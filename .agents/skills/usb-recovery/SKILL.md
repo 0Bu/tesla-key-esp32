@@ -3,11 +3,8 @@ name: usb-recovery
 description: Emergency no-build USB recovery using an already-published, provenance-verified signed CI image. Run only after explicit user approval for the exact board, port, target, app write, and otadata erase. Live HTTP verification is a separate approval boundary. The minimal flow preserves secret NVS at 0x9000/0x6000; NVS wipe, merged images, and broader bootloader/partition recovery are outside this authorization unless separately and explicitly approved.
 ---
 
-> **Canonical runner-neutral skill.** Read [`AGENTS.md`](../../../AGENTS.md) before acting.
-> Project skills are canonical under [`.agents/skills/`](../), and lifecycle/PR policy is
-> enforced by the runner-neutral core under [`tools/agent-hooks/`](../../../tools/agent-hooks/).
-> This skill does not grant permissions beyond the user's explicit request.
-> Invoke this workflow canonically as `$usb-recovery`.
+Invoke `$usb-recovery`. Read [AGENTS.md](../../../AGENTS.md) first; this workflow grants no
+additional authorization. Canonical skills live under `.agents/skills/`; hooks enforce local policy.
 
 # usb-recovery — no-build emergency reflash of a bricked / OTA-refusing board
 
@@ -27,22 +24,9 @@ VIN and WiFi survive (no NFC re-enrol).
 > Before any HTTP request, obtain separate explicit user approval for the exact recovered device/IP and the named GET endpoints.
 > `GET /ota/check` is state-changing and must be named explicitly in that live approval.
 
-Two failure modes dominate:
-
-- **(a) OTA reaches 100 %, then `/ota/status` → `state:error, message:"downloaded image is
-  invalid"`** (serial: `image valid, signature bad` / `ESP_ERR_OTA_VALIDATE_FAILED`). The
-  running app verifies each OTA's RSA signature against the public key embedded in *itself*
-  (TOFU, `CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT`). If the running image was signed with
-  a key ≠ the current CI `OTA_SIGNING_KEY` (classic case: a **local build** whose reported
-  version is the `version.txt` floor, e.g. `1.4.0`), every CI-signed OTA fails at the final
-  validate. Fixed live 2026-07-08 on a test board → recovered to `1.4.34`, OTA "up to date".
-- **(b) A boot / reboot loop after flashing an UNSIGNED local build.** An unsigned app
-  `abort()`s in ESP-IDF's `check_signature_on_update_check()` during core init, **before
-  `app_main`**, on *any* target — it does not boot-and-TOFU. Local `scripts/idf-docker.sh`
-  builds come out unsigned (`CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=n`; the RSA-3072 key is a
-  CI-only secret), so flashing one directly bricks the boot.
-
-Both are cured the same way: **USB-flash the published, signed image + erase `otadata`.**
+Typical uses are an unsigned-app boot loop or an evidenced signing-authority mismatch.
+`downloaded image is invalid` alone is not proof of key mismatch; rule out chip/revision/corruption.
+The signed app and final otadata erase recover firmware while preserving NVS.
 
 > ### Which path do I need?
 > - **OTA still works** — `/ota/check` → `update_available`, `/ota/update` installs and reboots
@@ -54,16 +38,9 @@ Both are cured the same way: **USB-flash the published, signed image + erase `ot
 >   hand off to the installed global `$nvs-backup`/`$nvs-delete` workflow with separate explicit
 >   authorization. Do not create a project copy and do not provide a whole-flash erase shortcut.
 
-## Scope vs. the neighbouring skills
-
-- [`$flash-esp32`](../flash-esp32/SKILL.md) is the **normal** path — build the local tree in
-  Docker and USB-flash it; its "flashing a specific PR" section downloads the signed CI artifact.
-- [`$ship`](../ship/SKILL.md) is the **release** path — squash-merge the PR, ride post-merge CI,
-  then flash the signed artifact (or OTA).
-- **This skill** is the **no-build EMERGENCY reflash** of an *already-published* signed image
-  plus an `otadata` erase, for the bootloop / "signature bad" cases where OTA and a plain
-  reflash can't recover the board. It reuses flash-esp32's port detection and signed-artifact
-  facts and does **not** re-teach the build.
+For builds or previews use `$flash-esp32`; for authorized merge/main delivery use `$ship`.
+This recovery uses existing published bytes only; all selection, retained-bootloader, signature,
+port/target, region and activation checks below remain mandatory.
 
 ## Host prerequisites
 

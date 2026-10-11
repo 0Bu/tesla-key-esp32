@@ -3,11 +3,8 @@ name: flash-esp32
 description: Build tesla-key-esp32 firmware or, only with explicit user approval for the identified board and target, USB-flash a verified signed image (ESP32 / S3 / C3 / C6). Local builds are compile-only until an explicit development signing key is supplied; ordinary unsigned PR artifacts are never flash sources. Every flash preserves NVS and requires unambiguous port/chip verification.
 ---
 
-> **Canonical runner-neutral skill.** Read [`AGENTS.md`](../../../AGENTS.md) before acting.
-> Project skills are canonical under [`.agents/skills/`](../), and lifecycle/PR policy is
-> enforced by the runner-neutral core under [`tools/agent-hooks/`](../../../tools/agent-hooks/).
-> This skill does not grant permissions beyond the user's explicit request.
-> Invoke this workflow canonically as `$flash-esp32`.
+Invoke `$flash-esp32`. Read [AGENTS.md](../../../AGENTS.md) first; this workflow grants no
+additional authorization. Canonical skills live under `.agents/skills/`; hooks enforce local policy.
 
 # flash-esp32 — build & USB-flash the firmware
 
@@ -30,15 +27,9 @@ a flashable artifact: `CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=n` by design.
 > Never touch `nvs@0x9000/0x6000`, never use a merged full-flash image, and never read or search for
 > the real OTA signing key.
 
-## Why two halves (Docker build, host flash)
-
-There is **no local ESP-IDF install** — builds run via `scripts/idf-docker.sh`, which runs
-the official `espressif/idf` Docker image pinned by the immutable tag+digest in
-`esp-idf-toolchain.txt` (resolved by `scripts/idf-version.sh`, the same contract CI reads).
-But **Docker Desktop on macOS has no USB passthrough**, so the *flash* step runs
-on the **host** with `esptool` (`brew install esptool`). Build → produces `build/`, then
-sign/verify the app explicitly or download a provenance-matched signed artifact, then flash from
-the host.
+Build with the pinned Docker wrapper; USB delivery runs on the host. Compile is not signing or
+flash approval. [Development](../../../docs/DEVELOPMENT.md#delivery) owns the shared build/delivery
+contract; the exact artifact/key/port checks below remain mandatory.
 
 ## Local tree: compile first; signing is an explicit flash gate
 

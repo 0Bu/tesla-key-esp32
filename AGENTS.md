@@ -1,225 +1,135 @@
 # tesla-key-esp32
 
-`tesla-key-esp32` is ESP-IDF firmware that exposes a Tesla BLE key through a local HTTP/MCP API,
-an evcc-compatible API, MQTT/Home Assistant, a web UI and signed OTA updates. This file is the
-compact, canonical instruction set for every coding runner. Read deeper references only when the
-task touches them:
-
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): firmware architecture, task/lock ownership,
-  HTTP exception containment, OTA, MQTT, pairing and sleep/link-state behavior.
-- [`docs/SECURITY.md`](docs/SECURITY.md): threat model, NVS/key handling, signing and deployment
-  trust boundaries.
-- [`docs/FEATURES.md`](docs/FEATURES.md): technical feature catalog and documentation gate.
-- [`docs/MCP.md`](docs/MCP.md): MCP wire contract and command/read-only boundaries.
-- [`test/README.md`](test/README.md): host-test scope, entry points and hardware exclusions.
+ESP-IDF firmware exposing a Tesla BLE Charging Manager key through local HTTP/MCP, evcc,
+MQTT/Home Assistant, a web UI and signed OTA. This is the canonical policy for every coding runner.
+Read task-specific contracts through the [documentation index](docs/README.md).
 
 ## Authorization and ownership
 
-- Analysis, review, audit, diagnosis and triage are **read-only by default**. They authorize
-  inspection and tests, not edits, formatting, commits, pushes, PR changes, merges, releases,
-  flashing, OTA, NVS operations, live vehicle calls or commands.
-- An implementation request authorizes scoped repository edits and proportionate local tests. It
-  does **not** automatically authorize commit, push, PR creation/update, merge, release, Pages
-  publication, signing with a real key, flash, OTA, NVS mutation or vehicle/device mutation.
-- Obtain explicit user authorization for each publication or physical/live mutation boundary.
-  Never infer it from `fix`, `review`, `ship`, a green test, or an earlier unrelated approval.
-- Preserve user changes. Before integration inspect `git status --short --branch`, the current
-  `origin/main`, the merge-base and intervening changes. Never reset, stage, stash, overwrite or
-  rewrite history unless the user explicitly requests that exact action.
-- The root/lead agent owns requirements, architecture, integration and conflict resolution. Give
-  implementers non-overlapping paths. Shared builds, signing, hardware, vehicle and Git operations
-  are serialized. Final certification must come from an independent read-only reviewer, not the
-  role that implemented the same area.
-- A P1/P2 security, signing, NVS, pairing, partition or vehicle-safety finding is a stop condition.
-  Fix or escalate it before claiming completion.
+- Analysis, review, audit, diagnosis and triage are read-only by default: inspect and test, then report.
+  They do not authorize edits, formatting, commits, pushes, PR changes, merges, releases,
+  publication, signing, flash, OTA, NVS operations or live device/vehicle contact.
+- An implementation request permits scoped repository edits and proportionate local tests; it does
+  not authorize commit, push, PR/stamp, merge, release, Pages, real-key signing or physical/live
+  mutation. Obtain explicit authorization for each phase; one approval does not grant another.
+- A live read can wake the car. Default to collected/local evidence; require explicit user authorization
+  for the target and live scope before contacting a board, vehicle or evcc endpoint. Command and charge-toggle scopes
+  are separate. Never pair, wake, reboot, erase evidence or change identity from a review request.
+- Preserve user changes. Before integration inspect status, `origin/main`, merge-base and
+  intervening changes. Do not reset, stage, stash, overwrite or rewrite history without that
+  exact authorization.
+- The lead owns requirements, architecture, integration and conflicts. Implementers have disjoint
+  paths. Serialize shared builds, signing, hardware, vehicle and Git operations. Final certification
+  comes from an independent read-only reviewer, not the implementer of that area.
+- P1/P2 security, signing, NVS, pairing, partition or vehicle-safety findings stop completion until
+  fixed or escalated.
 
-## Fixed platform and dependency contract
+## Fixed contracts
 
-- Supported targets are exactly `esp32`, `esp32s3`, `esp32c3` and `esp32c6`. Do not add, drop or
-  silently skip one. `scripts/ci-build-all.sh` is the four-target CI entry point.
-- [`esp-idf-toolchain.txt`](esp-idf-toolchain.txt) pins ESP-IDF **v6.1** and its container digest.
-  Use the repository wrappers; do not substitute a host IDF or move to another ESP-IDF line as part
-  of an unrelated task. ESP-IDF 6 no longer bundles cJSON, MQTT or the W5500 driver: W5500 and
-  mDNS are commit-pinned Espressif Git components, while cJSON and MQTT, whose Git trees carry
-  submodules, are exact registry releases, all pinned by component hash in the same manifest and
-  per-target lockfiles.
-- [`main/idf_component.yml`](main/idf_component.yml) pins `yoziru/tesla-ble` **v5.2.0**.
-  [`patches/tesla-ble/`](patches/tesla-ble/) is an ordered, hash-checked, fail-closed local series:
-  unused Parental Controls trim, signer.go session-counter replay alignment and the PSA Crypto
-  port of the crypto bindings for Mbed TLS 4 (earlier patches 0001-0003 are retired in favor of
-  native `main/logic/` orchestration). Do not edit the
-  pin, patch order, wire behavior, key compatibility or size trims without a separately
-  authorized dependency migration and protocol-vector review.
-- `teslamotors/vehicle-command` is the normative reference for vehicle BLE protocol behaviour (see
-  [`docs/adr/0005-tesla-ble-seam.md`](docs/adr/0005-tesla-ble-seam.md)). Every departure from upstream
-  or reference must be documented in ADR-0005 and recorded in its departure list. No silent workarounds.
-- Any change to the PSA crypto seam (patch 0006, `main/vehicle_pairing.cpp`) must preserve P-256
-  ECDH byte order, `SHA1(shared-secret)[:16]`, HMAC/session derivation, AES-GCM nonce/AAD/tag
-  layout, response-tag verification against the counter the response carries, Tesla key-ID
-  derivation and PEM/NVS key reuse, proven by the V1 vectors in `test/test_tesla_ble_harness.cpp`
-  (the key ID through a host mirror of `compute_key_fingerprint_()`). See
-  [`docs/adr/0002-idf6-mbedtls4-crypto-seam.md`](docs/adr/0002-idf6-mbedtls4-crypto-seam.md).
-- Do not change BLE wire formats, pairing/session semantics, command meaning, dependency locks,
-  target set or firmware behavior during agent/configuration-only work.
+- Targets: exactly `esp32`, `esp32s3`, `esp32c3`, `esp32c6`; never add, omit or silently skip one.
+  `scripts/ci-build-all.sh` is the CI entry point.
+- `esp-idf-toolchain.txt` pins ESP-IDF **v6.1** and its container digest. Use
+  `scripts/idf-docker.sh`; preserve its **1.5 CPU / 1800 MiB** limits. Do not substitute host IDF.
+- `main/idf_component.yml` pins `yoziru/tesla-ble` **v5.2.0**. The ordered, hash-checked series in
+  `patches/tesla-ble/` is fail-closed. Pins, patches, locks, trims, wire behavior and key compatibility
+  require a separately authorized dependency migration and protocol-vector review.
+- `teslamotors/vehicle-command` is normative for BLE protocol behavior. Record every departure in
+  [ADR-0005](docs/adr/0005-tesla-ble-seam.md). PSA changes must preserve ECDH byte order,
+  `SHA1(shared-secret)[:16]`, HMAC/session derivation, nonce/AAD/tag layout, response-counter tag
+  verification, key-ID derivation and existing PEM/NVS keys. Prove them with V1 harness vectors;
+  [ADR-0002](docs/adr/0002-idf6-mbedtls4-crypto-seam.md) owns rationale.
+- Agent/configuration-only work must not alter firmware behavior, target set, dependencies,
+  partitions, BLE commands, pairing or sessions.
 
-## Environment and evidence boundaries
+## Implementation and evidence
 
-- `scripts/idf-docker.sh` is the pinned ESP-IDF boundary and explicitly caps each build container
-  at 1.5 CPU and 1800 MiB so co-resident services retain capacity. Do not bypass or raise those
-  limits during ordinary builds. A host mock result is not an IDF build; an IDF build is not a
-  signed image; a signed image is not a flash; a flash is not runtime or vehicle proof.
-- A remote runner may have neither Docker nor USB. Report capabilities rather than manufacturing
-  evidence. Do not bypass a missing boundary with an unpinned toolchain.
-- Keep evidence separate in reports: host tests, four-target CI-equivalent build, disposable-key
-  signing contract, remote CI, hardware/USB, OTA, vehicle/live API and browser/visual checks.
-  State **not run** for every boundary not exercised.
-- Never claim hardware, flash, OTA, vehicle, sleep/wake, pairing, key reuse or release success from
-  compilation or host tests. Never claim remote CI from a local CI-like run.
+Follow [main/AGENTS.md](main/AGENTS.md), [main/logic/AGENTS.md](main/logic/AGENTS.md),
+[protocol rules](.agents/rules/ble-tesla-protocol.md) and
+[size rules](.agents/rules/firmware-size-budget.md) for their scopes.
 
-## Build and test entry points
+The critical memory measure is INTERNAL **largest contiguous free block**, not total free heap. Use bounded responses,
+check allocation failures, and contain all exceptions at HTTP/MCP, C callbacks and task boundaries.
+Follow the [lock/task contract](docs/ARCHITECTURE.md#concurrency-normative-contract): snapshot leaf
+state under lock, use after unlock; no logging, network or storage work while holding shared locks.
+Background status/display/telemetry consume caches and preserve sleep debounce, retry/backoff and
+foreground-command arbitration. Reboot loops are safety failures.
 
-Use the narrowest relevant checks first, then the full contract before handoff:
+Pure decisions belong in `main/logic/`, with host tests and registered ownership. New untracked logic
+or tests must not evade the Stop-hook test decision. Firmware integration also requires pinned IDF
+compilation; host tests do not compile the ESP/NimBLE/NVS/FreeRTOS shells.
+
+Use the narrowest relevant checks, then the full contract before handoff:
 
 ```bash
-scripts/run-mock-tests.sh                    # capability-aware local host suite
-scripts/run-mock-tests.sh --require-all      # fail-closed CI host/CMake/browser suite
-scripts/repo-lint.sh                         # offline syntax/link/workflow-policy canaries
-scripts/run-sanitizer-tests.sh               # Linux ASan + UBSan + LSan + fuzz/runtime suite
-scripts/test-build-contracts.sh              # pins, targets, partitions and CI/release contracts
-scripts/test-pr-gates.sh                     # PR command/record policy canaries
-tools/agent-config/selftest.sh                # runner mapping/config/hook mutation canaries
-scripts/idf-docker.sh idf.py -B build set-target esp32s3 build
+scripts/run-mock-tests.sh
+scripts/run-mock-tests.sh --require-all
+scripts/repo-lint.sh
+scripts/run-sanitizer-tests.sh
+scripts/test-build-contracts.sh
+scripts/test-pr-gates.sh
+tools/agent-config/selftest.sh
 scripts/idf-docker.sh ./scripts/ci-build-verify.sh "$(cat version.txt)" "$(git rev-parse HEAD)"
-                                               # four targets + disposable signing +
-                                               # manifest/Pages bytes + reproducibility
 ```
 
-Also run syntax checks appropriate to edited JSON, TOML, YAML, Python and Bash, relative Markdown
-link checks, and `git diff --check`. Use a generated throwaway RSA key for signer-contract tests.
-Never read, copy, materialize or use the real offline OTA signing key.
+Run edited-format syntax, relative Markdown links and `git diff --check`. Use only a generated
+throwaway RSA key for signer tests. [Development](docs/DEVELOPMENT.md) explains build contracts.
+Report host, four-target build, disposable signing, remote CI, USB/hardware, OTA, live vehicle/API
+and browser/visual evidence separately. Mark unexercised boundaries **not run**; compilation never
+proves signed delivery, hardware, pairing, key reuse, sleep/wake or release acceptance.
 
-Pure decision logic belongs in `main/logic/` with host coverage in `test/test_logic.cpp`. A change
-to logic or tests, including a new untracked file, must not evade the Stop-hook test decision.
-Firmware-only integration still needs the pinned IDF build because host tests do not compile the
-ESP HTTP, NimBLE, NVS, OTA or FreeRTOS shells.
+## Secrets and delivery
 
-## Memory, exceptions and concurrency
+NVS is secret material: WiFi, VIN, MQTT settings, private keys and sessions. Never print, upload, attach, archive,
+diff or casually inspect a dump, or put one in the repository. Global `nvs-backup`, `nvs-restore`
+and `nvs-delete` skills stay outside this project.
 
-- On ESP32 the limiting heap measure is the **largest contiguous free block**, not total free heap.
-  Avoid building large temporary `std::string`, JSON or HTML responses. Stream bounded chunks and
-  check every allocation/error path. Keep payload and body limits explicit and host-tested.
-- Every HTTP/MCP request path must remain inside the server's exception/OOM containment net.
-  C-library allocation failures (for example cJSON returning null) need explicit handling because
-  they do not throw. Never let an exception escape the HTTP task or convert malformed/oversized
-  input into reboot loops.
-- Do not allocate, log, perform network I/O, or call throwing code while holding a shared mutex.
-  Follow the lock hierarchy and snapshot-under-lock/use-after-unlock pattern in
-  [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Review the largest-block effect and all unwind
-  paths, not only the happy path or total heap.
-- Prefer pure, bounded transformations in `main/logic/`; keep IDF handles, tasks and mutable state
-  in the integration shell. Cross-task state must follow the documented owner/atomic/lock model.
+`partitions.csv` is immutable without an explicit migration: NVS `0x9000/0x6000`, otadata
+`0xf000/0x2000`, OTA starts `0x20000` and `0x210000`, each `0x1f0000` bytes.
+Ordinary OTA must preserve keys/sessions. NVS erase, forced generation, restore or identity change
+needs explicit approval and a backup/rollback plan. Firmware rollback does not recover NVS.
 
-## Keys, NVS, partitions and signing
+Unsigned images are not flashable. Flash/OTA requires explicit scope plus signed-image verification.
+The real `OTA_SIGNING_KEY` belongs only to protected publication; PR code, hooks and tests never
+receive it. Never read, copy, materialize or use the offline key. The hook permits only an explicitly
+authorized, unchained `espsecure.py sign_data`/`sign-data` keyfile command; no wrapper, pipe,
+redirect, copy, archive or compound use.
 
-- NVS is secret material. It contains WiFi, VIN, MQTT configuration, the vehicle private key and
-  BLE sessions. Do not print, upload, archive, attach, diff, inspect casually or place an NVS dump
-  in the repository. The global `nvs-backup`, `nvs-restore` and `nvs-delete` skills stay outside
-  this project; never copy or modify them here.
-- [`partitions.csv`](partitions.csv) is immutable without an explicit partition-migration request:
-  `nvs` is offset `0x9000`, size `0x6000`; `otadata` is `0xf000`, size `0x2000`; `ota_0` begins at
-  `0x20000`; `ota_1` begins at `0x210000`; each OTA slot is `0x1f0000`. Moving offsets can brick
-  already-installed devices or destroy key/session data.
-- Locally built unsigned images are **not flashable artifacts**. Flash/OTA requires explicit user
-  authorization plus the project signed-image verification path. A build command never grants
-  signing or flashing authority.
-- The real `OTA_SIGNING_KEY` belongs only to the protected signing/publish trust boundary. PR code,
-  unprivileged builds, agent hooks and tests must never receive it. The only hook-recognized
-  keyfile use is an explicitly authorized, unchained `espsecure.py sign_data`/`sign-data` command;
-  no wrapper, pipe, redirect, copy, print, archive, upload or compound command is allowed.
-- Preserve CI's split: unprivileged build emits unsigned bytes and provenance; protected publish
-  revalidates the exact main/release candidate before provisioning the key, signs already-built
-  bytes, removes the key, and binds signed Release/Pages artifacts (Dev channel builds on `main` push to
-  `dev/` Pages; official tagged Releases manually triggered via `workflow_dispatch` with `release: true`).
-  Every production app must pass RSA-PSS verification against `scripts/ota-signing-public-key.sha256`;
-  changing the key/pin is a separately reviewed USB fleet migration because software-only TOFU cannot rotate keys over OTA.
-  A same-SHA retry with an exact immutable Release must use the key-free byte-verified reuse path;
-  it must never sign, re-upload or mutate that Release again, but it does publish one new
-  SHA-bound Actions recovery artifact from the verified bytes. Do not weaken action/privileged-job
-  pins, symlink checks, signed size gates, preview revalidation or release/Pages byte identity.
-- Pairing keys and sessions must survive ordinary OTA. Any NVS erase, forced key generation,
-  restore or identity change is destructive and needs a backup/rollback plan plus explicit user
-  approval. Never confuse firmware rollback with NVS/key recovery.
+Preserve the [signing/publication contract](docs/SECURITY.md#release-pipeline-and-trust-boundaries):
+unprivileged unsigned build, independent exact-source rebuild, protected signing, key removal,
+production RSA-PSS pin, Release/Pages byte identity, immutable same-SHA key-free reuse and signed
+preview revalidation/cleanup. Key/pin changes need a reviewed USB fleet migration; software TOFU
+cannot rotate authority over OTA. Live evcc checks use `scripts/e2e_evcc.sh` with explicit scopes.
 
-## Vehicle and live-device safety
+## Documentation
 
-- A live read is not automatically harmless: connecting or requesting stale data can wake the
-  vehicle. Default diagnosis uses already-collected/local evidence. Do not contact a vehicle,
-  evcc endpoint or device unless the user explicitly authorizes the live boundary and target.
-- Live evcc end-to-end checks are host/cluster operations provided by `scripts/e2e_evcc.sh` (and
-  orchestrated by `$deploy`). They exercise the live pod-to-vehicle path and retain their own
-  explicit read, command, and charge-toggle authorization boundaries.
-- Never send a vehicle command, pair, regenerate keys, change VIN, modify charge current, wake the
-  car, reboot the board, flash, OTA or clear a crash/NVS artifact from a review or diagnosis task.
-- Background telemetry, display and status code must consume cached state and must not introduce a
-  hidden wake path. Preserve sleep debounce, backoff and foreground-command arbitration.
-- Treat reboot loops as safety failures: repeated boot pairing/connect/command attempts can wake or
-  drain the vehicle and can make recovery impossible. Validate failure throttling, safe mode,
-  rollback and largest-block behavior when changing startup or networking code.
-- A vehicle-command proposal needs three-way evidence: upstream Tesla/VCSEC behavior, this local
-  implementation, and feasibility with the pinned patched `tesla-ble`. Do not infer support from a
-  protocol name alone.
+Use English, plain precise prose and the minimum sufficient explanation. Each document has a clear
+purpose; each topic has one owner. Keep warnings beside risky steps, with deeper contracts linked.
+Update the owner with the changed code/configuration. Do not duplicate technical catalogs here.
 
-## Documentation sources of truth
+Skills use `$skill-name` and `.agents/skills/`; legacy `/skill-name` is historical only.
+Hook policy lives in `tools/agent-hooks/`, configuration in `.agents/` and `tools/agent-config/`.
+Hooks are lexical defense in depth, not authorization or sandboxing.
 
-- Architecture, concurrency, exception, HTTP, OTA, MQTT, sleep/link and pairing details:
-  [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
-- Secrets, NVS, signing, CI trust boundaries and hardening: [`docs/SECURITY.md`](docs/SECURITY.md).
-- Shipped technical features and their evidence: [`docs/FEATURES.md`](docs/FEATURES.md).
-- MCP methods, read-only tools and command semantics: [`docs/MCP.md`](docs/MCP.md).
-- Host-test scope and how to add logic coverage: [`test/README.md`](test/README.md).
-
-Update the owning document with the code/configuration that changes its contract. Do not move long
-API, architecture, incident or field references into this compact file. References to project
-skills use `$skill-name` and canonical paths under `.agents/skills/`; `/skill-name` is accepted only
-in historical PR records. Hierarchical scoped rules live under [`main/AGENTS.md`](main/AGENTS.md)
-(C++/heap safety), [`main/logic/AGENTS.md`](main/logic/AGENTS.md) (pure-logic isolation), and
-`.agents/rules/` (protocol and firmware budget invariants). Hook policy lives in `tools/agent-hooks/`, with runner hook
-configuration and subagent manifests in `.agents/`.
-
-## PR, review and merge discipline
+## PR and review
 
 - `$skill-audit` is required before PR creation or push. `$project-review` is required before every
-  merge. `$pr-hygiene` is required at PR creation, every push, and every merge — it screens the PR
-  title/body, commit messages and touched documentation for personal/private information (LAN IPs,
-  MAC addresses, VINs, WiFi network names, hostnames, emails) and for content not written in
-  English; it is not a subset of `$project-review` or `$skill-audit`. Automated Renovate
-  maintenance PRs whose diff is strictly limited to `.github/workflows/renovate.yaml` or
-  `.github/renovate.json` (`gate_is_renovate_maintenance`) are exempt from manual gate records
-  at merge/check. `$feature-docs` is conditionally required when the cataloged feature surface
-  changes, including the PR-policy and bench-acceptance workflows. `$vehicle-command-audit` is
-  conditionally required when vehicle-command/BLE paths change (`main/vehicle_*`, `main/ble_client.*`,
-  `main/logic/{command_registry,command_runner,ble_dispatcher,rx_framing,session_state,command_result,key_rotation,ble_chunk,ble_deferred_event,wake_poll,active_window}.hpp`,
-  `patches/tesla-ble/`, `main/idf_component.yml`, `test/test_tesla_ble_harness.cpp`,
-  `scripts/test-tesla-ble-harness.sh`, `docs/adr/0005-tesla-ble-seam.md`,
-  `.agents/skills/vehicle-command-audit/`). Records are
-  bound to the exact current PR head and become stale after any push. Gate records in PR descriptions
-  are local, advisory agent checks enforced by local pre-push hooks and scripts rather than GitHub
-  server-side branch protection.
-
-- Reviewers report actionable findings with path/line, cause, impact and evidence. A green build is
-  not review proof. Resolve P1/P2 findings and rerun the affected independent review after edits.
-- The only accepted merge shape is:
+  merge and always assesses documentation quality; unresolved material `DOC-QUALITY` findings
+  prevent clean. `$pr-hygiene` is required at PR creation, every push, and every merge. It checks
+  privacy and English independently of the other reviews.
+- `$feature-docs` is required when its cataloged surface changes. `$vehicle-command-audit` is
+  required when the BLE/command relevance classifier in `tools/agent-hooks/pr-gate-lib.sh` applies.
+  Consult those skills for exact scope; no silent relevance exemptions.
+- Strict Renovate maintenance (`gate_is_renovate_maintenance`, only `.github/workflows/renovate.yaml`
+  or `.github/renovate.json`) is exempt from manual records. Dependency updates are not exempt.
+- Records name the exact current PR head and expire after every push. Local hooks/scripts enforce
+  advisory records; server-side enforcement needs the required `pr-policy / current-head-records`
+  check. Report findings with severity, path/line, cause, impact and evidence; resolve P1/P2 and
+  rerun the affected independent review.
+- The only accepted, separately authorized merge shape is:
 
   ```text
   gh --repo github.com/0Bu/tesla-key-esp32 pr merge <numeric-pr> --match-head-commit <full-40-hex-head-sha> --squash
   ```
 
-  No `--admin`, `--auto`, `--merge`, `--rebase`, queue/auto-merge, REST/GraphQL/MCP merge, foreign
-  host/repository, missing numeric PR, missing exact head SHA or mutation-prefixed compound command.
-- Do not create a commit, push, PR, review stamp, merge, release or Pages update unless the user has
-  authorized that phase explicitly. Local migration completion is not Phase 7 publication approval.
-
-Runner-neutral policy is implemented in [`tools/agent-hooks/`](tools/agent-hooks/) and configured
-for this project by [`.agents/hooks.json`](.agents/hooks.json). Hooks are lexical defense in depth:
-they do not replace sandboxing, explicit authorization, branch protection, protected environments
-or human review.
+  No admin/auto/queue, merge/rebase shape, alternate API/repository or compound mutation prefix.
+  Local implementation completion grants no publication approval.

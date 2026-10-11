@@ -3,10 +3,8 @@ name: ci-heal
 description: Monitors GitHub Actions CI after push, reproduces a failure locally, pushes an operator-authored fix commit with attested pre-push records, and reports merge readiness only from green CI on the exact head plus explicitly attested gate records. Never authors commits, never runs the reviews it records, and never merges without separate authorization.
 ---
 
-> **Canonical runner-neutral skill.** Read [`AGENTS.md`](../../../AGENTS.md) before acting.
-> Project skills are canonical under [`.agents/skills/`](../), and lifecycle/PR policy is
-> enforced by the runner-neutral core under [`tools/agent-hooks/`](../../../tools/agent-hooks/).
-> Invoke this workflow canonically as `$ci-heal`.
+Invoke `$ci-heal`. Read [AGENTS.md](../../../AGENTS.md) first; this workflow grants no
+additional authorization. Canonical skills live under `.agents/skills/`; hooks enforce local policy.
 
 # ci-heal — Post-Push CI Monitoring, Failure Reproduction & Merge-Readiness Gate
 

@@ -7,18 +7,9 @@
 
 ## Context
 
-The firmware integrates `yoziru/tesla-ble` v5.2.0 as an ESP-IDF component. Upstream `tesla-ble` divides into two distinct layers:
-1. **The protocol crypto core** (`client.h`, `peer.h`, `crypto_context.h`, generated Nanopb protobufs): handles P-256 ECDH, HMAC key derivation, AES-GCM encryption/decryption, and protobuf serialization.
-2. **The vehicle orchestration layer** (`vehicle.cpp`, `tb_logging.cpp`): manages BLE stream reassembly, request-response dispatch, command queuing, authentication flows, and retry/timeout heuristics.
-
-While the protocol crypto core is sound, the upstream orchestration layer has proven fragile across repeated production incidents:
-- **RX framing failure modes**: The upstream framing code in `vehicle.cpp` attempts heuristic recovery loops when bytes are corrupted or split unexpectedly, causing log floods (which required patch 0003 to rate-limit). Upstream's v5.1.4 response adds complex speculative scanning rather than deterministic framing.
-- **Incomplete anti-replay protection**: Patch 0001 (and ADR-0003) were introduced to halt execution in `handle_carserver_message_` when `validate_response_counter()` detects a duplicate counter. However, ADR-0003's rationale was incomplete: unauthenticated CarServer responses carry `response_counter == 0`, bypassing the replay check entirely in `vehicle.cpp`.
-- **Non-transactional key regeneration**: Upstream's `Vehicle::regenerate_key()` replaces the in-memory key before persistence without roll-back safety on storage error (requiring patch 0002).
-- **Session counter monotonicity inversion**: Upstream forces lower reported counters rather than maintaining `max(local, reported)` as the reference requires (requiring patch 0005).
-- **Dead code bloat**: Unused Parental Controls actions in the protobufs waste flash on size-constrained targets like `esp32c6` (requiring patch 0004).
-
-The repository previously maintained four local patches against v5.2.0 (0002–0005; patch 0001 was retired earlier in favor of native dispatch). Maintaining source patches against an upstream orchestration layer is unsustainable. Furthermore, it tightly couples transport quirks to protocol decoding.
+Upstream Vehicle orchestration combined heuristic framing, incomplete plaintext attribution,
+non-transactional key replacement and session-counter divergence. Keep protocol crypto upstream,
+but own bounded framing/dispatch/arbitration in the firmware. This replaces patches 0001–0003.
 
 ### Normative Reference: `teslamotors/vehicle-command`
 
@@ -64,41 +55,29 @@ The reference is written in Go, relying on goroutines, runtime-managed channels,
 
 ### 2.1 Framing Edge Cases and Protocol Deviations (F8)
 
-The native `tk::RxFramer` reassembly implementation covers the critical framing boundary conditions identified during v5.1.4 analysis and verified in `test/test_logic.cpp`:
-- **Case 2 (Split frame across multiple notifications)**: Frames fragmented across several BLE notifications are reassembled cleanly without premature completion or state corruption.
-- **Case 3 (Several frames in one single notification)**: Multiple concatenated frames arriving back-to-back in a single notification are sliced and delivered sequentially.
-- **Case 4 (Corrupt length before split frame)**: A chunk declaring an invalid length (> 2048 B) is rejected immediately as `CorruptLength`, discarding corrupt bytes while allowing subsequent valid split frames to reassemble normally.
-- **Case 5 (Zero-length treated as corrupt)**: Frames with decoded length 0 are rejected immediately as `CorruptLength`, preventing infinite or zero-byte parsing loops.
-- **Case 13 (Malformed payload inside frame)**: A frame with a malformed payload is delivered deterministically to the upper protocol layer, which handles decoding errors while the framer continues processing subsequent frames.
-- **Case 14 / 14a (Duplicate fragment and duplicate frame arrival)**: Duplicate notifications or fragments during a split frame deliver a frame containing the duplicate bytes (which upper-layer decoding rejects fail-closed); extra duplicate residual bytes trigger `CorruptLength` or `BufferOverflow` on subsequent frames or are discarded cleanly on the 3 s inter-chunk timeout.
+Host CHECKs cover split and concatenated frames, corrupt/zero lengths, malformed payloads and
+repeated fragments. The framer delivers deterministic bytes; upper-layer authentication/decoding
+rejects malformed or duplicated content. Residual corrupt bytes fail length/buffer bounds or expire
+on the configured inter-chunk timeout. No heuristic recovery scans for plausible payloads.
 
 ### 3. Superseding of ADR-0003
 
-ADR-0003 introduced patch 0001 to drop replayed CarServer responses. However, as noted in Issue #306, ADR-0003 only blocked replayed messages where `response_counter > 0`. Plaintext or unauthenticated CarServer responses (`response_counter == 0`) remained open to attribution confusion in `vehicle.cpp`. Under the new dispatcher model, every response must match an active request by UUID (or be an allowed empty-UUID VCSEC broadcast). Thus, ADR-0003 is formally **superseded** by this ADR.
+[ADR-0003](0003-reject-replayed-tesla-responses.md) is superseded: command responses require an
+active UUID/domain, with only the documented empty-UUID VCSEC broadcast exception.
 
 ### 4. Relationship to ADR-0002 and Issue #61
 
-This architecture leaves `crypto_context.cpp` and `peer.cpp` upstream in `yoziru/tesla-ble`. It does not move cryptographic operations into the firmware. Consequently:
-- It is fully complementary to ADR-0002 and Issue #61 (the ESP-IDF 6.x / Mbed TLS 4 / PSA crypto migration).
-- Dropping `vehicle.cpp` kept the PSA bridge small: it is the repository-owned patch `0006-port-crypto-bindings-to-psa.patch`, confined to tesla-ble's crypto bindings (ADR-0002, "Execution").
-- Issue #61 tracks that migration until the change carrying patch 0006 is merged. Issue #65 (the PSA-port evaluation) was closed as not planned on 2026-09-23; its findings are folded into #61.
+[ADR-0002](0002-idf6-mbedtls4-crypto-seam.md) owns PSA/key compatibility and evidence. Crypto stays
+in upstream Client/Peer; firmware owns orchestration. The active patches are 0004 descriptor trim,
+0005 counter alignment and 0006 PSA bindings/response authentication.
 
 ### 5. Delivered Architecture and Patch Retirement
 
-The native BLE orchestration layer is implemented across:
-- `main/logic/rx_framing.hpp`: Deterministic 2-byte BE length-prefix framing (`tk::RxFramer`) and the TX framing helpers `drive_command_runner_()` uses (`tk::build_ble_tx_frame`, `tk::is_well_formed_ble_frame`).
-- `main/logic/ble_dispatcher.hpp`: Multi-slot UUID and domain dispatcher (`tk::BleDispatcher`).
-- `main/logic/session_state.hpp`: Thin `tk::SessionTracker` mirror with monotonic counter progression (`max(local, reported)`), zero in-house crypto.
-- `main/logic/command_runner.hpp`: Command state machine arbitrating VCSEC auth, Wake, infotainment auth, and payload dispatch.
-- `main/logic/command_result.hpp`: Normative `is_nominal_already_set()` outcome evaluation.
-- `main/vehicle_ctrl.{hpp,cpp}`, `main/vehicle_commands.cpp`, `main/vehicle_telemetry.cpp`, `main/vehicle_pairing.cpp`: Direct integration with `TeslaBLE::Client`.
-- Native transactional key generation: `tk::regenerate_private_key()` in `main/logic/key_rotation.hpp` (2048 B PEM export, fail-closed rollback), called by `regenerate_key_native_()` in `main/vehicle_pairing.cpp`.
-- `test/test_tesla_ble_harness.cpp` (`scripts/test-tesla-ble-harness.sh`, run in the CI `logic-test` job) exercises the TX framing helpers, `tk::regenerate_private_key()` and the protocol-vector known answers (V1) against the real patched tesla-ble v5.2.0, Nanopb and the exact Mbed TLS 4.1 / TF-PSA-Crypto commit that ESP-IDF v6.1 pins.
-
-With this architecture in place, patches 0001, 0002, 0003, and the `vehicle.cpp` portion of 0005 were retired. The active patch series in `patches/tesla-ble/` consists strictly of:
-1. `0004-drop-unused-parental-controls-actions.patch` (trim unused Nanopb message descriptors for target size budget)
-2. `0005-align-session-counter-replay-with-signer-go.patch` (`peer.cpp` session counter monotonic progression alignment per `signer.go`)
-3. `0006-port-crypto-bindings-to-psa.patch` (crypto bindings on PSA Crypto for ESP-IDF 6 / Mbed TLS 4; wire bytes and key format unchanged, response tags now verified against the response's own counter, see §2)
+`rx_framing`, `ble_dispatcher`, `session_state`, `command_runner`, `command_result` and `key_rotation`
+under `main/logic/` delegate through vehicle controller/commands/telemetry/pairing shells.
+Transactional key generation has a 2048 B PEM bound and durable failure rollback. The real patched
+library harness exercises production helpers and V1 vectors against pinned Nanopb/Mbed TLS.
+Patches 0001–0003 and the Vehicle portion of 0005 are retired.
 
 ### 6. Compilation of Dead Translation Units (TESLABLE_SRCS)
 

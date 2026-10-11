@@ -3,11 +3,8 @@ name: ship
 description: Coordinate an explicitly authorized PR merge, the resulting main build run (Dev channel, or a separately authorized manual stable-Release run), and one explicitly chosen delivery path (USB flash or OTA) for tesla-key-esp32. Never infer merge, release, flash, OTA, push, or PR-edit authority from a review, approval, or another step; confirm each mutation scope separately and use only provenance-bound signed artifacts while preserving NVS.
 ---
 
-> **Canonical runner-neutral skill.** Read [`AGENTS.md`](../../../AGENTS.md) before acting.
-> Project skills are canonical under [`.agents/skills/`](../), and lifecycle/PR policy is
-> enforced by the runner-neutral core under [`tools/agent-hooks/`](../../../tools/agent-hooks/).
-> This skill does not grant permissions beyond the user's explicit request.
-> Invoke this workflow canonically as `$ship`.
+Invoke `$ship`. Read [AGENTS.md](../../../AGENTS.md) first; this workflow grants no
+additional authorization. Canonical skills live under `.agents/skills/`; hooks enforce local policy.
 
 # ship — merge the PR, ride CI, put the signed build on the board
 

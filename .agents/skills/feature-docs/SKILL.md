@@ -3,11 +3,8 @@ name: feature-docs
 description: Keep docs/FEATURES.md (this firmware's technical-feature catalog) in sync when a platform feature lands or changes — including runner-neutral agent policy under AGENTS.md, .agents/, .github/PULL_REQUEST_TEMPLATE.md, tools/agent-hooks/, and tools/agent-config/. Use after implementing or changing a technical feature, before opening the PR. Required before merging a PR whose diff reaches those agent-policy paths, main/, test/, sdkconfig.defaults, partitions.csv, the shipped Pages runtime, release-relevance.sh, or the build/signed-preview/preview-cleanup/PR-policy/bench-acceptance workflows.
 ---
 
-> **Canonical runner-neutral skill.** Read [`AGENTS.md`](../../../AGENTS.md) before acting.
-> Project skills are canonical under [`.agents/skills/`](../), and lifecycle/PR policy is
-> enforced by the runner-neutral core under [`tools/agent-hooks/`](../../../tools/agent-hooks/).
-> This skill does not grant permissions beyond the user's explicit request.
-> Invoke this workflow canonically as `$feature-docs`.
+Invoke `$feature-docs`. Read [AGENTS.md](../../../AGENTS.md) first; this workflow grants no
+additional authorization. Canonical skills live under `.agents/skills/`; hooks enforce local policy.
 
 # feature-docs — sync docs/FEATURES.md with what the firmware actually does
 
@@ -15,11 +12,6 @@ description: Keep docs/FEATURES.md (this firmware's technical-feature catalog) i
 *platform* level: the ESP-IDF capabilities, security mechanisms, network behaviour and diagnostic
 surfaces, including Tesla/BLE mechanisms when they enforce a cross-cutting safety contract. It
 answers "does this device do X, and where does X live?" for someone who has not read the whole tree.
-
-It rots in a way nothing else catches. A feature lands, every test passes, every narrative doc
-stays correct about its own area — and the catalog simply does not mention the new thing. Six months
-later the entry that would have said *"this exists, and here is the failure it prevents"* is not
-there, so the mechanism looks optional and gets deleted, or gets built a second time.
 
 [`tools/agent-hooks/require-pr-gates.sh`](../../../tools/agent-hooks/require-pr-gates.sh) gates a merge on this having been run — but only when the
 PR's diff reaches `main/`, `test/`, `sdkconfig.defaults*`, `partitions.csv`, runner-neutral
@@ -87,17 +79,9 @@ that separate authority through the appropriate workflow.
    agree. FEATURES.md is a catalog, not a second narrative: it should point at the deep reference
    rather than duplicate it.
 
-6. **Special case — the static-analysis section.** `docs/FEATURES.md` ends with a *measured*
-   rejection of adding a static analyser. If a change alters that measurement (a new lint class, a
-   new warning flag pinned in `main/CMakeLists.txt`), re-run the measurement rather than editing the
-   numbers:
-   ```bash
-   clang-tidy --quiet --checks='-*,bugprone-*,clang-analyzer-*,cert-*,performance-*' \
-     test/test_logic.cpp -- -std=c++17 -Imain 2>/dev/null | grep -c "warning:"
-   g++ -std=c++17 -Wall -Wextra -Wconversion -Wsign-conversion -Wshadow -Imain \
-     -fsyntax-only test/test_logic.cpp
-   ```
-   A number in that section that nobody re-measured is worse than no number.
+6. **Measured decisions.** Static-analysis rationale is now in
+   [Development](../../../docs/DEVELOPMENT.md#static-analysis-decision). If a change affects the
+   recorded result, rerun it; preserve dates and evidence limits rather than inventing current numbers.
 
 7. **Report gate readiness; do not mutate the PR by default.** After a successful sync, provide the
    exact top-level CommonMark record for a separately authorized PR-body update:

@@ -3,10 +3,8 @@ name: mock-test
 description: Fast host-only mock and sanitizer test runner for IDF-free logic and boundaries.
 ---
 
-> **Canonical runner-neutral skill.** Read [`AGENTS.md`](../../../AGENTS.md) before acting.
-> This skill is **read-only**: it runs local host verification suites and reports results without
-> modifying files, staging Git state, flashing, or contacting a vehicle.
-> Invoke this workflow canonically as `$mock-test`.
+Invoke `$mock-test`. Read [AGENTS.md](../../../AGENTS.md) first; this workflow grants no
+additional authorization. Canonical skills live under `.agents/skills/`; hooks enforce local policy.
 
 # mock-test — fast host-side logic, mock, and sanitizer execution
 

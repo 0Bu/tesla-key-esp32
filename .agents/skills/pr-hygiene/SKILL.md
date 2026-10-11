@@ -3,11 +3,8 @@ name: pr-hygiene
 description: Read-only screen of this PR's commits, title/body and touched documentation for personal or private information (LAN IP addresses, MAC addresses, vehicle VINs, WiFi network names, hostnames, phone numbers, emails, private session/transcript links) and for content not written in English. Reports findings and the exact gate record only; never edits a commit, a file or a PR body, and never commits, pushes, merges, releases, flashes, OTAs, or contacts a live device/vehicle unless the user separately authorizes implementation.
 ---
 
-> **Canonical runner-neutral skill.** Read [`AGENTS.md`](../../../AGENTS.md) before acting.
-> Project skills are canonical under [`.agents/skills/`](../), and lifecycle/PR policy is
-> enforced by the runner-neutral core under [`tools/agent-hooks/`](../../../tools/agent-hooks/).
-> This skill does not grant permissions beyond the user's explicit request.
-> Invoke this workflow canonically as `$pr-hygiene`.
+Invoke `$pr-hygiene`. Read [AGENTS.md](../../../AGENTS.md) first; this workflow grants no
+additional authorization. Canonical skills live under `.agents/skills/`; hooks enforce local policy.
 
 # pr-hygiene — screen commits, PRs and docs for private data and non-English text
 
@@ -45,7 +42,7 @@ their scope is coherence, not confidentiality or language.
 - A private session/transcript URL, non-public ticket or internal dashboard link, or a URL carrying
   an authentication token. A public documentation or source permalink is not a finding.
 - The board's own diagnostic MAC (this firmware's `sys.board_mac`) is intentionally visible
-  on-device (see `docs/README.md` `/status?redact=1` and `main/logic/status_model.hpp`); quoting
+  on-device (see `docs/API.md` `/status?redact=1` and `main/logic/status_model.hpp`); quoting
   that design choice is not itself a finding. Only a value that is plausibly the tester's own
   real hardware or network, written into PR/commit prose, is.
 

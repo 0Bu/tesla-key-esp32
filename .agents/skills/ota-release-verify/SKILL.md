@@ -3,11 +3,8 @@ name: ota-release-verify
 description: "Read-only verification of the already-published OTA channel against the latest GitHub Release: bind manifest.sourceSha to the Release tag commit, hash-check all 16 manifest parts, and verify every app's embedded version and chip family without publishing, releasing, flashing, OTA, or local ref mutation. Optional live-board GETs require separate explicit user approval."
 ---
 
-> **Canonical runner-neutral skill.** Read [`AGENTS.md`](../../../AGENTS.md) before acting.
-> Project skills are canonical under [`.agents/skills/`](../), and lifecycle/PR policy is
-> enforced by the runner-neutral core under [`tools/agent-hooks/`](../../../tools/agent-hooks/).
-> This skill does not grant permissions beyond the user's explicit request.
-> Invoke this workflow canonically as `$ota-release-verify`.
+Invoke `$ota-release-verify`. Read [AGENTS.md](../../../AGENTS.md) first; this workflow grants no
+additional authorization. Canonical skills live under `.agents/skills/`; hooks enforce local policy.
 
 # ota-release-verify — is the published OTA channel actually flashable?
 
@@ -16,17 +13,8 @@ images it points at, and the version stamped into them — is internally consist
 device on the LAN can pull an update and boot it. This is a health check of the *release channel
 itself*, independent of any one board.
 
-This subsystem has broken in three distinct ways, each of which this check catches:
-
-- **Image rename 404** — v1.4.6 renamed the OTA image `tesla-key-esp32.bin` → `-<target>.bin`;
-  the URL the device builds must exist same-origin or every OTA `"could not start download"`.
-- **TOFU signing-key mismatch** — a device whose running image was signed with a key ≠ the current
-  CI `OTA_SIGNING_KEY` rejects every published image as `"downloaded image is invalid"`
-  (`signature bad`), because the signature proves authenticity (TOFU), not that the *channel* is
-  wrong.
-- **Floor-vs-stamped version drift** — [`version.txt`](../../../version.txt) is a committed
-  **floor** (`1.4.0`); CI stamps the *real* release version into the binary and the manifest. If
-  those disagree, devices loop on "update available" or silently no-op.
+Check fixed filenames, full source SHA, all manifest parts, Release-byte identity and descriptors.
+Channel validity does not prove a particular device's installed signing authority or hardware state.
 
 > **Read-only by default.** Steps 1–3 use `git`, `gh`, `curl`, Python and `esptool image-info`
 > against public Release/Pages bytes; they do not update Git refs, publish, sign, flash, start OTA,
@@ -45,71 +33,14 @@ Do not duplicate their steps. If the manifest is coherent but a *particular devi
 update, that is a per-board TOFU/anchor issue → see the interpretation table and
 [`docs/SECURITY.md`](../../../docs/SECURITY.md), not this channel check.
 
-## Ground truth (confirm by reading these files)
+## Ground truth
 
-The device fetches, at runtime, from [`main/Kconfig.projbuild`](../../../main/Kconfig.projbuild)
-defaults and [`main/ota_update.cpp`](../../../main/ota_update.cpp):
-
-- `CONFIG_TESLA_OTA_MANIFEST_URL` = `https://0bu.github.io/tesla-key-esp32/manifest.json`.
-- `CONFIG_TESLA_OTA_FIRMWARE_BASE_URL` = `https://0bu.github.io/tesla-key-esp32/`.
-- Image URL the device builds: `FIRMWARE_BASE_URL` + `"tesla-key-esp32"` + `<suffix>` + `".bin"`
-  (`ota_update.cpp` lines ~546-547). **The step-3 URLs below are exactly this string** — a 404 here is
-  the 404 a real device would hit.
-
-Per-target image **suffix** (must agree across four places —
-[`main/ota_update.cpp`](../../../main/ota_update.cpp) `TESLA_OTA_IMG_SUFFIX` /
-[`main/logic/target.hpp`](../../../main/logic/target.hpp) `tk::image_suffix()`,
-[`scripts/ci-sign-artifacts.sh`](../../../scripts/ci-sign-artifacts.sh) and
-[`scripts/build-pages.sh`](../../../scripts/build-pages.sh) `image_suffix()`):
-
-| target | suffix | chipFamily | bootloader offset |
-|--------|--------|------------|-------------------|
-| esp32   | `""`  | `ESP32`    | 4096 (`0x1000`)  |
-| esp32s3 | `-s3` | `ESP32-S3` | 0                |
-| esp32c3 | `-c3` | `ESP32-C3` | 0                |
-| esp32c6 | `-c6` | `ESP32-C6` | 0                |
-
-`manifest.json` is written and locally re-validated by
-[`scripts/build-pages.sh`](../../../scripts/build-pages.sh) and
-[`scripts/check-pages-manifest.py`](../../../scripts/check-pages-manifest.py). Schema
-`layoutVersion:2` binds a 40-hex `sourceSha` and **exactly four** builds, one per chipFamily. Each
-`build.parts` has exactly four `{path,offset,size,sha256}` records in role order:
-`[ bootloader@per-target, partition@32768, app@131072, ota_data_initial@61440 ]`. The browser verifies
-all bytes before writing and writes otadata last as the activation step.
-
-Pages has one serving topology: GitHub's branch-backed `legacy` mode from `gh-pages:/`, holding both
-the root channel and `PR/<N>/`. [`scripts/check-pages-source.py`](../../../scripts/check-pages-source.py)
-validates that API contract and the credential-free HTTPS URL; an Actions Pages mode, another
-branch/path or a Pages Actions artifact is not an alternate valid channel.
-
-Images are built unsigned by [`scripts/ci-build-all.sh`](../../../scripts/ci-build-all.sh), then
-signed only by trusted [`scripts/ci-sign-artifacts.sh`](../../../scripts/ci-sign-artifacts.sh)
-(`espsecure.py sign_data --version 2`, Secure Boot v2 RSA-3072; protected-Environment secret
-`OTA_SIGNING_KEY` → transient `ota_signing_key.pem`). Signing is **authenticity (TOFU), not
-freshness**; unprivileged CI uses only a disposable test key to exercise the release path.
-
-Version coherence: [`scripts/select-release-version.sh`](../../../scripts/select-release-version.sh)
-reuses one valid Release tag already pointing at the exact source SHA (idempotent retry after a
-partial publish), but only while that tag is the newest valid tag and the source is still
-`origin/main`; otherwise it blocks stale runs. If that Release is already immutable, the build
-workflow downloads and binds all 40 assets and reconciles only Pages—without provisioning the key,
-signing, re-uploading or attempting to mutate the Release. It still emits one new SHA-bound Actions
-recovery artifact from the verified bytes. Every signed app must pass RSA-PSS verification against
-[`scripts/ota-signing-public-key.sha256`](../../../scripts/ota-signing-public-key.sha256), and every
-merged image must match its declared parts, erased gaps (including NVS) and exact EOF. For an
-untagged current main,
-[`scripts/next-version.sh`](../../../scripts/next-version.sh)
-selects the maximum of the `version.txt` floor, every stable tag's next patch and every
-prerelease tag's stable-core promotion; invalid `v*` tags are ignored fail-closed. The
-[`.github/workflows/build.yml`](../../../.github/workflows/build.yml) "Stamp firmware version" step
-overwrites `version.txt` in the workspace (**not** committed) with the version being published, so
-`esp_app_get_description()->version`, the release tag, and the manifest `version` all agree. The
-main Pages manifest carries `steps.stamp.outputs.disp` = the release version.
-
-Device-side **downgrade gate** ([`ota_update.cpp`](../../../main/ota_update.cpp) ~579-624): before
-the bulk download, `ota_task` reads the incoming image's own version via
-`esp_https_ota_get_img_desc` and refuses anything not strictly newer than the running firmware
-(`tk::compare_ota_versions()`, [`ota_contract.hpp`](../../../main/logic/ota_contract.hpp)) — software anti-rollback, no eFuses.
+Read [Security](../../../docs/SECURITY.md#release-pipeline-and-trust-boundaries),
+`main/Kconfig.projbuild`, `scripts/build-pages.sh`, `scripts/ci-sign-artifacts.sh`,
+`main/logic/target.hpp`, `main/ota_update.cpp`, and `scripts/check-release-pages-bytes.py`.
+Verify their current four-target suffix/offset map and the fixed publication URLs before continuing.
+Root Pages is stable Release; Dev and previews are separate. A test-mode dispatch does not publish.
+The full two-snapshot byte-verification procedure below is mandatory.
 
 ## The check
 
