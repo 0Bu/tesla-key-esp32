@@ -373,8 +373,17 @@ that path before burning anything.
 [`AGENTS.md`](../AGENTS.md) is the canonical authorization policy: analysis, review and diagnosis
 are read-only by default, and an implementation request does not authorize commit, push, merge,
 release, USB, flash, OTA, NVS or live-vehicle operations. Specialist reviewers in
-`.agents/subagents.json` run with `SandboxMode = "read-only"`, no model pin and no approval
-escalation. The runner-neutral hook core under [`tools/agent-hooks/`](../tools/agent-hooks/) checks
+`.agents/subagents.json` are registered through generated `.codex/agents/*.toml` files with
+`sandbox_mode = "read-only"`, `approval_policy = "never"` and no model pin. These are defaults:
+Codex can reapply the parent session's runtime permission overrides, so a reviewer must still
+observe its read-only role and the effective sandbox must be checked before relying on isolation.
+Native `.codex/hooks.json` adapts Codex payloads and serializes safety checks before PR checks;
+it runs only after the project and each current hook definition are trusted by the user.
+In linked Git worktrees, Codex loads hook declarations from the primary checkout, including
+inline TOML hooks; a passing adapter check in the worktree is not automatic enforcement proof.
+Verify the effective registrations and current trust with Codex `/hooks`, or run the gates
+explicitly until the primary checkout carries the reviewed setup.
+The runner-neutral hook core under [`tools/agent-hooks/`](../tools/agent-hooks/) checks
 secrets, partitions and PR gates lexically — defense in depth, not a substitute for sandboxing,
 explicit authorization, branch protection, CI trust separation or human review. No PR or agent gate
 receives `OTA_SIGNING_KEY`; through agent tools the only permitted key use is an explicitly
