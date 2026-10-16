@@ -1,4 +1,4 @@
-// Host integration harness against the real yoziru/tesla-ble v5.3.0 (with the repository patch
+// Host integration harness against the real yoziru/tesla-ble v6.1.1 (with the repository patch
 // series, including the PSA port), Nanopb, and the Mbed TLS 4.1 / TF-PSA-Crypto commit that the
 // pinned ESP-IDF v6.1 builds into the firmware.
 //
@@ -36,6 +36,7 @@
 
 #include <mbedtls/pk.h>
 #include <psa/crypto.h>
+#include <psa/crypto_extra.h>
 
 // Official protocol test keys (never production): tesla-ble tests/test_constants.h, which copies
 // them from vehicle-command protocol.md.
@@ -816,6 +817,43 @@ int main() {
                             kat::hex(key_id, sizeof key_id);
         expect(ok, "firmware key fingerprint (PK -> PSA -> SHA-1) equals tesla-ble's key id",
                "firmware key fingerprint diverges from tesla-ble's key id");
+    }
+
+    {
+        // Last crypto check: shut down the real PSA RNG after Client initialization. Both
+        // routing-address and UUID failures must stop handshake and payload construction.
+        Client no_connection;
+        Client with_connection;
+        no_connection.set_vin(kVin);
+        with_connection.set_vin(kVin);
+        const pb_byte_t fixed_connection[16] = {0x42};
+        const pb_byte_t empty_connection[16] = {};
+        with_connection.set_connection_id(fixed_connection);
+        pb_byte_t output[1024];
+        size_t length = sizeof output;
+        const bool initialized = no_connection.load_private_key(kat::client_pem(), kat::client_pem_size()) == 0 &&
+                                 with_connection.load_private_key(kat::client_pem(), kat::client_pem_size()) == 0;
+        expect(initialized && no_connection.build_session_info_request_message(
+                   UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY, output, &length) == 0,
+               "healthy RNG permits a handshake", "healthy RNG unexpectedly blocks a handshake");
+        no_connection.set_connection_id(empty_connection);
+        mbedtls_psa_crypto_free();
+        for (Client* candidate : {&no_connection, &with_connection}) {
+            std::memset(output, 0xa5, sizeof output);
+            length = sizeof output;
+            const auto handshake = candidate->build_session_info_request_message(
+                UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY, output, &length);
+            pb_byte_t payload[] = {1};
+            const auto request = candidate->build_universal_message_with_payload(
+                payload, sizeof payload,
+                UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY, output, &length, false);
+            bool untouched = length == sizeof output;
+            for (const auto byte : output) untouched = untouched && byte == 0xa5;
+            expect(initialized && handshake == TeslaBLE_Status_E_ERROR_CRYPTO &&
+                       request == TeslaBLE_Status_E_ERROR_CRYPTO && untouched,
+                   "failed RNG refuses handshake/payload without emitting a frame",
+                   "failed RNG generated a fallback identifier or emitted a frame");
+        }
     }
 
     std::printf("\n=================================================================\n");
