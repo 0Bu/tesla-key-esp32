@@ -86,9 +86,10 @@ must be available for `200`/`result:true`; otherwise the response is `503`/`resu
 
 The active window is a command in the last five minutes, or cached Charging/Starting with live
 Infotainment contact <60 s old. Once that contact expires without a recent command, valid
-last-known charge/climate data can be served again. Climate refreshes only through the in-window
-rotation, restarted at climate on window entry. After reboot it stays unavailable until that
-rotation reaches an awake car; the boot window is not seeded after a heap-watchdog restart.
+last-known charge/climate data can be served again. Climate refreshes only through in-window
+telemetry, restarted at climate on window entry. Missing/stale climate is retried at the next 30 s
+slot, with at most two consecutive attempts before another domain. After reboot it stays unavailable
+until a poll obtains a sample; the boot window is not seeded after a heap-watchdog restart.
 Drive refreshes through the rotation and a best-effort `NO_WAKE_SKIP` wake/bootstrap one-shot.
 
 ## Body controller state (no wake)
