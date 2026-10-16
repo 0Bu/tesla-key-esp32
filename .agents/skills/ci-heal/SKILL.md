@@ -174,9 +174,9 @@ pushing or merging and is incompatible with `--auto-merge`.
 Paths that reach `evaluate_and_optimize()` report the following; some early refusals return
 before evaluation:
 
-1. **Calculate Run Metrics**: iterations vs limit, duration, the failure category (`repo-lint`,
-   `agent-config`, `mock-tests`, `pr-gates`, `build-contracts`, `sanitizers`, `compiler`), and the
-   fix footprint.
+1. **Report Run Metrics**: iterations vs limit, duration and the failure category (`repo-lint`,
+   `agent-config`, `mock-tests`, `pr-gates`, `build-contracts`, `sanitizers`, `compiler`).
+   Fix-footprint counters remain unmeasured zero placeholders.
 2. **Present Scorecard** summarizing the outcome and root cause.
 3. **Persist Statistics (`.tmp/ci-heal-cache.json`)**: category frequencies and recent runs are
    stored locally for reporting. They do not select or prioritize checks. The cache is untracked;

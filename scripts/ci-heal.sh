@@ -78,7 +78,7 @@ try:
     with open(sys.argv[1], "r") as f:
         data = json.load(f)
     print("================================================================================")
-    print("ci-heal: HISTORICAL RUN STATISTICS & HEURISTICS")
+    print("ci-heal: HISTORICAL RUN STATISTICS")
     print("================================================================================")
     print(f"Total Recorded Runs:    {data.get('total_runs', 0)}")
     print(f"Successful Runs:        {data.get('success_runs', 0)}")
@@ -233,14 +233,14 @@ evaluate_and_optimize() {
   fi
 
   echo "================================================================================"
-  echo "ci-heal: RUN EVALUATION SCORECARD & SELF-OPTIMIZATION"
+  echo "ci-heal: RUN EVALUATION SCORECARD"
   echo "================================================================================"
   echo "  Outcome:             $status"
   echo "  PR:                  #$pr"
   echo "  Iterations:          $iters / $max_iters"
   echo "  Duration:            ${duration_secs}s"
   echo "  Identified Cause:    ${root_cause:-None / Clean}"
-  echo "  Fix Footprint:       $files_changed files, $lines_changed lines modified"
+  echo "  Fix Footprint:       not measured (placeholder counters: $files_changed files, $lines_changed lines)"
   echo "  Efficiency Score:    $score / 100"
   echo "--------------------------------------------------------------------------------"
 
