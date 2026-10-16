@@ -78,7 +78,7 @@ try:
     with open(sys.argv[1], "r") as f:
         data = json.load(f)
     print("================================================================================")
-    print("ci-heal: HISTORICAL RUN STATISTICS & HEURISTICS")
+    print("ci-heal: HISTORICAL RUN STATISTICS")
     print("================================================================================")
     print(f"Total Recorded Runs:    {data.get('total_runs', 0)}")
     print(f"Successful Runs:        {data.get('success_runs', 0)}")
@@ -233,14 +233,14 @@ evaluate_and_optimize() {
   fi
 
   echo "================================================================================"
-  echo "ci-heal: RUN EVALUATION SCORECARD & SELF-OPTIMIZATION"
+  echo "ci-heal: RUN EVALUATION SCORECARD"
   echo "================================================================================"
   echo "  Outcome:             $status"
   echo "  PR:                  #$pr"
   echo "  Iterations:          $iters / $max_iters"
   echo "  Duration:            ${duration_secs}s"
   echo "  Identified Cause:    ${root_cause:-None / Clean}"
-  echo "  Fix Footprint:       $files_changed files, $lines_changed lines modified"
+  echo "  Fix Footprint:       not measured (placeholder counters: $files_changed files, $lines_changed lines)"
   echo "  Efficiency Score:    $score / 100"
   echo "--------------------------------------------------------------------------------"
 
@@ -300,7 +300,7 @@ PY
 
   echo "ci-heal: knowledge updated in .tmp/ci-heal-cache.json"
   if [ -n "$root_cause" ] && [ "$root_cause" != "None" ] && [ "$root_cause" != "None / Clean" ]; then
-    echo "ci-heal: [Optimization] Prioritizing '$root_cause' in subsequent pre-flight runs."
+    echo "ci-heal: failure category '$root_cause' recorded in run statistics."
   fi
   echo "================================================================================"
 }
@@ -309,7 +309,7 @@ run_local_verifications() {
   local prioritized_cause="${1:-}"
   echo "ci-heal: running repository syntax, mock tests, and contract checks..."
 
-  # If a specific failure cause is prioritized via cache/self-optimization, run it first
+  # Run the current failure category first when it has a supported host preflight.
   case "$prioritized_cause" in
     repo-lint) "$root/scripts/repo-lint.sh" ;;
     agent-config) "$root/tools/agent-config/selftest.sh" ;;

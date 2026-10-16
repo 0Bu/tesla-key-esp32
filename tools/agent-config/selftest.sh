@@ -213,6 +213,12 @@ perl -0pi -e 's#scripts/ota-signing-public-key\.sha256#scripts/unreviewed-ship-k
 expect_failure "ship production authority" "$fixture" \
   "production-authority verification contract before flash"
 
+fixture="$WORK/ship-usb-only-verification"; make_fixture "$fixture"
+perl -0pi -e 's/^(python3 scripts\/check-firmware-artifacts\.py[^\n]+\n)//m or die "missing verifier"; my $verify=$1; s/^(APP_INFO=)/$verify$1/m or die "missing USB branch";' \
+  "$fixture/.agents/skills/ship/SKILL.md"
+expect_failure "ship OTA cannot skip consumer verification" "$fixture" \
+  "verify the selected app in the common block before USB or OTA delivery"
+
 fixture="$WORK/ship-main-artifact-head"; make_fixture "$fixture"
 perl -0pi -e 's/tesla-key-esp32-\$VERSION-\$RUN_SHA/tesla-key-esp32-\$VERSION/' \
   "$fixture/.agents/skills/ship/SKILL.md"

@@ -179,6 +179,12 @@ TARGET=esp32s3  # choose esp32 | esp32s3 | esp32c3 | esp32c6
 case "$TARGET" in esp32) SFX=""; FAMILY=ESP32 ;; esp32s3) SFX=-s3; FAMILY=ESP32-S3 ;;
   esp32c3) SFX=-c3; FAMILY=ESP32-C3 ;; esp32c6) SFX=-c6; FAMILY=ESP32-C6 ;;
   *) echo "REFUSING: unsupported target" >&2; exit 1 ;; esac
+APP="$SHIP_DIR/tesla-key-esp32$SFX.bin"
+[ -f "$APP" ] && [ ! -L "$APP" ] || { echo "REFUSING: signed target app missing/unsafe" >&2; exit 1; }
+[ "$(wc -c < "$APP" | tr -d ' ')" -le $((0x1e8000)) ] || {
+  echo "REFUSING: signed main app exceeds the policy limit" >&2; exit 1;
+}
+python3 scripts/check-firmware-artifacts.py --app-only --target "$TARGET" --version "$VERSION" --app "$APP" --signed-app --expected-public-key-digest scripts/ota-signing-public-key.sha256
 ```
 
 ### Explicitly selected USB delivery (app slot only — NVS and pairing survive)
@@ -192,12 +198,6 @@ merged image or touch `nvs@0x9000/0x6000`:
 set -euo pipefail
 : "${PORT:?set PORT to the explicitly identified serial device}"
 [ -c "$PORT" ] || { echo "REFUSING: PORT is not a character device: $PORT" >&2; exit 1; }
-APP="$SHIP_DIR/tesla-key-esp32$SFX.bin"
-[ -f "$APP" ] && [ ! -L "$APP" ] || { echo "REFUSING: signed target app missing/unsafe" >&2; exit 1; }
-[ "$(wc -c < "$APP" | tr -d ' ')" -le $((0x1e8000)) ] || {
-  echo "REFUSING: signed main app exceeds the policy limit" >&2; exit 1;
-}
-python3 scripts/check-firmware-artifacts.py --app-only --target "$TARGET" --version "$VERSION" --app "$APP" --signed-app --expected-public-key-digest scripts/ota-signing-public-key.sha256
 APP_INFO=$(esptool image-info "$APP")
 printf '%s\n' "$APP_INFO"
 printf '%s\n' "$APP_INFO" | grep -qx "Detected image type: $FAMILY" \

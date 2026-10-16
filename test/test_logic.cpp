@@ -45,6 +45,7 @@
 #include "logic/connect_outcome.hpp"
 #include "logic/active_window.hpp"
 #include "logic/wake_poll.hpp"
+#include "logic/telemetry_poll.hpp"
 #include "logic/ble_readiness.hpp"
 #include "logic/ble_phase.hpp"
 #include "logic/ble_row.hpp"
@@ -3641,6 +3642,111 @@ static void test_active_window() {
         CHECK(charge_cache_usable(true, fresh_window, true, kActiveChargeStateMaxAgeS));
         CHECK(!charge_cache_usable(true, fresh_window, true, kActiveChargeStateMaxAgeS + 1));
     }
+}
+
+static void test_telemetry_poll() {
+    using Domain = tk::TelemetryPollDomain;
+    tk::TelemetryPollState st{};
+    const auto attempt = [&](uint32_t ticks, bool usable, bool enqueued) {
+        st.begin_attempt(ticks);
+        st.note_admission(usable, enqueued);
+    };
+    constexpr uint32_t interval = 30000;  // Test ticks; the shell converts the cadence to IDF ticks.
+    tk::TelemetryPollInputs in{true, true, true, false, interval + 1, interval};
+    CHECK(st.due(in));
+    in.now_ticks = interval;
+    CHECK(!st.due(in));
+    in.now_ticks = interval - 1;
+    CHECK(!st.due(in));
+    in.now_ticks = interval + 1;
+    in.paired = false;
+    CHECK(!st.due(in));
+    in.paired = true;
+    in.window = false;
+    CHECK(!st.due(in));  // Being awake does not grant an idle climate poll.
+    in.window = true;
+    in.connected = false;
+    CHECK(!st.due(in));
+    in.connected = true;
+    in.command_in_flight = true;
+    CHECK(!st.due(in));
+    in.command_in_flight = false;
+
+    // Regression: a queued climate attempt expires/fails without publishing a sample. Retry at
+    // the next 30 s slot, rather than silently moving through Drive/Tires/Closures for ~120 s.
+    CHECK(st.next(false) == Domain::Climate);
+    attempt(in.now_ticks, false, true);
+    in.now_ticks += interval;
+    CHECK(!st.due(in));
+    ++in.now_ticks;
+    CHECK(st.due(in));
+    CHECK(st.next(false) == Domain::Climate);
+
+    // Queue refusal cannot consume the pending retry, and still cannot create a tight loop.
+    attempt(in.now_ticks, false, false);
+    CHECK(!st.due(in));
+    CHECK(st.next(false) == Domain::Climate);
+    in.now_ticks += interval + 1;
+    CHECK(st.due(in));
+    attempt(in.now_ticks, false, true);
+    CHECK(st.next(false) == Domain::Drive);
+    attempt(in.now_ticks + interval + 1, false, false);
+    CHECK(st.next(false) == Domain::Drive);
+
+    // Once climate arrives, ordinary rotation resumes where it left off.
+    const Domain normal[] = {Domain::Drive, Domain::Tires, Domain::Closures, Domain::Climate};
+    for (const auto expected : normal) {
+        CHECK(st.next(true) == expected);
+        attempt(0, true, true);
+    }
+
+    // Both absence and the shared 300/301 s freshness boundary trigger priority, not a looser
+    // API freshness allowance. A valid current sample leaves Drive as the next normal domain.
+    st.reset();
+    attempt(1, true, true);
+    CHECK(st.next(tk::climate_cache_usable(true, true, true, 300)) == Domain::Drive);
+    CHECK(st.next(tk::climate_cache_usable(true, true, true, 301)) == Domain::Climate);
+    CHECK(st.next(tk::climate_cache_usable(false, true, false, 0)) == Domain::Climate);
+
+    // Persistent climate failure must not starve any other domain or repeatedly reset to Drive.
+    st.reset();
+    const Domain failing[] = {Domain::Climate, Domain::Climate, Domain::Drive,
+                              Domain::Climate, Domain::Climate, Domain::Tires,
+                              Domain::Climate, Domain::Climate, Domain::Closures,
+                              Domain::Climate, Domain::Climate, Domain::Drive};
+    uint32_t now = 0;
+    for (const auto expected : failing) {
+        now += interval + 1;
+        in.now_ticks = now;
+        CHECK(st.due(in));
+        CHECK(st.next(false) == expected);
+        attempt(now, false, true);
+    }
+
+    // Unsigned elapsed ticks remain correct across the scheduler's wrap boundary.
+    attempt(UINT32_MAX - 100, true, true);
+    in.now_ticks = interval - 101;
+    CHECK(!st.due(in));
+    ++in.now_ticks;
+    CHECK(st.due(in));
+    st.reset();
+    CHECK(st.next(false) == Domain::Climate);
+    in.now_ticks = interval;
+    CHECK(!st.due(in));
+
+    // An exception before queue admission skips note_admission. It must still throttle the next
+    // iteration (50 ms in the shell), preserve the domain and permit a later bounded retry.
+    in.now_ticks = interval + 1;
+    CHECK(st.due(in));
+    st.begin_attempt(in.now_ticks);
+    in.now_ticks += 50;
+    CHECK(!st.due(in));
+    CHECK(st.next(false) == Domain::Climate);
+    in.now_ticks += interval - 50;
+    CHECK(!st.due(in));
+    ++in.now_ticks;
+    CHECK(st.due(in));
+    CHECK(st.next(false) == Domain::Climate);
 }
 
 // ── Wake-edge one-shot charge poll (logic/wake_poll.hpp) — the stale-SOC-after-plug-in fix ──
@@ -8186,6 +8292,7 @@ int main() {
     test_vcsec_sleep_three_valued();
     test_vcsec_sleep_clock();
     test_wake_poll();
+    test_telemetry_poll();
     test_ble_readiness();
     test_ble_phase();
     test_ble_row();

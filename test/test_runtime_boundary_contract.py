@@ -1357,8 +1357,62 @@ def require_wake_companion_drive_poll(loop_source: str) -> None:
         raise AssertionError("window rising-edge block missing")
     edge_open = layout.index("{", edge)
     edge_body = layout[edge_open:balanced_end(layout, edge_open, "{", "}", "rising edge") + 1]
-    if "tele_idx = 0;" not in edge_body:
+    if "telemetry_poll.reset();" not in edge_body:
         raise AssertionError("window rising edge must restart the telemetry rotation at climate")
+
+
+def require_telemetry_poll_schedule(telemetry_source: str) -> None:
+    """The firmware uses the tested cadence/priority and accounts for actual queue admission."""
+    loop = function_body_in(telemetry_source, "loop_task_fn_")
+    layout = scrub_cpp_preserving_layout(loop)
+    gate = re.search(
+        r"if\s*\(telemetry_poll\.due\(\{paired,\s*window,\s*self->ble_connected\(\),\s*"
+        r"self->cmd_in_flight_\.load\(\),\s*now_ticks,\s*pdMS_TO_TICKS\(30000\)\}\)\)\s*\{",
+        layout,
+    )
+    if not gate:
+        raise AssertionError("telemetry must delegate all active-window/cadence gates to the tested scheduler")
+    start = gate.end() - 1
+    end = balanced_end(layout, start, "{", "}", "telemetry schedule")
+    block = loop[start:end + 1]
+    code = layout[start:end + 1]
+    require_before("telemetry attempt throttled before fallible work", code,
+                   "telemetry_poll.begin_attempt(now_ticks);", "self->get_vehicle_climate(climate)")
+    require_before("climate snapshot before vehicle lock", code,
+                   "const bool climate_usable = self->get_vehicle_climate(climate);",
+                   "tk::SemGuard g(self->vehicle_mutex_);")
+    require_before("priority selection before dispatch", code,
+                   "const auto domain = telemetry_poll.next(climate_usable);", "switch (domain)")
+    lock = code.index("tk::SemGuard g(self->vehicle_mutex_);")
+    lock_start = code.rfind("{", 0, lock)
+    lock_end = balanced_end(code, lock_start, "{", "}", "telemetry vehicle lock")
+    account = code.find("telemetry_poll.note_admission(climate_usable, enqueued);")
+    if account <= lock_end:
+        raise AssertionError("scheduler must account for actual admission after releasing the vehicle lock")
+    expected = {"Climate": ("Climate State Poll", "getClimateState"),
+                "Drive": ("Drive State Poll", None),
+                "Tires": ("Tire Pressure Poll", "getTirePressureState"),
+                "Closures": ("Closures State Poll", "getClosuresState")}
+    for domain, (name, selector) in expected.items():
+        case = re.search(rf"case tk::TelemetryPollDomain::{domain}:\s*"
+                         r"enqueued = self->enqueue_background_poll_\(", code)
+        if not case or not lock < case.start() < lock_end:
+            raise AssertionError(f"{domain} must dispatch under vehicle lock and retain queue admission")
+        tail = block[case.end():block.index("break;", case.end())]
+        if f'"{name}", tk::BleDomain::Infotainment,' not in tail:
+            raise AssertionError(f"{domain} dispatches the wrong telemetry poll")
+        if selector and f"CarServer_GetVehicleData_{selector}_tag" not in tail:
+            raise AssertionError(f"{domain} requests the wrong protobuf selector")
+    enqueue = scrub_cpp(function_body_in(telemetry_source, "enqueue_background_poll_"))
+    for rejection in ("if (!command_identity_ready_()) return false;",
+                      "if (command_runner_.is_queue_full()) return false;"):
+        if rejection not in enqueue:
+            raise AssertionError("background admission must report identity/queue refusal")
+    if "tk::WakePolicy::NoWakeSkip, 10000" not in enqueue:
+        raise AssertionError("background telemetry must retain NO_WAKE_SKIP and its bounded expiry")
+    admitted = re.search(r"if \(cmd_id > 0\)\s*\{(.*?)\}", enqueue, re.DOTALL)
+    if not admitted or "return true;" not in admitted.group(1) or not re.search(r"return false;\s*\}$", enqueue):
+        raise AssertionError("background admission must report success only for a queued command")
 
 
 def require_drive_poll_builder(telemetry_source: str) -> None:
@@ -3887,6 +3941,7 @@ def require_runtime_source_contracts() -> None:
     require_active_window_seam(SOURCES["vehicle_telemetry.cpp"])
     require_climate_publication_stamp(SOURCES["vehicle_telemetry.cpp"])
     require_wake_companion_drive_poll(function_body_in(SOURCES["vehicle_telemetry.cpp"], "loop_task_fn_"))
+    require_telemetry_poll_schedule(SOURCES["vehicle_telemetry.cpp"])
     require_drive_poll_builder(SOURCES["vehicle_telemetry.cpp"])
     require_unlocked_diagnostic_logging(SOURCES["heap_trend.cpp"], SOURCES["vehicle_telemetry.cpp"])
     require_diag_dump_completion_contract(
@@ -4864,7 +4919,7 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
         "            if (poll_cadence) last_poll_ticks = now_ticks;\n",
         "            if (poll_cadence) last_poll_ticks = now_ticks;\n"
         '            self->enqueue_background_poll_("Drive State Poll", tk::BleDomain::Infotainment, build_drive_state_poll);\n', 1)
-    no_edge_reset = wake_loop.replace("            tele_idx = 0;\n", "", 1)
+    no_edge_reset = wake_loop.replace("            telemetry_poll.reset();\n", "", 1)
     lambda_rotation = wake_loop.replace(
         '"Drive State Poll", tk::BleDomain::Infotainment, build_drive_state_poll);\n                        break;',
         '"Drive State Poll", tk::BleDomain::Infotainment, [](TeslaBLE::Client*, uint8_t*, size_t*) { return 0; });\n                        break;', 1)
@@ -4872,7 +4927,7 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
         ("wake gate removed", ungated_drive),
         ("drive enqueue replaced", no_drive_enqueue),
         ("drive enqueue outside the gate", drive_outside_gate),
-        ("rising-edge tele_idx reset removed", no_edge_reset),
+        ("rising-edge telemetry reset removed", no_edge_reset),
         ("rotation stops sharing the builder", lambda_rotation),
     ):
         if mutated == wake_loop:
@@ -4886,6 +4941,30 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
         lambda: require_drive_poll_builder(climate_telemetry.replace(
             "CarServer_GetVehicleData_getDriveState_tag);\n}", "CarServer_GetVehicleData_getChargeState_tag);\n}", 1)),
     )
+
+    for label, old, new in (
+        ("window gate removed", "telemetry_poll.due({paired, window,", "telemetry_poll.due({paired, true,"),
+        ("priority ignored", "telemetry_poll.next(climate_usable)", "telemetry_poll.next(true)"),
+        ("attempt throttle removed", "telemetry_poll.begin_attempt(now_ticks);", ""),
+        ("queue refusal ignored", "note_admission(climate_usable, enqueued)",
+         "note_admission(climate_usable, true)"),
+        ("climate admission lost", 'enqueued = self->enqueue_background_poll_(\n                            "Climate State Poll"',
+         'self->enqueue_background_poll_(\n                            "Climate State Poll"'),
+        ("background wake enabled", "tk::WakePolicy::NoWakeSkip, 10000", "tk::WakePolicy::AutoWake, 10000"),
+        ("wrong climate selector", "CarServer_GetVehicleData_getClimateState_tag",
+         "CarServer_GetVehicleData_getChargeState_tag"),
+        ("wrong tires selector", "CarServer_GetVehicleData_getTirePressureState_tag",
+         "CarServer_GetVehicleData_getChargeState_tag"),
+        ("wrong closures selector", "CarServer_GetVehicleData_getClosuresState_tag",
+         "CarServer_GetVehicleData_getChargeState_tag"),
+    ):
+        mutated = climate_telemetry.replace(old, new, 1)
+        if mutated == climate_telemetry:
+            raise AssertionError(f"telemetry schedule mutation did not apply: {label}")
+        require_mutation_rejected(
+            f"telemetry schedule {label}",
+            lambda mutated=mutated: require_telemetry_poll_schedule(mutated),
+        )
 
     heap = SOURCES["heap_trend.cpp"]
     telemetry = SOURCES["vehicle_telemetry.cpp"]

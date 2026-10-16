@@ -68,8 +68,11 @@ debounced ASLEEP→AWAKE, or paired+connected with a stale/empty cache. Failed p
 cache ages. Stable sleep/disconnect resets it; awake alone never opens the active window.
 A wake/bootstrap fire also enqueues one Drive State Poll; background entries expire after 10 s,
 so a slow charge round trip may leave the odometer last-known. The 10 s in-window charge cadence
-adds no drive poll. Climate is refreshed only by the rotating poll, reset to climate at window entry;
-post-boot cache availability is described in the API.
+adds no drive poll. `logic/telemetry_poll.hpp` schedules one in-window telemetry attempt per 30 s,
+normally rotating climate → drive → tires → closures and restarting at climate on window entry.
+Missing/stale climate gets at most two consecutive attempts before the next other domain; priority
+retries preserve the normal rotation's place. Queue refusal retains the pending domain and cadence.
+All attempts use `NO_WAKE_SKIP`; post-boot cache availability is described in the API.
 
 ## OTA self-update
 

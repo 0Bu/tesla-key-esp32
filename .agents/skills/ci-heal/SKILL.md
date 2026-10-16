@@ -1,6 +1,6 @@
 ---
 name: ci-heal
-description: Monitors GitHub Actions CI after push, reproduces a failure locally, pushes an operator-authored fix commit with attested pre-push records, and reports merge readiness only from green CI on the exact head plus explicitly attested gate records. Never authors commits, never runs the reviews it records, and never merges without separate authorization.
+description: Monitors GitHub Actions CI after push, runs host preflights, pushes an operator-authored fix commit with attested pre-push records, and reports merge readiness only from green CI on the exact head plus explicitly attested gate records. Protocol, sanitizer and compiler reproduction are separate operator steps. Never authors commits, never runs the reviews it records, and never merges without separate authorization.
 ---
 
 Invoke `$ci-heal`. Read [AGENTS.md](../../../AGENTS.md) first; this workflow grants no
@@ -9,8 +9,8 @@ additional authorization. Canonical skills live under `.agents/skills/`; hooks e
 # ci-heal — Post-Push CI Monitoring, Failure Reproduction & Merge-Readiness Gate
 
 This skill orchestrates the post-push CI lifecycle for `tesla-key-esp32`. It monitors GitHub
-Actions for an open pull request, extracts failed logs, reproduces the failure locally with the
-narrowest matching repository script, pushes a fix commit that the operator already made, and
+Actions for an open pull request, extracts failed logs, runs host preflights, pushes a fix
+commit that the operator already made, and
 verifies that the PR reaches a mergeable state with current gate records.
 
 > **Authorization and Safety Boundary.** Invoking this skill authorizes running the repository
@@ -89,18 +89,21 @@ flowchart TD
 
 ## Phase 2: Failure Analysis & Local Reproduction
 
-If any CI check fails, `ci-heal.sh` prints the failed job logs and runs the narrowest matching
-local script first:
+If any CI check fails, `ci-heal.sh` prints the failed job logs. It runs all five host preflights
+below, first repeating the one matching the current failure category when supported:
 
 - **Agent configuration / rules**: `./tools/agent-config/selftest.sh`
 - **Repository linter / syntax**: `./scripts/repo-lint.sh`
-- **Host logic / mock tests**: `./scripts/run-mock-tests.sh` (or `--require-all`)
-- **Tesla BLE integration harness**: `./scripts/test-tesla-ble-harness.sh`
+- **Host logic / mock tests**: `./scripts/run-mock-tests.sh`
 - **Build contracts / pins / partition**: `./scripts/test-build-contracts.sh`
 - **PR gate matcher**: `./scripts/test-pr-gates.sh`
-- **Sanitizers**: `./scripts/run-sanitizer-tests.sh`
-- **ESP-IDF firmware compilation** (if Docker is present):
-  `./scripts/idf-docker.sh idf.py -B build set-target esp32s3 build`
+
+The operator must separately reproduce failures outside these automatic host preflights:
+
+- **Tesla BLE integration harness**: `./scripts/test-tesla-ble-harness.sh`
+- **Linux sanitizers**: `./scripts/run-sanitizer-tests.sh`
+- **Pinned ESP-IDF compilation**: use `./scripts/idf-docker.sh` and the affected target's
+  build entry point from [Development](../../../docs/DEVELOPMENT.md).
 
 A failure that cannot be identified from the check rollup (pending, cancelled, API error) is not
 treated as fixable; the script stops and points at `gh pr checks`.
@@ -166,13 +169,15 @@ pushing or merging and is incompatible with `--auto-merge`.
 
 ---
 
-## Phase 6: Self-Evaluation, Scorecard & Self-Optimization
+## Phase 6: Evaluation, Scorecard & Run Statistics
 
-At the conclusion of every execution (successful merge readiness or early stop):
+Paths that reach `evaluate_and_optimize()` report the following; some early refusals return
+before evaluation:
 
-1. **Calculate Run Metrics**: iterations vs limit, duration, the failure category (`repo-lint`,
-   `agent-config`, `mock-tests`, `pr-gates`, `build-contracts`, `sanitizers`, `compiler`), and the
-   fix footprint.
+1. **Report Run Metrics**: iterations vs limit, duration and the failure category (`repo-lint`,
+   `agent-config`, `mock-tests`, `pr-gates`, `build-contracts`, `sanitizers`, `compiler`).
+   Fix-footprint counters remain unmeasured zero placeholders.
 2. **Present Scorecard** summarizing the outcome and root cause.
-3. **Persist Knowledge (`.tmp/ci-heal-cache.json`)**: category frequencies are stored locally and
-   used to run high-frequency checks first in later pre-flights. The cache is untracked.
+3. **Persist Statistics (`.tmp/ci-heal-cache.json`)**: category frequencies and recent runs are
+   stored locally for reporting. They do not select or prioritize checks. The cache is untracked;
+   preflight priority comes from the current failure category.

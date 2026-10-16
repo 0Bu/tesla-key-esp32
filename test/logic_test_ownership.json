@@ -57,6 +57,7 @@
     "syslog_start_gate.hpp": {"test": "test/test_logic.cpp", "evidence": "test_syslog_start_gate("},
     "target.hpp": {"test": "test/test_logic.cpp", "evidence": "test_target("},
     "task_start_gate.hpp": {"test": "test/test_logic.cpp", "evidence": "test_task_start_gate("},
+    "telemetry_poll.hpp": {"test": "test/test_logic.cpp", "evidence": "test_telemetry_poll("},
     "ui_state.hpp": {"test": "test/test_logic.cpp", "evidence": "test_display_helpers("},
     "units.hpp": {"test": "test/test_logic.cpp", "evidence": "test_units("},
     "vehicle_data.hpp": {"test": "test/test_logic.cpp", "evidence": "test_vehicle_data("},

@@ -9,6 +9,7 @@
 #include "logic/units.hpp"
 #include "logic/active_window.hpp"
 #include "logic/wake_poll.hpp"
+#include "logic/telemetry_poll.hpp"
 #include "logic/heap_watchdog.hpp"
 #include "ota_update.hpp"
 #include "heap_trend.hpp"
@@ -656,15 +657,17 @@ void VehicleController::process_ble_host_events_() {
     }
 }
 
-void VehicleController::enqueue_background_poll_(const std::string& name, tk::BleDomain domain, Builder builder) {
-    if (!command_identity_ready_()) return;
-    if (command_runner_.is_queue_full()) return;
+bool VehicleController::enqueue_background_poll_(const std::string& name, tk::BleDomain domain, Builder builder) {
+    if (!command_identity_ready_()) return false;
+    if (command_runner_.is_queue_full()) return false;
     const uint32_t now_ms = static_cast<uint32_t>(pdTICKS_TO_MS(xTaskGetTickCount()));
     const uint32_t cmd_id = command_runner_.enqueue(
         name, domain, tk::WakePolicy::NoWakeSkip, 10000, now_ms, {}, nullptr);
     if (cmd_id > 0) {
         command_builders_[cmd_id % tk::CommandRunner::kMaxQueueSize] = std::move(builder);
+        return true;
     }
+    return false;
 }
 
 bool VehicleController::persist_session_(UniversalMessage_Domain domain,
@@ -1264,8 +1267,7 @@ void VehicleController::loop_task_fn_(void* arg) {
     }
     uint32_t last_poll_ticks    = 0;
     uint32_t last_connect_ticks = 0;
-    uint32_t last_tele_ticks    = 0;
-    int      tele_idx           = 0;  // rotates the telemetry domain polled each cycle
+    tk::TelemetryPollState telemetry_poll{};
     bool     prev_window        = false;  // edge-detect the active window
     auto     prev_sleep         = tk::SleepState::Unknown;  // edge-detect VCSEC sleep flag
     tk::WakePollState wake_poll{};         // one-shot charge poll on the VCSEC wake edge (#264)
@@ -1564,10 +1566,8 @@ void VehicleController::loop_task_fn_(void* arg) {
         }
         // Rising edge: window just opened → refresh the cache promptly (reset throttles).
         if (paired && !prev_window && window) {
-            last_poll_ticks = last_tele_ticks = last_connect_ticks = 0;
-            // Climate (rotation case 0) goes first: get_vehicle_climate() answers 503 (which evcc
-            // reads) for an in-window climate older than kActiveClimateStateMaxAgeS.
-            tele_idx = 0;
+            last_poll_ticks = last_connect_ticks = 0;
+            telemetry_poll.reset();
         }
         prev_window = window;
 
@@ -1610,9 +1610,10 @@ void VehicleController::loop_task_fn_(void* arg) {
             }
         }
 
-        // Background telemetry refresh (paired + window + connected): one domain per cycle,
-        // rotating climate → drive → tires → closures so the full set refreshes every ~120 s
-        // without flooding the command queue. These are slow-changing (cabin temp, tyre
+        // Background telemetry refresh: one domain per 30 s, normally climate → drive → tires →
+        // closures. Missing/stale climate gets at most two consecutive attempts before the next
+        // other domain, so a failed first attempt need not wait a full ~120 s rotation. The normal
+        // rotation retains its place across priority retries. These are slow-changing (cabin temp, tyre
         // pressure, odometer), so a relaxed 30 s cadence costs nothing visible while cutting how
         // often the BLE radio is active — each poll on a weak link can desync into a multi-second
         // retry burst that, via WiFi/BT radio coexistence, steals airtime from the HTTP server.
@@ -1620,34 +1621,38 @@ void VehicleController::loop_task_fn_(void* arg) {
         // (/vehicle_data endpoints=climate_state, freshness-bounded inside the window) and drive
         // feeds evcc's odometer (endpoints=drive_state); tires and closures are web UI / MQTT
         // only. All NO_WAKE_SKIP.
-        if (paired && window && self->ble_connected() && !self->cmd_in_flight_.load()
-            && (now_ticks - last_tele_ticks > pdMS_TO_TICKS(30000))) {
-            last_tele_ticks = now_ticks;
+        if (telemetry_poll.due({paired, window, self->ble_connected(), self->cmd_in_flight_.load(),
+                                now_ticks, pdMS_TO_TICKS(30000)})) {
+            telemetry_poll.begin_attempt(now_ticks);
+            tk::VehicleClimateData climate{};
+            const bool climate_usable = self->get_vehicle_climate(climate);
+            const auto domain = telemetry_poll.next(climate_usable);
+            bool enqueued = false;
             {
                 tk::SemGuard g(self->vehicle_mutex_);
-                switch (tele_idx % 4) {
-                    case 0:
-                        self->enqueue_background_poll_(
+                switch (domain) {
+                    case tk::TelemetryPollDomain::Climate:
+                        enqueued = self->enqueue_background_poll_(
                             "Climate State Poll", tk::BleDomain::Infotainment,
                             [](TeslaBLE::Client* client, uint8_t* buff, size_t* len) {
                                 return client->build_car_server_get_vehicle_data_message(
                                     buff, len, CarServer_GetVehicleData_getClimateState_tag);
                             });
                         break;
-                    case 1:
-                        self->enqueue_background_poll_(
+                    case tk::TelemetryPollDomain::Drive:
+                        enqueued = self->enqueue_background_poll_(
                             "Drive State Poll", tk::BleDomain::Infotainment, build_drive_state_poll);
                         break;
-                    case 2:
-                        self->enqueue_background_poll_(
+                    case tk::TelemetryPollDomain::Tires:
+                        enqueued = self->enqueue_background_poll_(
                             "Tire Pressure Poll", tk::BleDomain::Infotainment,
                             [](TeslaBLE::Client* client, uint8_t* buff, size_t* len) {
                                 return client->build_car_server_get_vehicle_data_message(
                                     buff, len, CarServer_GetVehicleData_getTirePressureState_tag);
                             });
                         break;
-                    case 3:
-                        self->enqueue_background_poll_(
+                    case tk::TelemetryPollDomain::Closures:
+                        enqueued = self->enqueue_background_poll_(
                             "Closures State Poll", tk::BleDomain::Infotainment,
                             [](TeslaBLE::Client* client, uint8_t* buff, size_t* len) {
                                 return client->build_car_server_get_vehicle_data_message(
@@ -1656,7 +1661,7 @@ void VehicleController::loop_task_fn_(void* arg) {
                         break;
                 }
             }
-            tele_idx++;
+            telemetry_poll.note_admission(climate_usable, enqueued);
         }
       } catch (const std::exception& e) {
           ESP_LOGE(TAG, "vehicle loop iteration threw (%s) — continuing", e.what());
