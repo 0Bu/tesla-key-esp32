@@ -12,7 +12,7 @@ scripts/run-mock-tests.sh --require-all # fail closed: CI/Stop prerequisites are
 ```
 
 Normal mode needs a C++17 compiler, using CMake when present or equivalent direct compilation.
-The separate real v5.3.0 tesla-ble/PSA harness requires C++20; pure firmware logic remains C++17.
+The separate real v6.1.1 tesla-ble/PSA harness requires C++20; pure firmware logic remains C++17.
 Strict mode requires Git, Python, Node, CMake, compiler and every gate file, with bounded subprocesses.
 Missing tooling is failure, not reduced coverage reported green. Binaries stop on a failed CHECK.
 
@@ -45,10 +45,11 @@ behavior claims. Mirrored C++/Python/JS presenters need parity checks, not merel
 | Public protocol vectors | `tesla_protocol_vectors.test.mjs`: VIN, ECDH/HMAC/AES-GCM and patch contracts, public test keys only |
 | External JSON contract | Golden status output, command registry/bounds, MQTT registry/fields/presence and exact MCP IDs |
 
-The v5.3.0 real-library harness also checks fresh/forced/established/cleared-secret peer admission,
+The v6.1.1 real-library harness also checks fresh/forced/established/cleared-secret peer admission,
 monotonic session counters, domain request-hash isolation and invalid-domain lookup.
 The crypto harness checks official client/session derivation, HMAC/tag, AES-GCM, response-counter
 AAD (different from request counter), tampered-tag refusal, PEM compatibility and invalid keys.
+Disabling the real PSA RNG must refuse handshake and payload construction without emitting a frame.
 Firmware key fingerprint uses a host mirror because the IDF function is not compiled on the host.
 Presenter parity likewise proves decisions, not physical pixels.
 

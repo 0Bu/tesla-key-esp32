@@ -324,7 +324,7 @@ expect_failure "multi-target host-gate dependency" "$fixture" \
   "multi-target reviewer is missing the independent-rebuild/publication DAG contract"
 
 fixture="$WORK/stale-pin"; make_fixture "$fixture"
-perl -0pi -e 's/version: "v5.3.0"/version: "v5.4.0"/' "$fixture/main/idf_component.yml"
+perl -0pi -e 's/version: "v6.1.1"/version: "v5.3.0"/' "$fixture/main/idf_component.yml"
 expect_failure "stale pin assertion" "$fixture" \
   "pin assertion does not match idf_component.yml pin"
 

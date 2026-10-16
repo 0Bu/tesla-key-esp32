@@ -19,7 +19,7 @@ idf_build_set_property(COMPILE_OPTIONS "-Wno-error=format" APPEND)
 
 project(tesla-key-esp32)
 
-# yoziru/tesla-ble v5.3.0 binds Parental Controls actions into the VehicleAction oneof
+# yoziru/tesla-ble v6.1.1 binds Parental Controls actions into the VehicleAction oneof
 # that this firmware never sends (trimmed to preserve target flash budget), and pulls
 # in redundant force_update_session dead code on counter replay instead of aligning with
 # signer.go. Key regeneration and BLE orchestration are handled natively in the firmware.
