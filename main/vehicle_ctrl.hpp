@@ -522,7 +522,7 @@ private:
     bool load_nvs_sessions_();
     bool persist_session_(UniversalMessage_Domain domain, const UniversalMessage_RoutableMessage_session_info_t& info);
     bool regenerate_key_native_();
-    void enqueue_background_poll_(const std::string& name, tk::BleDomain domain, Builder builder);
+    bool enqueue_background_poll_(const std::string& name, tk::BleDomain domain, Builder builder);
 
     SemaphoreHandle_t vehicle_mutex_{nullptr};
     // Serializes a whole command/query cycle so concurrent HTTP requests and the automatic
