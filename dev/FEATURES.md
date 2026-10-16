@@ -140,5 +140,6 @@ unresolved material findings prevent a clean verdict.
 Native Codex registration is generated from canonical reviewers/hooks and checked for parity;
 current hook trust and primary-checkout declarations remain separate runtime conditions. Both host
 jobs are mandatory for the aggregate build, alongside concurrent producer/independent target legs.
-The PSA harness verifies v5.3.0 peer admission, domain hash isolation and encrypted VCSEC denial
-before telemetry. [Runtime contract](ARCHITECTURE.md#pinned-tesla-ble-and-native-orchestration).
+The PSA harness verifies v6.1.1 peer admission, domain hash isolation, encrypted VCSEC denial
+before telemetry and message refusal when the RNG fails.
+[Runtime contract](ARCHITECTURE.md#pinned-tesla-ble-and-native-orchestration).
