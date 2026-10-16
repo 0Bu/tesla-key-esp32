@@ -1,5 +1,5 @@
 dependencies:
-  # ESP-IDF 6 carries Mbed TLS 4 / TF-PSA-Crypto. The pinned tesla-ble v5.3.0 still uses the legacy
+  # ESP-IDF 6 carries Mbed TLS 4 / TF-PSA-Crypto. The pinned tesla-ble v6.1.1 still uses the legacy
   # Mbed TLS API, so patches/tesla-ble/0006-port-crypto-bindings-to-psa.patch ports its crypto
   # bindings to PSA; docs/adr/0002-idf6-mbedtls4-crypto-seam.md owns that migration.
   idf: ">=6.1,<7.0"
@@ -37,7 +37,7 @@ dependencies:
   # After the Component Manager materialises the source, root CMake applies the
   # ordered repository-owned patch series from patches/tesla-ble/ before compilation.
   #
-  # Firmware targets remain esp32 / esp32s3 / esp32c3 / esp32c6. v5.3.0 also declares
+  # Firmware targets remain esp32 / esp32s3 / esp32c3 / esp32c6. v6.1.1 also declares
   # esp32c5 upstream; dependency support alone does not reinstate its firmware, partition,
   # signing-size or hardware acceptance contract (docs/adr/0004-drop-esp32c5-target.md).
   yoziru/tesla-ble:

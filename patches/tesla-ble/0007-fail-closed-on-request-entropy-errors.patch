@@ -1,0 +1,143 @@
+diff --git a/include/client.h b/include/client.h
+index c697a08..957d253 100644
+--- a/include/client.h
++++ b/include/client.h
+@@ -180,11 +180,11 @@ class Client {
+   static void prepend_length(const pb_byte_t *input_buffer, size_t input_buffer_length, pb_byte_t *output_buffer,
+                              size_t *output_buffer_length);
+ 
+-  void prepare_routable_message_(UniversalMessage_RoutableMessage &msg, UniversalMessage_Domain domain);
++  int prepare_routable_message_(UniversalMessage_RoutableMessage &msg, UniversalMessage_Domain domain);
+ 
+-  void generate_connection_id_();
++  int generate_connection_id_();
+ 
+-  void generate_uuid_(pb_byte_t uuid[16]);
++  int generate_uuid_(pb_byte_t uuid[16]);
+ 
+   void store_last_request_uuid_(UniversalMessage_Domain domain, const pb_byte_t *uuid, pb_size_t uuid_size);
+ 
+diff --git a/src/client.cpp b/src/client.cpp
+index 7ff02ff..7a51695 100644
+--- a/src/client.cpp
++++ b/src/client.cpp
+@@ -24,9 +24,6 @@
+ 
+ #include <pb_decode.h>
+ 
+-#include <chrono>
+-#include <cstdint>
+-
+ #include "tb_logging.h"
+ #include <pb_encode.h>
+ 
+@@ -119,20 +116,6 @@ std::string truncate_utf8(const pb_byte_t *data, size_t length, size_t max_lengt
+ 
+ namespace TeslaBLE {
+ 
+-namespace {
+-
+-// Last-resort entropy when the platform RNG fails (not expected to run):
+-// xorshift64* seeded from the clock and a stack address.
+-uint64_t fallback_random_u64() {
+-  static uint64_t state = static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count()) ^
+-                          reinterpret_cast<uintptr_t>(&state);
+-  state ^= state >> 12;
+-  state ^= state << 25;
+-  state ^= state >> 27;
+-  return state * 0x2545F4914F6CDD1DULL;
+-}
+-
+-}  // namespace
+ Client::Client() { initialize_peers_(); }
+ 
+ void Client::initialize_peers_() {
+@@ -711,7 +694,9 @@ int Client::build_universal_message_with_payload(pb_byte_t *payload, size_t payl
+   }
+ 
+   UniversalMessage_RoutableMessage universal_message = UniversalMessage_RoutableMessage_init_default;
+-  prepare_routable_message_(universal_message, domain);
++  if (prepare_routable_message_(universal_message, domain) != TeslaBLE_Status_E_OK) {
++    return TeslaBLE_Status_E_ERROR_CRYPTO;
++  }
+ 
+   store_last_request_uuid_(domain, universal_message.uuid.bytes, universal_message.uuid.size);
+ 
+@@ -833,7 +818,9 @@ int Client::build_session_info_request_message(UniversalMessage_Domain domain, p
+   }
+ 
+   UniversalMessage_RoutableMessage universal_message = UniversalMessage_RoutableMessage_init_default;
+-  prepare_routable_message_(universal_message, domain);
++  if (prepare_routable_message_(universal_message, domain) != TeslaBLE_Status_E_OK) {
++    return TeslaBLE_Status_E_ERROR_CRYPTO;
++  }
+ 
+   store_last_request_uuid_(domain, universal_message.uuid.bytes, universal_message.uuid.size);
+ 
+@@ -1095,7 +1082,7 @@ int Client::build_vcsec_closure_message(const VCSEC_ClosureMoveRequest *closure_
+   return TeslaBLE_Status_E_OK;
+ }
+ 
+-void Client::prepare_routable_message_(UniversalMessage_RoutableMessage &msg, UniversalMessage_Domain domain) {
++int Client::prepare_routable_message_(UniversalMessage_RoutableMessage &msg, UniversalMessage_Domain domain) {
+   msg.has_to_destination = true;
+   msg.to_destination.which_sub_destination = UniversalMessage_Destination_domain_tag;
+   msg.to_destination.sub_destination.domain = domain;
+@@ -1103,40 +1090,39 @@ void Client::prepare_routable_message_(UniversalMessage_RoutableMessage &msg, Un
+   msg.has_from_destination = true;
+   msg.from_destination.which_sub_destination = UniversalMessage_Destination_routing_address_tag;
+   if (!ParameterValidator::is_valid_connection_id(connection_id_.data())) {
+-    generate_connection_id_();
++    if (generate_connection_id_() != TeslaBLE_Status_E_OK) {
++      return TeslaBLE_Status_E_ERROR_CRYPTO;
++    }
+   }
+   std::copy_n(connection_id_.data(), connection_id_.size(), msg.from_destination.sub_destination.routing_address.bytes);
+   msg.from_destination.sub_destination.routing_address.size = connection_id_.size();
+ 
+-  generate_uuid_(msg.uuid.bytes);
++  if (generate_uuid_(msg.uuid.bytes) != TeslaBLE_Status_E_OK) {
++    return TeslaBLE_Status_E_ERROR_CRYPTO;
++  }
+   msg.uuid.size = 16;
+ 
+   // Default flags: always request encrypted response if possible
+   msg.flags = (1 << UniversalMessage_Flags_FLAG_ENCRYPT_RESPONSE);
++  return TeslaBLE_Status_E_OK;
+ }
+ 
+-void Client::generate_connection_id_() {
++int Client::generate_connection_id_() {
+   if (crypto_context_.generate_random_bytes(connection_id_.data(), connection_id_.size()) != TeslaBLE_Status_E_OK) {
+-    LOG_ERROR("Failed to generate connection ID, falling back to local PRNG");
+-    for (size_t i = 0; i < connection_id_.size(); i += sizeof(uint64_t)) {
+-      const uint64_t value = fallback_random_u64();
+-      for (size_t j = 0; j < sizeof(uint64_t) && i + j < connection_id_.size(); ++j) {
+-        connection_id_[i + j] = static_cast<pb_byte_t>((value >> (8 * j)) & 0xFF);
+-      }
+-    }
++    connection_id_.fill(0);
++    LOG_ERROR("Failed to generate connection ID; refusing request");
++    return TeslaBLE_Status_E_ERROR_CRYPTO;
+   }
++  return TeslaBLE_Status_E_OK;
+ }
+ 
+-void Client::generate_uuid_(pb_byte_t uuid[16]) {
++int Client::generate_uuid_(pb_byte_t uuid[16]) {
+   if (this->crypto_context_.generate_random_bytes(uuid, 16) != TeslaBLE_Status_E_OK) {
+-    LOG_ERROR("Failed to generate robust random UUID, falling back to local PRNG");
+-    for (int i = 0; i < 16; i += static_cast<int>(sizeof(uint64_t))) {
+-      const uint64_t value = fallback_random_u64();
+-      for (size_t j = 0; j < sizeof(uint64_t) && i + static_cast<int>(j) < 16; ++j) {
+-        uuid[i + static_cast<int>(j)] = static_cast<pb_byte_t>((value >> (8 * j)) & 0xFF);
+-      }
+-    }
++    std::fill_n(uuid, 16, 0);
++    LOG_ERROR("Failed to generate request UUID; refusing request");
++    return TeslaBLE_Status_E_ERROR_CRYPTO;
+   }
++  return TeslaBLE_Status_E_OK;
+ }
+ 
+ void Client::store_last_request_uuid_(UniversalMessage_Domain domain, const pb_byte_t *uuid, pb_size_t uuid_size) {
