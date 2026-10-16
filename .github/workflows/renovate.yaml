@@ -22,6 +22,7 @@ jobs:
         env:
           RENOVATE_PLATFORM: github
           RENOVATE_PLATFORM_COMMIT: true
+          RENOVATE_GIT_AUTHOR: 'Oleg Burau <4757856+0Bu@users.noreply.github.com>'
           RENOVATE_EXTENDS: config:best-practices,helpers:pinGitHubActionDigests
           RENOVATE_AUTODISCOVER: true
           RENOVATE_AUTODISCOVER_FILTER: ${{ github.repository }}
