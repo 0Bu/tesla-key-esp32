@@ -307,6 +307,11 @@ if printf '%s\n' 'main/command_exec.cpp' | gate_vehicle_command_relevant \
 else
   fail_case 'vehicle-command file relevance'
 fi
+if printf '%s\n' 'main/logic/telemetry_poll.hpp' | gate_vehicle_command_relevant; then
+  pass_case 'header-only telemetry scheduler requires vehicle-command review'
+else
+  fail_case 'header-only telemetry scheduler relevance'
+fi
 if printf '%s\n' 'docs/README.md' | gate_vehicle_command_relevant \
    || printf '%s\n' 'main/display.cpp' | gate_vehicle_command_relevant \
    || printf '%s\n' 'main/logic/soc_gradient.hpp' | gate_vehicle_command_relevant; then
@@ -400,6 +405,11 @@ printf '%s\n' .github/workflows/renovate.yaml esp-idf-toolchain.txt >"$tmp/renov
 expect_rc 2 'mixed Renovate and toolchain PR requires gates' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/no-gates.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/renovate-mixed.files" "$gate" --check --project-dir "$root"
 grep -v vehicle-command-audit "$tmp/all.md" >"$tmp/no-vehicle.md"
 expect_rc 2 'vehicle-relevant check requires vehicle-command-audit' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/no-vehicle.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/vehicle.files" "$gate" --check --project-dir "$root"
+printf '%s\n' main/logic/telemetry_poll.hpp >"$tmp/telemetry-header.files"
+expect_rc 2 'header-only telemetry change blocks without protocol review' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/no-vehicle.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/telemetry-header.files" "$gate" --check --project-dir "$root"
+expect_rc 0 'header-only telemetry change accepts current protocol review' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/all.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/telemetry-header.files" "$gate" --check --project-dir "$root"
+printf '%s\n' main/logic/soc_gradient.hpp >"$tmp/unrelated-header.files"
+expect_rc 0 'unrelated logic header does not require protocol review' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/no-vehicle.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/unrelated-header.files" "$gate" --check --project-dir "$root"
 expect_rc 0 'feature-only check skips vehicle-command-audit' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/no-vehicle.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/feature.files" "$gate" --check --project-dir "$root"
 
 grep -v pr-hygiene "$tmp/all.md" >"$tmp/no-hygiene.md"

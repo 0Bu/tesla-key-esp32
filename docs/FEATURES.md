@@ -116,7 +116,7 @@ unresolved material findings prevent a clean verdict.
 
 | Feature | Where | Prevents |
 |---|---|---|
-| Runner-neutral agent policy and five SHA-bound PR gates | `AGENTS.md`, `.agents/`, `.codex/`, `scripts/with-host-python.sh`; [build and review](DEVELOPMENT.md) | Unsafe authority, stale review records, or publishing personal/private identifiers or non-English PR/docs content. |
+| Runner-neutral agent policy and five SHA-bound PR gates | `AGENTS.md`, `.agents/`, `.codex/`, `tools/agent-hooks/`, `tools/agent-config/`, `scripts/with-host-python.sh`; [build and review](DEVELOPMENT.md) | Unsafe authority, stale review records, polling changes escaping protocol review, or publishing personal/private identifiers or non-English PR/docs content. |
 | Resource-bounded build container | `scripts/idf-docker.sh`, `scripts/check-build-gate-contract.py` | A local ESP-IDF compile starving a shared k3s/Docker node. |
 | Fail-closed host verification | `scripts/run-mock-tests.sh --require-all`, `run-sanitizer-tests.sh`, `run-fuzz-smoke.sh`; [test scope](../test/README.md) | Skipped CI coverage, unsafe runtime boundaries, partial JSON, parser UB or browser-only failures. |
 | Split host gates and concurrent target builds | `.github/workflows/build.yml` (`logic-test`, `logic-harness`, `build-target`), `scripts/check-workflow-policy.py` | Serial host/firmware waits or an aggregate build that omits a host gate. |
@@ -127,7 +127,7 @@ unresolved material findings prevent a clean verdict.
 | Vendored installer runtime | `docs/vendor/`, `scripts/verify-vendored-esptool-js.sh` | Executing mutable CDN JavaScript inside the USB firmware trust boundary. |
 | Browser installer port release | `docs/index.html`, `serial-port-release.mjs`, `test/serial_port_release.test.mjs`, `scripts/build-pages.sh` | A previously granted serial port staying "paired" with no way to revoke it, or a release interrupting an active flash. |
 | Trusted cleanup and runner-context bootstrap | `.github/workflows/pr-preview-cleanup.yml`, `bench-acceptance.yml`, `scripts/check-workflow-policy.py` | PR-authored code gaining the `gh-pages` write token, a new default-branch validator missing for the PR that introduces it, or a runner-only context resolved before a runner exists. |
-| Release-bound signed Pages channel | `.github/workflows/build.yml`, `signed-pr-preview.yml`, `pr-preview-cleanup.yml`; [build and review](DEVELOPMENT.md) | Stale, partial or mixed publication being mistaken for the exact signed channel. |
+| Release-bound signed Pages channel | `.github/workflows/build.yml`, `signed-pr-preview.yml`, `pr-preview-cleanup.yml`; [delivery verification](../.agents/skills/ship/SKILL.md#4-select-target-then-usb-flash-or-ota); [build and review](DEVELOPMENT.md) | Stale, partial or mixed publication, or delivery without a production-pinned consumer signature check. |
 | Warning contract on `main/` | `main/CMakeLists.txt`, `test/test_runtime_boundary_contract.py` | Own code depending on IDF defaults. |
 | Presenter parity checks | `scripts/check-display-sim-parity.sh`, `check-ble-row-parity.sh` | The Python display sim and browser JS drifting from the C++ presenters they mirror. |
 | Reproducible toolchain and complete effective-build graph | `esp-idf-toolchain.txt`, `main/idf_component.yml`, `dependencies.lock.*`; [build and review](DEVELOPMENT.md) | Unpinned, hidden or substituted compiler/generated/link inputs escaping the reviewed source graph. |

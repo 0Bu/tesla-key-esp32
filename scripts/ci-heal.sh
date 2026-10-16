@@ -300,7 +300,7 @@ PY
 
   echo "ci-heal: knowledge updated in .tmp/ci-heal-cache.json"
   if [ -n "$root_cause" ] && [ "$root_cause" != "None" ] && [ "$root_cause" != "None / Clean" ]; then
-    echo "ci-heal: [Optimization] Prioritizing '$root_cause' in subsequent pre-flight runs."
+    echo "ci-heal: failure category '$root_cause' recorded in run statistics."
   fi
   echo "================================================================================"
 }
@@ -309,7 +309,7 @@ run_local_verifications() {
   local prioritized_cause="${1:-}"
   echo "ci-heal: running repository syntax, mock tests, and contract checks..."
 
-  # If a specific failure cause is prioritized via cache/self-optimization, run it first
+  # Run the current failure category first when it has a supported host preflight.
   case "$prioritized_cause" in
     repo-lint) "$root/scripts/repo-lint.sh" ;;
     agent-config) "$root/tools/agent-config/selftest.sh" ;;
