@@ -87,6 +87,7 @@ Details: [network](ARCHITECTURE.md#wifi--lan-connectivity).
 | Endless runtime reconnect | `net.cpp` `wifi_event_handler` | Surrendering to the setup portal on a transient outage once credentials are known-good. |
 | mDNS + DHCP hostname, privacy-bounded TXT | `main.cpp` | Having to find the IP, or making the VIN multicast-browseable. |
 | Bounded 20-byte BLE writes | `logic/ble_chunk.hpp`, `main/ble_client.{cpp,hpp}` | Invalid chunk sizes or lost framing. MTU is 23 in this build; the negotiated-MTU helper is unreachable. See ADR-0005 for transport departures. |
+| Bounded climate refresh priority | `logic/telemetry_poll.hpp`, `main/vehicle_telemetry.cpp`; [scheduling](ARCHITECTURE.md#read-only-telemetry-and-command-correctness) | A failed climate attempt waiting a full telemetry rotation, or persistent climate failure starving other domains. |
 | SNTP + browser-clock fallback with authoritative sync gate | `main/main.cpp`, `time_sync.hpp`, `POST /set_time`, `mqtt_ha.cpp` | Invalid OTA certificate dates or HA/key/pairing timestamps derived from a stale restored clock. |
 | UDP Syslog (RFC 5424) | `main/syslog.cpp`, `logic/syslog_policy.hpp` | Losing the log that explains a reboot (`/diag` is RAM). |
 | Commit-gated Syslog queue lifetime | `logic/syslog_start_gate.hpp`, `main/syslog.cpp` | A consumer touching startup-owned resources before creation commits, or the log hook retaining a queue that startup deleted. |
