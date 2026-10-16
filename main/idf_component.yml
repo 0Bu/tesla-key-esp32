@@ -42,4 +42,4 @@ dependencies:
   # signing-size or hardware acceptance contract (docs/adr/0004-drop-esp32c5-target.md).
   yoziru/tesla-ble:
     git: "https://github.com/yoziru/tesla-ble.git"
-    version: "v5.3.0"
+    version: "v6.1.1"
