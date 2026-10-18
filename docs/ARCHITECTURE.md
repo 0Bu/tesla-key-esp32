@@ -258,9 +258,19 @@ Board mappings are owned by [User guide](USER_GUIDE.md#wired-networking-optional
 
 ### Keeping the link up
 
-Before any successful lease, ten fast WiFi failures allow setup fallback. Once online, event-driven
-reconnect continues indefinitely. The 30 s gateway watchdog recovers after two failures only if the
-link claims up and that transport's gateway answered at least once. Never-answering ICMP is unusable
+Before any successful lease, the 30 s boot window, or ten fast WiFi failures within it, ends the
+boot attempt. Without usable stored credentials the setup portal then waits for the form. With
+stored credentials the portal joins the station as APSTA and keeps retrying them in the background
+(`logic/setup_portal.hpp`): first after 30 s, then with doubling backoff up to 5 min. Before the
+30 min open-time cap this policy starts no new attempt while a phone is on the setup AP. If the
+boot window timed out before the ten-failure budget was spent, the station event handler can
+still use its remaining retries; the portal does not suspend that owner. Once a lease (WiFi or wired)
+exists, the portal is torn down and the boot continues in place. The open AP closes after 10 min
+without a client and 30 min after opening; retries continue. A failed AP close is retried with the
+same backoff, and the boot does not continue while the AP is up. Nothing here reboots: a timed restart would revert a pending OTA image,
+defeat the crash counter and re-seed the vehicle window. Once online, event-driven reconnect
+continues indefinitely. The 30 s gateway watchdog recovers after two failures only if the link
+claims up and that transport's gateway answered at least once. Never-answering ICMP is unusable
 evidence. Probe setup errors fail open; missing lease/gateway or unanswered probes are unreachable.
 Recovery disconnects WiFi (the event handler reconnects) or restarts Ethernet; it never reboots.
 
@@ -280,15 +290,16 @@ association that never answers therefore stays unrecovered rather than inheritin
 | State | Proof |
 |---|---|
 | AWAKE | Live Infotainment telemetry younger than 60 s |
-| ASLEEP | No live data; uninterrupted VCSEC ASLEEP held about 120 s and signed reachability younger than 150 s |
+| ASLEEP | No live data; uninterrupted VCSEC ASLEEP held about 120 s and BLE reachability younger than 150 s |
 | IDLE | Reachable within 150 s, without proven sleep or fresh Infotainment data |
-| UNREACHABLE | No signed round trip for at least 150 s |
+| UNREACHABLE | No BLE reachability within 150 s and no live Infotainment data within 60 s |
 
 Before first evidence the state is unknown/omitted. Raw VCSEC AWAKE cannot prove AWAKE; raw ASLEEP
 requires debounce; AWAKE and UNKNOWN both reset its run (`next_asleep_since`/`vcsec_asleep_proven`).
 UI labels retained readings as last known; unreachable/unknown offers no action.
 Active-window polling needs recent command or fresh charging contact; stale cached charging cannot
-keep it open. Signed VCSEC health checks outside that window must not open Infotainment or wake.
+keep it open. Non-waking VCSEC `GET_STATUS` health checks outside that window must not open Infotainment or wake.
+The request is plaintext; a successful response alone does not prove session authentication.
 
 `ble_phase.hpp` supplies connecting/waiting deadlines together with rounded-up seconds; connecting
 wins overlap, and zero means now. The C++ `ble_row.hpp` presenter has shipped-JS parity. Scanning is
@@ -302,14 +313,17 @@ Health/enrollment timeout policies are distinct from foreground command timeouts
 
 ## Pairing lifecycle / invalidation
 
-Pairing requires a plausible 17-character VIN; without it, auto-pair idles and listing-only scans
-show nearby cars without connect/enroll. Pairing/keycard operation is in [User guide](USER_GUIDE.md#pairing-and-identity).
+Pairing requires a plausible 17-character VIN. Without it, the supervisor idles and listing-only
+scans show nearby cars without connect/enrol. The supervisor performs bounded read-only status and
+health probes; only an explicit `POST /send_key` sends Whitelist Add. See [User guide](USER_GUIDE.md#pairing-and-identity).
 
-`paired` means stored VCSEC session exists. Invalidation regenerates the key and clears session/cache
-when: (1) signed UNKNOWN_KEY_ID/INACTIVE_KEY/INVALID_KEY_HANDLE, a whitelist fault, or two consecutive
-health-probe authentication failures prove deletion; (2) forced generation; (3) changed VIN, also
-forgetting BLE MAC and rebooting. Role-denied user commands never count as revocation. Same VIN is
-no-op. Successful NVS existence probes are cached; read errors retry instead of becoming absent.
+`paired` means a VCSEC session is stored, not that the car has freshly accepted it. Remote status
+faults and command error text set only a volatile `reauth` hint; they never erase sessions, rotate
+the key or trigger enrollment. A successful health response clears the hint. A missing
+session also prompts the user to submit the existing key explicitly; successful local transmission
+does not prove vehicle approval. Forced key generation and changed VIN are explicit identity changes
+that clear sessions/cache; a changed VIN also forgets the BLE MAC and reboots. Same VIN is a no-op.
+Successful NVS existence probes are cached; read errors retry instead of becoming absent.
 
 NimBLE posts fixed LinkUp only. The vehicle task owns GATT-ready generation, materializes the MAC
 after unlock and persists it once outside shared locks. Startup MAC strings stay startup-only.
@@ -421,7 +435,7 @@ Priorities come only from `task_config.hpp`; stacks remain at creation sites.
 | `captive_dns` | `kPrioCaptiveDns` = 5 | 4096 | `provisioning.cpp` | captive-portal DNS (setup-AP mode only; vehicle stack not running) |
 | `ota` | `kPrioOta` = 5 | 8192 | `ota_update.cpp` | OTA download + flash (transient) |
 | `ota_chk` | `kPrioOtaCheck` = 5 | 8192 | `ota_update.cpp` | OTA manifest check (transient) |
-| `auto_pair` | `kPrioAutoPair` = 4 | 8192 | `vehicle_ctrl.cpp` (fn: `vehicle_pairing.cpp`) | pairing supervisor: enrol / re-pair / health probe |
+| `auto_pair` | `kPrioAutoPair` = 4 | 8192 | `vehicle_ctrl.cpp` (fn: `vehicle_pairing.cpp`) | pairing supervisor: read-only status and health probes |
 | `net_wd` | `kPrioWifiWatchdog` = 4 | 3072 | `net.cpp` | ghost-link watchdog (forces the active transport to re-establish, never reboots) |
 | `mqtt_pub` | `kPrioMqttPub` = 4 | 6144 | `mqtt_ha.cpp` | MQTT/HA publisher (reads the caches) |
 | `display` | `kPrioDisplay` = 3 | 6144 | `display.cpp` | ST7735 renderer (`CONFIG_TESLA_DISPLAY_ENABLED` builds) |

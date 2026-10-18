@@ -52,6 +52,18 @@ bool net_start_eth();
 // deadline) is spent.
 bool net_start_wifi(const char* ssid, const char* password, bool rollback_pending);
 
+// Start a station association attempt with the stored credentials, after net_start_wifi() spent
+// its boot window. The setup portal's background retry (logic/setup_portal.hpp) drives these. Once
+// the boot retry budget is spent on a device that was never online, the station's own event
+// handler no longer reconnects, so each call is one attempt; a window that timed out with budget
+// left still has the handler's own reconnects running, and a call then only adds one. A lease
+// that arrives is handled like any other, and the runtime reconnect is endless from then on.
+void net_wifi_retry_station();
+
+// True once net_start_wifi() started the station. False when it rejected the stored credentials
+// (or had none) before the WiFi driver was initialized.
+bool net_wifi_station_started();
+
 // True while SOME transport holds an IP. The successor to wifi_is_connected(): same meaning,
 // no assumption about which radio (or none) is behind it.
 bool net_is_up();
@@ -96,8 +108,9 @@ const char* net_wifi_standard();
 // Start the connectivity watchdog task (logic/net_link.hpp's watch_step drives it). Call once
 // the link is up; it probes the default gateway every ~30 s and, only on a PROVEN ghost link,
 // forces the active transport to re-establish. It deliberately never reboots — a reboot during
-// an outage would hit the boot-window timeout and drop into the setup portal, abandoning good
-// credentials. Returns false if the task could not be created (an essential failure).
+// an outage would hit the boot-window timeout and drop into the setup portal, which retries good
+// credentials only with backoff. Returns false if the task could not be created (an essential
+// failure).
 bool net_watchdog_start();
 
 }  // namespace tk

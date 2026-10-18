@@ -32,6 +32,9 @@ independent per-target compiles, and final `build` requires both host jobs. Pyth
 checks use ASan, UBSan and LSan, with deliberate tripwires proving the detectors work, plus a fixed-seed
 20,000-case fuzz corpus. Local host evidence is distinct from remote CI.
 
+The build-contract suite runs the real Pages assembler with and without a published ref using its
+invoking Bash, including macOS Bash 3.2.
+
 ## What's covered
 
 [`logic_test_ownership.json`](logic_test_ownership.json) is the complete machine-checked inventory

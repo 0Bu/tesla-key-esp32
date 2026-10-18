@@ -16,9 +16,10 @@ wake and read access.
 
 ## 1. Install and configure
 
-1. Open the [web installer](https://0bu.github.io/tesla-key-esp32/), click **Install** and select
-   the serial port. First installation erases existing configuration and keys. For an already
-   compatible installation, **Keep configuration** preserves them.
+1. Open the [web installer](https://0bu.github.io/tesla-key-esp32/), click **Select USB device** and
+   select the serial port. Choose **Erase everything** for a first installation, which erases
+   existing configuration and keys, or **Keep configuration** for an already compatible
+   installation. Then click **Install firmware**.
 2. Join `tesla-key-esp32-setup`. Open `http://192.168.4.1` if the setup page does not appear.
 3. Save WiFi credentials and VIN. After the reboot, open `http://tesla-key-esp32.local`, or use
    the IP shown by your router. The installer itself does not configure WiFi.
@@ -27,13 +28,14 @@ An ESP32-S3 with a supported wired board uses DHCP; configure its VIN in the web
 
 ## 2. Pair with the car
 
-The device generates its key and requests enrollment automatically once a VIN is configured.
-There is no Pair button.
+The device generates its key after a VIN is configured, but does not send an enrollment request
+automatically. Use **Send existing key** in the web UI when you are ready to pair.
 
-1. Park within Bluetooth range, approximately 10 m, and wait for **connecting…** in the web UI.
-2. Place an existing Tesla NFC keycard on the center-console reader behind the cup holders.
+1. Park within Bluetooth range, approximately 10 m, and wait for the web UI to show **Ready to pair**.
+2. Place an existing Tesla NFC keycard on the center-console reader behind the cup holders, then
+   click **Send existing key** in the web UI.
 3. Confirm **Add key** on the car's touchscreen while the card is present. The web UI shows
-   **paired**; the car lists an **Unknown key**.
+   **paired** after the session is established; the car lists an **Unknown key**.
 
 If pairing fails, check [troubleshooting](docs/USER_GUIDE.md#troubleshooting). Tesla's roughly
 three simultaneous BLE connections are shared with phone keys and fobs.

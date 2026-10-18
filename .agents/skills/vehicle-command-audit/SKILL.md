@@ -124,10 +124,14 @@ Verify every dimension against the reviewed revisions; previous audit results ar
    real-time 1-hour reuse window. Restore is attempted before controller init; absent/unreadable
    `last_time` or a failed clock set can leave the inherited negative-age acceptance path. Do not
    claim guaranteed expiry from this restore.
-4. **Pairing / whitelist** — add-key carries role + `KEY_FORM_FACTOR_CLOUD_KEY`, no key name (car
-   shows "Unknown key"), requires an **NFC card on the console reader**, verify via a SessionInfo
-   probe. (Note: the **"3"** is the simultaneous-BLE-**connection** limit; a
-   car stores up to **19 keys** — don't call it a 3-key cap.)
+4. **Pairing / whitelist** — Whitelist Add requires an explicit user action that sends the
+   existing Charging-Manager key through `POST /send_key`; the supervisor never enrolls
+   automatically. Automatic key generation is limited to verified first-boot key absence.
+   Add-key carries role + `KEY_FORM_FACTOR_CLOUD_KEY`, no key name (car shows "Unknown key"),
+   and requires an **NFC card on the console reader**. Local transmission completion is not
+   vehicle approval; verify acceptance through an authenticated session/status observation.
+   (Note: the **"3"** is the simultaneous-BLE-**connection** limit; a car stores up to
+   **19 keys** — don't call it a 3-key cap.)
 5. **Command params / ranges** — amps **0–48** (faithful to real chargers; upstream has no cap),
    charge-limit **50–100**, scheduled-charging `start_minutes` **0–1439** after local midnight.
    REST and MCP reject supplied fractional/out-of-range values rather than silently executing a
@@ -135,12 +139,16 @@ Verify every dimension against the reviewed revisions; previous audit results ar
 6. **Wake / sleep** — wake is a **VCSEC-domain** `RKE_ACTION_WAKE_VEHICLE` (not infotainment);
    `vehicleSleepStatus`/`vehicleLockState`/`userPresence` string values match the upstream enums;
    the "trust debounced VCSEC ASLEEP, never VCSEC AWAKE" asymmetry is a correct reading.
-7. **Error / fault taxonomy + revocation heuristic** — `OperationStatus`, `MessageFault`
+7. **Error / fault taxonomy and recovery hints** — `OperationStatus`, `MessageFault`
    (`UNKNOWN_KEY_ID=3`, `INACTIVE_KEY=4`, `INSUFFICIENT_PRIVILEGES=7`, `INVALID_KEY_HANDLE=27`),
-   `SESSION_INFO_STATUS_KEY_NOT_ON_WHITELIST`. Confirm the firmware's three detectors stay sound:
-   the `set_message_callback` fault match (the path that actually fires on a **cached** session),
-   the `"whitelist"` substring (session-info handshake only), and the two-strike `"authentication
-   failed"` **gated to the health probe** so a role-denied user command can't destroy a pairing.
+   `SESSION_INFO_STATUS_KEY_NOT_ON_WHITELIST`. Check the native
+   `handle_signed_message_fault_` → `on_vehicle_message_` path, the `"whitelist"` error match,
+   and the health-probe-only authentication-failure streak. These signals do not prove key
+   deletion or authorize key replacement, persisted-session removal or Whitelist Add.
+   In-memory peer/session resets remain distinct from deleting persisted records.
+   `paired` reports stored VCSEC-session presence; `reauth` may coexist with `paired:true`.
+   Finding a stored session does not clear the hint. A successful health response can clear
+   this advisory hint; that outcome alone does not prove an authenticated response.
 8. **Library-version claims** — every command the firmware calls resolves to a real builder at the
    pin; distinguish the firmware registry's no-exposure policy (scheduled departure) from builder
    availability in `message_builders.cpp` and from role/hardware acceptance.

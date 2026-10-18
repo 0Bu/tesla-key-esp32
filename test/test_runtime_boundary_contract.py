@@ -304,7 +304,8 @@ DELEGATE_ALLOWED_CALLS = {
 # Reviewed exceptions are deliberately restricted to fixed-buffer/C/atomic paths. Adding another
 # exception is a code-review event because it weakens the default rule that C frames need a catch.
 REVIEWED_NON_THROWING = {
-    "dns_task": "fixed stack buffer and socket C calls only",
+    "dns_task": "fixed stack buffers, atomic stop flag, socket C calls and the noexcept "
+                "pure DNS reply builder only",
     "nimble_host_task": "NimBLE run/deinit trampoline only",
     "on_mqtt_probe": "plain-data probe verdict plus semaphore give only",
     "ping_probe_on_end": "generation-atomic ping result plus semaphore give only",
@@ -316,7 +317,8 @@ REVIEWED_NON_THROWING = {
 REVIEWED_ALLOWED_CALLS = {
     "dns_task": {
         "socket", "ESP_LOGW", "vTaskDelete", "htonl", "htons", "bind", "close",
-        "recvfrom", "memcpy", "sendto",
+        "recvfrom", "memcpy", "sendto", "setsockopt", "load", "store", "build_captive_dns_reply",
+        "vTaskDelay", "pdMS_TO_TICKS",
     },
     "nimble_host_task": {"nimble_port_run", "nimble_port_freertos_deinit"},
     "on_mqtt_probe": {"xSemaphoreGive"},
@@ -3093,28 +3095,107 @@ def require_explicit_idf_boot_error_contract(main_source: str, net_source: str,
     for token in ("if (err == ESP_OK) return;", "boot_fatal(component);"):
         if token not in provisioning_require:
             raise AssertionError(f"setup AP critical-IDF helper missing {token!r}")
-    setup = function_body_in(provisioning_source, "provisioning_run")
+    setup = function_body_in(provisioning_source, "portal_open")
     if setup.count("!= ESP_OK &&") < 2 or setup.count("!= ESP_ERR_INVALID_STATE") < 2:
         raise AssertionError("setup AP substrate does not handle only idempotent INVALID_STATE")
+    setup_flat = " ".join(setup.split())
     for token in (
         'provisioning_boot_require(netif_err, "setup network interface substrate")',
         'provisioning_boot_require(loop_err, "setup network event loop")',
         'if (!ap_netif) boot_fatal("setup AP network interface");',
         'provisioning_boot_require(esp_wifi_init(&cfg), "setup WiFi driver initialization");',
-        'provisioning_boot_require(esp_wifi_set_mode(WIFI_MODE_AP), "setup AP mode");',
+        'provisioning_boot_require(esp_wifi_set_mode(keep_station ? WIFI_MODE_APSTA : WIFI_MODE_AP), "setup AP mode");',
         'provisioning_boot_require(esp_wifi_set_config(WIFI_IF_AP, &ap), "setup AP configuration");',
-        'provisioning_boot_require(esp_wifi_start(), "setup AP start");',
-        'if (httpd_start(&server, &hcfg) != ESP_OK)',
+        'if (!keep_station) provisioning_boot_require(esp_wifi_start(), "setup AP start");',
+        'if (httpd_start(&portal.server, &hcfg) != ESP_OK)',
         'boot_fatal("setup HTTP server");',
-        "httpd_register_uri_handler(server, &save) != ESP_OK",
-        "httpd_register_uri_handler(server, &form) != ESP_OK",
-        "httpd_stop(server);",
+        "httpd_register_uri_handler(portal.server, &save) != ESP_OK",
+        "httpd_register_uri_handler(portal.server, &form) != ESP_OK",
+        "httpd_stop(portal.server);",
         'boot_fatal("setup HTTP handlers");',
     ):
-        if token not in setup:
+        if token not in setup_flat:
             raise AssertionError(f"setup AP fail-closed route missing {token!r}")
     require_before("setup handler failure stops partial server", setup,
-                   "httpd_stop(server);", 'boot_fatal("setup HTTP handlers");')
+                   "httpd_stop(portal.server);", 'boot_fatal("setup HTTP handlers");')
+    close = function_body_in(provisioning_source, "portal_close_ap")
+    close_code = " ".join(scrub_cpp(close).split())
+    if not re.search(r"if \(stop_err != ESP_OK\) \{[^{}]*return false; \}", close_code):
+        raise AssertionError("setup HTTP stop failure must retain ownership and defer the close")
+    require_before("setup HTTP stop checked before forgetting its handle", close,
+                   "const esp_err_t stop_err = httpd_stop(portal.server);", "if (stop_err != ESP_OK)")
+    require_before("setup HTTP stop checked before forgetting its handle", close,
+                   "if (stop_err != ESP_OK)", "portal.server = nullptr;")
+    require_before("setup server stopped before changing WiFi mode", close,
+                   "portal.server = nullptr;", "esp_wifi_set_mode(WIFI_MODE_STA)")
+    failed_stop = re.search(r"if \(stop_err != ESP_OK\) \{([^{}]*)\}", close_code)
+    if failed_stop and "portal.server =" in failed_stop.group(1):
+        raise AssertionError("setup HTTP stop failure must not forget the running server")
+    # Portal scheduling only suppresses its own new calls. A station whose boot deadline expired
+    # before MAX_RETRY still reconnects from its event handler, including while an AP client exists.
+    event = " ".join(scrub_cpp(function_body_in(net_source, "wifi_event_handler")).split())
+    if "!s_ever_up.load() && !s_rollback_active.load() && s_retry_num >= MAX_RETRY" not in event:
+        raise AssertionError("review the shared station/portal retry ownership after an event-policy change")
+    if not re.search(r"else \{ esp_wifi_connect\(\); s_retry_num\+\+;", event):
+        raise AssertionError("remaining boot retries must be accounted for independently of portal scheduling")
+    # First-time setup stays terminal; the stored-credential portal returns only through the
+    # host-tested policy (logic/setup_portal.hpp) and never restarts the device itself.
+    terminal = " ".join(function_body_in(provisioning_source, "provisioning_run").split())
+    if "portal_open(config_store, /*keep_station=*/false);" not in terminal or \
+            "while (true) vTaskDelay(pdMS_TO_TICKS(1000));" not in terminal:
+        raise AssertionError("first-time setup portal must stay terminal")
+    retry = function_body_in(provisioning_source, "provisioning_run_with_retry")
+    for token in ("if (!tk::net_wifi_station_started()) {", "provisioning_run(config_store);",
+                  "portal_open(config_store, /*keep_station=*/true);", "tk::portal_step(state,",
+                  "tk::net_wifi_retry_station();", "return;", "esp_timer_get_time()"):
+        if token not in retry:
+            raise AssertionError(f"retrying setup portal lost {token!r}")
+    # A failed AP close keeps the AP marked open and is reported to the policy (backoff); Leave
+    # continues the boot only once the AP is down.
+    retry_flat = " ".join(scrub_cpp(retry).split())
+    for token in ("if (portal_close_ap(portal)) ap_open = false; else tk::portal_close_failed(state, now_s);",
+                  "if (ap_open && !portal_close_ap(portal)) { tk::portal_close_failed(state, now_s); break; }"):
+        if token not in retry_flat:
+            raise AssertionError(f"retrying setup portal lost {token!r}")
+    # APSTA needs the running station: rejected credentials take the terminal portal first.
+    require_before("retrying setup portal falls back before joining a missing station", retry,
+                   "if (!tk::net_wifi_station_started()) {", "provisioning_run(config_store);")
+    require_before("retrying setup portal falls back before joining a missing station", retry,
+                   "provisioning_run(config_store);", "portal_open(config_store, /*keep_station=*/true);")
+    # The terminal fallback must sit INSIDE the station check, or the retrying portal is dead code.
+    retry_code = scrub_cpp(retry)
+    guard = retry_code.find("if (!tk::net_wifi_station_started()) {")
+    if guard < 0 or "provisioning_run(config_store);" not in retry_code[guard:retry_code.find("}", guard)]:
+        raise AssertionError("the terminal setup portal must be reached only without a running station")
+    if "[[noreturn]] void provisioning_run(NvsStorageAdapter& config_store);" not in \
+            (ROOT / "main/provisioning.hpp").read_text(encoding="utf-8"):
+        raise AssertionError("provisioning_run must be declared [[noreturn]]")
+    if "xTaskGetTickCount" in scrub_cpp(retry):
+        raise AssertionError("the retrying setup portal clock must not wrap with the 32-bit tick count")
+    # The boot takes the retrying portal after a stored-credential WiFi failure; the terminal one
+    # stays for missing credentials and for a rollback that could not be persisted.
+    boot = " ".join(main_source.split())
+    if boot.count("provisioning_run_with_retry(config_store);") != 1:
+        raise AssertionError("the boot must call the retrying setup portal exactly once")
+    require_before("stored-credential WiFi failure takes the retrying portal", boot,
+                   "!tk::net_start_wifi(ssid.c_str(), password.c_str(), cfg_blob.wifi_rollback_active)) {",
+                   "provisioning_run_with_retry(config_store);")
+    unpersisted = boot.find("} else if (rollback_unpersisted) {")
+    if unpersisted < 0 or "provisioning_run(config_store);" not in \
+            boot[unpersisted:boot.find("provisioning_run_with_retry(config_store);")]:
+        raise AssertionError("an unpersisted rollback must take the terminal setup portal")
+    # The captive DNS task must be stoppable (receive timeout applied, or no task) and must not
+    # spin on a persistent socket error.
+    dns = " ".join(function_body_in(provisioning_source, "dns_task").split())
+    for token in ("if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {",
+                  "if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) { vTaskDelay(pdMS_TO_TICKS(100));"):
+        if token not in dns:
+            raise AssertionError(f"captive DNS task lost {token!r}")
+    started = " ".join(function_body_in(net_source, "net_start_wifi").split())
+    require_before("station flag only after the driver started", started,
+                   'net_boot_require(esp_wifi_start(), "WiFi station start");', "s_sta_started.store(true);")
+    if re.search(r"\besp_restart\s*\(", scrub_cpp(retry)):
+        raise AssertionError("the retrying setup portal must never restart the device itself")
 
     for token in (
         "test_explicit_idf_boot_error_injection",
@@ -3640,8 +3721,8 @@ def require_tesla_cpp_callback_contract(
     ):
         if forbidden in scrub_cpp(message):
             raise AssertionError(f"on_vehicle_message_: callback contains forbidden {forbidden!r}")
-    if "pairing_lost_.store(true, std::memory_order_release);" not in message:
-        raise AssertionError("on_vehicle_message_: pairing loss is not an atomic publication")
+    if "pairing_recovery_hint_.store(true, std::memory_order_release);" not in message:
+        raise AssertionError("on_vehicle_message_: recovery hint is not an atomic publication")
 
     deferred = function_body_in(telemetry, "process_pending_telemetry_")
     if "vehicle_mutex_" in scrub_cpp(deferred):
@@ -6051,6 +6132,23 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
             ),
             provisioning_source,
         ),
+        (
+            "setup HTTP stop error ignored",
+            main_source, net_source,
+            provisioning_source.replace("if (stop_err != ESP_OK)", "if (false)", 1),
+        ),
+        (
+            "setup HTTP stop failure loses running handle",
+            main_source, net_source,
+            provisioning_source.replace("if (stop_err != ESP_OK) {",
+                                        "if (stop_err != ESP_OK) { portal.server = nullptr;", 1),
+        ),
+        (
+            "remaining event-driven retries omitted from portal ownership",
+            main_source,
+            net_source.replace("s_retry_num >= MAX_RETRY", "false", 1),
+            provisioning_source,
+        ),
     ):
         require_mutation_rejected(
             label,
@@ -6887,6 +6985,113 @@ def self_test_vehicle_recovery_canaries(sources: dict[str, str]) -> None:
         )
 
 
+def require_pairing_recovery_contract(pairing: str, commands: str, telemetry: str) -> None:
+    """Remote pairing hints may surface recovery guidance, never mutate identity or enrol."""
+    supervisor = function_body_in(pairing, "auto_pair_task_fn_")
+    if "self->pair(" in scrub_cpp(supervisor):
+        raise AssertionError("pairing supervisor must not send automatic Whitelist Add")
+    recovery_at = supervisor.find("if (key_action == tk::AutomaticKeyAction::RecoveryRequired)")
+    generate_at = supervisor.find("if (key_action == tk::AutomaticKeyAction::Generate)")
+    if recovery_at < 0 or generate_at < 0 or recovery_at >= generate_at:
+        raise AssertionError("recovery hint must be handled before the first-boot-only generator")
+    recovery_branch = supervisor[recovery_at:generate_at]
+    for forbidden in ("generate_key(", "clear_session_and_cache_(", "self->pair(",
+                      "storage_->remove(", "finish_key_rotation_cleanup_("):
+        if forbidden in scrub_cpp(recovery_branch):
+            raise AssertionError(f"recovery hint branch may not perform {forbidden!r}")
+    if "self->repair_notice_.store(true)" not in recovery_branch:
+        raise AssertionError("recovery hint must remain visible to the user")
+
+    paired_branch = supervisor[supervisor.find("if (self->has_session())"):]
+    health = paired_branch.find("bool ok            = self->health_probe_();")
+    clear_notice = paired_branch.find("self->repair_notice_.store(false);")
+    if health < 0 or clear_notice < health:
+        raise AssertionError("a stored session alone must not clear the recovery notice")
+    if "if (self->has_session())" not in paired_branch[:clear_notice]:
+        raise AssertionError("health confirmation must remain associated with a stored session")
+
+    result_callback = function_body_in(commands, "make_result_cb_")
+    scrubbed_callback = scrub_cpp(result_callback)
+    for forbidden in ("generate_key(", "clear_session_and_cache_(", "finish_key_rotation_cleanup_(",
+                      "storage_->remove(", "storage_->save(", "pair("):
+        if forbidden in scrubbed_callback:
+            raise AssertionError(f"remote result callback may not perform {forbidden!r}")
+    for required in ("pairing_recovery_hint_.store(true, std::memory_order_release)",
+                     "repair_notice_.store(true, std::memory_order_release)"):
+        if required not in scrubbed_callback:
+            raise AssertionError(f"remote result callback no longer publishes {required!r}")
+
+    fault_handler = function_body_in(telemetry, "handle_signed_message_fault_")
+    scrubbed_fault_handler = scrub_cpp(fault_handler)
+    for forbidden in ("storage_->remove(", "storage_->save(", "generate_key(",
+                      "finish_key_rotation_cleanup_(", "pair("):
+        if forbidden in scrubbed_fault_handler:
+            raise AssertionError(f"signed message fault may not perform {forbidden!r}")
+    for required in ("peer->reset();", "on_vehicle_message_(msg);",
+                     "command_runner_.notify_signed_message_fault(has_session_error,"):
+        if required not in scrubbed_fault_handler:
+            raise AssertionError(f"signed message fault handling lost {required!r}")
+
+    pair_body = function_body_in(pairing, "pair")
+    if "if (origin != tk::ConnectOrigin::Foreground)" not in pair_body:
+        raise AssertionError("Whitelist Add must reject non-user/background origins")
+    if "Keys_Role_ROLE_CHARGING_MANAGER" not in pair_body:
+        raise AssertionError("explicit enrollment role changed from Charging Manager")
+    if "VCSEC_KeyFormFactor_KEY_FORM_FACTOR_CLOUD_KEY" not in pair_body:
+        raise AssertionError("explicit enrollment form factor changed from CLOUD_KEY")
+    if "true /* completes_on_transmit:" not in pair_body:
+        raise AssertionError("Whitelist Add result must report local transmission, not wait for car approval")
+    if "0 /* max_retries:" not in pair_body:
+        raise AssertionError("an ambiguous Whitelist Add write must not be replayed automatically")
+    vcsec_sender = function_body_in(commands, "send_vcsec_locked_")
+    if "completes_on_transmit, max_retries" not in vcsec_sender:
+        raise AssertionError("VCSEC sender must preserve each command's retry budget")
+
+
+def self_test_pairing_recovery_canaries(pairing: str, commands: str,
+                                        telemetry: str) -> None:
+    def reject(label: str, mutated_pairing: str, mutated_commands: str = commands,
+               mutated_telemetry: str = telemetry) -> None:
+        require_mutation_rejected(
+            f"pairing recovery contract: {label}",
+            lambda: require_pairing_recovery_contract(mutated_pairing, mutated_commands,
+                                                       mutated_telemetry),
+        )
+
+    anchor = "void VehicleController::auto_pair_task_fn_(void* arg) {"
+    if pairing.count(anchor) != 1:
+        raise AssertionError("pairing supervisor canary anchor missing")
+    reject("automatic enrollment restored",
+           pairing.replace(anchor, anchor + "\n    self->pair(tk::ConnectOrigin::Background);", 1))
+    reject("ambiguous Whitelist Add retry restored",
+           pairing.replace("0 /* max_retries:", "3 /* max_retries:", 1))
+    reject("VCSEC sender discards the explicit retry budget", pairing,
+           commands.replace("completes_on_transmit, max_retries", "completes_on_transmit", 1))
+    recovery_start = pairing.find("if (key_action == tk::AutomaticKeyAction::RecoveryRequired)")
+    generate_start = pairing.find("if (key_action == tk::AutomaticKeyAction::Generate)", recovery_start)
+    if recovery_start < 0 or generate_start < 0:
+        raise AssertionError("pairing recovery canary anchors missing")
+    recovery_branch = pairing[recovery_start:generate_start]
+    reject("hint-triggered key generation", pairing[:recovery_start] +
+           recovery_branch.replace("self->repair_notice_.store(true);",
+                                   "self->repair_notice_.store(true); self->generate_key();", 1) +
+           pairing[generate_start:])
+    reject("error callback clears persisted sessions", pairing,
+           commands.replace("pairing_recovery_hint_.store(true, std::memory_order_release);",
+                            "pairing_recovery_hint_.store(true, std::memory_order_release);\n"
+                            "storage_->remove(tk::nvs_contract::kSessionVcsec);", 1))
+    handler_start = telemetry.find("void VehicleController::handle_signed_message_fault_(")
+    handler_end = telemetry.find("void VehicleController::handle_session_info_frame_(", handler_start)
+    if handler_start < 0 or handler_end < 0:
+        raise AssertionError("signed fault handler canary anchors missing")
+    handler = telemetry[handler_start:handler_end]
+    reject("signed fault clears a stored session",
+           pairing, commands,
+           telemetry[:handler_start] + handler.replace(
+               "peer->reset();", "peer->reset(); storage_->remove(tk::nvs_contract::kSessionVcsec);", 1)
+           + telemetry[handler_end:])
+
+
 def main() -> int:
     tasks = task_inventory(ALL_CODE)
     callbacks = callback_inventory(ALL_CODE)
@@ -6900,6 +7105,13 @@ def main() -> int:
     }
     require_vehicle_recovery_contract(**recovery_sources)
     self_test_vehicle_recovery_canaries(recovery_sources)
+    pairing_sources = {
+        "pairing": SOURCES["vehicle_pairing.cpp"],
+        "commands": SOURCES["vehicle_commands.cpp"],
+        "telemetry": SOURCES["vehicle_telemetry.cpp"],
+    }
+    require_pairing_recovery_contract(**pairing_sources)
+    self_test_pairing_recovery_canaries(**pairing_sources)
     print(f"OK runtime C-boundary inventory ({len(tasks)} tasks, {len(callbacks)} callbacks)")
     return 0
 

@@ -76,9 +76,9 @@
           "/COMPONENT_MAIN_DIR/ota_update.cpp :: void ota_task_impl()": 592
         },
         "CMakeFiles/__idf_main.dir/provisioning.cpp.su": {
+          "/COMPONENT_MAIN_DIR/provisioning.cpp :: SetupPortal portal_open(NvsStorageAdapter&, bool)": 544,
           "/COMPONENT_MAIN_DIR/provisioning.cpp :: esp_err_t save_post_impl(httpd_req_t*)": 1472,
-          "/COMPONENT_MAIN_DIR/provisioning.cpp :: void dns_task(void*)": 592,
-          "/COMPONENT_MAIN_DIR/provisioning.cpp :: void provisioning_run(NvsStorageAdapter&)": 528
+          "/COMPONENT_MAIN_DIR/provisioning.cpp :: void dns_task(void*)": 896
         },
         "CMakeFiles/__idf_main.dir/runtime_admission.cpp.su": {},
         "CMakeFiles/__idf_main.dir/safe_mode.cpp.su": {},
@@ -102,7 +102,7 @@
         },
         "CMakeFiles/__idf_main.dir/vehicle_telemetry.cpp.su": {
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: VehicleController::load_nvs_sessions_()::<lambda(UniversalMessage_Domain, const char*, tk::BleDomain)>": 336,
-          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: bool VehicleController::get_vehicle_status(VehicleStatusResult&, tk::ConnectOrigin, int)": 256,
+          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: bool VehicleController::get_vehicle_status(VehicleStatusResult&, tk::ConnectOrigin, int)": 272,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: static void VehicleController::loop_task_fn_(void*)": 704,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::handle_carserver_frame_(const UniversalMessage_RoutableMessage&)": 2048,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::handle_session_info_frame_(const UniversalMessage_RoutableMessage&)": 304,
@@ -185,9 +185,9 @@
           "/COMPONENT_MAIN_DIR/ota_update.cpp :: void ota_task_impl()": 592
         },
         "CMakeFiles/__idf_main.dir/provisioning.cpp.su": {
+          "/COMPONENT_MAIN_DIR/provisioning.cpp :: SetupPortal portal_open(NvsStorageAdapter&, bool)": 544,
           "/COMPONENT_MAIN_DIR/provisioning.cpp :: esp_err_t save_post_impl(httpd_req_t*)": 1472,
-          "/COMPONENT_MAIN_DIR/provisioning.cpp :: void dns_task(void*)": 592,
-          "/COMPONENT_MAIN_DIR/provisioning.cpp :: void provisioning_run(NvsStorageAdapter&)": 528
+          "/COMPONENT_MAIN_DIR/provisioning.cpp :: void dns_task(void*)": 896
         },
         "CMakeFiles/__idf_main.dir/runtime_admission.cpp.su": {},
         "CMakeFiles/__idf_main.dir/safe_mode.cpp.su": {},
@@ -211,7 +211,7 @@
         },
         "CMakeFiles/__idf_main.dir/vehicle_telemetry.cpp.su": {
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: VehicleController::load_nvs_sessions_()::<lambda(UniversalMessage_Domain, const char*, tk::BleDomain)>": 336,
-          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: bool VehicleController::get_vehicle_status(VehicleStatusResult&, tk::ConnectOrigin, int)": 256,
+          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: bool VehicleController::get_vehicle_status(VehicleStatusResult&, tk::ConnectOrigin, int)": 272,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: static void VehicleController::loop_task_fn_(void*)": 704,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::handle_carserver_frame_(const UniversalMessage_RoutableMessage&)": 2048,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::handle_session_info_frame_(const UniversalMessage_RoutableMessage&)": 304,
@@ -290,9 +290,9 @@
           "/COMPONENT_MAIN_DIR/ota_update.cpp :: void ota_task_impl()": 592
         },
         "CMakeFiles/__idf_main.dir/provisioning.cpp.su": {
+          "/COMPONENT_MAIN_DIR/provisioning.cpp :: SetupPortal portal_open(NvsStorageAdapter&, bool)": 528,
           "/COMPONENT_MAIN_DIR/provisioning.cpp :: esp_err_t save_post_impl(httpd_req_t*)": 1376,
-          "/COMPONENT_MAIN_DIR/provisioning.cpp :: void dns_task(void*)": 576,
-          "/COMPONENT_MAIN_DIR/provisioning.cpp :: void provisioning_run(NvsStorageAdapter&)": 496
+          "/COMPONENT_MAIN_DIR/provisioning.cpp :: void dns_task(void*)": 880
         },
         "CMakeFiles/__idf_main.dir/runtime_admission.cpp.su": {},
         "CMakeFiles/__idf_main.dir/safe_mode.cpp.su": {},
@@ -395,9 +395,9 @@
           "/COMPONENT_MAIN_DIR/ota_update.cpp :: void ota_task_impl()": 592
         },
         "CMakeFiles/__idf_main.dir/provisioning.cpp.su": {
+          "/COMPONENT_MAIN_DIR/provisioning.cpp :: SetupPortal portal_open(NvsStorageAdapter&, bool)": 528,
           "/COMPONENT_MAIN_DIR/provisioning.cpp :: esp_err_t save_post_impl(httpd_req_t*)": 1456,
-          "/COMPONENT_MAIN_DIR/provisioning.cpp :: void dns_task(void*)": 576,
-          "/COMPONENT_MAIN_DIR/provisioning.cpp :: void provisioning_run(NvsStorageAdapter&)": 496
+          "/COMPONENT_MAIN_DIR/provisioning.cpp :: void dns_task(void*)": 880
         },
         "CMakeFiles/__idf_main.dir/runtime_admission.cpp.su": {},
         "CMakeFiles/__idf_main.dir/safe_mode.cpp.su": {},

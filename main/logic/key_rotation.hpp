@@ -111,19 +111,21 @@ enum class AutomaticKeyAction : uint8_t {
     Generate,
     StorageUnavailable,
     RebootRequired,
+    RecoveryRequired,
 };
 
 constexpr AutomaticKeyAction decide_automatic_key_action(bool probe_ok,
                                                           bool key_exists,
                                                           bool runtime_safe,
-                                                          bool pairing_lost) {
+                                                          bool recovery_hint) {
     if (!probe_ok) return AutomaticKeyAction::StorageUnavailable;
-    // An existing durable key with an unsafe in-memory identity must be reloaded before a
-    // revocation flag can authorize replacement. Otherwise a CommitUnknown result followed by
-    // pairing_lost=true would repeatedly mutate the key without ever classifying the first NVS
-    // commit. Verified first-boot absence remains the sole unsafe-runtime generation case.
+    // An existing durable key with an unsafe in-memory identity must be reloaded before use.
+    // Verified first-boot absence remains the sole unsafe-runtime generation case.
     if (key_exists && !runtime_safe) return AutomaticKeyAction::RebootRequired;
-    if (pairing_lost) return AutomaticKeyAction::Generate;
+    // A remote pairing hint is not authority to replace a durable identity. Keep the existing
+    // key and require an explicit user action to re-enrol it; this also covers the inconsistent
+    // case where the key is absent but the runtime flag claims the identity is safe.
+    if (recovery_hint) return AutomaticKeyAction::RecoveryRequired;
     if (!key_exists) {
         return runtime_safe ? AutomaticKeyAction::RebootRequired
                             : AutomaticKeyAction::Generate;

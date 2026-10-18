@@ -77,7 +77,7 @@ current implementation. These are review questions, not substitute implementatio
 
 | Area | Required checks |
 |---|---|
-| Sleep/wake | Cached status/MQTT/display never wake; NO_WAKE background polls pause under commands; signed health probe does not open Infotainment; fresh-contact charging and recent-command active window; debounce, retry and episode quiescence survive repeated cycles. |
+| Sleep/wake | Cached status/MQTT/display never wake; NO_WAKE background polls pause under commands; non-waking VCSEC GET_STATUS health probe does not open Infotainment; fresh-contact charging and recent-command active window; debounce, retry and episode quiescence survive repeated cycles. |
 | Link/presentation | One link-state owner; live Infotainment proves awake, debounced VCSEC proves sleep, reachability proves idle; unknown/unreachable and last-known labels remain honest across UI/MQTT/API; phase timers/presenter mirrors agree. |
 | Commands/protocol | One registry/dispatcher; required/optional bounds and REST/MCP differences; complete fixed evcc charge_state versus optional status/MQTT fields and imperial versus metric units; Charging-Manager feasibility; request UUID/replay/authentication binding, initialized-secret admission and fail-closed encrypted VCSEC before telemetry; late completion generation/lifetime; charging-current ACK plus fresh exact readback. |
 | Heap/locks | INTERNAL largest block, bounded payloads, all allocation outcomes and unwind paths; RAII ordering; no Vehicle lock while waiting; POD callbacks/zero-wait host locks; parse after unlock; sticky JSON with exactly one failure reply and no partial retained publish. |

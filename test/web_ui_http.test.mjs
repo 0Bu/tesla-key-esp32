@@ -504,6 +504,21 @@ test("hero card remains visible when vehicle link is unreachable or unknown", ()
   assert.match(element("hstats").innerHTML, /75/);
 });
 
+test("unpaired connected vehicle prompts explicit key send before touchscreen approval", () => {
+  const { context, element } = loadUi();
+  context.render({
+    paired: false,
+    key_present: true,
+    vin: "5YJ3E1EA7KF000316",
+    ble: { connected: true },
+    link: "unknown"
+  });
+  assert.match(element("hlabel").innerHTML, /Ready to pair/);
+  assert.match(element("hsub").textContent, /Send the existing key above, then approve/i);
+  assert.doesNotMatch(element("hsub").textContent, /^Approve the request/i);
+  assert.equal(element("bannerAct").textContent, "Send existing key");
+});
+
 test("render handles s.link === 'idle' without ReferenceError and sets chips", () => {
   const { context, element } = loadUi();
   context.render({
@@ -532,6 +547,63 @@ test("render displays safe mode banner when sys.safe_mode is active", () => {
   const rb = element("reauthBanner");
   assert.equal(rb.classList.contains("show"), true);
   assert.match(rb.querySelector(".bt").innerHTML, /Safe Mode active/);
+});
+
+test("reauth notice preserves the existing key and remains visible with a stored session", () => {
+  const { context, element } = loadUi();
+  context.render({
+    link: "idle",
+    paired: true,
+    key_present: true,
+    reauth: true,
+    key_fingerprint: "AA:BB:CC:DD"
+  });
+  const banner = element("reauthBanner");
+  assert.equal(banner.classList.contains("show"), true);
+  assert.match(banner.querySelector(".bt").innerHTML, /existing key was preserved/i);
+  assert.equal(element("bannerAct").textContent, "Send existing key");
+  assert.match(element("keySub").textContent, /Existing key preserved/);
+});
+
+test("explicit recovery action sends the existing key once and never regenerates it", async () => {
+  const { context, element } = loadUi();
+  const requests = [];
+  const messages = [];
+  let polls = 0;
+  context.toast = (message, kind) => messages.push({ message, kind });
+  context.poll = () => { polls++; };
+  context.fetch = async (url, options) => {
+    requests.push({ url, options });
+    return { ok: true, status: 200, async json() { return { result: true, role: "charging_manager", reason: "transmitted" }; } };
+  };
+  context.render({ link: "idle", paired: true, key_present: true, reauth: true });
+
+  await context.bannerAction();
+
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, "/send_key");
+  assert.equal(requests[0].options.method, "POST");
+  assert.equal(requests.some(request => request.url.includes("gen_keys")), false);
+  assert.equal(messages.at(-1).kind, "ok");
+  assert.match(messages.at(-1).message, /approval is not yet confirmed/i);
+  assert.equal(polls, 1);
+  assert.equal(element("bannerAct").disabled, false);
+});
+
+test("ambiguous key-send response is surfaced without an automatic resend", async () => {
+  const { context } = loadUi();
+  const requests = [];
+  const messages = [];
+  context.toast = (message, kind) => messages.push({ message, kind });
+  context.poll = () => {};
+  context.fetch = async (url) => { requests.push(url); throw new Error("connection lost"); };
+  context.render({ link: "idle", paired: false, key_present: true, reauth: true });
+
+  await context.bannerAction();
+
+  assert.deepEqual(requests, ["/send_key"]);
+  assert.equal(messages.at(-1).kind, "err");
+  assert.match(messages.at(-1).message, /result is unknown/i);
 });
 
 test("toggleCharge renders server rejection reason on HTTP 502", async () => {

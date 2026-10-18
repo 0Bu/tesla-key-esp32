@@ -184,8 +184,9 @@ static void log_heap(const char* where) {
 //
 // Whether being online is even the expected state is the caller's fact, sampled once at arm
 // time: a device with no credentials and no wire is legitimately offline. On this firmware
-// that state never reaches here (the setup portal does not return), which is why the flag is
-// computed rather than assumed — it is the control flow around it that would change.
+// that state never reaches here (the first-time portal does not return, and the retrying portal
+// returns only once the network is up), which is why the flag is computed rather than assumed —
+// it is the control flow around it that would change.
 static bool s_ota_gate_link_expected = false;
 
 static void ota_health_gate_task(void*) {
@@ -740,6 +741,7 @@ extern "C" void app_main() {
     // fallback to the setup portal so the user can reconfigure it.
     if (!on_wire &&
         !tk::net_start_wifi(ssid.c_str(), password.c_str(), cfg_blob.wifi_rollback_active)) {
+        bool rollback_unpersisted = false;
         if (cfg_blob.wifi_rollback_active) {
             // The credentials from the last /set_wifi did not work and the grace window is spent.
             // Restore the pair that DID work and reboot onto it, rather than dropping into the
@@ -766,6 +768,7 @@ extern "C" void app_main() {
             // portal instead, which at least leaves the device configurable.
             ESP_LOGE(TAG, "could not persist the credential rollback — falling back to the setup "
                           "portal rather than rebooting into a loop");
+            rollback_unpersisted = true;
         }
         // LAST look before surrendering the running firmware to the portal. The Ethernet
         // driver keeps polling through the whole WiFi boot window, so a cable plugged in
@@ -775,9 +778,17 @@ extern "C" void app_main() {
         if (tk::net_is_up()) {
             ESP_LOGW(TAG, "WiFi did not come up, but the link is carried by %s — staying up",
                      tk::net_link_str(tk::net_kind()));
+        } else if (rollback_unpersisted) {
+            // The station still holds the refused trial pair and the restored one exists only in
+            // RAM, so a retry would repeat the refusal: the terminal portal, as before.
+            provisioning_run(config_store);  // never returns; reboots on save
         } else {
-            ESP_LOGW(TAG, "WiFi connection failed — starting setup portal");
-            provisioning_run(config_store); // never returns; reboots on save
+            // Stored credentials stay in use: the portal retries them in the background and the
+            // boot continues here once the network is up (a router that boots slower than this
+            // board after a power cut). Saving the form still reboots. No timed reboot: it would
+            // revert a pending OTA image, defeat the crash counter and re-seed the vehicle window.
+            ESP_LOGW(TAG, "WiFi connection failed — setup portal with background retry");
+            provisioning_run_with_retry(config_store);
         }
     }
     // Associated on the new credentials: the trial is over and the backup has done its job. Drop it
@@ -785,7 +796,8 @@ extern "C" void app_main() {
     //
     // NOT on the wired path: coming up on Ethernet proves nothing about the credentials on
     // trial, so consuming the backup there would silently discard the only way back to a working
-    // network the moment the cable is unplugged.
+    // network the moment the cable is unplugged. Every failure path above disarms the trial in RAM
+    // first, so the portal and the last look never reach this with a trial armed.
     if (!on_wire && cfg_blob.wifi_rollback_active) {
         cfg_blob.wifi_ssid_backup.clear();
         cfg_blob.wifi_pass_backup.clear();

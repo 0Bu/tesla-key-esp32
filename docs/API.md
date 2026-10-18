@@ -115,7 +115,7 @@ GET /api/1/vehicles/{VIN}/body_controller_state
 | `POST /crash/dismiss` | Deletes this boot's crash report; a failed erase returns `500` and retains the report. |
 | `GET /heap` | `{dt, b0, b_boot, unit:"KiB", scale:10, free[], largest[]}` — 24 h memory trend; interpretation below. |
 | `POST /gen_keys[?force=1]` | Generate the ECDSA P-256 key (refuses overwrite without `force`, `409`). Identity mutation is Stable-only: `PendingVerify`, unknown OTA state or an active OTA/update returns `503` before anything changes. |
-| `POST /send_key` | Manually trigger pairing (Charging Manager only; normally automatic). |
+| `POST /send_key` | Explicitly transmit the existing Charging Manager key as Whitelist Add. `result:true` means local transmission completed, not car approval; confirm on the touchscreen and verify `/status`. |
 | `POST /set_vin` | Persist the VIN, regenerate the key, clear the paired BLE MAC/session and reboot. Same Stable-only `503` rule as `/gen_keys`. |
 | `POST /set_mqtt` | `{"broker":"host:port"}` or full `"mqtt://…"`; `""` disables. Changed brokers are tested before persistence; failure saves nothing. |
 | `POST /set_syslog` | `{"server":"host:port"}` (a bare host defaults to 514; `""` disables) and reboot. |
@@ -177,7 +177,7 @@ rollback. [Shared provisioning contract](USER_GUIDE.md#provision-without-rebuild
 |---|---|
 | `vin`, `ip`, `version` | Device identity. |
 | `key_present`, `key_fingerprint`, `key_created` | Key state; `key_created` (epoch) is omitted while the clock is unsynced. |
-| `paired`, `paired_at`, `reauth` | Pairing state; `paired_at` (epoch) omitted if unknown. |
+| `paired`, `paired_at`, `reauth` | `paired` means a stored VCSEC session; `reauth` is an advisory attention hint and may be true while `paired` is true. `paired_at` (epoch) is omitted if unknown. |
 | `wifi` | `{ssid, rssi, std, rolled_back?}` — always present, empty while no WiFi link holds the lease; `rolled_back` appears only when the last `/set_wifi` was undone by the credential rollback. |
 | `eth` | `{link, speed?, full_duplex}` — present **only** while Ethernet carries the lease (`speed` in Mbit, omitted until the PHY negotiates). Carries no MAC, so it needs no `?redact=1` treatment. |
 | `ble` | `{connected, scanning, phase?, phase_s?, rssi, addr}` when connected, otherwise includes `devices:[{addr,name,rssi,connectable}]`. `connect_fail?`/`car_connectable?` appear only while actively failing. |

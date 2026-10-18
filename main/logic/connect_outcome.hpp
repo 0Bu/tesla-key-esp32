@@ -97,8 +97,8 @@ enum class ConnectOrigin : uint8_t {
 };
 
 // Restate an unchanged background condition once per monotonic hour. This must be time-based:
-// the unpaired auto-enrolment supervisor can issue ten probes in one round, so an attempt-count
-// threshold that is hourly for the paired health probe becomes only minutes in that burst path.
+// an attempt-count threshold would make the reporting interval depend on how often a caller
+// probes, rather than how long the condition has persisted.
 inline constexpr uint64_t kConnectFailRepeatMs = 60ULL * 60ULL * 1000ULL;
 
 struct ConnectFailState {
@@ -146,7 +146,7 @@ inline void connect_ok_note(ConnectFailState& st) {
     st.last_emit_ms = 0;
 }
 
-// A completed BLE connection and a completed signed command are separate health signals.
+// A completed BLE connection and a completed command are separate health signals.
 // In particular, Whitelist Add Key normally has no completing commandStatus, while the
 // authorised GET_STATUS health probe must answer. Do not infer that distinction from whether
 // the caller is foreground/background; make each command choose its timeout contract.
@@ -182,8 +182,8 @@ inline CompletionTimeoutLog completion_timeout_note(CompletionTimeoutState& st,
     return CompletionTimeoutLog::Warn;
 }
 
-// Any completed signed command proves the command channel is answering and ends the health-
-// timeout run, regardless of which policy that particular command used.
+// A timely completion signal ends the health-timeout run, regardless of command policy.
+// Completion alone does not prove command success or an authenticated response.
 inline void completion_ok_note(CompletionTimeoutState& st) {
     st.streak = 0;
     st.last_emit_ms = 0;

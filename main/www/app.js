@@ -428,6 +428,29 @@ function setHeroAct(label,icon,fn,busyText){
 }
 var bannerFn=null;
 function bannerAction(){ if(isOtaRunning()) return; if(bannerFn) return bannerFn(); }
+var sendKeyInFlight=false;
+function sendExistingKey(){
+  if(isOtaRunning() || sendKeyInFlight) return Promise.resolve();
+  sendKeyInFlight=true;
+  var button=$("bannerAct"); if(button) button.disabled=true;
+  return requestJsonResultWithTimeout('/send_key',{method:'POST'},15000).then(function(res){
+    var body=res.json&&res.json.response?res.json.response:res.json;
+    if(res.ok&&body&&body.result===true){
+      toast('Existing key request transmitted. Place the Tesla keycard on the console reader and confirm on the touchscreen; approval is not yet confirmed.','ok','send-key');
+    } else {
+      toast('Key transmission was not confirmed. Check vehicle status before trying again.','err','send-key');
+    }
+    poll();
+  }).catch(function(){
+    // The POST may have reached the device even if its response was lost. Never resend
+    // automatically; the user can check status and choose whether to try again.
+    toast('The key request result is unknown. Check vehicle status before trying again.','err','send-key');
+    poll();
+  }).then(function(){
+    sendKeyInFlight=false;
+    if(button) button.disabled=isOtaRunning();
+  });
+}
 
 /* ---------- render ---------- */
 // Connection row: tone ('ok' | 'warn' | '') colours the icon dot, status line and signal glyph.
@@ -475,14 +498,21 @@ function render(s){
 
   // re-pair / Safe Mode notice
   var rb=$("reauthBanner"), ba=$("bannerAct");
-  if(s.reauth && !paired){
-    rb.classList.add('show');
-    setHTML(rb.querySelector('.bt'),'<b>Key was reset</b> — The vehicle removed this device’s key, so a fresh one was generated automatically. Approve the new pairing on your Tesla’s touchscreen.');
-    if(ba) ba.textContent='Open setup'; bannerFn=function(){ scrollToKey(); };
-  } else if(safe){
+  if(safe){
     rb.classList.add('show');
     setHTML(rb.querySelector('.bt'),'<b>Safe Mode active</b> — Vehicle Bluetooth, commands, and telemetry are stopped. Use this recovery dashboard to inspect diagnostics or update firmware.');
     if(ba) ba.textContent='Check for update'; bannerFn=otaCheck;
+  } else if(s.reauth || (s.key_present && !paired)){
+    rb.classList.add('show');
+    if(s.key_present){
+      setHTML(rb.querySelector('.bt'), s.reauth
+        ? '<b>Vehicle connection needs attention</b> — Your existing key was preserved. If enrolment is needed, place the Tesla keycard on the console reader, then send the existing key and confirm on the touchscreen.'
+        : '<b>No active pairing is stored</b> — Your existing key is unchanged. Place the Tesla keycard on the console reader, then send the existing key and confirm on the touchscreen.');
+      if(ba) ba.textContent='Send existing key'; bannerFn=sendExistingKey;
+    } else {
+      setHTML(rb.querySelector('.bt'),'<b>Key setup required</b> — No existing key is available. Open setup to generate one before enrolling.');
+      if(ba) ba.textContent='Open setup'; bannerFn=function(){ scrollToKey(); };
+    }
   } else { rb.classList.remove('show'); bannerFn=null; }
 
   // hero — single source of overall status. The gauge markup is written only when it actually
@@ -551,7 +581,7 @@ function render(s){
     act=hasVin?genKey:editVin; actLabel=hasVin?'Generate key':'Add VIN'; actIcon=hasVin?'key':'pencil';
   } else if(linked){
     g={mode:'neutral', glyph:'link'};
-    head='Pairing'; sub='Approve the request on your Tesla’s touchscreen.';
+    head='Ready to pair'; sub='Send the existing key above, then approve the request on your Tesla’s touchscreen.';
   } else if((s.ble&&s.ble.connect_fail)>=2){
     // The car WAS found (advert heard, name matches the VIN) but every connection attempt times
     // out. Don't blame range. car_connectable===false → the car is at its BLE connection limit;
@@ -602,7 +632,7 @@ function render(s){
     // No VIN and nothing seen yet — the one "Searching…" with nothing to count down.
     setRow('ble','warn','Searching…','Scanning for Teslas',searchBarsHTML());
   } else if(d.row==='linked'){
-    // The GATT link is up. Stateless (paired but no signed round-trip yet) shows the amber wave
+    // The GATT link is up. Stateless (paired but reachability unknown/stale) shows the amber wave
     // instead of healthy green bars — the link is connected yet knows nothing.
     var br=num(ble.rssi);
     setRow('ble', d.stateless?'warn':'ok', ble.addr?'<span class="mono">'+esc(ble.addr)+'</span>':'Connected',
@@ -675,7 +705,7 @@ function render(s){
   if(s.key_present){
     $("keyVal").innerHTML=esc(s.key_fingerprint||'');
     var created=s.key_created?('Created '+new Date(s.key_created*1000).toLocaleDateString(undefined,{year:'numeric',month:'short',day:'numeric'})):'';
-    if(s.reauth&&!paired) setSub("keySub",'New key — approve it on the touchscreen','warn');
+    if(s.reauth) setSub("keySub",'Existing key preserved — connection needs attention','warn');
     else if(paired) setSub("keySub",created?created+' · paired':'Paired with the vehicle','ok');
     else setSub("keySub",(created?created+' · ':'')+'not paired yet','');
   } else {
