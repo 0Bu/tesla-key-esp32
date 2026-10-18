@@ -17,6 +17,7 @@
 #include "logic/syslog_policy.hpp"
 #include "logic/mqtt_uri.hpp"
 #include "logic/wifi_credentials.hpp"
+#include "logic/wifi_rollback.hpp"
 #include "logic/vin_transition.hpp"
 #include "ota_update.hpp"   // ota_confirm_pending_image() — guard OTA rollback across config reboots
 #include <esp_log.h>
@@ -695,19 +696,11 @@ esp_err_t handle_set_wifi(GuardedReq rq) {
                                                  "WiFi unchanged — no reboot"));
     }
 
-    // Arm the one-shot rollback only when there is something to roll back TO. On a device with no
-    // stored credentials there is no better previous state, and arming it would mean a failed first
-    // attempt "restores" an empty configuration — which is just the setup portal with extra steps.
-    if (!cfg.wifi_ssid.empty()) {
-        cfg.wifi_ssid_backup     = cfg.wifi_ssid;
-        cfg.wifi_pass_backup     = cfg.wifi_pass;
-        cfg.wifi_rollback_active = true;
-    }
-    // A new attempt retires the previous verdict: /status.wifi.rolled_back describes the LAST
-    // attempt, and leaving it set would report an old failure against new credentials.
-    cfg.wifi_rolled_back = false;
-    cfg.wifi_ssid = ssid;
-    cfg.wifi_pass = pass;
+    // Arm the one-shot rollback only when there is something to roll back TO, and keep the last
+    // PROVEN pair as the backup while an earlier change is still on trial (a deferred restart):
+    // the host-tested logic/wifi_rollback.hpp. A new attempt also retires the previous verdict, so
+    // /status.wifi.rolled_back describes the LAST attempt.
+    tk::stage_wifi_change(cfg, ssid, pass);
 
     const bool ok = tk::cfg_save(*g_config, cfg);
     esp_err_t r = send_json(req, ok ? 200 : 500,

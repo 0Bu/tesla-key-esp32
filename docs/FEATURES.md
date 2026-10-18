@@ -78,7 +78,8 @@ Details: [network](ARCHITECTURE.md#wifi--lan-connectivity).
 
 | Feature | Where | Prevents |
 |---|---|---|
-| Captive portal | `main/provisioning.cpp`, `logic/captive.hpp` | A setup portal that does not pop. |
+| Captive portal | `main/provisioning.cpp`, `logic/captive.hpp` | A setup portal that does not pop, or a DNS reply whose A record lands outside the answer section. |
+| Retrying setup portal | `main/provisioning.cpp`, `logic/setup_portal.hpp`, `main/main.cpp` | A board that boots faster than the router after a power cut staying offline in an unbounded, open setup portal. |
 | SPI Ethernet (W5500) | `net.cpp` (`CONFIG_TESLA_ETH_ENABLED`), `logic/eth_board.hpp`, `main/Kconfig.projbuild`; [network](ARCHITECTURE.md#wifi--lan-connectivity) | Running the BLE proxy on a radio that shares ONE antenna path with BLE. |
 | One image, multiple boards | `main/board.{cpp,hpp}`, `logic/eth_board.hpp` | Two copies of "which board is this" disagreeing on a SHARED pin (the T-Dongle-S3 panel clock is GPIO5, the PoE base's SPI SCLK). |
 | Transport seam | `main/net.hpp`, `net.cpp`, `logic/net_link.hpp` | A network layer that can only be WiFi: one contract (`net_is_up` / `net_kind` / `net_active_netif`) replaces a predicate `extern`ed in five modules and an ifkey hardcoded in three. |

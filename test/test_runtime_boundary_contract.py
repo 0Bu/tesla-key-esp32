@@ -304,7 +304,8 @@ DELEGATE_ALLOWED_CALLS = {
 # Reviewed exceptions are deliberately restricted to fixed-buffer/C/atomic paths. Adding another
 # exception is a code-review event because it weakens the default rule that C frames need a catch.
 REVIEWED_NON_THROWING = {
-    "dns_task": "fixed stack buffer and socket C calls only",
+    "dns_task": "fixed stack buffers, atomic stop flag, socket C calls and the noexcept "
+                "pure DNS reply builder only",
     "nimble_host_task": "NimBLE run/deinit trampoline only",
     "on_mqtt_probe": "plain-data probe verdict plus semaphore give only",
     "ping_probe_on_end": "generation-atomic ping result plus semaphore give only",
@@ -316,7 +317,8 @@ REVIEWED_NON_THROWING = {
 REVIEWED_ALLOWED_CALLS = {
     "dns_task": {
         "socket", "ESP_LOGW", "vTaskDelete", "htonl", "htons", "bind", "close",
-        "recvfrom", "memcpy", "sendto",
+        "recvfrom", "memcpy", "sendto", "setsockopt", "load", "store", "build_captive_dns_reply",
+        "vTaskDelay", "pdMS_TO_TICKS",
     },
     "nimble_host_task": {"nimble_port_run", "nimble_port_freertos_deinit"},
     "on_mqtt_probe": {"xSemaphoreGive"},
@@ -3001,28 +3003,87 @@ def require_explicit_idf_boot_error_contract(main_source: str, net_source: str,
     for token in ("if (err == ESP_OK) return;", "boot_fatal(component);"):
         if token not in provisioning_require:
             raise AssertionError(f"setup AP critical-IDF helper missing {token!r}")
-    setup = function_body_in(provisioning_source, "provisioning_run")
+    setup = function_body_in(provisioning_source, "portal_open")
     if setup.count("!= ESP_OK &&") < 2 or setup.count("!= ESP_ERR_INVALID_STATE") < 2:
         raise AssertionError("setup AP substrate does not handle only idempotent INVALID_STATE")
+    setup_flat = " ".join(setup.split())
     for token in (
         'provisioning_boot_require(netif_err, "setup network interface substrate")',
         'provisioning_boot_require(loop_err, "setup network event loop")',
         'if (!ap_netif) boot_fatal("setup AP network interface");',
         'provisioning_boot_require(esp_wifi_init(&cfg), "setup WiFi driver initialization");',
-        'provisioning_boot_require(esp_wifi_set_mode(WIFI_MODE_AP), "setup AP mode");',
+        'provisioning_boot_require(esp_wifi_set_mode(keep_station ? WIFI_MODE_APSTA : WIFI_MODE_AP), "setup AP mode");',
         'provisioning_boot_require(esp_wifi_set_config(WIFI_IF_AP, &ap), "setup AP configuration");',
-        'provisioning_boot_require(esp_wifi_start(), "setup AP start");',
-        'if (httpd_start(&server, &hcfg) != ESP_OK)',
+        'if (!keep_station) provisioning_boot_require(esp_wifi_start(), "setup AP start");',
+        'if (httpd_start(&portal.server, &hcfg) != ESP_OK)',
         'boot_fatal("setup HTTP server");',
-        "httpd_register_uri_handler(server, &save) != ESP_OK",
-        "httpd_register_uri_handler(server, &form) != ESP_OK",
-        "httpd_stop(server);",
+        "httpd_register_uri_handler(portal.server, &save) != ESP_OK",
+        "httpd_register_uri_handler(portal.server, &form) != ESP_OK",
+        "httpd_stop(portal.server);",
         'boot_fatal("setup HTTP handlers");',
     ):
-        if token not in setup:
+        if token not in setup_flat:
             raise AssertionError(f"setup AP fail-closed route missing {token!r}")
     require_before("setup handler failure stops partial server", setup,
-                   "httpd_stop(server);", 'boot_fatal("setup HTTP handlers");')
+                   "httpd_stop(portal.server);", 'boot_fatal("setup HTTP handlers");')
+    # First-time setup stays terminal; the stored-credential portal returns only through the
+    # host-tested policy (logic/setup_portal.hpp) and never restarts the device itself.
+    terminal = " ".join(function_body_in(provisioning_source, "provisioning_run").split())
+    if "portal_open(config_store, /*keep_station=*/false);" not in terminal or \
+            "while (true) vTaskDelay(pdMS_TO_TICKS(1000));" not in terminal:
+        raise AssertionError("first-time setup portal must stay terminal")
+    retry = function_body_in(provisioning_source, "provisioning_run_with_retry")
+    for token in ("if (!tk::net_wifi_station_started()) {", "provisioning_run(config_store);",
+                  "portal_open(config_store, /*keep_station=*/true);", "tk::portal_step(state,",
+                  "tk::net_wifi_retry_station();", "return;", "esp_timer_get_time()"):
+        if token not in retry:
+            raise AssertionError(f"retrying setup portal lost {token!r}")
+    # A failed AP close keeps the AP marked open and is reported to the policy (backoff); Leave
+    # continues the boot only once the AP is down.
+    retry_flat = " ".join(scrub_cpp(retry).split())
+    for token in ("if (portal_close_ap(portal)) ap_open = false; else tk::portal_close_failed(state, now_s);",
+                  "if (ap_open && !portal_close_ap(portal)) { tk::portal_close_failed(state, now_s); break; }"):
+        if token not in retry_flat:
+            raise AssertionError(f"retrying setup portal lost {token!r}")
+    # APSTA needs the running station: rejected credentials take the terminal portal first.
+    require_before("retrying setup portal falls back before joining a missing station", retry,
+                   "if (!tk::net_wifi_station_started()) {", "provisioning_run(config_store);")
+    require_before("retrying setup portal falls back before joining a missing station", retry,
+                   "provisioning_run(config_store);", "portal_open(config_store, /*keep_station=*/true);")
+    # The terminal fallback must sit INSIDE the station check, or the retrying portal is dead code.
+    retry_code = scrub_cpp(retry)
+    guard = retry_code.find("if (!tk::net_wifi_station_started()) {")
+    if guard < 0 or "provisioning_run(config_store);" not in retry_code[guard:retry_code.find("}", guard)]:
+        raise AssertionError("the terminal setup portal must be reached only without a running station")
+    if "[[noreturn]] void provisioning_run(NvsStorageAdapter& config_store);" not in \
+            (ROOT / "main/provisioning.hpp").read_text(encoding="utf-8"):
+        raise AssertionError("provisioning_run must be declared [[noreturn]]")
+    if "xTaskGetTickCount" in scrub_cpp(retry):
+        raise AssertionError("the retrying setup portal clock must not wrap with the 32-bit tick count")
+    # The boot takes the retrying portal after a stored-credential WiFi failure; the terminal one
+    # stays for missing credentials and for a rollback that could not be persisted.
+    boot = " ".join(main_source.split())
+    if boot.count("provisioning_run_with_retry(config_store);") != 1:
+        raise AssertionError("the boot must call the retrying setup portal exactly once")
+    require_before("stored-credential WiFi failure takes the retrying portal", boot,
+                   "!tk::net_start_wifi(ssid.c_str(), password.c_str(), cfg_blob.wifi_rollback_active)) {",
+                   "provisioning_run_with_retry(config_store);")
+    unpersisted = boot.find("} else if (rollback_unpersisted) {")
+    if unpersisted < 0 or "provisioning_run(config_store);" not in \
+            boot[unpersisted:boot.find("provisioning_run_with_retry(config_store);")]:
+        raise AssertionError("an unpersisted rollback must take the terminal setup portal")
+    # The captive DNS task must be stoppable (receive timeout applied, or no task) and must not
+    # spin on a persistent socket error.
+    dns = " ".join(function_body_in(provisioning_source, "dns_task").split())
+    for token in ("if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {",
+                  "if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) { vTaskDelay(pdMS_TO_TICKS(100));"):
+        if token not in dns:
+            raise AssertionError(f"captive DNS task lost {token!r}")
+    started = " ".join(function_body_in(net_source, "net_start_wifi").split())
+    require_before("station flag only after the driver started", started,
+                   'net_boot_require(esp_wifi_start(), "WiFi station start");', "s_sta_started.store(true);")
+    if re.search(r"\besp_restart\s*\(", scrub_cpp(retry)):
+        raise AssertionError("the retrying setup portal must never restart the device itself")
 
     for token in (
         "test_explicit_idf_boot_error_injection",

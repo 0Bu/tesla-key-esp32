@@ -126,7 +126,7 @@ change state; distinguish them from reading an existing log or cached status.
 |---|---|---|
 | Installer has no serial port | Data cable, browser Web Serial support, port already in use | Close the serial monitor; hold BOOT while connecting or use BOOT + RESET. |
 | `.local` will not load | DHCP lease in router | Open the current IP. Use that IP or `.local` for browser saves. |
-| No WiFi | SSID/password, open or WPA2 network | Use setup AP or `provision.py`; do not write partial NVS images. Failed LAN credential changes roll back once. |
+| No WiFi | SSID/password, open or WPA2 network | Use setup AP or `provision.py`; do not write partial NVS images. Failed LAN credential changes roll back once. With saved credentials the device keeps retrying them and the setup AP closes after 10 minutes without a client (30 minutes at most); power-cycle to reopen it. |
 | No pairing prompt | VIN configured, `key_present`, BLE range, NFC card on reader | Keep car awake and confirm on its touchscreen; retry enrollment if the prompt expired. |
 | BLE connection fails | `/status.ble.connect_fail`, `car_connectable`, log cause | Move closer; disconnect another phone/fob if the car advertises non-connectable. |
 | Command times out | BLE availability and car asleep | An intentional wake may be needed; wait for the link and retry. Preserve keys and logs. |
