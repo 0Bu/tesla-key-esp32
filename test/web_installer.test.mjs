@@ -273,6 +273,43 @@ test("device probing validates the manifest, pulses EN back to the app and close
   assert.deepEqual(fake.calls, ["transport", "loader", "main", "flashId", ...EN_PULSE, "disconnect"]);
 });
 
+test("probe cleanup keeps the serial port owned until a delayed reset settles", { timeout: 5000 }, async () => {
+  const fake = fakeEsptool();
+  const setSignals = fake.port.setSignals.bind(fake.port);
+  let releaseFirstSignal;
+  let firstSignal = true;
+  fake.port.setSignals = async (signals) => {
+    if (firstSignal) {
+      firstSignal = false;
+      await new Promise((resolve) => { releaseFirstSignal = resolve; });
+    }
+    await setSignals(signals);
+  };
+  let finished = false;
+  const pending = probeDevice({
+    port: fake.port,
+    manifest,
+    TransportCtor: fake.Transport,
+    ESPLoaderCtor: fake.Loader,
+    timeoutMs: 1000,
+    cleanupTimeoutMs: 50,
+    delay: noDelay
+  }).then((result) => { finished = true; return result; });
+
+  for (let tries = 0; tries < 100 && !releaseFirstSignal; tries++) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(typeof releaseFirstSignal, "function", "probe cleanup started its reset sequence");
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(finished, false, "probe cleanup still owns the pending reset");
+  assert.equal(fake.calls.includes("disconnect"), false, "disconnect cannot overtake setSignals");
+
+  releaseFirstSignal();
+  await pending;
+  assert.equal(finished, true);
+  assert.deepEqual(fake.calls.slice(-3), [...EN_PULSE, "disconnect"]);
+});
+
 test("device probing times out and releases an unresponsive serial device", async () => {
   const calls = [];
   class Transport {
@@ -386,22 +423,33 @@ test("after a completed write a failed restart or boot check is reported as inst
   });
 });
 
-test("the install handler marks the firmware written before verifying the boot", () => {
+test("the install handler marks firmware written before waiting for reset and verifying boot", () => {
   // The page handler is DOM-bound; pin its wiring to the tested status decision.
   const source = fs.readFileSync(new URL("../docs/web-installer.mjs", import.meta.url), "utf8");
   const handler = source.match(/const install = async \(\) => \{([\s\S]*?)\n  \};/)?.[1];
   assert.ok(handler, "install handler found");
-  assert.match(handler, /let written = false;[\s\S]*await flashDevice\([\s\S]*?\}\);\s*written = true;[\s\S]*await verifyBootImpl\(/);
+  assert.match(handler, /let written = false;[\s\S]*await flashDevice\([\s\S]*onState\(state\) \{[\s\S]*state\.stage === "restarting"[\s\S]*written = true;[\s\S]*await verifyBootImpl\(/);
   assert.match(handler, /catch \(error\) \{[\s\S]*installFailureStatus\(error, \{ written, version: manifest\.version \}\)/);
   const html = fs.readFileSync(new URL("../docs/index.html", import.meta.url), "utf8");
   assert.match(html, /\.installer-page-status\[data-kind="warning"\]\{color:var\(--warn-text\)\}/);
 });
 
-test("a hanging restart after a completed write neither times out the install nor blocks it", { timeout: 5000 }, async () => {
+test("a delayed restart keeps the serial port owned until reset and cleanup settle", { timeout: 5000 }, async () => {
   const fake = fakeEsptool();
-  fake.port.setSignals = () => new Promise(() => {});
+  const setSignals = fake.port.setSignals.bind(fake.port);
+  let releaseFirstSignal;
+  let firstSignal = true;
+  fake.port.setSignals = async (signals) => {
+    if (firstSignal) {
+      firstSignal = false;
+      await new Promise((resolve) => { releaseFirstSignal = resolve; });
+    }
+    await setSignals(signals);
+  };
   const logs = [];
-  const result = await flashDevice({
+  let written = false;
+  let finished = false;
+  const pending = flashDevice({
     port: fake.port,
     manifest,
     manifestUrl: "https://example.test/manifest.json",
@@ -411,15 +459,25 @@ test("a hanging restart after a completed write neither times out the install no
     fetchImpl: async (url) => firmwareResponse(url),
     cryptoImpl: webcrypto,
     onLog(text) { logs.push(text); },
-    // The install deadline is shorter than the restart bound: only a restart outside the timed
-    // install can still report the completed write.
+    onState(state) { if (state.stage === "restarting") written = true; },
     timeoutMs: 200,
-    cleanupTimeoutMs: 400,
+    cleanupTimeoutMs: 50,
     delay: noDelay
-  });
-  assert.equal(result.restarted, false);
+  }).then((result) => { finished = true; return result; });
+
+  for (let tries = 0; tries < 100 && !logs.join("").includes("Device reset timed out."); tries++) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
   assert.match(logs.join(""), /Automatic restart unavailable: Device reset timed out\./);
-  assert.equal(fake.calls.at(-1), "disconnect");
+  assert.equal(written, true, "all flash writes completed before reset began");
+  assert.equal(finished, false, "the pending signal still owns the serial operation");
+  assert.equal(fake.calls.includes("disconnect"), false, "disconnect waits for the reset sequence");
+
+  releaseFirstSignal();
+  const result = await pending;
+  assert.equal(result.restarted, false);
+  assert.equal(finished, true);
+  assert.deepEqual(fake.calls.slice(-3), [...EN_PULSE, "disconnect"]);
 });
 
 // Minimal stand-in for the installer page: elements by id, the four steps and the mode radios.

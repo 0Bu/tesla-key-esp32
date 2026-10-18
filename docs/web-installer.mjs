@@ -96,10 +96,14 @@ function terminalAdapter(onLog) {
 
 async function settleTransport(transport, restart, timeoutMs = TRANSPORT_CLEANUP_TIMEOUT_MS) {
   if (restart) {
+    let restartPromise;
     try {
-      await withTimeout(restart(), timeoutMs, new Error("Device reset timed out."));
+      restartPromise = Promise.resolve(restart());
+      await withTimeout(restartPromise, timeoutMs, new Error("Device reset timed out."));
     } catch (_error) {
-      // Cleanup still has to close the port if the adapter cannot drive the reset lines.
+      // A timeout bounds the status report, not ownership of an in-flight serial signal. Wait for
+      // it to settle before disconnecting so no later reset edge can affect a new session.
+      if (restartPromise) await restartPromise.catch(() => {});
     }
   }
   if (transport && typeof transport.disconnect === "function") {
@@ -521,11 +525,16 @@ export async function flashDevice({
     // failure: the caller still verifies the boot, and the board then only needs a manual RESET.
     onState({ stage: "restarting", percentage: 100, message: "Starting firmware" });
     let restarted = true;
+    let restartPromise;
     try {
-      await withTimeout(resetToUserFirmware(port, delay), cleanupTimeoutMs, new Error("Device reset timed out."));
+      restartPromise = resetToUserFirmware(port, delay);
+      await withTimeout(restartPromise, cleanupTimeoutMs, new Error("Device reset timed out."));
     } catch (error) {
       restarted = false;
       onLog(`Automatic restart unavailable: ${errorMessage(error)}\n`);
+      // Keep the serial port owned until the reset sequence settles; Promise.race timeouts do not
+      // cancel Web Serial setSignals() and must not permit a retry or disconnect to overtake it.
+      if (restartPromise) await restartPromise.catch(() => {});
     }
     return { ...written, restarted };
   } finally {
@@ -863,6 +872,10 @@ export function attachWebInstaller({
         fetchImpl,
         onLog: appendMonitor,
         onState(state) {
+          if (state.stage === "restarting") {
+            written = true;
+            setPageStatus("Firmware written. Waiting for the board to restart…", "warning");
+          }
           setProgress(state.message, state.percentage);
         }
       });
