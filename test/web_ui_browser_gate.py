@@ -114,6 +114,18 @@ console.error = function() {
     check(!toastRegion.querySelector("img"), "toast content remains escaped");
     check(toastRegion.textContent.includes("<img"), "escaped toast remains readable");
 
+    render({paired: true, last_seen_s: 0,
+      vehicle: {status: "Stopped", actual_amps: 16, volts: 230, phases: 2},
+      tele: {climate: {cop: "FanOnly", front_defrost: true, rear_defrost: true, defrost_mode: "Max"}}});
+    const climateChips = document.getElementById("hstats");
+    check(climateChips.textContent.includes("Overheat setting"), "COP is a setting");
+    check(climateChips.textContent.includes("Fan only"), "COP setting is readable");
+    check(climateChips.textContent.includes("Defrost (cached)"), "defrost remains explicitly cached after fresh charge contact");
+    check(!climateChips.textContent.includes("kW"), "charger fields are not attributed to climate power");
+    check(Array.from(climateChips.children).every(chip => chip.title.includes("current activity and power are unknown")),
+          "climate titles disclose activity and power limits");
+    check(window.__browserGateFetchCalls === 2, "rendering climate does not request vehicle data");
+
     check(getComputedStyle(document.body).display !== "none", "body is rendered");
     check(document.querySelector(".wrap").getBoundingClientRect().width > 0, "main layout has width");
     check(document.documentElement.scrollWidth <= window.innerWidth + 1, "no horizontal overflow");

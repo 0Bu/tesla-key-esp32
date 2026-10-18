@@ -36,6 +36,10 @@ before writing DOM so animations persist. A failed poll retains the last frame b
 and stops phase countdown claims. Post-update reboot detection uses a separate 1 s poll.
 Request/response polling avoids per-client queued status copies and blocked broadcast sends.
 
+Climate chips show the last reported overheat-protection setting and explicitly cached defrost
+state. `/status` has no climate-specific age; other telemetry cannot establish their current
+activity. Charger input fields do not establish climate power consumption or an AC phase multiplier.
+
 ## Read-only telemetry and command correctness
 
 `vehicle_loop` rotates climate, drive, tires and closures at roughly 30 s per domain. All background

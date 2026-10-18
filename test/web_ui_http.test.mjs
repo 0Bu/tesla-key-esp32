@@ -434,6 +434,55 @@ test("render initializes channel state from running version or status ota channe
   assert.equal(uiDev.element("fwSub").textContent, "Release channel");
 });
 
+test("climate chips label cached settings without inferring AC power or current activity", () => {
+  const { context, element } = loadUi();
+  for (const phases of [undefined, 0, 1, 2, 3]) {
+    for (const last_seen_s of [undefined, 0, 300, 86400]) {
+      context.render({
+        paired: true, last_seen_s,
+        vehicle: { status: "Stopped", actual_amps: 16, volts: 230, phases },
+        tele: { climate: { cop: "On", cop_cooling: true, front_defrost: true } }
+      });
+      const chips = element("hstats").innerHTML;
+      assert.match(chips, /Overheat setting/);
+      assert.match(chips, /Defrost \(cached\)/);
+      assert.match(chips, /Last reported cabin overheat protection setting/);
+      assert.match(chips, /Last reported defrost state/);
+      assert.match(chips, /current activity and power are unknown/);
+      assert.doesNotMatch(chips, /kW|AC draw|class="stat (warn|info)"/);
+    }
+  }
+});
+
+test("climate settings do not require charger input and reject unknown active states", () => {
+  const { context } = loadUi();
+  assert.match(context.copChip({ tele: { climate: { cop: "FanOnly" } } }), /Fan only/);
+  assert.match(context.defrostChip({ tele: { climate: { rear_defrost: true, defrost_mode: "Max" } } }), /Rear \/ Max/);
+  for (const cop of [undefined, "Off", "Unknown", "<script>"]) {
+    assert.equal(context.copChip({ tele: { climate: { cop } } }), "");
+  }
+  for (const defrost_mode of [undefined, "Off", "Unknown", "<script>"]) {
+    assert.equal(context.defrostChip({ tele: { climate: { front_defrost: false, rear_defrost: false, defrost_mode } } }), "");
+  }
+  const escaped = context.copChip({ tele: { climate: { cop: "On", cop_temp: '<img src=x onerror="alert(1)">' } } });
+  assert.doesNotMatch(escaped, /<img/);
+  assert.match(escaped, /&lt;img/);
+  assert.equal(context.copChip({}), "");
+  assert.equal(context.defrostChip({}), "");
+});
+
+test("charging power remains vehicle-reported alongside explicitly cached climate chips", () => {
+  const { context, element } = loadUi();
+  context.render({
+    paired: true, last_seen_s: 0,
+    vehicle: { status: "Charging", power: 11, amps: 16, actual_amps: 16, volts: 230, phases: 2 },
+    tele: { climate: { cop: "On", front_defrost: true } }
+  });
+  assert.match(element("hstats").innerHTML, /Power.*11<small>kW/);
+  assert.match(element("hstats").innerHTML, /Defrost \(cached\)/);
+  assert.doesNotMatch(context.copChip(context.state) + context.defrostChip(context.state), /kW/);
+});
+
 test("hero card remains visible when vehicle link is unreachable or unknown", () => {
   const { context, element } = loadUi();
   const hero = element("hero");
