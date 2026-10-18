@@ -74,7 +74,13 @@ the device to reboot. Click the version to select **Release** (official releases
 
 For USB recovery, **Keep configuration** is available for an existing dual-OTA layout.
 **Erase everything** and a merged-image write erase WiFi, VIN and pairing; back up secret NVS
-before an intentional destructive recovery. Never flash an unsigned local build: it cannot boot.
+before an intentional destructive recovery. If an installation times out or USB disconnects, the
+installer aborts the active serial read or write, blocks later commands and keeps the port reserved
+until the active operation and its port cleanup settle. The page shows **Stopping** during this
+interval; keep the board connected and do not retry until the installer reports the timeout or
+disconnect. If the browser cannot complete a USB operation, the page remains busy rather than
+releasing a port that may still be active. Reconnect and inspect the board's firmware before
+retrying. Never flash an unsigned local build: it cannot boot.
 [Verified delivery procedures](DEVELOPMENT.md#delivery).
 
 A reviewed same-repository PR with the `signed-preview` label may offer a signed installer at
@@ -125,6 +131,7 @@ change state; distinguish them from reading an existing log or cached status.
 | Symptom | Check | Next step |
 |---|---|---|
 | Installer has no serial port | Data cable, browser Web Serial support, port already in use | Close the serial monitor; hold BOOT while connecting or use BOOT + RESET. |
+| Installer: firmware installed, start not verified | Adapter without reset lines, a native USB port that reconnected late, or an image that does not boot | The firmware is already on flash: press RESET or reconnect the cable. If it still does not start, open the serial monitor and reinstall with Keep configuration rather than Erase. |
 | `.local` will not load | DHCP lease in router | Open the current IP. Use that IP or `.local` for browser saves. |
 | No WiFi | SSID/password, open or WPA2 network | Use setup AP or `provision.py`; do not write partial NVS images. Failed LAN credential changes roll back once. |
 | No pairing prompt | VIN configured, `key_present`, BLE range, NFC card on reader | Keep car awake and confirm on its touchscreen; retry enrollment if the prompt expired. |

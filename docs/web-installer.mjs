@@ -61,27 +61,51 @@ export function splitSerialChunk(pending, text, flush = false) {
   return { lines, pending: nextPending };
 }
 
-async function withTimeout(operation, milliseconds, timeoutError) {
+async function withTimeout(operation, milliseconds, timeoutError, onTimeout, signal) {
   let timeoutId;
-  const timeout = new Promise((_, reject) => {
-    timeoutId = setTimeout(() => reject(timeoutError), milliseconds);
-  });
+  let abortHandler;
+  const pending = [Promise.resolve(operation), new Promise((_, reject) => {
+    timeoutId = setTimeout(() => {
+      try {
+        if (typeof onTimeout === "function") onTimeout();
+      } catch (_error) {
+        // The deadline still rejects the operation if its cancellation hook itself fails.
+      } finally {
+        reject(timeoutError);
+      }
+    }, milliseconds);
+  })];
+  if (signal) {
+    pending.push(new Promise((_, reject) => {
+      abortHandler = () => reject(signal.reason instanceof Error
+        ? signal.reason
+        : errorWithName("AbortError", "The operation was aborted."));
+      if (signal.aborted) abortHandler();
+      else signal.addEventListener("abort", abortHandler, { once: true });
+    }));
+  }
   try {
-    return await Promise.race([Promise.resolve(operation), timeout]);
+    return await Promise.race(pending);
   } finally {
     clearTimeout(timeoutId);
+    if (signal && abortHandler) signal.removeEventListener("abort", abortHandler);
   }
 }
 
-export async function stopSerialReader(reader, loop, timeoutMs = TRANSPORT_CLEANUP_TIMEOUT_MS) {
+function throwIfAborted(signal, fallback = "The operation was aborted.") {
+  if (!signal || !signal.aborted) return;
+  throw signal.reason instanceof Error ? signal.reason : errorWithName("AbortError", fallback);
+}
+
+export async function stopSerialReader(reader, loop) {
   if (reader && typeof reader.cancel === "function") {
     try {
-      await withTimeout(reader.cancel(), timeoutMs, new Error("Stopping the serial reader timed out."));
+      await reader.cancel();
     } catch (_error) {}
   }
   if (loop) {
     try {
-      await withTimeout(loop, timeoutMs, new Error("Stopping the serial read loop timed out."));
+      await loop;
     } catch (_error) {}
   }
 }
@@ -94,21 +118,119 @@ function terminalAdapter(onLog) {
   };
 }
 
-async function settleTransport(transport, loader, resetMode, timeoutMs = TRANSPORT_CLEANUP_TIMEOUT_MS) {
-  if (resetMode && loader && loader.chip && typeof loader.after === "function") {
+async function settleTransport(transport, restart, timeoutMs = TRANSPORT_CLEANUP_TIMEOUT_MS) {
+  if (restart) {
+    let restartPromise;
     try {
-      await withTimeout(loader.after(resetMode), timeoutMs, new Error("Device reset timed out."));
+      restartPromise = Promise.resolve().then(restart);
+      await withTimeout(restartPromise, timeoutMs, new Error("Device reset timed out."));
     } catch (_error) {
-      // Cleanup still has to close the port if a reset signal is not supported by the adapter.
+      // A timeout bounds the status report, not ownership of an in-flight serial signal. Wait for
+      // it to settle before disconnecting so a late reset cannot affect a subsequent session.
+      if (restartPromise) await restartPromise.catch(() => {});
     }
   }
   if (transport && typeof transport.disconnect === "function") {
+    let disconnectPromise;
     try {
-      await withTimeout(transport.disconnect(), timeoutMs, new Error("Serial cleanup timed out."));
+      disconnectPromise = Promise.resolve().then(() => transport.disconnect());
+      await withTimeout(disconnectPromise, timeoutMs, new Error("Serial cleanup timed out."));
     } catch (_error) {
       // The device can disappear during its reset. In that case the browser already closed it.
+      // A late disconnect still owns this serial transport; do not release it to a retry yet.
+      if (disconnectPromise) await disconnectPromise.catch(() => {});
     }
   }
+}
+
+function makeAbortableTransport(transport, signal) {
+  const originalWrite = typeof transport.write === "function"
+    ? transport.write.bind(transport)
+    : async () => { throw new Error("The serial transport cannot write bytes."); };
+  const originalRead = typeof transport.read === "function" ? transport.read.bind(transport) : null;
+  let stopped = false;
+  let activeWriter = null;
+  let activeWrite = null;
+  let writerAbort = null;
+  let readerCancel = null;
+
+  const abort = () => {
+    if (stopped) return;
+    stopped = true;
+    const reason = signal.reason instanceof Error
+      ? signal.reason
+      : errorWithName("AbortError", "The serial operation was aborted.");
+    if (activeWriter && typeof activeWriter.abort === "function") {
+      const writer = activeWriter;
+      writerAbort = Promise.resolve().then(() => writer.abort(reason)).catch(() => {});
+    }
+    const reader = transport.reader;
+    if (reader && typeof reader.cancel === "function") {
+      readerCancel = Promise.resolve().then(() => reader.cancel(reason)).catch(() => {});
+    }
+  };
+
+  transport.write = async (data) => {
+    throwIfAborted(signal, "Firmware installation stopped.");
+    if (stopped) throw errorWithName("AbortError", "Further serial writes were stopped.");
+
+    const writable = transport.device && transport.device.writable;
+    const writer = writable && typeof writable.getWriter === "function" &&
+      typeof transport.slipWriter === "function"
+      ? writable.getWriter()
+      : null;
+    if (!writer) {
+      const pending = Promise.resolve().then(() => {
+        throwIfAborted(signal, "Firmware installation stopped.");
+        return originalWrite(data);
+      });
+      activeWrite = pending;
+      try {
+        await pending;
+        throwIfAborted(signal, "Firmware installation stopped.");
+      } finally {
+        if (activeWrite === pending) activeWrite = null;
+      }
+      return;
+    }
+
+    activeWriter = writer;
+    const pending = Promise.resolve().then(() => {
+      throwIfAborted(signal, "Firmware installation stopped.");
+      const framed = transport.slipWriter(data);
+      if (transport.tracing) transport.trace(`Write ${framed.length} bytes: ${transport.hexConvert(framed)}`);
+      return writer.write(framed);
+    });
+    activeWrite = pending;
+    try {
+      await pending;
+      throwIfAborted(signal, "Firmware installation stopped.");
+    } finally {
+      if (activeWriter === writer) activeWriter = null;
+      if (activeWrite === pending) activeWrite = null;
+      try { writer.releaseLock(); } catch (_error) {}
+    }
+  };
+
+  if (originalRead) {
+    transport.read = async (...args) => {
+      throwIfAborted(signal, "Firmware installation stopped.");
+      if (stopped) throw errorWithName("AbortError", "Further serial reads were stopped.");
+      const result = await originalRead(...args);
+      throwIfAborted(signal, "Firmware installation stopped.");
+      return result;
+    };
+  }
+
+  signal.addEventListener("abort", abort, { once: true });
+  if (signal.aborted) abort();
+  return {
+    async settleAbort() {
+      abort();
+      await Promise.allSettled([activeWrite, writerAbort, readerCancel].filter(Boolean));
+    },
+    dispose() { signal.removeEventListener("abort", abort); }
+  };
 }
 
 export async function resetToUserFirmware(port, delay = sleep) {
@@ -134,6 +256,25 @@ export async function resetConnectedDevice(port, { keepOpen = false, delay = sle
   } finally {
     if (!wasOpen && !keepOpen && (port.readable || port.writable)) await port.close();
   }
+}
+
+export function installFailureStatus(error, { written = false, version = "" } = {}) {
+  const reason = errorMessage(error);
+  if (written) {
+    return {
+      kind: "warning",
+      step: 4,
+      message: `Firmware ${version} installed, but its start was not verified: ${reason} ` +
+        "Restart the board with its RESET button or by reconnecting the USB cable.",
+      statusLine: `Firmware ${version} installed; boot verification failed: ${reason}`
+    };
+  }
+  return {
+    kind: "error",
+    step: 2,
+    message: `Installation failed: ${reason}`,
+    statusLine: `Installation failed: ${reason}`
+  };
 }
 
 export function detectedSerialType(info = {}) {
@@ -249,13 +390,16 @@ export async function sha256Hex(data, cryptoImpl = globalThis.crypto) {
   return Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-export async function fetchFirmwareParts(build, manifestUrl, fetchImpl = fetch, cryptoImpl = globalThis.crypto) {
+export async function fetchFirmwareParts(build, manifestUrl, fetchImpl = fetch, cryptoImpl = globalThis.crypto, signal) {
   validateBuild(build, manifestUrl);
 
   const baseDirectory = new URL("./", manifestUrl);
   return Promise.all(build.parts.map(async (part, index) => {
     const url = new URL(part.path, baseDirectory).toString();
-    const response = await fetchImpl(url, { cache: "no-store" });
+    const requestOptions = { cache: "no-store" };
+    if (signal) requestOptions.signal = signal;
+    const response = await fetchImpl(url, requestOptions);
+    throwIfAborted(signal, "Firmware download stopped.");
     if (!response.ok) {
       throw errorWithName(
         "FirmwareDownloadError",
@@ -292,8 +436,8 @@ export async function verifyBootVersion({
   expectedVersion,
   onLog = () => {},
   timeoutMs = BOOT_VERIFICATION_TIMEOUT_MS,
-  cleanupTimeoutMs = TRANSPORT_CLEANUP_TIMEOUT_MS,
-  delay = sleep
+  delay = sleep,
+  signal
 }) {
   if (!port) throw errorWithName("BootVerificationError", "The serial port disappeared before boot verification.");
   if (typeof expectedVersion !== "string" || !expectedVersion) {
@@ -302,30 +446,48 @@ export async function verifyBootVersion({
 
   const deadline = Date.now() + timeoutMs;
   let lastOpenError = null;
-  while (!port.readable && Date.now() < deadline) {
-    try {
-      await withTimeout(
-        port.open({ baudRate: 115200, bufferSize: 8192 }),
-        Math.min(2000, Math.max(1, deadline - Date.now())),
-        new Error("Opening the serial port timed out.")
-      );
-    } catch (error) {
-      lastOpenError = error;
-      await delay(Math.min(250, Math.max(0, deadline - Date.now())));
-    }
-  }
-  if (!port.readable) {
-    throw errorWithName(
-      "BootVerificationError",
-      `The flashed device did not reconnect for version verification${lastOpenError ? `: ${errorMessage(lastOpenError)}` : "."}`
-    );
-  }
-
-  const reader = port.readable.getReader();
-  const decoder = new TextDecoder();
+  let pendingOpen = null;
+  let reader = null;
+  let readLoop = null;
   let captured = "";
-  let readLoop;
   try {
+    while (!port.readable && Date.now() < deadline) {
+      throwIfAborted(signal, "Boot verification stopped.");
+      let openSettled = false;
+      const opening = Promise.resolve().then(() => port.open({ baudRate: 115200, bufferSize: 8192 }));
+      pendingOpen = opening.finally(() => { openSettled = true; });
+      try {
+        await withTimeout(
+          pendingOpen,
+          Math.min(2000, Math.max(1, deadline - Date.now())),
+          new Error("Opening the serial port timed out."),
+          undefined,
+          signal
+        );
+        pendingOpen = null;
+      } catch (error) {
+        lastOpenError = error;
+        if (signal && signal.aborted) throw error;
+        if (!openSettled) {
+          throw errorWithName(
+            "BootVerificationError",
+            `The serial port did not finish opening for version verification: ${errorMessage(error)}`
+          );
+        }
+        await delay(Math.min(250, Math.max(0, deadline - Date.now())));
+        pendingOpen = null;
+      }
+    }
+    if (!port.readable) {
+      throw errorWithName(
+        "BootVerificationError",
+        `The flashed device did not reconnect for version verification${lastOpenError ? `: ${errorMessage(lastOpenError)}` : "."}`
+      );
+    }
+    throwIfAborted(signal, "Boot verification stopped.");
+
+    reader = port.readable.getReader();
+    const decoder = new TextDecoder();
     // Generate a fresh, observable boot after the monitor has acquired the stream. Some native USB
     // targets re-enumerate here; a read error is still a failed verification, never silent success.
     try { await resetToUserFirmware(port, delay); } catch (error) { onLog(`Automatic verification reset unavailable: ${errorMessage(error)}\n`); }
@@ -342,18 +504,28 @@ export async function verifyBootVersion({
     const verified = await withTimeout(
       readLoop,
       Math.max(1, deadline - Date.now()),
-      errorWithName("BootVerificationError", `Timed out waiting for firmware ${expectedVersion} to boot.`)
+      errorWithName("BootVerificationError", `Timed out waiting for firmware ${expectedVersion} to boot.`),
+      undefined,
+      signal
     );
     if (!verified) {
       throw errorWithName("BootVerificationError", `The serial stream ended before firmware ${expectedVersion} was observed.`);
     }
     return { version: expectedVersion, log: captured };
   } finally {
-    await stopSerialReader(reader, readLoop, cleanupTimeoutMs);
-    try { reader.releaseLock(); } catch (_error) {}
+    // port.open() cannot be cancelled by AbortSignal. Retain ownership until its pending attempt
+    // settles so a late success is closed before the installer can release or reuse this port.
+    if (pendingOpen) {
+      try { await pendingOpen; } catch (_error) {}
+      pendingOpen = null;
+    }
+    if (reader) {
+      await stopSerialReader(reader, readLoop);
+      try { reader.releaseLock(); } catch (_error) {}
+    }
     if (port.readable || port.writable) {
       try {
-        await withTimeout(port.close(), cleanupTimeoutMs, new Error("Closing boot verification timed out."));
+        await port.close();
       } catch (_error) {}
     }
   }
@@ -393,7 +565,9 @@ export async function probeDevice({
   ESPLoaderCtor,
   onLog = () => {},
   timeoutMs = DEVICE_PROBE_TIMEOUT_MS,
-  cleanupTimeoutMs = TRANSPORT_CLEANUP_TIMEOUT_MS
+  cleanupTimeoutMs = TRANSPORT_CLEANUP_TIMEOUT_MS,
+  delay = sleep,
+  signal: callerSignal
 }) {
   const transport = new TransportCtor(port);
   const loader = new ESPLoaderCtor({
@@ -404,12 +578,34 @@ export async function probeDevice({
     enableTracing: false
   });
   let loaderReady = false;
+  let activeOperation = null;
+  const timeoutError = errorWithName(
+    "DeviceProbeTimeoutError",
+    "The serial device did not answer in flashing mode. Select the ESP chip's native USB port when available; otherwise hold BOOT, tap RESET, then try again."
+  );
+  const controller = new AbortController();
+  const abort = (reason) => {
+    if (!controller.signal.aborted) controller.abort(reason);
+  };
+  const abortFromCaller = () => abort(callerSignal?.reason instanceof Error
+    ? callerSignal.reason
+    : errorWithName("DeviceProbeAbortedError", "The USB connection ended during device checking."));
+  if (callerSignal) {
+    if (callerSignal.aborted) abortFromCaller();
+    else callerSignal.addEventListener("abort", abortFromCaller, { once: true });
+  }
+  const abortableTransport = makeAbortableTransport(transport, controller.signal);
 
   try {
-    return await withTimeout((async () => {
+    activeOperation = (async () => {
+      throwIfAborted(controller.signal, "Device checking stopped.");
       await loader.main();
+      throwIfAborted(controller.signal, "Device checking stopped.");
       loaderReady = true;
-      if (typeof loader.flashId === "function") await loader.flashId();
+      if (typeof loader.flashId === "function") {
+        await loader.flashId();
+        throwIfAborted(controller.signal, "Device checking stopped.");
+      }
       const chipFamily = loader.chip && loader.chip.CHIP_NAME;
       if (!chipFamily) throw errorWithName("ChipDetectionError", "The connected ESP chip could not be identified.");
       const build = selectManifestBuild(manifest, chipFamily, port.getInfo());
@@ -417,15 +613,37 @@ export async function probeDevice({
         throw errorWithName("UnsupportedChipError", `${chipFamily} is not supported by this firmware.`);
       }
       await assertChipRevisionSupported(loader, chipFamily);
+      throwIfAborted(controller.signal, "Device checking stopped.");
       return { chipFamily, build };
-    })(), timeoutMs, errorWithName(
-      "DeviceProbeTimeoutError",
-      "The serial device did not answer in flashing mode. Select the ESP chip's native USB port when available; otherwise hold BOOT, tap RESET, then try again."
-    ));
+    })();
+    return await withTimeout(
+      activeOperation,
+      timeoutMs,
+      timeoutError,
+      () => abort(timeoutError),
+      controller.signal
+    );
   } finally {
     // The compatibility probe runs the flasher stub. Explicitly hand control back to the installed
-    // application before releasing the serial port.
-    await settleTransport(transport, loader, loaderReady ? "soft_reset" : undefined, cleanupTimeoutMs);
+    // application before releasing the serial port. On cancellation, abort active Web Serial IO,
+    // disconnect to cancel any remaining read, wait for the loader, then disconnect again in case
+    // a late port.open completed after the first close attempt.
+    if (controller.signal.aborted) {
+      await abortableTransport.settleAbort();
+      await settleTransport(transport, undefined, cleanupTimeoutMs);
+      if (activeOperation) {
+        try { await activeOperation; } catch (_error) {}
+      }
+      await settleTransport(transport, undefined, cleanupTimeoutMs);
+    } else {
+      await settleTransport(
+        transport,
+        loaderReady ? () => resetToUserFirmware(port, delay) : undefined,
+        cleanupTimeoutMs
+      );
+    }
+    abortableTransport.dispose();
+    if (callerSignal) callerSignal.removeEventListener("abort", abortFromCaller);
   }
 }
 
@@ -441,7 +659,9 @@ export async function flashDevice({
   onState = () => {},
   onLog = () => {},
   timeoutMs = FLASH_OPERATION_TIMEOUT_MS,
-  cleanupTimeoutMs = TRANSPORT_CLEANUP_TIMEOUT_MS
+  cleanupTimeoutMs = TRANSPORT_CLEANUP_TIMEOUT_MS,
+  delay = sleep,
+  signal: callerSignal
 }) {
   const transport = new TransportCtor(port);
   const loader = new ESPLoaderCtor({
@@ -452,13 +672,51 @@ export async function flashDevice({
     enableTracing: false
   });
   let completed = false;
+  let activeOperation = null;
+  let restartPromise = null;
+  let completedResult = null;
+  const timeoutError = errorWithName("FlashTimeoutError", "Firmware installation timed out before it completed.");
+  const controller = new AbortController();
+  const stop = (error) => {
+    if (!controller.signal.aborted) controller.abort(error);
+  };
+  const abortFromCaller = () => {
+    stop(callerSignal?.reason instanceof Error
+      ? callerSignal.reason
+      : errorWithName("FlashAbortedError", "The USB connection ended during firmware installation."));
+  };
+  if (callerSignal) {
+    if (callerSignal.aborted) abortFromCaller();
+    else callerSignal.addEventListener("abort", abortFromCaller, { once: true });
+  }
+  const flashTransport = makeAbortableTransport(transport, controller.signal);
+  controller.signal.addEventListener("abort", () => {
+    onState({ stage: "stopping", percentage: 0, message: "Stopping active USB operation" });
+  }, { once: true });
+  const runDeviceOperation = async (operation, onSuccess) => {
+    throwIfAborted(controller.signal, "Firmware installation stopped.");
+    const pendingOperation = Promise.resolve().then(operation);
+    activeOperation = pendingOperation;
+    try {
+      await pendingOperation;
+    } finally {
+      if (activeOperation === pendingOperation) activeOperation = null;
+    }
+    if (onSuccess) onSuccess();
+    if (!completed) throwIfAborted(controller.signal, "Firmware installation stopped.");
+  };
 
   try {
-    return await withTimeout((async () => {
+    let written;
+    try {
+      written = await withTimeout((async () => {
+    throwIfAborted(controller.signal, "Firmware installation stopped.");
     validateManifest(manifest, manifestUrl);
     onState({ stage: "connecting", percentage: 0, message: "Checking device" });
-    await loader.main();
-    if (typeof loader.flashId === "function") await loader.flashId();
+    await runDeviceOperation(() => loader.main());
+    throwIfAborted(controller.signal, "Firmware installation stopped.");
+    if (typeof loader.flashId === "function") await runDeviceOperation(() => loader.flashId());
+    throwIfAborted(controller.signal, "Firmware installation stopped.");
 
     const chipFamily = loader.chip && loader.chip.CHIP_NAME;
     const build = selectManifestBuild(manifest, chipFamily, port.getInfo());
@@ -468,52 +726,123 @@ export async function flashDevice({
         chipFamily ? `${chipFamily} is not supported by this firmware.` : "The ESP chip could not be identified."
       );
     }
-    await assertChipRevisionSupported(loader, chipFamily);
+    await runDeviceOperation(() => assertChipRevisionSupported(loader, chipFamily));
+    throwIfAborted(controller.signal, "Firmware installation stopped.");
 
     onState({ stage: "preparing", percentage: 0, message: "Loading firmware" });
-    const fileArray = await fetchFirmwareParts(build, manifestUrl, fetchImpl, cryptoImpl);
+    const fileArray = await fetchFirmwareParts(build, manifestUrl, fetchImpl, cryptoImpl, controller.signal);
+    throwIfAborted(controller.signal, "Firmware download stopped.");
 
     if (eraseFirst) {
+      throwIfAborted(controller.signal, "Firmware installation stopped.");
       onState({ stage: "erasing", percentage: 0, message: "Erasing flash" });
-      await loader.eraseFlash();
+      await runDeviceOperation(() => loader.eraseFlash());
     }
 
     const writePhase = async (phaseFiles, firstGlobalIndex, stage, message) => {
-      onState({
-        stage,
-        percentage: combinedProgress(fileArray, firstGlobalIndex, 0, phaseFiles[0].data.length),
-        message
-      });
-      await loader.writeFlash({
-        fileArray: phaseFiles,
-        flashSize: "keep",
-        flashMode: "keep",
-        flashFreq: "keep",
-        eraseAll: false,
-        compress: true,
-        reportProgress(fileIndex, written, total) {
-          onState({
-            stage,
-            percentage: combinedProgress(fileArray, firstGlobalIndex + fileIndex, written, total),
-            message
-          });
-        }
-      });
+      for (let phaseIndex = 0; phaseIndex < phaseFiles.length; phaseIndex += 1) {
+        throwIfAborted(controller.signal, "Firmware installation stopped.");
+        const globalIndex = firstGlobalIndex + phaseIndex;
+        const phaseFile = phaseFiles[phaseIndex];
+        onState({
+          stage,
+          percentage: combinedProgress(fileArray, globalIndex, 0, phaseFile.data.length),
+          message
+        });
+        // esptool-js 0.6.1 loops over every entry in one writeFlash call. A late abort can arrive
+        // after flashDeflFinish but before its next internal flashDeflBegin, so pass one part at a
+        // time and regain control between commands before starting another address range.
+        await runDeviceOperation(() => loader.writeFlash({
+          fileArray: [phaseFile],
+          flashSize: "keep",
+          flashMode: "keep",
+          flashFreq: "keep",
+          eraseAll: false,
+          compress: true,
+          reportProgress(fileIndex, written, total) {
+            throwIfAborted(controller.signal, "Firmware write stopped.");
+            onState({
+              stage,
+              percentage: combinedProgress(fileArray, globalIndex + fileIndex, written, total),
+              message
+            });
+          }
+        }), stage === "activating" && globalIndex === fileArray.length - 1 ? () => {
+          // Once the last otadata command resolves, the new app is selected. Record that boundary
+          // before checking a just-arrived abort so a timeout cannot misreport a complete write.
+          completed = true;
+          completedResult = { chipFamily, build };
+        } : undefined);
+      }
     };
 
-    // Keep-mode may start on ota_1. Write bootloader/table/new ota_0 first; only after all of those
-    // succeeded write ota_data_initial in its own final phase, atomically selecting the new ota_0.
-    // A failure before this phase leaves the previously active image selected and bootable.
+    // Leave otadata unchanged until all preceding writes have succeeded. This preserves boot-
+    // selection metadata, not the previous app bytes or guaranteed bootability: ota_0 or the
+    // partition table may already have been overwritten.
     await writePhase(fileArray.slice(0, 3), 0, "writing", "Writing firmware");
+    throwIfAborted(controller.signal, "Firmware installation stopped.");
     await writePhase(fileArray.slice(3), 3, "activating", "Activating new firmware");
 
+    if (!completed) {
+      throwIfAborted(controller.signal, "Firmware installation stopped.");
+      completed = true;
+      completedResult = { chipFamily, build };
+    }
+    return completedResult;
+      })(), timeoutMs, timeoutError, () => stop(timeoutError), controller.signal);
+    } catch (error) {
+      if (activeOperation) {
+        try {
+          // Let the in-flight loader command cross its commit boundary before deciding whether
+          // cancellation happened before or after the final otadata write.
+          await activeOperation;
+        } catch (_operationError) {
+          // The original timeout or cancellation remains the reported failure unless activation
+          // completed successfully while the command was settling.
+        }
+      }
+      if (!completed) throw error;
+      // A deadline can race the final loader promise's resolution. Once otadata has committed,
+      // finish the reset and report the installed image instead of a failed flash.
+      written = completedResult;
+    }
+
+    // The flash phases are complete. Detach cancellation and the install deadline before the EN
+    // pulse; neither may turn a successful write into a timeout or release the port mid-reset.
+    if (callerSignal) callerSignal.removeEventListener("abort", abortFromCaller);
     onState({ stage: "restarting", percentage: 100, message: "Starting firmware" });
-    await loader.after("soft_reset");
-    completed = true;
-    return { chipFamily, build };
-    })(), timeoutMs, errorWithName("FlashTimeoutError", "Firmware installation timed out before it completed."));
+    let restarted = true;
+    try {
+      restartPromise = Promise.resolve().then(() => resetToUserFirmware(port, delay));
+      await withTimeout(restartPromise, cleanupTimeoutMs, new Error("Device reset timed out."));
+    } catch (error) {
+      restarted = false;
+      onLog(`Automatic restart unavailable: ${errorMessage(error)}\n`);
+      // Keep the serial port owned until the reset sequence settles. Promise.race timeouts do not
+      // cancel Web Serial setSignals() and must not let disconnect or a new session overtake it.
+      if (restartPromise) await restartPromise.catch(() => {});
+    }
+    return { ...written, restarted };
   } finally {
-    await settleTransport(transport, loader, completed ? undefined : "soft_reset", cleanupTimeoutMs);
+    if (callerSignal) callerSignal.removeEventListener("abort", abortFromCaller);
+    if (restartPromise) await restartPromise.catch(() => {});
+    if (controller.signal.aborted && activeOperation) {
+      try {
+        // The transport aborts its active Web Serial writer and reader. Keep this operation and
+        // port quarantined until its continuation has stopped; a later loader step must not race
+        // reset, disconnect, or a retry.
+        await activeOperation;
+      } catch (_error) {
+        // The failed command has settled; the aborted signal prevents any following phase.
+      }
+    }
+    if (controller.signal.aborted) await flashTransport.settleAbort();
+    await settleTransport(
+      transport,
+      !completed && loader.chip ? () => resetToUserFirmware(port, delay) : undefined,
+      cleanupTimeoutMs
+    );
+    flashTransport.dispose();
   }
 }
 
@@ -560,6 +889,10 @@ export function attachWebInstaller({
   let monitorLoop = null;
   let monitorPendingLine = "";
   let busy = false;
+  let activeInstallController = null;
+  let activeConnectController = null;
+  let monitorStartPromise = null;
+  let monitorStopPromise = null;
   const serialSupported = Boolean(
     serial && typeof serial.requestPort === "function" && globalThis.isSecureContext
   );
@@ -619,84 +952,101 @@ export function attachWebInstaller({
   const closePort = async () => {
     if (!selectedPort || (!selectedPort.readable && !selectedPort.writable)) return;
     try {
-      await withTimeout(
-        selectedPort.close(),
-        TRANSPORT_CLEANUP_TIMEOUT_MS,
-        new Error("Closing the serial port timed out.")
-      );
+      await selectedPort.close();
     } catch (_error) {
       // A USB reset or unplug can close the port before the page reaches cleanup.
     }
   };
 
   const stopMonitor = async ({ collapse = true } = {}) => {
+    if (monitorStopPromise) return monitorStopPromise;
     if (collapse) {
       root.dataset.monitor = "closed";
       monitorButton.setAttribute("aria-expanded", "false");
       monitor.setAttribute("aria-hidden", "true");
     }
-    monitorLive.textContent = "Stopped";
-    monitorLive.dataset.state = "stopped";
+    monitorStopPromise = (async () => {
+      // A start can still be waiting for port.open(). Let it finish before taking the reader,
+      // otherwise cleanup can miss a late-opened stream and release the port while it is active.
+      if (monitorStartPromise) {
+        try { await monitorStartPromise; } catch (_error) {}
+      }
+      monitorLive.textContent = "Stopped";
+      monitorLive.dataset.state = "stopped";
 
-    const reader = monitorReader;
-    const loop = monitorLoop;
-    monitorReader = null;
-    monitorLoop = null;
-    await stopSerialReader(reader, loop);
-    await closePort();
+      const reader = monitorReader;
+      const loop = monitorLoop;
+      monitorReader = null;
+      monitorLoop = null;
+      await stopSerialReader(reader, loop);
+      await closePort();
+    })();
+    try {
+      await monitorStopPromise;
+    } finally {
+      monitorStopPromise = null;
+    }
   };
 
   const startMonitor = async () => {
-    if (!selectedPort || busy) return;
-    root.dataset.monitor = "open";
-    monitorButton.setAttribute("aria-expanded", "true");
-    monitor.setAttribute("aria-hidden", "false");
-    monitorLive.textContent = "Connecting";
-    monitorLive.dataset.state = "connecting";
+    if (!selectedPort || busy || monitorStartPromise || monitorStopPromise) return;
+    const starting = (async () => {
+      root.dataset.monitor = "open";
+      monitorButton.setAttribute("aria-expanded", "true");
+      monitor.setAttribute("aria-hidden", "false");
+      monitorLive.textContent = "Connecting";
+      monitorLive.dataset.state = "connecting";
 
-    try {
-      await selectedPort.open({ baudRate: 115200, bufferSize: 8192 });
-      if (!selectedPort.readable) throw new Error("The serial input stream is unavailable.");
-      const reader = selectedPort.readable.getReader();
-      const decoder = new TextDecoder();
-      monitorReader = reader;
-
-      monitorLoop = (async () => {
-        try {
-          while (monitorReader === reader) {
-            const { value, done } = await reader.read();
-            if (done) break;
-            appendMonitor(decoder.decode(value, { stream: true }));
-          }
-          appendMonitor(decoder.decode(), { flush: true });
-        } catch (error) {
-          if (monitorReader === reader) appendStatusLine(`Serial monitor stopped: ${errorMessage(error)}`);
-        } finally {
-          try { reader.releaseLock(); } catch (_error) {}
-          if (monitorReader === reader) {
-            monitorReader = null;
-            monitorLoop = null;
-            monitorLive.textContent = "Stopped";
-            monitorLive.dataset.state = "stopped";
-          }
-        }
-      })();
-
-      appendStatusLine("Resetting the ESP into normal firmware mode");
       try {
-        await resetToUserFirmware(selectedPort);
-      } catch (error) {
-        appendStatusLine(`Automatic reset unavailable: ${errorMessage(error)} Press RESET once to see boot output.`);
-      }
+        await selectedPort.open({ baudRate: 115200, bufferSize: 8192 });
+        if (!selectedPort.readable) throw new Error("The serial input stream is unavailable.");
+        const reader = selectedPort.readable.getReader();
+        const decoder = new TextDecoder();
+        monitorReader = reader;
 
-      monitorLive.textContent = "Live";
-      monitorLive.dataset.state = "live";
-      appendStatusLine("Serial monitor started at 115200 baud");
-    } catch (error) {
-      monitorLive.textContent = "Error";
-      monitorLive.dataset.state = "error";
-      appendStatusLine(`Could not open serial monitor: ${errorMessage(error)}`);
-      await closePort();
+        monitorLoop = (async () => {
+          try {
+            while (monitorReader === reader) {
+              const { value, done } = await reader.read();
+              if (done) break;
+              appendMonitor(decoder.decode(value, { stream: true }));
+            }
+            appendMonitor(decoder.decode(), { flush: true });
+          } catch (error) {
+            if (monitorReader === reader) appendStatusLine(`Serial monitor stopped: ${errorMessage(error)}`);
+          } finally {
+            try { reader.releaseLock(); } catch (_error) {}
+            if (monitorReader === reader) {
+              monitorReader = null;
+              monitorLoop = null;
+              monitorLive.textContent = "Stopped";
+              monitorLive.dataset.state = "stopped";
+            }
+          }
+        })();
+
+        appendStatusLine("Resetting the ESP into normal firmware mode");
+        try {
+          await resetToUserFirmware(selectedPort);
+        } catch (error) {
+          appendStatusLine(`Automatic reset unavailable: ${errorMessage(error)} Press RESET once to see boot output.`);
+        }
+
+        monitorLive.textContent = "Live";
+        monitorLive.dataset.state = "live";
+        appendStatusLine("Serial monitor started at 115200 baud");
+      } catch (error) {
+        monitorLive.textContent = "Error";
+        monitorLive.dataset.state = "error";
+        appendStatusLine(`Could not open serial monitor: ${errorMessage(error)}`);
+        await closePort();
+      }
+    })();
+    monitorStartPromise = starting;
+    try {
+      await starting;
+    } finally {
+      if (monitorStartPromise === starting) monitorStartPromise = null;
     }
   };
 
@@ -718,12 +1068,35 @@ export function attachWebInstaller({
   };
 
   const disconnect = async () => {
-    busy = false;
-    await stopMonitor();
-    await closePort();
-    selectedPort = null;
-    setDisconnected();
-    setPageStatus("", "info");
+    if (busy) {
+      if (activeInstallController) {
+        activeInstallController.abort(errorWithName(
+          "FlashAbortedError",
+          "The USB connection ended during firmware installation."
+        ));
+      } else if (activeConnectController) {
+        activeConnectController.abort(errorWithName(
+          "DeviceProbeAbortedError",
+          "The USB connection ended during device checking."
+        ));
+      }
+      return;
+    }
+    busy = true;
+    connectButton.disabled = true;
+    disconnectButton.disabled = true;
+    resetButton.disabled = true;
+    installButton.disabled = true;
+    monitorButton.disabled = true;
+    try {
+      await stopMonitor();
+      await closePort();
+      selectedPort = null;
+      setPageStatus("", "info");
+    } finally {
+      busy = false;
+      setDisconnected();
+    }
   };
 
   // Permission removal identifies its target before asking the controller to disconnect. Close
@@ -741,13 +1114,16 @@ export function attachWebInstaller({
   };
 
   const connect = async () => {
-    if (!serial || typeof serial.requestPort !== "function" || !manifest || busy) return;
+    if (!serial || typeof serial.requestPort !== "function" || !manifest || busy || monitorStartPromise || monitorStopPromise) return;
     busy = true;
+    const connectController = new AbortController();
+    activeConnectController = connectController;
     connectButton.disabled = true;
     setPageStatus("Select your ESP board in the browser dialog.");
 
     try {
       const port = await serial.requestPort();
+      throwIfAborted(connectController.signal, "Device checking stopped.");
       selectedPort = port;
       connectionLabel.textContent = "Checking device…";
       setPageStatus("Checking chip and firmware compatibility…");
@@ -757,8 +1133,10 @@ export function attachWebInstaller({
         manifest,
         TransportCtor,
         ESPLoaderCtor,
-        onLog: appendMonitor
+        onLog: appendMonitor,
+        signal: connectController.signal
       });
+      throwIfAborted(connectController.signal, "Device checking stopped.");
       const info = port.getInfo ? port.getInfo() : {};
       deviceValue.textContent = result.chipFamily;
       connectionValue.textContent = describeSerialConnection(info);
@@ -788,14 +1166,20 @@ export function attachWebInstaller({
         appendStatusLine(`Connection failed: ${errorMessage(error)}`);
       }
     } finally {
+      if (activeConnectController === connectController) activeConnectController = null;
       busy = false;
       if (selectedPort) connectButton.disabled = true;
     }
   };
 
   const install = async () => {
-    if (!selectedPort || !manifest || busy) return;
+    if (!selectedPort || !manifest || busy || monitorStartPromise || monitorStopPromise) return;
     busy = true;
+    const installController = new AbortController();
+    activeInstallController = installController;
+    installController.signal.addEventListener("abort", () => {
+      setPageStatus("Stopping the active USB operation. Keep the board connected until it stops.", "info");
+    }, { once: true });
     await stopMonitor();
     root.dataset.flashing = "true";
     root.dataset.finished = "false";
@@ -808,9 +1192,10 @@ export function attachWebInstaller({
     setPageStatus("Keep this page open and leave the USB cable connected.");
     appendStatusLine(`Firmware installation ${manifest.version || ""} started`);
 
+    let written = false;
     try {
       const eraseFirst = Boolean(root.querySelector('input[name="install-mode"]:checked')?.value === "erase");
-      await flashDevice({
+      const flashed = await flashDevice({
         port: selectedPort,
         manifest,
         manifestUrl: new URL(manifestPath, location.href).toString(),
@@ -818,18 +1203,32 @@ export function attachWebInstaller({
         TransportCtor,
         ESPLoaderCtor,
         fetchImpl,
+        signal: installController.signal,
         onLog: appendMonitor,
         onState(state) {
+          if (state.stage === "restarting") {
+            written = true;
+            setPageStatus("Firmware written. Waiting for the board to restart…", "warning");
+          }
           setProgress(state.message, state.percentage);
+          if (state.stage === "stopping") {
+            setPageStatus("Stopping the active USB operation. Keep the board connected until it stops.", "info");
+          }
         }
       });
+      written = true;
+      if (flashed.restarted === false) {
+        appendStatusLine("Automatic restart unavailable. Press RESET on the board if the boot check does not finish.");
+      }
       setProgress("Verifying firmware boot", 100);
       setPageStatus(`Firmware written. Waiting for version ${manifest.version} to boot…`);
       await verifyBootImpl({
         port: selectedPort,
         expectedVersion: manifest.version,
-        onLog: appendMonitor
+        onLog: appendMonitor,
+        signal: installController.signal
       });
+      throwIfAborted(installController.signal, "Boot verification stopped.");
       root.dataset.flashing = "false";
       root.dataset.finished = "true";
       connectionLabel.textContent = "Restart complete";
@@ -840,10 +1239,23 @@ export function attachWebInstaller({
     } catch (error) {
       root.dataset.flashing = "false";
       root.dataset.finished = "false";
-      setPageStatus(`Installation failed: ${errorMessage(error)}`, "error");
-      appendStatusLine(`Installation failed: ${errorMessage(error)}`);
-      markSteps(2);
+      if (!written && error && (error.name === "FlashTimeoutError" || error.name === "FlashAbortedError" || error.name === "AbortError")) {
+        const message = error.name === "FlashTimeoutError"
+          ? "Installation timed out. Further flash phases were stopped. Reconnect and inspect the board before retrying."
+          : "USB disconnected during installation. Further flash phases were stopped. Reconnect and inspect the board before retrying.";
+        await closePort();
+        selectedPort = null;
+        setDisconnected();
+        setPageStatus(message, "error");
+        appendStatusLine(message);
+      } else {
+        const status = installFailureStatus(error, { written, version: manifest.version });
+        setPageStatus(status.message, status.kind);
+        appendStatusLine(status.statusLine);
+        markSteps(status.step);
+      }
     } finally {
+      activeInstallController = null;
       busy = false;
       const connected = Boolean(selectedPort && root.dataset.connected === "true");
       installButton.disabled = !connected;
@@ -854,7 +1266,7 @@ export function attachWebInstaller({
   };
 
   const resetDevice = async () => {
-    if (!selectedPort || busy) return;
+    if (!selectedPort || busy || monitorStartPromise || monitorStopPromise) return;
     busy = true;
     installButton.disabled = true;
     disconnectButton.disabled = true;
