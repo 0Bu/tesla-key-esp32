@@ -118,7 +118,7 @@ const usbAbsentApprovalProceeds = /(?:(?:approval|authorization)[^.!?]*(?:absent
 const reviewedSkillSha256 = new Map([
   ["add-logic-test", "565e7fd944695e8f90035a8d0033267af49b50b9e71c26253d2d3af09da6df39"],
   ["ci-heal", "b20e6e9c2cc0c43226ef9ce69b88d684108b31a4a2afce6e899ff60498567c58"],
-  ["deploy", "0660b9a7f88c7d0e58fedfc10ce9e22cfdaec77c6fa08eda3828122b38686703"],
+  ["deploy", "d3e876cdc221b10eee25fe44a3e304b0ac4fc763978e89fd92e749af9a0db5f6"],
   ["device-diag", "7d9d6eb7907195fc61b56a3325e79a03844fd794b64fa7d4a50a81a7d79af170"],
   ["display-preview", "e565dd7bb96f08c69d3ed6ed58c51164e3493f2e246b8a954a89eff39d05d0a4"],
   ["feature-docs", "17a486258723b88a5d1257284a33e295529bd52331d3b066335e832b666f1884"],
@@ -127,7 +127,7 @@ const reviewedSkillSha256 = new Map([
   ["ota-release-verify", "be87cac35d352d395bb8af0e22e4b5526c9414c02c6d11fd409192dc808d5e13"],
   ["pr-hygiene", "8491da669686acc5e00741e5e1fcfec6d2caf29abb8ebff0479ca973f20e87f1"],
   ["project-review", "0540bb7361180a5c12b0cf706aa865a0012fdca65c45e0e5c21cdcf0a310d778"],
-  ["ship", "4682fce356d2ae85d6a147a27935701251d1b3a84a2c33c35da48a90bf3637fd"],
+  ["ship", "8d412c8139c477c7b5c4235a58d39d51079347ed9834e8f483afe5218d959a61"],
   ["skill-audit", "3983f0cb2608b06b44a5eb6724bcce0e6c7084733fc9768eaea78acfb7ac742f"],
   ["usb-recovery", "4b1204f124f3408f0e1ff7152ba15c33a1e762791c50923ba27e56ddf9b07135"],
   ["vehicle-command-audit", "e797f795c9ab8f616feda45d2e925f5a88d25e6fa0a0257c71eac32d456049ba"],
@@ -148,6 +148,7 @@ const shipMergeGateContracts = [
   "- [x] $project-review clean — merge gate @ <sha>",
   "- [x] $pr-hygiene clean — content gate @ <sha>",
   "- [x] $feature-docs synced — merge gate @ <sha>",
+  "- [x] $vehicle-command-audit clean — merge gate @ <sha>",
   "`$project-review` does not establish `$pr-hygiene` readiness",
 ];
 const productionFlashAuthorityCommand =

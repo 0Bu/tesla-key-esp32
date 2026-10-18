@@ -37,7 +37,10 @@ gh pr view "$PR" --json number,state,mergeable,headRefOid,body
 - **Merge gate:** [`tools/agent-hooks/require-pr-gates.sh`](../../../tools/agent-hooks/require-pr-gates.sh)
   blocks merge unless the PR body's `- [x] $project-review clean — merge gate @ <sha>` and
   `- [x] $pr-hygiene clean — content gate @ <sha>` boxes are ticked and current. A
-  feature-relevant diff also requires `- [x] $feature-docs synced — merge gate @ <sha>`. The
+  feature-relevant diff also requires `- [x] $feature-docs synced — merge gate @ <sha>`, and a
+  vehicle-command-relevant diff (`gate_vehicle_command_relevant` in
+  [`pr-gate-lib.sh`](../../../tools/agent-hooks/pr-gate-lib.sh)) also requires
+  `- [x] $vehicle-command-audit clean — merge gate @ <sha>`. The
   command must carry that same full head SHA in `--match-head-commit`. If any record is missing or
   stale, run the corresponding read-only review/sync workflow and report that a separately
   authorized PR-body update is needed; `$project-review` does not establish `$pr-hygiene`

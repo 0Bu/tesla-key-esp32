@@ -24,7 +24,8 @@ multi-tier testing (targeted, comprehensive, and cluster evcc E2E), and branch c
 
 ## Phase 1: Local Analysis & Findings Fix Loop
 
-Before committing or pushing, verify workspace cleanliness, code style, unit tests, and contracts locally:
+Before committing or pushing, run the full local contract of
+[AGENTS.md](../../../AGENTS.md#implementation-and-evidence), narrowest relevant checks first:
 
 1. **Whitespace & Conflict Marker Check**:
    ```bash
@@ -34,9 +35,11 @@ Before committing or pushing, verify workspace cleanliness, code style, unit tes
    ```bash
    ./scripts/repo-lint.sh
    ```
-3. **Host Mock & Unit Test Suite**:
+3. **Host Mock, Unit & Sanitizer Suites**:
    ```bash
    ./scripts/run-mock-tests.sh
+   ./scripts/run-mock-tests.sh --require-all
+   ./scripts/run-sanitizer-tests.sh
    ```
 4. **Build Contracts & Partition Checks**:
    ```bash
@@ -47,11 +50,15 @@ Before committing or pushing, verify workspace cleanliness, code style, unit tes
    ./scripts/test-pr-gates.sh
    ./tools/agent-config/selftest.sh
    ```
-6. **Firmware Compile Check (Conditional)**:
-   If firmware files under `main/` were modified and Docker is available:
+6. **Four-Target Firmware Contract**:
+   Before handoff, run the full contract with the pinned container. For firmware-relevant changes
+   (`gate_firmware_size_relevant` in [`pr-gate-lib.sh`](../../../tools/agent-hooks/pr-gate-lib.sh)),
+   measure size and stack first ([size rule](../../rules/firmware-size-budget.md)):
    ```bash
-   ./scripts/idf-docker.sh idf.py -B build set-target esp32s3 build
+   ./scripts/idf-docker.sh ./scripts/ci-build-verify.sh "$(cat version.txt)" "$(git rev-parse HEAD)"
    ```
+   If Docker is unavailable, stop and report the firmware contract as **not run**; never skip it
+   silently.
 
 **Fix Loop**: If any check fails, analyze the root cause, apply the fix to code or tests, and re-run Phase 1 until all checks pass cleanly.
 

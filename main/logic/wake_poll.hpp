@@ -36,10 +36,13 @@
 //      re-arming while the car remains continuously connected and awake (issue #308). The system
 //      remains completely quiescent so an idle parked car can reach sleep undisturbed.
 //
-// Both use the same NO_WAKE_SKIP poll: a car already back asleep is skipped, so the device still
-// never causes a wake: we only ever piggyback on one the car did on its own. One poll refreshes the
-// SOC cache; if it reports Charging/Starting the existing charging arm opens the window and normal
-// session polling takes over, otherwise the car re-sleeps undisturbed.
+// Both use the same NO_WAKE_SKIP poll: a car already back asleep is skipped, so the device never
+// asks for a wake; we only piggyback on one the car did on its own. NO_WAKE_SKIP skips only while
+// the last VCSEC report says ASLEEP: with the state UNKNOWN or AWAKE it still sends its
+// Infotainment request (a SessionInfo request first when no session exists), and whether that
+// request itself wakes the main computer is not measured.
+// One poll refreshes the SOC cache; if it reports Charging/Starting the existing charging arm
+// opens the window and normal session polling takes over, otherwise the car re-sleeps.
 //
 // Why arming requires a *debounced* asleep run for the wake-edge trigger:
 // A single ASLEEP reading is not proof of sleep: the VCSEC flag flaps AWAKE↔ASLEEP (~60 s) while

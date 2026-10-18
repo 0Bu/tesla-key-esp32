@@ -621,6 +621,151 @@ int main() {
                "Peer::encrypt diverges from reference AES-GCM");
     }
     {
+        // The block above feeds Peer::encrypt the vector's own metadata. The metadata the library
+        // builds itself for every request (Client calls Peer::construct_ad_buffer) must equal that
+        // protocol.md command vector byte for byte. Epoch, expiry, counter and flags are taken from
+        // the vector's TLVs, so only the library's metadata assembly is under test.
+        std::map<uint8_t, std::vector<uint8_t>> tlv;
+        for (size_t i = 0; i + 1 < metadata.size() && metadata[i] != Signatures_Tag_TAG_END;
+             i += 2 + metadata[i + 1]) {
+            if (i + 2 + metadata[i + 1] > metadata.size()) break;
+            tlv[metadata[i]].assign(metadata.begin() + i + 2, metadata.begin() + i + 2 + metadata[i + 1]);
+        }
+        auto be32 = [](const std::vector<uint8_t>& v) {
+            return v.size() == 4 ? (uint32_t{v[0]} << 24) | (uint32_t{v[1]} << 16) | (uint32_t{v[2]} << 8) | v[3]
+                                 : 0u;
+        };
+        auto context = kat::loaded_client_context();
+        Peer peer(UniversalMessage_Domain_DOMAIN_INFOTAINMENT, context, tc::TEST_VIN);
+        const auto& epoch = tlv[Signatures_Tag_TAG_EPOCH];
+        const auto& vin = tlv[Signatures_Tag_TAG_PERSONALIZATION];
+        uint8_t ad[80];
+        size_t ad_size = 0;
+        bool ready = context && epoch.size() == 16 && vin.size() == std::strlen(tc::TEST_VIN) &&
+                     std::memcmp(vin.data(), tc::TEST_VIN, vin.size()) == 0 &&
+                     peer.set_epoch(epoch.data()) == TeslaBLE_Status_E_OK;
+        peer.set_counter(be32(tlv[Signatures_Tag_TAG_COUNTER]));
+        ready = ready && peer.construct_ad_buffer(Signatures_SignatureType_SIGNATURE_TYPE_AES_GCM_PERSONALIZED,
+                                                  tc::TEST_VIN, be32(tlv[Signatures_Tag_TAG_EXPIRES_AT]), ad,
+                                                  &ad_size, be32(tlv[Signatures_Tag_TAG_FLAGS])) ==
+                             TeslaBLE_Status_E_OK;
+        expect(ready && kat::hex(ad, ad_size) == kat::kMetadata,
+               "library-built request metadata matches the official command vector (epoch, expiry, counter, flags)",
+               "library-built request metadata diverges from the official command vector");
+    }
+    {
+        // Each response counter is checked against the request it answers (vehicle-command's
+        // per-receiver window). The pinned library's window accepts the first counter, refuses a
+        // repeat (zero included), accepts an older unseen counter once while it is fewer than 64
+        // below the highest, refuses one 64 or more below it, and starts afresh with the next
+        // request. vehicle-command's window is 32 wide; the 64-wide one is an inherited departure
+        // recorded in ADR-0005, and these checks hold for both. The firmware call sites that feed
+        // the window are pinned by the runtime contract (the CarServer site leaves counter 0, a
+        // plaintext reply, to the dispatcher's one-plaintext-response rule).
+        Client scoped;
+        scoped.set_vin(tc::TEST_VIN);
+        bool ready = scoped.load_private_key(reinterpret_cast<const uint8_t*>(tc::CLIENT_PRIVATE_KEY_PEM),
+                                             std::strlen(tc::CLIENT_PRIVATE_KEY_PEM) + 1) == 0;
+        Signatures_SessionInfo info = Signatures_SessionInfo_init_zero;
+        std::memcpy(info.epoch, tc::TEST_EPOCH, sizeof info.epoch);
+        std::memcpy(info.publicKey.bytes, tc::EXPECTED_VEHICLE_PUBLIC_KEY, 65);
+        info.publicKey.size = 65;
+        info.clock_time = 1234;
+        info.counter = 7;
+        auto* peer = scoped.get_peer(UniversalMessage_Domain_DOMAIN_INFOTAINMENT);
+        ready = ready && peer && peer->update_session(&info) == 0 && peer->is_initialized();
+        const bool window = ready &&
+                            peer->validate_response_counter(0) && !peer->validate_response_counter(0) &&
+                            peer->validate_response_counter(5) && peer->validate_response_counter(3) &&
+                            !peer->validate_response_counter(3) && !peer->validate_response_counter(5) &&
+                            peer->validate_response_counter(69) && !peer->validate_response_counter(4);
+        expect(window,
+               "response window: first counter, repeats (zero included), in-window reorder and expiry",
+               "response replay window accepts a repeat or refuses a valid reordered response");
+        uint8_t payload[] = {0x08, 0x01};
+        uint8_t wire[2048];
+        size_t wire_size = 0;
+        const bool fresh = window &&
+                           scoped.build_universal_message_with_payload(
+                               payload, sizeof payload, UniversalMessage_Domain_DOMAIN_INFOTAINMENT, wire,
+                               &wire_size, true) == 0 &&
+                           peer->validate_response_counter(3) && !peer->validate_response_counter(3);
+        expect(fresh, "the next request starts a fresh response window",
+               "a response counter seen for the previous request stays refused for the next one");
+    }
+    {
+        // The known answer above pins Peer's metadata assembly; this pins what Client feeds it. A real
+        // encrypted Infotainment request is decoded the way the vehicle decodes it, protocol.md
+        // metadata is serialized from the message's OWN epoch, expiry, counter and flags, and the
+        // reference AES-GCM with that metadata must reproduce the message's ciphertext and tag.
+        Client scoped;
+        scoped.set_vin(tc::TEST_VIN);
+        bool ready = scoped.load_private_key(reinterpret_cast<const uint8_t*>(tc::CLIENT_PRIVATE_KEY_PEM),
+                                             std::strlen(tc::CLIENT_PRIVATE_KEY_PEM) + 1) == 0;
+        Signatures_SessionInfo info = Signatures_SessionInfo_init_zero;
+        std::memcpy(info.epoch, tc::TEST_EPOCH, sizeof info.epoch);
+        std::memcpy(info.publicKey.bytes, tc::EXPECTED_VEHICLE_PUBLIC_KEY, 65);
+        info.publicKey.size = 65;
+        info.clock_time = 1234;
+        info.counter = 7;
+        auto* peer = scoped.get_peer(UniversalMessage_Domain_DOMAIN_INFOTAINMENT);
+        ready = ready && peer && peer->update_session(&info) == 0 && peer->is_initialized();
+        const uint8_t payload[] = {0x08, 0x01};
+        uint8_t wire[2048];
+        size_t wire_size = 0;
+        UniversalMessage_RoutableMessage msg = UniversalMessage_RoutableMessage_init_default;
+        pb_istream_t in = pb_istream_from_buffer(wire, 0);
+        bool decoded = ready && scoped.build_universal_message_with_payload(
+                                    const_cast<uint8_t*>(payload), sizeof payload,
+                                    UniversalMessage_Domain_DOMAIN_INFOTAINMENT, wire, &wire_size, true) == 0;
+        if (decoded) {
+            in = pb_istream_from_buffer(wire, wire_size);
+            decoded = pb_decode(&in, UniversalMessage_RoutableMessage_fields, &msg) &&
+                      msg.which_payload == UniversalMessage_RoutableMessage_protobuf_message_as_bytes_tag &&
+                      msg.which_sub_sigData == UniversalMessage_RoutableMessage_signature_data_tag &&
+                      msg.sub_sigData.signature_data.which_sig_type ==
+                          Signatures_SignatureData_AES_GCM_Personalized_data_tag;
+        }
+        bool sealed = false;
+        if (decoded) {
+            const auto& gcm = msg.sub_sigData.signature_data.sig_type.AES_GCM_Personalized_data;
+            std::vector<uint8_t> metadata_from_wire;
+            auto tlv = [&](uint8_t tag, const uint8_t* value, size_t size) {
+                metadata_from_wire.push_back(tag);
+                metadata_from_wire.push_back(static_cast<uint8_t>(size));
+                metadata_from_wire.insert(metadata_from_wire.end(), value, value + size);
+            };
+            auto be32 = [&](uint8_t tag, uint32_t value) {
+                const uint8_t bytes[4] = {static_cast<uint8_t>(value >> 24), static_cast<uint8_t>(value >> 16),
+                                          static_cast<uint8_t>(value >> 8), static_cast<uint8_t>(value)};
+                tlv(tag, bytes, sizeof bytes);
+            };
+            const uint8_t type = Signatures_SignatureType_SIGNATURE_TYPE_AES_GCM_PERSONALIZED;
+            const uint8_t domain = UniversalMessage_Domain_DOMAIN_INFOTAINMENT;
+            tlv(Signatures_Tag_TAG_SIGNATURE_TYPE, &type, 1);
+            tlv(Signatures_Tag_TAG_DOMAIN, &domain, 1);
+            tlv(Signatures_Tag_TAG_PERSONALIZATION, reinterpret_cast<const uint8_t*>(tc::TEST_VIN),
+                std::strlen(tc::TEST_VIN));
+            tlv(Signatures_Tag_TAG_EPOCH, gcm.epoch, sizeof gcm.epoch);
+            be32(Signatures_Tag_TAG_EXPIRES_AT, gcm.expires_at);
+            be32(Signatures_Tag_TAG_COUNTER, gcm.counter);
+            if (msg.flags != 0) be32(Signatures_Tag_TAG_FLAGS, msg.flags);  // protocol.md: flags only when set
+            metadata_from_wire.push_back(Signatures_Tag_TAG_END);
+            const auto& body = msg.payload.protobuf_message_as_bytes;
+            const auto reference = kat::gcm_encrypt(tc::EXPECTED_SESSION_KEY,
+                                                    std::vector<uint8_t>(gcm.nonce, gcm.nonce + sizeof gcm.nonce),
+                                                    kat::sha256(metadata_from_wire),
+                                                    std::vector<uint8_t>(payload, payload + sizeof payload));
+            // The request counter is the session's (7) advanced for this request.
+            sealed = gcm.counter == 8 && msg.flags != 0 && body.size == sizeof payload &&
+                     reference.size() == sizeof payload + 16 &&
+                     std::memcmp(body.bytes, reference.data(), sizeof payload) == 0 &&
+                     std::memcmp(gcm.tag, reference.data() + sizeof payload, 16) == 0;
+        }
+        expect(sealed, "Client seals each request with metadata built from the counter, expiry and flags it sends",
+               "Client's request AAD does not match the counter, expiry or flags on the wire");
+    }
+    {
         // A response sealed the way the vehicle seals it: the metadata of protocol.md "Response
         // metadata", serialized here independently of the library, carries the RESPONSE's counter.
         // The vehicle counts responses per request (VCSEC sends up to three), so that counter need not
