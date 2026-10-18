@@ -28,6 +28,7 @@ python3 "$repo_root/scripts/check-stack-usage.py" --self-test
 python3 "$repo_root/scripts/check-build-gate-contract.py" --self-test
 "$repo_root/scripts/e2e_evcc.sh" --self-test
 bash "$repo_root/scripts/idf-docker.sh" --self-test 2>/dev/null
+python3 "$repo_root/scripts/test-pages-shell-contract.py" --bash "$BASH"
 temp="$(mktemp -d)"
 trap 'rm -rf "$temp"' EXIT
 stage="$temp/fw"

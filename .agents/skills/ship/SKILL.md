@@ -422,6 +422,7 @@ the exact version/platform observed for at least 100 seconds from the first post
 baseline, with monotonic uptime advancing by the same minimum and tracking wall-clock time
 within five seconds, plus the boot-local `/diag?redact=1` confirmation that ESP-IDF accepted
 rollback cancellation. If the
-device still reports the old version after an OTA, check `/ota/status` `message` before
-retrying — a "signature bad" there means the running image's trust anchor doesn't match the
-published key (see the USB-recovery note in the project memory/docs).
+device still reports the old version after an OTA, check `/ota/status` `message` before retrying.
+Validation or signature failures do not uniquely establish a trust-anchor mismatch. Compare
+candidate identity, integrity and signing-authority evidence before proposing separately
+authorized USB recovery; see [Security](../../../docs/SECURITY.md).

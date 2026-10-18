@@ -116,7 +116,7 @@ const usbNoApprovalNeeded = /(?:live verification|HTTP requests?|(?:GET|POST|HTT
 const usbOtaNotStateChanging = /(?:GET|POST) \/ota\/check[^.!?]*(?:is not|isn't|not) state-changing/i;
 const usbAbsentApprovalProceeds = /(?:(?:approval|authorization)[^.!?]*(?:absent|missing|not obtained)|without (?:separate )?(?:approval|authorization))[^.!?]*(?:continue|proceed|run|contact|send|request)/i;
 const reviewedSkillSha256 = new Map([
-  ["add-logic-test", "565e7fd944695e8f90035a8d0033267af49b50b9e71c26253d2d3af09da6df39"],
+  ["add-logic-test", "b37264357f243110c29275fb9c4e19dcbaba692920fa248a2ba951632ee6f2ac"],
   ["ci-heal", "ea3440e3333ff118413f28c88ac0ac71d4d51ab1d62cdadbea5b18d187e72074"],
   ["deploy", "611cdc6653dea5ee10cee0a11fa96e5c06cc2795d87bb014101aa0af081a9528"],
   ["device-diag", "ce0a4340dd439276837b6baef9ab2800f78ee0a6e16ae5f0eb18c2e27db571e4"],
@@ -124,12 +124,12 @@ const reviewedSkillSha256 = new Map([
   ["feature-docs", "17a486258723b88a5d1257284a33e295529bd52331d3b066335e832b666f1884"],
   ["flash-esp32", "09709dd8b6c8609c22c8a4094ce4e02c54965309b27fe2d4ecab80f5d10de27b"],
   ["mock-test", "a440930b6ade485b1ca206a5cca56798deaa89a6606cc9eaee306b7f93042d9f"],
-  ["ota-release-verify", "ced9ee5fe846332f8fc19ab06ab2a6ad7b5e7f9f27197ebef08cfd8dc6140280"],
+  ["ota-release-verify", "5aab20d651b1e8f9ba86afdaba88b4af16576ced439610a6f39d4f21f266589a"],
   ["pr-hygiene", "8491da669686acc5e00741e5e1fcfec6d2caf29abb8ebff0479ca973f20e87f1"],
   ["project-review", "0540bb7361180a5c12b0cf706aa865a0012fdca65c45e0e5c21cdcf0a310d778"],
-  ["ship", "e06bdbc3cb50fce47cef77aad5444db87ec1f49398e757e97cd62de2158d3f26"],
+  ["ship", "864d3d4476b5616b09068f6b97c79be134ca17e6a0cdeac508ea61211ce9e4c0"],
   ["skill-audit", "5852572f672fe0acca85dba64cf3552b056ccccc04335b9df5b44da7850c225e"],
-  ["usb-recovery", "0b6d7ff67e2f2c3086dd116dd9232daf7f5c613215618f39cbcc7567f71eb092"],
+  ["usb-recovery", "60f4e399d9e652056140e226a69ec230d3cdf0862176ecb2a9a70febdcff6503"],
   ["vehicle-command-audit", "e797f795c9ab8f616feda45d2e925f5a88d25e6fa0a0257c71eac32d456049ba"],
 ]);
 const featureDocsScopeTokens = [

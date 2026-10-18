@@ -428,7 +428,7 @@ if [ -n "${BOOTLOADER:-}" ] || [ -n "${PARTITION_TABLE:-}" ]; then
   EXTRA_FLASH_ARGS=("$BOOT_OFFSET" "$BOOTLOADER" 0x8000 "$PARTITION_TABLE")
 fi
 if ! esptool --chip "$TARGET" -p "$PORT" write_flash \
-    "${EXTRA_FLASH_ARGS[@]}" 0x20000 "$APP"; then
+    ${EXTRA_FLASH_ARGS[@]+"${EXTRA_FLASH_ARGS[@]}"} 0x20000 "$APP"; then
   echo "REFUSING: recovery write failed; otadata was not activated" >&2; exit 1
 fi
 if ! esptool --chip "$TARGET" -p "$PORT" erase_region 0xf000 0x2000; then
@@ -451,7 +451,7 @@ if [ -n "${BOOTLOADER:-}" ] || [ -n "${PARTITION_TABLE:-}" ]; then
   EXTRA_FLASH_ARGS=("$BOOT_OFFSET" "$BOOTLOADER" 0x8000 "$PARTITION_TABLE")
 fi
 if ! esptool --chip "$TARGET" -p "$PORT" --before no-reset --after no-reset \
-    write_flash "${EXTRA_FLASH_ARGS[@]}" 0x20000 "$APP"; then
+    write_flash ${EXTRA_FLASH_ARGS[@]+"${EXTRA_FLASH_ARGS[@]}"} 0x20000 "$APP"; then
   echo "REFUSING: recovery write failed; otadata was not activated" >&2; exit 1
 fi
 if ! esptool --chip "$TARGET" -p "$PORT" --before no-reset --after no-reset \

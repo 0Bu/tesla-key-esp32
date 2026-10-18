@@ -22,10 +22,10 @@ one that runs. Never copy logic into a header and leave the original behind.
 There are **two kinds of unit**, and they reach that differently:
 - **Delegated** (the usual case) — the consumer is firmware C++, so it `#include`s the header and
   calls `tk::…`. Follow step 2.
-- **Mirrored** — the consumer is the browser or a Python tool, which cannot include a C++ header.
-  Then the header is a **spec** no firmware TU includes, the consumer carries a mirror of it, and a
-  **parity harness** compiles the C++, dumps its decisions over an exhaustive sweep, re-decides the
-  same inputs with the shipped consumer source, and diffs. Follow step 2b instead.
+- **Mirrored** — a browser or Python consumer cannot include a C++ header, so it carries a mirror
+  of the native header. Firmware may also include and use that same header. A
+  **parity harness** compiles the C++, dumps its decisions, compares the same covered inputs with
+  the shipped consumer source, and fails on a mismatch. Follow step 2b instead.
   Existing examples: `logic/display_model.hpp` ↔ `tools/display_sim.py`, and
   `logic/ble_row.hpp` ↔ the `BLE_ROW` region of `main/www/app.js`.
 
@@ -130,10 +130,10 @@ evidence token (e.g. `"test": "test/test_logic.cpp", "evidence": "test_<name>("`
 scripts/run-mock-tests.sh
 ```
 
-(Equivalent to `cmake -S test -B build_mock && cmake --build build_mock && ctest --test-dir
-build_mock --output-on-failure`; on a host without cmake the script falls back to compiling
-`test/test_logic.cpp` directly with g++/clang++ — same flags, same result.) It compiles with
-`-Wall -Wextra -Werror`, so warnings fail too.
+The runner builds the C++ binaries through `cmake -S test -B build_mock && cmake --build
+build_mock && ctest --test-dir build_mock --output-on-failure`, or direct g++/clang++ compilation
+when CMake is unavailable. Compilation uses `-Wall -Wextra -Werror`, so warnings fail too.
+These commands alone do not replace the runner's additional contract, parity and browser checks.
 A red result blocks the Stop hook — fix it before claiming done.
 
 ### 5. (If the value mirrors a compile-time constant) lock it with a `static_assert`
@@ -141,13 +141,12 @@ A red result blocks the Stop hook — fix it before claiming done.
 When the firmware also hard-codes the value as a macro/literal, mirror the `target.hpp` pattern:
 `static_assert` the compile-time literal against `tk::<fn>(...)` at its call site so the macro and
 the host-tested mapping can't drift (see the image-suffix `static_assert` in
-[`main/ota_update.cpp`](../../../main/ota_update.cpp), described in
-[`test/README.md`](../../../test/README.md)).
+[`main/ota_update.cpp`](../../../main/ota_update.cpp)).
 
 ### 6. Keep docs in sync
 
-If the new unit is a notable core, add a row to the coverage table in
-[`test/README.md`](../../../test/README.md) — for a mirrored unit, name its parity harness in the
-"used by" column and say the header is spec-only, so nobody later "fixes" the missing firmware
-include. If it changes how a documented subsystem behaves,
+If the new unit is a notable core, update the appropriate evidence summary in
+[`test/README.md`](../../../test/README.md). For a mirrored unit, name its shipped consumer and
+parity harness. Describe the header as spec-only only when no firmware translation unit uses it.
+If it changes how a documented subsystem behaves,
 the `$project-review` skill will flag any doc/code drift — run it before merging.
