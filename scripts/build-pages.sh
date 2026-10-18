@@ -205,7 +205,7 @@ if [[ -f "$repo_root/scripts/generate-ota-changelog.py" ]]; then
     --channel "$channel" \
     --version "$version" \
     --source-sha "$source_sha" \
-    "${published_ref_args[@]}" \
+    ${published_ref_args[@]+"${published_ref_args[@]}"} \
     --output "$out/changelog.json"
 fi
 
