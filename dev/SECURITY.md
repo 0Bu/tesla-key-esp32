@@ -17,6 +17,8 @@ charging, but cannot unlock or drive. NVS also holds WiFi credentials, VIN and M
 
 First-boot key generation enables hardware entropy before WiFi/BLE. IDF6 PSA draws from the hardware
 RNG. Devices keyed before this fix need a deliberate re-key/re-pair, not an automatic identity change.
+Remote pairing faults and error text are advisory only: they cannot rotate the key, erase sessions,
+or trigger enrollment. Re-enrollment uses the stored key only after an explicit user request.
 Rotation rolls back failed persistence and blocks signing while identity/cleanup is ambiguous.
 VIN transitions durably journal cross-namespace work. Protocol/key compatibility and reference
 departures are recorded in [ADR-0002](adr/0002-idf6-mbedtls4-crypto-seam.md) and
@@ -61,7 +63,11 @@ identity work needs explicit authorization and a backup/rollback plan.
 Port 80 has no authentication or TLS. Any LAN peer can call commands, change configuration/identity,
 trigger updates or remove crash evidence; the key role bounds car privileges, not device control.
 Never port-forward the device. Setup AP is open and provisioning uses plaintext HTTP; keep its
-window short. mDNS advertises version, not VIN.
+window short. With stored credentials the open setup AP closes when the network comes up, after 10
+minutes without a client, and 30 minutes after opening even with one; a failed close is retried
+with backoff, the boot does not continue while the AP is up, and a power cycle reopens it.
+First-time setup, stored credentials that fail validation, and a credential rollback that could not
+be saved keep it open until the form is saved. mDNS advertises version, not VIN.
 
 Browser mutations require a device-owned Host (name or current lease IP), matching Origin and no
 cross-site fetch. This includes POST and legacy mutating GETs for update check, diagnostic verbosity/

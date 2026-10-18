@@ -279,5 +279,5 @@ configuration belongs to that client's documentation; do not expose the board pu
 | `tools/call` returns `isError: true`, `"vehicle not reachable"` | Car out of BLE range or link cold — check range and pairing; an intentional wake may be needed before retrying. |
 | `tools/call` returns the car's own refusal text (e.g. `complete`) | Not an error in the chain — the car declined (battery already at limit, etc.). |
 | `get_vehicle_state` has only `vin`/`paired`/`link` | Fresh boot with the car asleep: caches are empty until the first contact. |
-| Commands fail although the car is nearby | Check `paired` in `get_vehicle_state` / the web UI — a lost pairing (key deleted on the car) needs a re-pair. |
+| Commands fail although the car is nearby | Check BLE availability and the web UI's attention notice. `paired` reports a stored VCSEC session, not fresh vehicle acceptance. If enrollment is needed, explicitly send the existing key through the web UI or `POST /send_key`, confirm on the touchscreen and verify authenticated status. Do not regenerate the key from an error hint. |
 | HTTPS / auth errors from a strict client | The endpoint is plain HTTP without credentials by design — see [`SECURITY.md`](SECURITY.md#http-api-exposure). Use a client/bridge that permits HTTP on a trusted LAN. |
