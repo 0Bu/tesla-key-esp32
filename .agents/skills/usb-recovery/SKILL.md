@@ -503,7 +503,10 @@ curl -fsS "http://$DEVICE_IP/ota/status" | jq .
 ```
 
 - `version` / `platform` should read the just-flashed release (not the old `1.4.0` floor).
-- `paired:true` confirms `nvs@0x9000` was preserved — no NFC re-enrol needed.
+- `paired:true` reports the firmware's VCSEC-session presence result. It does not prove private-key
+  or other configuration preservation, complete NVS integrity, or a successful vehicle handshake.
+  The prescribed app/otadata write ranges do not overlap NVS; assess this status field only as
+  session-presence evidence.
 - `/ota/status` should now settle to up-to-date / no `available` update, and future OTAs verify
   because the running app's signature block (its trust anchor) is once again the CI key — no more
   "signature bad". A live *successful* OTA can't be demonstrated when you've just flashed the
