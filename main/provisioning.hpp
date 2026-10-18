@@ -6,6 +6,15 @@
 // entered from a phone without recompiling. On save it writes wifi_ssid/wifi_pass/
 // vin into the given config store (namespace "tesla_cfg") and reboots.
 //
-// This function NEVER returns — it is the terminal state until the user reboots
-// the device by saving the form. Call it instead of connecting to WiFi.
-void provisioning_run(NvsStorageAdapter& config_store);
+// provisioning_run() NEVER returns — it is the terminal state of first-time setup until the
+// user reboots the device by saving the form. Call it instead of connecting to WiFi.
+[[noreturn]] void provisioning_run(NvsStorageAdapter& config_store);
+
+// The setup portal after a boot-time WiFi failure WITH stored credentials (#386). The portal joins
+// the running station as APSTA and retries stored credentials (logic/setup_portal.hpp). Before the
+// open-time cap, this policy defers new attempts while an AP client is present; station-event retries
+// remain independent. AP closure is requested at the idle/open-time limits and retried with backoff
+// on failure. Saving the form still reboots. Returns once the network is up and the portal torn down,
+// so boot continues in place. Never reboots on its own. Call only after net_start_wifi() failed; when it
+// never started the station (rejected credentials), this is provisioning_run() and never returns.
+void provisioning_run_with_retry(NvsStorageAdapter& config_store);

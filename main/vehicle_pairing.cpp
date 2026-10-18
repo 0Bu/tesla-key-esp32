@@ -1,6 +1,6 @@
-// Pairing lifecycle: the auto-pair supervisor task, key generation/fingerprinting,
-// session/cache invalidation, the VIN-change reset, the signed VCSEC health probe
-// (revocation canary) and the whitelist-add (pair). Part of the VehicleController
+// Pairing lifecycle: the supervisor task, key generation/fingerprinting,
+// session/cache invalidation, the VIN-change reset, the non-waking VCSEC health probe
+// (advisory connection-health hint) and explicit whitelist-add. Part of the VehicleController
 // implementation split — see vehicle_ctrl_internal.hpp.
 
 #include "vehicle_ctrl.hpp"
@@ -28,20 +28,9 @@
 
 static const char* TAG = "vehicle_ctrl";
 
-// Automatic pairing supervisor. Single-flight command discipline: an unsigned
-// "Whitelist Add Key" lingers until the car confirms it (or ~180 s pass), so
-// anything queued behind it is blocked.
-//
-// This supervisor keeps the queue clean and runs ONE command at a time per round:
-//   1. Probe with a signed VCSEC poll. If the key is already authorised this
-//      establishes + persists the session (done). If not, it fails *cleanly* with
-//      KEY_NOT_ON_WHITELIST and is popped — no clog.
-//   2. Send the whitelist-add. The car whitelists the key when the user confirms on
-//      screen but sends NO completing commandStatus. pair() owns command_mutex_ through
-//      its absolute timeout and generation-aware flush, so nothing can run behind it.
-//   3. Probe once more on a clean link — now authorised, this establishes the session.
-// Timed-out queued work is invalidated before link reset synchronously flushes
-// callbacks, so the next round starts clean and no late completion reaches another request.
+// Pairing supervisor: perform bounded, read-only status/health probes. Whitelist Add Key is
+// sent only by the explicit user action /send_key; a remote error, missing session or startup
+// state must never silently enrol an identity onto a vehicle.
 void VehicleController::auto_pair_task_fn_(void* arg) {
   try {
     auto* self = static_cast<VehicleController*>(arg);
@@ -54,6 +43,7 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
     vTaskDelay(pdMS_TO_TICKS(4000));  // let WiFi/BLE come up first
     bool warned_no_vin = false;
     tk::PeriodicLogState unpaired_notice;
+    tk::PeriodicLogState recovery_notice;
     while (true) {
       // Pairing/crypto is an allocation-rich 8 KiB task. Record its historical minimum at the one
       // point every supervision round reaches, before an exception or early continue can skip it.
@@ -66,12 +56,12 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
         // No vehicle to target: without a plausible 17-char VIN we must not connect or enrol —
         // that risks whitelisting our key onto an arbitrary nearby Tesla. Idle quietly instead
         // of spinning a connect→10 s-timeout loop; /scan still lists nearby cars. Logged once.
-        // Re-checked each cycle so enrolment starts automatically once a VIN is saved (the web
+        // Re-checked each cycle so read-only status probes start once a VIN is saved (the web
         // UI's POST /set_vin reboots into a configured state, but this stays robust regardless).
         if (!self->has_plausible_vin()) {
             if (!warned_no_vin) {
-                ESP_LOGW(TAG, "auto-pair: no VIN configured — pairing disabled. Set a VIN via the "
-                              "setup AP or POST /set_vin, then enrolment starts automatically.");
+                ESP_LOGW(TAG, "auto-pair: no VIN configured — pairing probes disabled. Set a VIN via the "
+                              "setup AP or POST /set_vin; enrollment remains an explicit user action.");
                 warned_no_vin = true;
             }
             // Keep a fresh, LISTING-ONLY view of nearby Teslas for the web UI (nearby() sorts
@@ -95,9 +85,8 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
             continue;
         }
 
-        // regenerate_key() returned without confirming whether its NVS commit landed. Do not
-        // let pairing_lost_ authorize another rotation: only a reboot can reconstruct client state
-        // from storage and classify the durable fingerprint.
+        // regenerate_key() returned without confirming whether its NVS commit landed. Only a
+        // reboot can reconstruct client state from storage and classify the durable fingerprint.
         if (self->key_reload_required_.load()) {
             self->key_runtime_safe_.store(false);
             self->believed_paired_.store(false);
@@ -131,9 +120,9 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
         const bool key_probe_ok = self->storage_ &&
                                   self->storage_->probe_blob(tk::nvs_contract::kPrivateKey,
                                                              stored_key_present);
-        const bool pairing_lost = self->pairing_lost_.load();
+        const bool recovery_hint = self->pairing_recovery_hint_.load();
         const tk::AutomaticKeyAction key_action = tk::decide_automatic_key_action(
-            key_probe_ok, stored_key_present, self->key_runtime_safe_.load(), pairing_lost);
+            key_probe_ok, stored_key_present, self->key_runtime_safe_.load(), recovery_hint);
         if (key_action == tk::AutomaticKeyAction::StorageUnavailable) {
             self->key_runtime_safe_.store(false);
             self->believed_paired_.store(false);
@@ -148,24 +137,27 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
             vTaskDelay(pdMS_TO_TICKS(30000));
             continue;
         }
-        if (key_action == tk::AutomaticKeyAction::Generate) {
-            self->believed_paired_.store(false);  // stop the observer acting during re-enrol
-            if (pairing_lost) {
-                ESP_LOGW(TAG, "auto-pair: KEY DELETED on the car — clearing pairing, generating a new key, restarting enrolment");
-                self->repair_notice_.store(true);
-            } else {
-                ESP_LOGW(TAG, "auto-pair: verified first-boot key absence — generating a storage-backed key");
+        if (key_action == tk::AutomaticKeyAction::RecoveryRequired) {
+            // Remote status/error evidence is only a volatile recovery hint. Keep the durable
+            // key and sessions intact; explicit /send_key reuses the same key if the user
+            // decides to enrol it again. Continue below only with a non-waking health probe.
+            self->repair_notice_.store(true);
+            if (tk::periodic_log_due(
+                    recovery_notice,
+                    static_cast<uint64_t>(esp_timer_get_time()) / 1000ULL,
+                    tk::kAutoPairNoticeRepeatMs)) {
+                ESP_LOGW(TAG, "auto-pair: vehicle authorization needs attention — preserving key and sessions; explicit enrolment required");
             }
+        }
+        if (key_action == tk::AutomaticKeyAction::Generate) {
+            self->believed_paired_.store(false);  // no session exists for the new first-boot key
+            ESP_LOGW(TAG, "auto-pair: verified first-boot key absence — generating a storage-backed key");
             if (!self->generate_key()) {
                 // If the key committed but cleanup did not, the dedicated branch above retries
                 // cleanup only; otherwise runtime identity stays fail-closed until retry/reboot.
                 ESP_LOGE(TAG, "auto-pair: key generation/rotation failed or cleanup incomplete — pairing remains disabled");
                 vTaskDelay(pdMS_TO_TICKS(30000));
                 continue;
-            }
-            if (pairing_lost) {
-                ESP_LOGI(TAG, "auto-pair: new key generated (%s) — re-enrol it on the car",
-                         self->key_fingerprint().c_str());
             }
             continue;
         }
@@ -174,19 +166,15 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
             // Re-entering enrolment after a real paired state is a state change and should
             // announce its instructions immediately rather than inherit the old hourly clock.
             tk::periodic_log_reset(unpaired_notice);
-            // A live session means (re-)pairing succeeded; drop the re-auth notice.
-            self->repair_notice_ = false;
-            // We're paired: arm the message observer so a key-rejection fault on any
-            // signed command (e.g. the background charge poll → ERROR_UNKNOWN_KEY_ID)
-            // trips pairing_lost_ even while the cached VCSEC session keeps succeeding.
+            // Keep the message observer armed. A stored session does not prove the vehicle
+            // still accepts it, and an error hint never mutates the stored identity.
             self->believed_paired_ = true;
-            // Paired — periodically run a signed VCSEC health poll (~30 s) so a key deleted
-            // on the car side is noticed even with no evcc traffic. The poll hits the always-
-            // on body controller (VCSEC), which does NOT wake the car's main computer (wake
-            // sequences are infotainment-only), so it never keeps a parked car awake. Three
+            // With a stored session, periodically run a VCSEC GET_STATUS health poll (~30 s) even
+            // without evcc traffic. This GET_STATUS probe does not request a wake or open
+            // Infotainment. Three
             // outcomes, distinguished so /diag clearly says what happened:
-            //   • success            → key still valid
-            //   • auth rejection     → car refused our key (likely deleted) — confirm now
+            //   • successful response → clear only the volatile hint; session validity is unproven
+            //   • auth rejection     → retain a volatile recovery hint
             //   • neither (no reply) → car unreachable (asleep / out of range / weak link)
             // Deliberately do NOT clear retry_deadline_ here. health_probe_ runs through
             // send_vcsec_, which first takes command_mutex_ and therefore BLOCKS until any
@@ -199,47 +187,50 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
             // Waiting). idle_until_next_health_poll_ re-arms it for the next cycle.
             int  streak_before = self->auth_fail_streak_;
             bool ok            = self->health_probe_();
-            if (self->pairing_lost_) continue;  // 2nd strike already → revoked (top of loop)
 
             if (ok) {
-                ESP_LOGD(TAG, "auto-pair: health check OK — key still valid");
-                // Idle ~30 s, but bail out fast if the message observer flags a deletion
-                // (a faulting charge poll mid-wait) so we re-key promptly, not 30 s later.
+                ESP_LOGD(TAG, "auto-pair: health response received — stored session validity remains unverified");
+                // Only a successful health response clears a recovery hint. Merely
+                // finding a persisted session is insufficient evidence.
+                self->pairing_recovery_hint_.store(false);
+                self->auth_fail_streak_.store(0);
+                self->repair_notice_.store(false);
+                tk::periodic_log_reset(recovery_notice);
                 self->idle_until_next_health_poll_();
             } else if (self->auth_fail_streak_ > streak_before) {
-                // The car answered but REFUSED our key → almost certainly deleted on the
-                // car side. Confirm immediately (don't wait a whole cycle) so we react in
-                // ~1-2 s; a second auth rejection trips pairing_lost_ in make_result_cb_.
-                ESP_LOGW(TAG, "auto-pair: car refused our key (auth fail %d/2) — re-checking to confirm…",
-                         (int)self->auth_fail_streak_);
-                self->health_probe_();
-                if (self->pairing_lost_) continue;
-                vTaskDelay(pdMS_TO_TICKS(1000));
+                // A rejected or ambiguous response is only a hint. Never issue an immediate
+                // confirmation burst or mutate identity; retry at the bounded normal cadence.
+                self->repair_notice_.store(true);
+                if (tk::periodic_log_due(
+                        recovery_notice,
+                        static_cast<uint64_t>(esp_timer_get_time()) / 1000ULL,
+                        tk::kAutoPairNoticeRepeatMs)) {
+                    ESP_LOGW(TAG, "auto-pair: vehicle authorization could not be verified (auth hint %d/2) — preserving key; retrying at the normal interval",
+                             (int)self->auth_fail_streak_);
+                }
+                self->idle_until_next_health_poll_();
             } else {
-                // No auth answer at all → could not reach/talk to the car. NOT a revocation;
-                // keep the pairing and retry. The connection layer already emits the first
+                // No answer is inconclusive, never evidence to replace identity. Keep the
+                // pairing and retry. The connection layer already emits the first
                 // failure and its hourly heartbeat; keep this per-probe summary at DEBUG so
                 // the supervisor cannot recreate the warning storm above that rate limiter.
                 ESP_LOGD(TAG, "auto-pair: car not reachable over BLE — can't verify key right now, will retry");
+                if (recovery_hint) self->repair_notice_.store(true);
                 self->idle_until_next_health_poll_();
             }
             continue;
         }
 
-        // Not paired (enrolling): disarm the observer — key-rejection faults are expected
-        // here and must not be mistaken for a revocation.
+        // No stored VCSEC session: do not infer that the key was deleted and do not send a
+        // Whitelist Add automatically. A user can explicitly submit the existing key with
+        // /send_key; this bounded status probe can discover an already-enrolled key meanwhile.
         self->believed_paired_ = false;
         // Leaving the paired steady state also retires its retry countdown. The idle wait
         // deliberately leaves its deadline armed-but-expired so the row reads "retrying…"
-        // across the probe that follows (see idle_until_next_health_poll_), but enrolment has
-        // no health-poll schedule at all — carrying that stale deadline in would pin the row
-        // on "retrying…" for the entire time the user is being asked to tap an NFC keycard.
+        // across the next read-only status probe.
         self->retry_deadline_.store(0);
 
-        // 1. Probe for an existing whitelist entry. Once the key is enrolled — by resting a
-        //    Tesla NFC keycard on the center-console reader and confirming the "Add key"
-        //    dialog the car then shows on its touchscreen (the dialog only appears while a
-        //    card is present) — it shows up here as a usable session.
+        // Read-only probe for an existing whitelist entry. It cannot enrol or rotate a key.
         VehicleStatusResult st;
         self->get_vehicle_status(st, tk::ConnectOrigin::Background, 6000);
         if (self->has_session()) {
@@ -247,55 +238,17 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
             continue;
         }
 
-        // Keep setup guidance visible on the state transition and as an hourly reminder, but
-        // not on every ~38 s automatic round. Per-round detail is available only in a build
-        // compiled with maximum DEBUG; production INFO/syslog stays bounded.
+        // Keep setup guidance visible on the state transition and as an hourly reminder.
         const bool announce_unpaired = tk::periodic_log_due(
             unpaired_notice, static_cast<uint64_t>(esp_timer_get_time()) / 1000ULL,
             tk::kAutoPairNoticeRepeatMs);
-
-        // 2. Send the whitelist-add ONCE. This is what makes the car
-        //    show the "Add key" dialog on its touchscreen — but the car only shows it while
-        //    a Tesla NFC keycard is resting on the center-console reader. We do NOT block
-        //    waiting on it: the "Whitelist Add Key" never completes cleanly on this car (no
-        //    completing commandStatus) — success is detected by probing (step 3), not by
-        //    pair()'s return. The short wait just lets the message reach the car; pair()'s
-        //    generation-aware timeout path invalidates and flushes the lingering request while
-        //    it still owns command_mutex_, so the probes below run clean. Sending it only once per round
-        //    (instead of every ~45 s block) also stops the car re-prompting after the key
-        //    is already registered.
+        self->repair_notice_.store(true);
         if (announce_unpaired) {
-            ESP_LOGI(TAG, "auto-pair: not paired — requesting key enrolment from the car…");
+            ESP_LOGI(TAG, "auto-pair: no stored session — preserving key; use the web UI's explicit send-key action if enrolment is intended");
         } else {
-            ESP_LOGD(TAG, "auto-pair: not paired — requesting key enrolment from the car…");
+            ESP_LOGD(TAG, "auto-pair: no stored session — preserving key; explicit enrolment action is required");
         }
-        self->pair(tk::ConnectOrigin::Background, 5000);
-        if (announce_unpaired) {
-            ESP_LOGI(TAG, "auto-pair: enrolment request attempted — place a Tesla NFC keycard on the center-console reader, then confirm 'Add key' on the touchscreen; waiting for the key to register…");
-        } else {
-            ESP_LOGD(TAG, "auto-pair: enrolment request attempted — place a Tesla NFC keycard on the center-console reader, then confirm 'Add key' on the touchscreen; waiting for the key to register…");
-        }
-
-        // 3. Poll for the resulting session at a short cadence so an enrolment that lands
-        //    mid-round — the instant a keycard is tapped — is noticed within a few seconds
-        //    instead of after a full slow round. A failed probe (not yet enrolled) returns
-        //    on its timeout; a successful one (now enrolled) returns in ~1 s and persists
-        //    the session, so has_session() flips and we stop here.
-        bool established = false;
-        for (int i = 0; i < 8; i++) {
-            self->get_vehicle_status(st, tk::ConnectOrigin::Background, 3000);
-            if (self->has_session()) { established = true; break; }
-            vTaskDelay(pdMS_TO_TICKS(400));
-        }
-        if (established) {
-            ESP_LOGI(TAG, "auto-pair: key registered on the car — session established, now PAIRED");
-            continue;
-        }
-        if (announce_unpaired) {
-            ESP_LOGI(TAG, "auto-pair: not registered yet — place a Tesla NFC keycard on the console reader and confirm 'Add key' on screen (or move closer if the car is out of BLE range)");
-        } else {
-            ESP_LOGD(TAG, "auto-pair: not registered yet — place a Tesla NFC keycard on the console reader and confirm 'Add key' on screen (or move closer if the car is out of BLE range)");
-        }
+        self->idle_until_next_health_poll_();
       } catch (const std::exception& e) {
           ESP_LOGE(TAG, "auto-pair iteration threw (%s) — pausing, will retry", e.what());
           vTaskDelay(pdMS_TO_TICKS(2000));
@@ -347,9 +300,8 @@ VehicleController::KeyGenerationResult VehicleController::generate_key_result(
 }
 
 bool VehicleController::generate_key() {
-    // Auto-pair must re-sample every authorizing fact AFTER taking the transaction lock. Reading
-    // pairing_lost_ first and then blocking here allowed a concurrent HTTP rotation to clear the
-    // flag while the stale true still replaced its freshly committed key a second time.
+    // Re-sample identity state AFTER taking the transaction lock. Automatic generation is
+    // allowed only for verified first-boot absence; a stale remote hint cannot authorize it.
     // Acquire OTA exclusion first, matching the HTTP/first-boot lock order (OTA gate then
     // command_mutex_). An active OTA check/download returns immediately; once held, no OTA worker
     // can start and reboot while the key journal is in flight.
@@ -368,9 +320,9 @@ bool VehicleController::generate_key() {
     bool key_exists = false;
     const bool probe_ok = storage_ &&
                           storage_->probe_blob(tk::nvs_contract::kPrivateKey, key_exists);
-    const bool pairing_lost = pairing_lost_.load();
+    const bool pairing_recovery_hint = pairing_recovery_hint_.load();
     const tk::AutomaticKeyAction action = tk::decide_automatic_key_action(
-        probe_ok, key_exists, key_runtime_safe_.load(), pairing_lost);
+        probe_ok, key_exists, key_runtime_safe_.load(), pairing_recovery_hint);
     if (action != tk::AutomaticKeyAction::Generate) {
         key_runtime_safe_.store(action == tk::AutomaticKeyAction::Continue);
         ESP_LOGE(TAG, "automatic key generation refused after locked identity recheck (action=%d)",
@@ -514,8 +466,8 @@ tk::KeyRotationResult VehicleController::generate_key_locked_() {
     }
     // A new key invalidates any existing pairing: the stored session belonged to the
     // previous key/whitelist entry, so a fresh enrolment + handshake is required.
-    // Wipe the session and cached data so has_session() flips to false (the UI shows
-    // "not paired" and hides the controls/SOC) and the auto-pair loop re-enrolls.
+    // Wipe the session and cached data so has_session() flips to false. The UI then offers
+    // an explicit same-key enrollment action; the supervisor does not enroll automatically.
     bool cleanup_complete = false;
     try {
         cleanup_complete = finish_key_rotation_cleanup_();
@@ -589,8 +541,8 @@ bool VehicleController::finish_key_rotation_cleanup_() {
     pairing_cleanup_pending_.store(false);
     key_reload_required_.store(false);
     key_runtime_safe_.store(true);
-    pairing_lost_.store(false);     // re-keying + cleanup resolved the pending revocation
-    auth_fail_streak_.store(0);     // and the streak that may have led here
+    pairing_recovery_hint_.store(false);  // explicit key rotation resolved the volatile hint
+    auth_fail_streak_.store(0);
     return true;
 }
 
@@ -760,9 +712,8 @@ VehicleController::NewVehicleResetResult VehicleController::reset_for_new_vehicl
 
 // Idle between two VCSEC health polls. The countdown the web UI shows and the wait it
 // counts down come from the SAME constant here, so the row can never promise a retry at a
-// time the loop doesn't actually retry. Polls in short steps so a key deletion flagged by
-// the message observer mid-wait (a faulting charge poll) re-keys promptly rather than a
-// full cycle later.
+// time the loop doesn't actually retry. The wait is fixed even when a volatile recovery hint
+// is set, so an inconclusive health result cannot create a tight probe loop.
 //
 // Deliberately leaves the deadline ARMED on the way out. Clearing it here (or, equivalently,
 // just before the probe) opened a phase-less window: the probe runs through send_vcsec_,
@@ -777,28 +728,21 @@ void VehicleController::idle_until_next_health_poll_() {
     constexpr uint32_t kIdleMs = 30000;
     constexpr uint32_t kStepMs = 500;
     retry_deadline_.store(deadline_in_(kIdleMs));
-    for (uint32_t w = 0; w < kIdleMs / kStepMs && !pairing_lost_; w++) vTaskDelay(pdMS_TO_TICKS(kStepMs));
+    for (uint32_t w = 0; w < kIdleMs / kStepMs; w++) vTaskDelay(pdMS_TO_TICKS(kStepMs));
 }
 
 bool VehicleController::health_probe_(int timeout_ms) {
-    // A signed VCSEC GET_STATUS — the one signed command a Charging-Manager key is ALWAYS
-    // authorised for, so its outcome unambiguously reflects whitelist state: success ⇒ key
-    // still valid; KEY_NOT_ON_WHITELIST or a tagless session-info ("authentication failed")
-    // ⇒ key deleted. Because role refusal cannot masquerade as revocation here (there is no
-    // role that can't read status), this is the ONE caller that passes auth_fail_is_revocation
-    // so make_result_cb_ lets an "authentication failed" feed the two-strike pairing_lost_.
-    // NO_WAKE_FAIL, not WAKE_IF_NEEDED: today the library ignores the wake policy on the
-    // VCSEC path entirely (the body controller is always on, no wake is ever needed), so
-    // this is behaviour-neutral — but "never wake the car from the periodic probe" is a
-    // guarantee of ours, and it must not silently invert if a future tesla-ble starts
-    // honouring the policy for VCSEC too. NO_WAKE_SKIP would be wrong here: it skips while
-    // the car is believed asleep, which would blind both revocation detection and the
-    // VCSEC sleep/wake sampling exactly when the car sleeps.
+    // A plaintext VCSEC GET_STATUS is a non-waking health probe. Its result can update the
+    // volatile recovery hint, but cannot prove that a key was deleted or authorize identity
+    // replacement. A successful response clears only the hint; plaintext VehicleStatus can
+    // also complete this request and does not prove that the stored session remains usable.
+    // NO_WAKE_FAIL preserves the background no-wake policy. NO_WAKE_SKIP would suppress
+    // asleep sampling, which would blind the connection-health hint and VCSEC sleep tracking.
     return send_vcsec_("VCSEC Health Poll", [](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
         return c->build_vcsec_information_request_message(
             VCSEC_InformationRequestType_INFORMATION_REQUEST_TYPE_GET_STATUS, b, l);
     }, WakePolicy::NoWakeFail, timeout_ms, tk::ConnectOrigin::Background,
-       /*auth_fail_is_revocation=*/true,
+       /*auth_fail_is_health_probe=*/true,
        tk::CompletionTimeoutPolicy::BackgroundHealth);
 }
 
@@ -924,16 +868,16 @@ std::string VehicleController::key_fingerprint() {
 }
 
 bool VehicleController::pair(tk::ConnectOrigin origin, int timeout_ms) {
+    if (origin != tk::ConnectOrigin::Foreground) {
+        ESP_LOGE(TAG, "automatic Whitelist Add is disabled — enrollment requires explicit user action");
+        return false;
+    }
     if (!tk::runtime_admission_vehicle_ready()) return false;
     if (timeout_ms <= 0) return false;
     const uint32_t deadline = deadline_in_(static_cast<uint32_t>(timeout_ms));
     tk::SemGuard cmd_guard(command_mutex_, ticks_until_(deadline));
     if (!cmd_guard) {
-        if (origin == tk::ConnectOrigin::Foreground) {
-            ESP_LOGW(TAG, "pair deadline exhausted waiting for another request");
-        } else {
-            ESP_LOGD(TAG, "background pair deadline exhausted waiting for another request");
-        }
+        ESP_LOGW(TAG, "pair deadline exhausted waiting for another request");
         return false;
     }
     // Check only after taking command_mutex_: a concurrent generate_key() may have changed the
@@ -957,29 +901,20 @@ bool VehicleController::pair(tk::ConnectOrigin origin, int timeout_ms) {
                 role, VCSEC_KeyFormFactor_KEY_FORM_FACTOR_CLOUD_KEY, b, l);
         },
         WakePolicy::NoWakeFail, deadline, origin,
-        /*auth_fail_is_revocation=*/false,
-        origin == tk::ConnectOrigin::Foreground
-            ? tk::CompletionTimeoutPolicy::ForegroundWarn
-            : tk::CompletionTimeoutPolicy::ExpectedSilent);
+        /*auth_fail_is_health_probe=*/false,
+        tk::CompletionTimeoutPolicy::ForegroundWarn,
+        true /* completes_on_transmit: the vehicle does not acknowledge Whitelist Add */,
+        0 /* max_retries: a partial BLE write may already have reached the vehicle */);
 
     if (!outcome.completed && !outcome.error.empty()) {
-        if (origin == tk::ConnectOrigin::Foreground) {
-            ESP_LOGW(TAG, "pair request failed before confirmation: %s", outcome.error.c_str());
-        } else {
-            ESP_LOGD(TAG, "background pair request failed before confirmation: %s",
-                     outcome.error.c_str());
-        }
+        ESP_LOGW(TAG, "Whitelist Add transmission was not confirmed: %s", outcome.error.c_str());
     } else if (!outcome.completed) {
-        if (origin == tk::ConnectOrigin::Foreground) {
-            ESP_LOGW(TAG, "pair not confirmed — confirm the pairing request on the car's screen");
-        } else {
-            ESP_LOGD(TAG, "background pair request not confirmed");
-        }
+        ESP_LOGW(TAG, "Whitelist Add was not confirmed as transmitted");
     } else if (!outcome.success) {
-        ESP_LOGW(TAG, "pair rejected: %s",
+        ESP_LOGW(TAG, "Whitelist Add transmission failed: %s",
                  outcome.error.empty() ? "vehicle returned failure" : outcome.error.c_str());
     } else {
-        ESP_LOGI(TAG, "pair confirmed on the car's screen");
+        ESP_LOGI(TAG, "Whitelist Add transmitted; vehicle approval remains unconfirmed");
     }
     return outcome.completed && outcome.success;
 }

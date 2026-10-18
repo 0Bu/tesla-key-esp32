@@ -291,7 +291,7 @@ public:
                      uint32_t timeout_ms = kDefaultCommandTimeoutMs, uint32_t now_ms = 0,
                      const BleUuid& uuid = {},
                      std::function<void(bool, const std::string&)> on_complete = nullptr,
-                     bool completes_on_transmit = false) {
+                     bool completes_on_transmit = false, uint32_t max_retries = 3) {
         if (queue_count_ >= kMaxQueueSize) {
             return 0; // Queue full
         }
@@ -312,6 +312,7 @@ public:
         cmd.state = CommandState::Idle;
         cmd.phase = CommandPhase::Queued;
         cmd.completes_on_transmit = completes_on_transmit;
+        cmd.max_retries = max_retries;
 
         queue_count_++;
         return cmd.id;

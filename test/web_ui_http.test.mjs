@@ -434,6 +434,55 @@ test("render initializes channel state from running version or status ota channe
   assert.equal(uiDev.element("fwSub").textContent, "Release channel");
 });
 
+test("climate chips label cached settings without inferring AC power or current activity", () => {
+  const { context, element } = loadUi();
+  for (const phases of [undefined, 0, 1, 2, 3]) {
+    for (const last_seen_s of [undefined, 0, 300, 86400]) {
+      context.render({
+        paired: true, last_seen_s,
+        vehicle: { status: "Stopped", actual_amps: 16, volts: 230, phases },
+        tele: { climate: { cop: "On", cop_cooling: true, front_defrost: true } }
+      });
+      const chips = element("hstats").innerHTML;
+      assert.match(chips, /Overheat setting/);
+      assert.match(chips, /Defrost \(cached\)/);
+      assert.match(chips, /Last reported cabin overheat protection setting/);
+      assert.match(chips, /Last reported defrost state/);
+      assert.match(chips, /current activity and power are unknown/);
+      assert.doesNotMatch(chips, /kW|AC draw|class="stat (warn|info)"/);
+    }
+  }
+});
+
+test("climate settings do not require charger input and reject unknown active states", () => {
+  const { context } = loadUi();
+  assert.match(context.copChip({ tele: { climate: { cop: "FanOnly" } } }), /Fan only/);
+  assert.match(context.defrostChip({ tele: { climate: { rear_defrost: true, defrost_mode: "Max" } } }), /Rear \/ Max/);
+  for (const cop of [undefined, "Off", "Unknown", "<script>"]) {
+    assert.equal(context.copChip({ tele: { climate: { cop } } }), "");
+  }
+  for (const defrost_mode of [undefined, "Off", "Unknown", "<script>"]) {
+    assert.equal(context.defrostChip({ tele: { climate: { front_defrost: false, rear_defrost: false, defrost_mode } } }), "");
+  }
+  const escaped = context.copChip({ tele: { climate: { cop: "On", cop_temp: '<img src=x onerror="alert(1)">' } } });
+  assert.doesNotMatch(escaped, /<img/);
+  assert.match(escaped, /&lt;img/);
+  assert.equal(context.copChip({}), "");
+  assert.equal(context.defrostChip({}), "");
+});
+
+test("charging power remains vehicle-reported alongside explicitly cached climate chips", () => {
+  const { context, element } = loadUi();
+  context.render({
+    paired: true, last_seen_s: 0,
+    vehicle: { status: "Charging", power: 11, amps: 16, actual_amps: 16, volts: 230, phases: 2 },
+    tele: { climate: { cop: "On", front_defrost: true } }
+  });
+  assert.match(element("hstats").innerHTML, /Power.*11<small>kW/);
+  assert.match(element("hstats").innerHTML, /Defrost \(cached\)/);
+  assert.doesNotMatch(context.copChip(context.state) + context.defrostChip(context.state), /kW/);
+});
+
 test("hero card remains visible when vehicle link is unreachable or unknown", () => {
   const { context, element } = loadUi();
   const hero = element("hero");
@@ -453,6 +502,21 @@ test("hero card remains visible when vehicle link is unreachable or unknown", ()
   assert.equal(hero.classList.contains("hide"), false);
   assert.match(element("hlabel").innerHTML, /Parked/);
   assert.match(element("hstats").innerHTML, /75/);
+});
+
+test("unpaired connected vehicle prompts explicit key send before touchscreen approval", () => {
+  const { context, element } = loadUi();
+  context.render({
+    paired: false,
+    key_present: true,
+    vin: "5YJ3E1EA7KF000316",
+    ble: { connected: true },
+    link: "unknown"
+  });
+  assert.match(element("hlabel").innerHTML, /Ready to pair/);
+  assert.match(element("hsub").textContent, /Send the existing key above, then approve/i);
+  assert.doesNotMatch(element("hsub").textContent, /^Approve the request/i);
+  assert.equal(element("bannerAct").textContent, "Send existing key");
 });
 
 test("render handles s.link === 'idle' without ReferenceError and sets chips", () => {
@@ -483,6 +547,63 @@ test("render displays safe mode banner when sys.safe_mode is active", () => {
   const rb = element("reauthBanner");
   assert.equal(rb.classList.contains("show"), true);
   assert.match(rb.querySelector(".bt").innerHTML, /Safe Mode active/);
+});
+
+test("reauth notice preserves the existing key and remains visible with a stored session", () => {
+  const { context, element } = loadUi();
+  context.render({
+    link: "idle",
+    paired: true,
+    key_present: true,
+    reauth: true,
+    key_fingerprint: "AA:BB:CC:DD"
+  });
+  const banner = element("reauthBanner");
+  assert.equal(banner.classList.contains("show"), true);
+  assert.match(banner.querySelector(".bt").innerHTML, /existing key was preserved/i);
+  assert.equal(element("bannerAct").textContent, "Send existing key");
+  assert.match(element("keySub").textContent, /Existing key preserved/);
+});
+
+test("explicit recovery action sends the existing key once and never regenerates it", async () => {
+  const { context, element } = loadUi();
+  const requests = [];
+  const messages = [];
+  let polls = 0;
+  context.toast = (message, kind) => messages.push({ message, kind });
+  context.poll = () => { polls++; };
+  context.fetch = async (url, options) => {
+    requests.push({ url, options });
+    return { ok: true, status: 200, async json() { return { result: true, role: "charging_manager", reason: "transmitted" }; } };
+  };
+  context.render({ link: "idle", paired: true, key_present: true, reauth: true });
+
+  await context.bannerAction();
+
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, "/send_key");
+  assert.equal(requests[0].options.method, "POST");
+  assert.equal(requests.some(request => request.url.includes("gen_keys")), false);
+  assert.equal(messages.at(-1).kind, "ok");
+  assert.match(messages.at(-1).message, /approval is not yet confirmed/i);
+  assert.equal(polls, 1);
+  assert.equal(element("bannerAct").disabled, false);
+});
+
+test("ambiguous key-send response is surfaced without an automatic resend", async () => {
+  const { context } = loadUi();
+  const requests = [];
+  const messages = [];
+  context.toast = (message, kind) => messages.push({ message, kind });
+  context.poll = () => {};
+  context.fetch = async (url) => { requests.push(url); throw new Error("connection lost"); };
+  context.render({ link: "idle", paired: false, key_present: true, reauth: true });
+
+  await context.bannerAction();
+
+  assert.deepEqual(requests, ["/send_key"]);
+  assert.equal(messages.at(-1).kind, "err");
+  assert.match(messages.at(-1).message, /result is unknown/i);
 });
 
 test("toggleCharge renders server rejection reason on HTTP 502", async () => {

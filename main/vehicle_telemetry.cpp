@@ -771,10 +771,8 @@ void VehicleController::handle_signed_message_fault_(const UniversalMessage_Rout
                 peer->reset();
                 if (err_domain == UniversalMessage_Domain_DOMAIN_INFOTAINMENT) {
                     command_runner_.info_session().reset();
-                    if (storage_) (void)storage_->remove(tk::nvs_contract::kSessionInfotainment);
                 } else {
                     command_runner_.vcsec_session().reset();
-                    if (storage_) (void)storage_->remove(tk::nvs_contract::kSessionVcsec);
                 }
                 has_session_error = true;
                 break;
@@ -782,8 +780,9 @@ void VehicleController::handle_signed_message_fault_(const UniversalMessage_Rout
                 break;
         }
     }
-    // R3: Run key-revocation detector unconditionally for all signed message faults
-    // so late ERROR_UNKNOWN_KEY_ID faults after command timeout or flush are never missed.
+    // Publish a volatile recovery hint for relevant message faults, including late faults
+    // after command timeout/flush. Faults can reset in-memory session state but never erase
+    // persisted session records or authorize key replacement.
     on_vehicle_message_(msg);
     if (cmd && !cmd->is_completed) {
         tk::BleDomain fault_domain = tk::BleDomain::None;
@@ -1014,7 +1013,7 @@ void VehicleController::handle_vcsec_frame_(const UniversalMessage_RoutableMessa
                 ESP_LOGW(TAG, "VCSEC Nominal Error: %d", static_cast<int>(vcsec_msg.sub_message.nominalError.genericError));
                 const uint8_t* uuid_ptr = (msg.request_uuid.size > 0) ? msg.request_uuid.bytes : nullptr;
                 const size_t uuid_len = msg.request_uuid.size;
-                // M1: Report "VCSEC authentication failed" to preserve health probe revocation semantics
+                // M1: Report "VCSEC authentication failed" so the health probe can update its advisory hint
                 command_runner_.handle_response(
                     tk::BleDomain::VehicleSecurity,
                     uuid_ptr, uuid_len,
@@ -1546,8 +1545,8 @@ void VehicleController::loop_task_fn_(void* arg) {
         // evcc starts charging via a command (→ window opens → charging_state then holds it
         // open for the session), so signals 1+2 cover the cases evcc cares about. When the
         // window closes we stop polling and drop the link once so the MCU idles into sleep.
-        // The auto-pair VCSEC health poll keeps running (it never wakes the MCU) as the
-        // revocation canary. Idle evcc reads may use the last cache value; during this
+        // The supervisor's VCSEC health poll keeps running (it never wakes the MCU) as a
+        // connection-health check. Idle evcc reads may use the last cache value; during this
         // active window get_charge_state requires a recent ChargeState instead, and
         // get_vehicle_climate (which also calls active_window_now_) refuses an in-window
         // climate snapshot older than tk::kActiveClimateStateMaxAgeS.
@@ -1580,8 +1579,7 @@ void VehicleController::loop_task_fn_(void* arg) {
 
         // Background charge-state refresh (paired + connected). Two triggers share ONE poll:
         //   • the 10 s in-window cadence (recent command or charging) — this infotainment poll
-        //     doubles as the reliable key-revocation canary: a deleted key faults it with
-        //     ERROR_UNKNOWN_KEY_ID, which the message observer turns into pairing_lost_; and
+        //     may surface a volatile recovery hint if the vehicle reports an authorization fault; and
         //   • a one-shot on the VCSEC wake edge (issue #264) or cache-invalid bootstrap, fired ONCE
         //     outside the window so a self-woken or rebooted-awake car refreshes its stale/empty SOC
         //     without our opening the window — otherwise evcc keeps acting on the stale reading or

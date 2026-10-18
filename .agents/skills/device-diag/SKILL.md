@@ -53,7 +53,7 @@ If approved, `/api/proxy/1/version` confirms identity: its fixed `-esp32` versio
 all four chips; separate platform names the actual target. Strip the suffix when comparing to status.
 `vehicle_data` reads cache only; active stale ChargeState returns 503, idle cache may legitimately age.
 
-Link `unknown` means no evidence since startup; `unreachable` means no recent signed contact.
+Link `unknown` means no evidence since startup; `unreachable` means no recent BLE reachability or live telemetry evidence.
 `idle` is normal parked reachability without proven sleep; `asleep` needs debounced VCSEC evidence.
 VCSEC AWAKE alone does not prove live `awake`. Do not treat ordinary sleep as a fault.
 
@@ -84,7 +84,7 @@ its escalation from panic, brownout or WDT. A healthy current sample does not ex
 | MQTT disconnected, uptime stable | Network or broker/TLS failure, not proof of crash | Inspect transport/error; never downgrade TLS silently |
 | OTA invalid/signature-bad | Wrong authority is one possibility; corruption/chip/revision also need exclusion | Verified `$usb-recovery` only after matching evidence and separate approval |
 | Boot loop before app_main after local flash | Unsigned app fails startup signature check | Signed-artifact recovery, separately authorized |
-| Pairing became false | Deleted key, forced generation or changed VIN | Verify revocation/identity cause, then separately authorized re-pair; role-denied commands are not revocation |
+| `reauth:true` or `paired:false` | Attention hint or no observed stored VCSEC session; neither proves deletion on the car. `reauth` may coexist with `paired:true`. | Preserve identity and stored sessions; inspect the evidence, then propose separately authorized same-key enrollment if needed. |
 
 ## Result
 

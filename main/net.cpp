@@ -202,6 +202,9 @@ static esp_netif_t* s_sta_netif_ptr() { return s_sta_netif; }
 // while associations are still churning. 0 = nothing has failed yet.
 static std::atomic<int> s_last_disco_reason{0};
 static std::atomic<bool> s_rollback_active{false};
+// Set once net_start_wifi() has the station running. Rejected credentials return before the
+// driver exists, and the retrying setup portal (provisioning.cpp) can only join a running one.
+static std::atomic<bool> s_sta_started{false};
 
 static void wifi_event_handler(void*, esp_event_base_t base, int32_t event_id, void* data) {
     try {
@@ -316,6 +319,7 @@ bool net_start_wifi(const char* ssid, const char* password, bool rollback_pendin
     net_boot_require(esp_wifi_set_mode(WIFI_MODE_STA), "WiFi station mode");
     net_boot_require(esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg), "WiFi station configuration");
     net_boot_require(esp_wifi_start(), "WiFi station start");
+    s_sta_started.store(true);
 
     // Keep WiFi modem-sleep at MIN_MODEM (the IDF default). Modem-sleep parks the radio between
     // DTIM beacons, which DOES add ~100 ms per round-trip (the original cause of the sluggish
@@ -375,6 +379,13 @@ bool net_start_wifi(const char* ssid, const char* password, bool rollback_pendin
                  s_last_disco_reason.load());
     }
 }
+
+void net_wifi_retry_station() {
+    const esp_err_t err = esp_wifi_connect();
+    if (err != ESP_OK) ESP_LOGW(TAG, "WiFi retry not started: %s", esp_err_to_name(err));
+}
+
+bool net_wifi_station_started() { return s_sta_started.load(); }
 
 // ── WiFi-only readings ────────────────────────────────────────────────────────
 // Both gate on net_kind() == Wifi, not merely on "something is up": esp_wifi_sta_get_ap_info()

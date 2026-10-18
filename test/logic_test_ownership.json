@@ -51,6 +51,7 @@
     "rx_framing.hpp": {"test": "test/test_logic.cpp", "evidence": "test_rx_framing("},
     "runtime_admission.hpp": {"test": "test/test_logic.cpp", "evidence": "test_runtime_admission("},
     "session_state.hpp": {"test": "test/test_logic.cpp", "evidence": "test_session_state("},
+    "setup_portal.hpp": {"test": "test/test_logic.cpp", "evidence": "test_setup_portal("},
     "soc_gradient.hpp": {"test": "test/test_logic.cpp", "evidence": "test_display_helpers("},
     "status_model.hpp": {"test": "test/test_logic.cpp", "evidence": "test_status_model("},
     "syslog_policy.hpp": {"test": "test/test_logic.cpp", "evidence": "test_syslog_policy("},

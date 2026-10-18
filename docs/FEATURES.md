@@ -51,7 +51,7 @@ Details: [security](SECURITY.md).
 |---|---|---|
 | Signed OTA (Secure Boot v2 RSA-3072, no hardware Secure Boot) | `sdkconfig.defaults`, `scripts/ci-build-all.sh`, `ci-sign-artifacts.sh`; [security](SECURITY.md) | A compromised update host pushing unsigned firmware, a changed CI secret replacing the production authority, or an image with a bad signature/extra padding block. |
 | Provenance-bound signed PR previews | `.github/workflows/signed-pr-preview.yml`, `pr-preview-cleanup.yml`, `.agents/skills/flash-esp32/SKILL.md`; [security](SECURITY.md) | Signing untrusted, stale or foreign source, or leaving obsolete previews public. |
-| Transactional key rotation + VIN journal | `main/vehicle_pairing.cpp`, `logic/key_rotation.hpp`, `logic/vin_transition.hpp`, `main/main.cpp` | Reporting a failed rotation as success, reusing old sessions after a durable replacement key, or a power cut leaving a new VIN with the previous vehicle's key/session. |
+| Transactional key rotation + explicit same-key enrollment | `main/vehicle_pairing.cpp`, `logic/key_rotation.hpp`, `logic/vin_transition.hpp`, `main/main.cpp` | Reporting a failed rotation as success, reusing old sessions after a durable replacement key, remote pairing hints rotating identity or enrolling automatically, or a power cut leaving a new VIN with the previous vehicle's key/session. |
 | Tesla protocol and patch known-answer gate | `test/tesla_protocol_vectors.test.mjs`, `test/test_tesla_ble_harness.cpp`, `scripts/test-tesla-ble-harness.sh`; [security](SECURITY.md) | A compiling dependency/crypto migration changing wire bytes, key compatibility, response authentication or the harness crypto pin. |
 | Generation-bound deferred BLE command readiness | `logic/ble_readiness.hpp`, `ble_deferred_event.hpp`, `main/ble_client.{cpp,hpp}`; [security](SECURITY.md) | Premature GATT readiness, allocating callbacks on the NimBLE host or stale events applied after handle reuse. |
 | Deterministic BLE RX/TX framing | `logic/rx_framing.hpp`, `main/vehicle_ctrl.hpp`, `vehicle_telemetry.cpp`, `test/test_tesla_ble_harness.cpp` | Upstream's heuristic recovery loops, offset shifting and log floods on corrupt/split frames, and outgoing frames the car cannot decode (a second length prefix). |
@@ -78,7 +78,8 @@ Details: [network](ARCHITECTURE.md#wifi--lan-connectivity).
 
 | Feature | Where | Prevents |
 |---|---|---|
-| Captive portal | `main/provisioning.cpp`, `logic/captive.hpp` | A setup portal that does not pop. |
+| Captive portal | `main/provisioning.cpp`, `logic/captive.hpp` | A setup portal that does not pop, or a DNS reply whose A record lands outside the answer section. |
+| Retrying setup portal | `main/provisioning.cpp`, `logic/setup_portal.hpp`, `main/main.cpp` | A board that boots faster than the router after a power cut staying offline in an unbounded, open setup portal. |
 | SPI Ethernet (W5500) | `net.cpp` (`CONFIG_TESLA_ETH_ENABLED`), `logic/eth_board.hpp`, `main/Kconfig.projbuild`; [network](ARCHITECTURE.md#wifi--lan-connectivity) | Running the BLE proxy on a radio that shares ONE antenna path with BLE. |
 | One image, multiple boards | `main/board.{cpp,hpp}`, `logic/eth_board.hpp` | Two copies of "which board is this" disagreeing on a SHARED pin (the T-Dongle-S3 panel clock is GPIO5, the PoE base's SPI SCLK). |
 | Transport seam | `main/net.hpp`, `net.cpp`, `logic/net_link.hpp` | A network layer that can only be WiFi: one contract (`net_is_up` / `net_kind` / `net_active_netif`) replaces a predicate `extern`ed in five modules and an ifkey hardcoded in three. |
@@ -141,6 +142,8 @@ unresolved material findings prevent a clean verdict.
 Native Codex registration is generated from canonical reviewers/hooks and checked for parity;
 current hook trust and primary-checkout declarations remain separate runtime conditions. Both host
 jobs are mandatory for the aggregate build, alongside concurrent producer/independent target legs.
-The PSA harness verifies v6.1.1 peer admission, domain hash isolation, encrypted VCSEC denial
+The PSA harness verifies v6.2.0 peer admission, domain hash isolation, encrypted VCSEC denial
 before telemetry and message refusal when the RNG fails.
+Upstream v6.2.0's charging-power estimator is not used by the native controller; charge telemetry
+keeps the vehicle-reported power and phases.
 [Runtime contract](ARCHITECTURE.md#pinned-tesla-ble-and-native-orchestration).

@@ -177,4 +177,29 @@ inline RollbackAction rollback_step(RollbackWatch& st, DiscoClass last, int elap
     return elapsed_s >= kWifiRollbackGraceS ? RollbackAction::RollBack : RollbackAction::Wait;
 }
 
+// Stage a new credential pair from /set_wifi (F-015). The backup must always hold the last PROVEN
+// pair. It is taken from the current credentials only when no rollback is armed: while a change
+// is still on trial (saved, but not yet proven by an association, e.g. because the restart was
+// deferred), the current pair is untried, and copying it over the backup would leave the device
+// with two unproven pairs and no way back. Arming needs something to roll back to, so a device
+// without stored credentials arms nothing. A new attempt retires the previous rollback verdict.
+// Residual: if the boot that proved a trial could not persist clearing it, NVS stays armed until a
+// later boot persists the clear. Meanwhile a rollback at such a boot, or a failed trial of a
+// further /set_wifi (which keeps the older backup), restores the older pair instead of the
+// just-proven one.
+//
+// `Config` provides wifi_ssid, wifi_pass, wifi_ssid_backup, wifi_pass_backup (strings) and
+// wifi_rollback_active, wifi_rolled_back (bools), as tk::ConfigBlob does.
+template <typename Config, typename Text>
+inline void stage_wifi_change(Config& cfg, const Text& ssid, const Text& pass) {
+    if (!cfg.wifi_rollback_active && !cfg.wifi_ssid.empty()) {
+        cfg.wifi_ssid_backup     = cfg.wifi_ssid;
+        cfg.wifi_pass_backup     = cfg.wifi_pass;
+        cfg.wifi_rollback_active = true;
+    }
+    cfg.wifi_rolled_back = false;
+    cfg.wifi_ssid        = ssid;
+    cfg.wifi_pass        = pass;
+}
+
 }  // namespace tk

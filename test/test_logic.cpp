@@ -77,6 +77,7 @@
 #include "logic/wifi_rollback.hpp"
 #include "logic/redact.hpp"
 #include "logic/captive.hpp"
+#include "logic/setup_portal.hpp"
 #include "logic/config_store.hpp"
 #include "logic/wifi_credentials.hpp"
 #include "logic/key_rotation.hpp"
@@ -461,9 +462,8 @@ static void test_key_rotation() {
     CHECK(!tk::private_key_identity_verified(true, true, false));
     CHECK(tk::private_key_identity_verified(true, true, true));
 
-    // Auto-pair may generate only on verified first-boot absence or explicit revocation. The
-    // decision is re-sampled under command_mutex_; this post-interleaving state (pairing_lost
-    // cleared by a concurrent successful HTTP rotation) must Continue, never honor stale true.
+    // Automatic generation is limited to verified first-boot absence. A pairing hint requires
+    // explicit recovery and can never authorize replacement of a durable identity.
     CHECK(tk::decide_automatic_key_action(false, false, false, false) ==
           A::StorageUnavailable);
     CHECK(tk::decide_automatic_key_action(true, false, false, false) == A::Generate);
@@ -474,10 +474,11 @@ static void test_key_rotation() {
     CHECK(tk::decide_automatic_key_action(true, true, false, true) ==
           A::RebootRequired);
     CHECK(tk::decide_automatic_key_action(true, true, true, false) == A::Continue);
-    CHECK(tk::decide_automatic_key_action(true, true, true, true) == A::Generate);
+    CHECK(tk::decide_automatic_key_action(true, true, true, true) == A::RecoveryRequired);
     CHECK(tk::decide_automatic_key_action(true, false, true, false) ==
           A::RebootRequired);
-    CHECK(tk::decide_automatic_key_action(true, false, false, true) == A::Generate);
+    CHECK(tk::decide_automatic_key_action(true, false, false, true) == A::RecoveryRequired);
+    CHECK(tk::decide_automatic_key_action(true, false, true, true) == A::RecoveryRequired);
 }
 
 static void test_nvs_string_load() {
@@ -738,7 +739,7 @@ static void test_connect_outcome() {
     }
 
     // Completion timeouts have an independent policy: auto-enrolment is known not to complete,
-    // the signed health probe must still leave a first/hourly warning, and a blocked user call
+    // the non-waking health probe must still leave a first/hourly warning, and a blocked user call
     // warns every time. One command response closes the health-timeout run.
     {
         tk::CompletionTimeoutState st;
@@ -779,8 +780,8 @@ static void test_connect_outcome() {
         CHECK(st.streak == UINT32_MAX);
     }
 
-    // Automatic enrolment instructions are INFO on entry and then only once per monotonic
-    // hour, even though the supervisor can complete hundreds of rounds in that interval.
+    // No-session setup guidance is INFO on entry and then only once per monotonic hour,
+    // even though the supervisor can complete hundreds of read-only rounds in that interval.
     {
         tk::PeriodicLogState st;
         constexpr uint64_t t0 = 5000;
@@ -5452,6 +5453,145 @@ static void test_wifi_rollback() {
           == tk::RollbackAction::RollBack);
     // The fast path must genuinely be faster than the patient one, or the distinction buys nothing.
     CHECK(tk::kWifiRollbackGraceS > tk::kWifiBootWindowS * tk::kWifiAuthToRollback);
+
+    // F-015: staging a /set_wifi change keeps the last PROVEN pair as the backup.
+    struct Cfg {
+        std::string wifi_ssid, wifi_pass, wifi_ssid_backup, wifi_pass_backup;
+        bool wifi_rollback_active = false, wifi_rolled_back = false;
+    };
+    const std::string proven = "home", proven_pass = "secret-1";
+    Cfg cfg{proven, proven_pass, "", "", false, true};
+    tk::stage_wifi_change(cfg, std::string("new-a"), std::string("pass-a"));
+    CHECK(cfg.wifi_ssid == "new-a" && cfg.wifi_pass == "pass-a");
+    CHECK(cfg.wifi_ssid_backup == proven && cfg.wifi_pass_backup == proven_pass);
+    CHECK(cfg.wifi_rollback_active && !cfg.wifi_rolled_back);
+    // A second change before the first was ever tried (restart deferred) must not copy the
+    // untried pair over the proven backup.
+    tk::stage_wifi_change(cfg, std::string("new-b"), std::string("pass-b"));
+    CHECK(cfg.wifi_ssid == "new-b" && cfg.wifi_pass == "pass-b");
+    CHECK(cfg.wifi_ssid_backup == proven && cfg.wifi_pass_backup == proven_pass);
+    CHECK(cfg.wifi_rollback_active);
+    // Once a change is proven (the boot clears the trial), the next change backs up that pair.
+    cfg.wifi_rollback_active = false;
+    cfg.wifi_ssid_backup.clear();
+    cfg.wifi_pass_backup.clear();
+    tk::stage_wifi_change(cfg, std::string("new-c"), std::string("pass-c"));
+    CHECK(cfg.wifi_ssid_backup == "new-b" && cfg.wifi_pass_backup == "pass-b");
+    // Without stored credentials there is nothing to roll back to, so nothing is armed.
+    Cfg fresh{};
+    tk::stage_wifi_change(fresh, std::string("first"), std::string("pass"));
+    CHECK(!fresh.wifi_rollback_active && fresh.wifi_ssid_backup.empty() && fresh.wifi_ssid == "first");
+}
+
+static void test_setup_portal() {
+    using tk::PortalAction;
+    // Simulates the portal loop at one tick per second. The access point becomes reachable at
+    // `router_up_s`; an attempt started at or after that time brings the network up on the next
+    // tick. `client` is an [arrive, leave) window of a phone on the setup AP. Closing the AP fails
+    // before `close_ok_s` (the shell then calls portal_close_failed and keeps the AP open).
+    struct Run {
+        uint32_t leave_at = 0, close_at = 0, attempts = 0, close_calls = 0;
+        std::vector<uint32_t> attempt_times;
+        bool attempted_with_client = false;
+    };
+    auto simulate = [](uint32_t router_up_s, uint32_t client_from, uint32_t client_to,
+                       uint32_t horizon_s, uint32_t close_ok_s = 0) {
+        Run run;
+        tk::PortalState st{};
+        bool ap_open = true, network_up = false, connecting = false;
+        for (uint32_t t = 0; t <= horizon_s; ++t) {
+            if (connecting && t > 0) network_up = true;
+            connecting = false;
+            const uint32_t clients = (ap_open && t >= client_from && t < client_to) ? 1 : 0;
+            const PortalAction a = tk::portal_step(st, {network_up, ap_open, clients, t});
+            const bool closing = a == PortalAction::CloseAp || (a == PortalAction::Leave && ap_open);
+            if (closing) ++run.close_calls;
+            if (closing && t < close_ok_s) {
+                tk::portal_close_failed(st, t);
+                continue;
+            }
+            if (a == PortalAction::AttemptStation) {
+                ++run.attempts;
+                run.attempt_times.push_back(t);
+                if (clients) run.attempted_with_client = true;
+                if (t >= router_up_s) connecting = true;
+            } else if (a == PortalAction::CloseAp) {
+                if (!run.close_at) run.close_at = t;
+                ap_open = false;
+            } else if (a == PortalAction::Leave) {
+                run.leave_at = t;
+                break;
+            }
+        }
+        return run;
+    };
+    const uint32_t never = 1u << 30;
+
+    // A router that comes up after the boot window (power cut): recovered in place, no reboot.
+    // Attempts at 30, 90, 210 s; the router is back at 200 s, so the 210 s attempt connects.
+    Run late = simulate(200, never, never, 3600);
+    CHECK(late.leave_at == 211);
+    CHECK((late.attempt_times == std::vector<uint32_t>{30, 90, 210}));
+    CHECK(late.close_at == 0);
+
+    // Backoff doubles from 30 s and is capped at 300 s; a permanently wrong password never leaves,
+    // and the open setup AP closes after 600 s without a client while retries continue.
+    Run wrong = simulate(never, never, never, 4000);
+    CHECK(wrong.leave_at == 0);
+    CHECK(wrong.close_at == tk::kPortalIdleCloseS);
+    CHECK(wrong.attempt_times.size() >= 6);
+    if (wrong.attempt_times.size() >= 6) {
+        CHECK((std::vector<uint32_t>(wrong.attempt_times.begin(), wrong.attempt_times.begin() + 6) ==
+               std::vector<uint32_t>{30, 90, 210, 450, 750, 1050}));
+    }
+    for (size_t i = 5; i < wrong.attempt_times.size(); ++i)
+        CHECK(wrong.attempt_times[i] - wrong.attempt_times[i - 1] == tk::kPortalRetryMaxS);
+
+    // A phone on the setup AP defers attempts (a scan would drop it off the channel) and the idle
+    // bound restarts when it leaves.
+    Run busy = simulate(never, 20, 400, 2000);
+    CHECK(!busy.attempted_with_client);
+    CHECK(!busy.attempt_times.empty() && busy.attempt_times.front() == 400);
+    CHECK(busy.close_at == 399 + tk::kPortalIdleCloseS);
+
+    // A station that never leaves the AP (anyone in range, or a phone that remembered the setup
+    // network) cannot hold it open or defer the retries past the open-time cap.
+    Run squatter = simulate(never, 10, never, 4000);
+    CHECK(squatter.close_at == tk::kPortalApMaxOpenS);
+    CHECK(!squatter.attempted_with_client);
+    CHECK(!squatter.attempt_times.empty() && squatter.attempt_times.front() == tk::kPortalApMaxOpenS + 1);
+
+    // The network coming up while a station is on the AP: left at once, not parked behind it.
+    Run parked = simulate(0, 31, never, 4000);
+    CHECK((parked.attempt_times == std::vector<uint32_t>{30}));
+    CHECK(parked.leave_at == 31);
+
+    tk::PortalState st{};
+    CHECK(tk::portal_step(st, {false, true, 1, 100}) == PortalAction::None);
+    CHECK(tk::portal_step(st, {true, true, 1, 101}) == PortalAction::Leave);
+    // A wired lease counts as "network up" too, also after the AP closed, and Leave wins over
+    // the open-time cap.
+    tk::PortalState wired{};
+    CHECK(tk::portal_step(wired, {true, false, 0, 5}) == PortalAction::Leave);
+    tk::PortalState capped{};
+    CHECK(tk::portal_step(capped, {true, true, 1, tk::kPortalApMaxOpenS}) == PortalAction::Leave);
+
+    // An AP close that keeps failing is retried with backoff (600, 630, 690, 810, 1050, then every
+    // 300 s) and does not crowd out the attempts, which keep their own schedule.
+    Run stuck = simulate(never, never, never, 4000, never);
+    CHECK(stuck.close_calls == 14);
+    CHECK(stuck.close_at == 0 && stuck.leave_at == 0);
+    CHECK(stuck.attempts == wrong.attempts);
+    // Leave with a failing close: the boot does not continue with the AP up; the close is retried
+    // at 241, 301 and 421 s and succeeds then.
+    Run slow = simulate(200, never, never, 3600, 400);
+    CHECK(slow.leave_at == 421);
+    CHECK(slow.close_calls == 4);
+    // Both at once: a station that stays associated and a close that keeps failing. Past the cap
+    // the form is gone, so the station no longer defers the attempts.
+    Run wedged = simulate(never, 10, never, 8000, never);
+    CHECK(!wedged.attempt_times.empty() && wedged.attempt_times.front() == tk::kPortalApMaxOpenS + 1);
+    CHECK(wedged.attempts >= 20);
 }
 
 // ─── Network transport seam (logic/net_link.hpp) ──────────────────────────────
@@ -5478,6 +5618,12 @@ static void test_net_link() {
     CHECK(!wifi_baseline.observe(wifi_a, false));  // returning to A is conservative
     CHECK(!wifi_baseline.observe(wifi_new_lease, false)); // same IP, new lease is unproven
     CHECK(!wifi_baseline.observe({tk::NetLink::Wifi, 0, 3}, true));
+    // The case above starts from an UNPROVEN baseline, so it cannot see a dropped generation
+    // comparison. Here the old lease is proven right before only its generation changes.
+    tk::GatewayBaseline same_address{};
+    CHECK(same_address.observe(wifi_a, true));
+    CHECK(same_address.observe(wifi_a, false));          // proven for this lease
+    CHECK(!same_address.observe(wifi_new_lease, false)); // new lease, no reply yet: unproven
     tk::GatewayBaseline eth_baseline{};
     CHECK(!eth_baseline.observe({tk::NetLink::Eth, wifi_a.address, 1}, false));
     // A route switch does not discard proof for a still-held WiFi lease. If Ethernet then
@@ -5863,6 +6009,91 @@ static void test_captive() {
     // ONE place writes the portal address, so the DNS answer, the DHCP option and the Location
     // header cannot drift apart.
     CHECK(std::string(tk::CAPTIVE_PORTAL_URI).find(tk::CAPTIVE_PORTAL_IP) != std::string::npos);
+
+    // F-079: captive DNS replies are built, not patched into the query.
+    auto query = [](uint16_t qtype, bool with_opt) {
+        std::vector<unsigned char> q = {0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+                                        0x00, static_cast<unsigned char>(with_opt ? 1 : 0)};
+        for (const char* label : {"captive", "apple", "com"}) {
+            q.push_back(static_cast<unsigned char>(std::strlen(label)));
+            q.insert(q.end(), label, label + std::strlen(label));
+        }
+        q.push_back(0x00);
+        q.push_back(static_cast<unsigned char>(qtype >> 8));
+        q.push_back(static_cast<unsigned char>(qtype & 0xff));
+        q.push_back(0x00);
+        q.push_back(0x01);  // class IN
+        if (with_opt) {     // EDNS OPT pseudo-record: root name, TYPE 41, UDP 1232, no options
+            const unsigned char opt[] = {0x00, 0x00, 0x29, 0x04, 0xd0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+            q.insert(q.end(), opt, opt + sizeof opt);
+        }
+        return q;
+    };
+    auto reply_for = [](const std::vector<unsigned char>& q, std::vector<unsigned char>& out) {
+        out.assign(tk::kCaptiveDnsReplyMax, 0);
+        const size_t n = tk::build_captive_dns_reply(q.data(), q.size(), out.data(), out.size());
+        out.resize(n);
+        return n;
+    };
+    auto u16 = [](const std::vector<unsigned char>& b, size_t at) { return (b[at] << 8) | b[at + 1]; };
+    std::vector<unsigned char> out;
+    const size_t question_end = 12 + 1 + 7 + 1 + 5 + 1 + 3 + 1 + 4;  // header + name + type/class
+    for (bool with_opt : {false, true}) {
+        const auto q = query(1, with_opt);
+        CHECK(reply_for(q, out) == question_end + 16);
+        CHECK(u16(out, 0) == 0x1234);                        // ID kept
+        CHECK(out[2] == 0x81 && out[3] == 0x80);             // QR + RD, RA, RCODE 0
+        CHECK(u16(out, 4) == 1 && u16(out, 6) == 1);         // one question, one answer
+        CHECK(u16(out, 8) == 0 && u16(out, 10) == 0);        // the OPT record is not echoed
+        CHECK(u16(out, question_end) == 0xC00C);             // the ANSWER section holds the A record
+        CHECK(u16(out, question_end + 2) == 1 && u16(out, question_end + 4) == 1);
+        CHECK(std::memcmp(out.data() + question_end + 12, tk::CAPTIVE_PORTAL_OCTETS, 4) == 0);
+    }
+    CHECK(reply_for(query(255, false), out) == question_end + 16);  // ANY gets the A answer
+    CHECK(reply_for(query(28, true), out) == question_end);         // AAAA: empty NOERROR answer
+    CHECK(u16(out, 6) == 0 && out[3] == 0x80);
+    // Dropped: too short, a response, a non-standard opcode, two questions, a pre-filled answer,
+    // a compressed or overlong name, a truncated question, a non-IN class, a too-small buffer.
+    auto dropped = [&](std::vector<unsigned char> q) { return reply_for(q, out) == 0; };
+    auto base = query(1, false);
+    CHECK(dropped(std::vector<unsigned char>(base.begin(), base.begin() + 12)));
+    auto response = base; response[2] |= 0x80;          CHECK(dropped(response));
+    auto opcode = base;   opcode[2] |= 0x10;            CHECK(dropped(opcode));
+    auto two = base;      two[5] = 2;                   CHECK(dropped(two));
+    auto answered = base; answered[7] = 1;              CHECK(dropped(answered));
+    auto authority = base; authority[9] = 1;            CHECK(dropped(authority));
+    auto pointer = base;  pointer[12] = 0xC0;           CHECK(dropped(pointer));
+    auto truncated = base; truncated.resize(base.size() - 2); CHECK(dropped(truncated));
+    auto chaos = base;    chaos[base.size() - 1] = 3;   CHECK(dropped(chaos));
+    std::vector<unsigned char> overlong(base.begin(), base.begin() + 12);
+    for (int i = 0; i < 5; ++i) { overlong.push_back(63); overlong.insert(overlong.end(), 63, 'a'); }
+    overlong.insert(overlong.end(), {0x00, 0x00, 0x01, 0x00, 0x01});
+    CHECK(dropped(overlong));
+    std::vector<unsigned char> small(16, 0);
+    CHECK(tk::build_captive_dns_reply(base.data(), base.size(), small.data(), small.size()) == 0);
+    // The longest legal name (255 bytes on the wire) still fits the reply bound exactly.
+    std::vector<unsigned char> longest(base.begin(), base.begin() + 12);
+    for (int i = 0; i < 3; ++i) { longest.push_back(63); longest.insert(longest.end(), 63, 'a'); }
+    longest.push_back(61); longest.insert(longest.end(), 61, 'b');
+    longest.insert(longest.end(), {0x00, 0x00, 0x01, 0x00, 0x01});
+    CHECK(reply_for(longest, out) == tk::kCaptiveDnsReplyMax);
+    // One byte more (256 on the wire) is dropped: its reply would overrun the bound.
+    std::vector<unsigned char> too_long(base.begin(), base.begin() + 12);
+    for (int i = 0; i < 3; ++i) { too_long.push_back(63); too_long.insert(too_long.end(), 63, 'a'); }
+    too_long.push_back(62); too_long.insert(too_long.end(), 62, 'b');
+    too_long.insert(too_long.end(), {0x00, 0x00, 0x01, 0x00, 0x01});
+    CHECK(dropped(too_long));
+    // A 64-byte label, the reserved label types (0b01, 0b10) and compression pointers (0b11) are
+    // dropped even when the forged length lands exactly on a valid question end.
+    auto forged = [&](unsigned char lead) {
+        std::vector<unsigned char> q(base.begin(), base.begin() + 12);
+        q.push_back(lead);
+        q.insert(q.end(), lead, 'a');
+        q.insert(q.end(), {0x00, 0x00, 0x01, 0x00, 0x01});
+        return q;
+    };
+    for (unsigned char lead : {0x40, 0x80, 0xC0}) CHECK(dropped(forged(lead)));
+    CHECK(reply_for(forged(63), out) == 12 + 1 + 63 + 1 + 4 + 16);  // the largest label is valid
 }
 
 // ─── Atomic config blob ───────────────────────────────────────────────────────
@@ -7166,13 +7397,52 @@ static void test_command_runner() {
         CommandRunner runner;
         CHECK(!runner.vcsec_session().is_authenticated());
 
-        runner.enqueue("Whitelist Add Key", BleDomain::VehicleSecurity, WakePolicy::WakeIfNeeded, 20000, 1000);
+        bool completed = false;
+        bool transmitted = false;
+        runner.enqueue("Whitelist Add Key", BleDomain::VehicleSecurity, WakePolicy::NoWakeFail,
+                       20000, 1000, {}, [&](bool ok, const std::string&) {
+                           completed = true;
+                           transmitted = ok;
+                       }, true /* completes_on_transmit */, 0 /* never replay ambiguous writes */);
 
         // Bypass session auth directly
         TxAction act = runner.tick(1000, true, false);
         CHECK(act == TxAction::SendCommandPayload);
         CHECK(runner.current_command()->state == CommandState::Ready);
         CHECK(runner.current_command()->phase == CommandPhase::SendingRequest);
+        // Tesla sends no completing commandStatus for Whitelist Add. The local TX completion
+        // reports submission to the API, while vehicle approval remains a separate status check.
+        runner.notify_tx_complete(act, 1001);
+        CHECK(completed);
+        CHECK(transmitted);
+        CHECK(runner.current_command()->is_completed);
+        CHECK(runner.current_command()->is_success);
+        CHECK(runner.current_command()->max_retries == 0);
+        runner.pop_current();
+        CHECK(runner.current_command() == nullptr);
+    }
+
+    // 4a. An ambiguous/partial Whitelist Add write must not be automatically replayed.
+    {
+        CommandRunner runner;
+        unsigned completions = 0;
+        bool last_success = true;
+        runner.enqueue("Whitelist Add Key", BleDomain::VehicleSecurity,
+                       WakePolicy::NoWakeFail, 20000, 1000, {},
+                       [&](bool ok, const std::string&) {
+                           ++completions;
+                           last_success = ok;
+                       }, true /* completes_on_transmit */, 0 /* no ambiguous replay */);
+
+        TxAction act = runner.tick(1000, true, false);
+        CHECK(act == TxAction::SendCommandPayload);
+        runner.notify_tx_failed("BLE write failed after partial submission");
+        CHECK(completions == 1);
+        CHECK(!last_success);
+        CHECK(runner.current_command()->is_completed);
+        CHECK(runner.current_command()->retry_count == 0);
+        CHECK(runner.tick(1001, true, false) == TxAction::None);
+        CHECK(completions == 1);
     }
 
     // 4b. "Wake" Session Flow and Vehicle Confirmation (N1)
@@ -8312,6 +8582,7 @@ int main() {
     test_ble_chunk();
     test_ble_deferred_event();
     test_wifi_rollback();
+    test_setup_portal();
     test_net_link();
     test_status_eth();
     test_eth_board();

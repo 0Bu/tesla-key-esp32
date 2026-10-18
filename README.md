@@ -28,13 +28,14 @@ An ESP32-S3 with a supported wired board uses DHCP; configure its VIN in the web
 
 ## 2. Pair with the car
 
-The device generates its key and requests enrollment automatically once a VIN is configured.
-There is no Pair button.
+The device generates its key after a VIN is configured, but does not send an enrollment request
+automatically. Use **Send existing key** in the web UI when you are ready to pair.
 
-1. Park within Bluetooth range, approximately 10 m, and wait for **connecting…** in the web UI.
-2. Place an existing Tesla NFC keycard on the center-console reader behind the cup holders.
+1. Park within Bluetooth range, approximately 10 m, and wait for the web UI to show **Ready to pair**.
+2. Place an existing Tesla NFC keycard on the center-console reader behind the cup holders, then
+   click **Send existing key** in the web UI.
 3. Confirm **Add key** on the car's touchscreen while the card is present. The web UI shows
-   **paired**; the car lists an **Unknown key**.
+   **paired** after the session is established; the car lists an **Unknown key**.
 
 If pairing fails, check [troubleshooting](docs/USER_GUIDE.md#troubleshooting). Tesla's roughly
 three simultaneous BLE connections are shared with phone keys and fobs.

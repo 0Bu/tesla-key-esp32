@@ -24,10 +24,10 @@
 //
 // WHY "EXPECTED" AND NOT JUST "UP". A device with no credentials and no wire is legitimately
 // offline: it is running the setup portal, which is a valid state and must not be read as a broken
-// image. That is what link_expected distinguishes. On this firmware the portal never returns to
-// app_main, so the gate is armed only on a device that HAS a route — but the rule belongs in the
-// decision rather than in the caller's control flow, because it is the caller's control flow that
-// would quietly change.
+// image. That is what link_expected distinguishes. On this firmware the first-time portal never
+// returns to app_main and the retrying portal returns only once the network is up, so the gate is
+// armed only on a device that HAS a route — but the rule belongs in the decision rather than in
+// the caller's control flow, because it is the caller's control flow that would quietly change.
 //
 // WHAT GIVE-UP DOES, AND WHAT IT DELIBERATELY DOES NOT DO. Past the hard cap an unhealthy image is
 // simply LEFT pending: no mark, no restart. The next reboot from any cause then rolls it back. It

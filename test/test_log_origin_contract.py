@@ -31,9 +31,11 @@ pair_decl = re.search(r"bool pair\([^;]+;", header, re.DOTALL)
 assert status_decl and "origin =" not in status_decl.group(0)
 assert pair_decl and "origin =" not in pair_decl.group(0)
 
-# Every automatic enrolment/health call is background; every blocking HTTP call is foreground.
-assert pairing.count("get_vehicle_status(st, tk::ConnectOrigin::Background") == 2
-assert pairing.count("pair(tk::ConnectOrigin::Background") == 1
+# The supervisor's only status call is read-only/background; Whitelist Add is an explicit HTTP action.
+assert pairing.count("get_vehicle_status(st, tk::ConnectOrigin::Background") == 1
+assert "pair(tk::ConnectOrigin::Background" not in pairing
+auto_pair = pairing[pairing.index("void VehicleController::auto_pair_task_fn_"):pairing.index("// ─── Key management")]
+assert "self->pair(" not in auto_pair
 assert "get_vehicle_status(vs, tk::ConnectOrigin::Foreground)" in http_api
 assert "pair(tk::ConnectOrigin::Foreground)" in http_config
 assert "timeout_ms, tk::ConnectOrigin::Background," in pairing  # paired health probe
@@ -41,12 +43,12 @@ assert "timeout_ms, tk::ConnectOrigin::Background," in pairing  # paired health 
 # Per-probe summaries must not bypass the lower connect rate limiter.
 assert 'ESP_LOGD(TAG, "auto-pair: car not reachable over BLE' in pairing
 assert 'ESP_LOGW(TAG, "auto-pair: car not reachable over BLE' not in pairing
-assert 'if (origin == tk::ConnectOrigin::Foreground)' in pairing
-assert 'ESP_LOGD(TAG, "background pair request not confirmed")' in pairing
+pair_body = pairing[pairing.index("bool VehicleController::pair("):]
+assert "if (origin != tk::ConnectOrigin::Foreground)" in pair_body
+assert "automatic Whitelist Add is disabled" in pair_body
 assert "await_completion_(completion, generation, deadline, name.c_str(), timeout_policy)" in commands
 assert 'ESP_LOGD(TAG, "background \'%s\' timed out' in commands
 assert "tk::CompletionTimeoutPolicy::BackgroundHealth" in pairing
-assert "tk::CompletionTimeoutPolicy::ExpectedSilent" in pairing
 assert "kConnectFailRepeatMs" in outcome_logic
 assert "kCompletionTimeoutRepeatMs" in outcome_logic
 assert "kAutoPairNoticeRepeatMs" in outcome_logic
@@ -63,17 +65,8 @@ assert "observation.seen_us > e->connectable_us" in ble_client
 assert "pending->seen_us = now_us;" in ble_client
 assert "tk::periodic_log_due(" in pairing
 assert "tk::periodic_log_reset(unpaired_notice)" in pairing
-assert 'ESP_LOGD(TAG, "background pair deadline exhausted waiting for another request")' in pairing
-pair_mutex = pairing[pairing.index("tk::SemGuard cmd_guard(command_mutex_"):
-                     pairing.index("// Check only after taking command_mutex_", pairing.index("tk::SemGuard cmd_guard(command_mutex_"))]
-assert "if (origin == tk::ConnectOrigin::Foreground)" in pair_mutex
-for message in (
-    "auto-pair: not paired — requesting key enrolment from the car…",
-    "auto-pair: enrolment request attempted — place a Tesla NFC keycard",
-    "auto-pair: not registered yet — place a Tesla NFC keycard",
-):
-    assert f'ESP_LOGI(TAG, "{message}' in pairing
-    assert f'ESP_LOGD(TAG, "{message}' in pairing
+assert 'ESP_LOGI(TAG, "auto-pair: no stored session — preserving key;' in pairing
+assert 'ESP_LOGD(TAG, "auto-pair: no stored session — preserving key;' in pairing
 assert re.search(r"await_completion_\(completion, generation, deadline, name\.c_str\(\),\s*"
                  r"tk::CompletionTimeoutPolicy::ForegroundWarn\)", commands)
 
