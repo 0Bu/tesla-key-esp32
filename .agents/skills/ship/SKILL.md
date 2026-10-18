@@ -105,8 +105,11 @@ signed build goes to `gh-pages:/dev/` with a `X.Y.Z-dev.N` version, and no GitHu
 Pages change is produced. The stable Release and root Pages come exclusively from a manually
 dispatched `build` run with `release: true` on current `main`; that needs its own explicit user
 authorization and is never started by this skill (select it here with
-`CHANNEL_RUN=workflow_dispatch`). A docs/config-only merge produces no firmware to deploy; say so
-and stop instead of flashing an unchanged rebuild.
+`CHANNEL_RUN=workflow_dispatch`). Check the selected main run's actual `firmware` output and
+publication jobs. When it reports `firmware=no` and publication/deployment are skipped, report
+that no firmware was produced and stop. A docs/config-only diff alone cannot establish this:
+the Dev classifier compares cumulative changes against the published baseline and schedules
+a build when that baseline cannot be verified.
 
 ## 3. Download the signed image
 
