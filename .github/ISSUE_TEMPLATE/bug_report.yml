@@ -79,7 +79,12 @@ body:
     id: diag
     attributes:
       label: Relevant /diag or serial log
-      description: Paste an excerpt from GET /diag (or the serial monitor). Redact your VIN/SSID.
+      description: >-
+        Paste a short excerpt from GET /diag?redact=1. Follow the
+        [diagnostic export guidance](https://github.com/0Bu/tesla-key-esp32/blob/main/docs/API.md#diagnostic-export-and-heap-trend)
+        and inspect it manually before posting: remove the board MAC, VIN, WiFi/network names,
+        addresses and any other private identifiers. Redaction is not complete sanitation.
+        Apply the same manual sanitation to serial-monitor excerpts.
       render: text
     validations:
       required: false

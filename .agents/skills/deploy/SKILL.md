@@ -24,7 +24,8 @@ multi-tier testing (targeted, comprehensive, and cluster evcc E2E), and branch c
 
 ## Phase 1: Local Analysis & Findings Fix Loop
 
-Before committing or pushing, verify workspace cleanliness, code style, unit tests, and contracts locally:
+Before committing or pushing, run the full local contract of
+[AGENTS.md](../../../AGENTS.md#implementation-and-evidence), narrowest relevant checks first:
 
 1. **Whitespace & Conflict Marker Check**:
    ```bash
@@ -34,9 +35,11 @@ Before committing or pushing, verify workspace cleanliness, code style, unit tes
    ```bash
    ./scripts/repo-lint.sh
    ```
-3. **Host Mock & Unit Test Suite**:
+3. **Host Mock, Unit & Sanitizer Suites**:
    ```bash
    ./scripts/run-mock-tests.sh
+   ./scripts/run-mock-tests.sh --require-all
+   ./scripts/run-sanitizer-tests.sh
    ```
 4. **Build Contracts & Partition Checks**:
    ```bash
@@ -47,11 +50,15 @@ Before committing or pushing, verify workspace cleanliness, code style, unit tes
    ./scripts/test-pr-gates.sh
    ./tools/agent-config/selftest.sh
    ```
-6. **Firmware Compile Check (Conditional)**:
-   If firmware files under `main/` were modified and Docker is available:
+6. **Four-Target Firmware Contract**:
+   Before handoff, run the full contract with the pinned container. For firmware-relevant changes
+   (`gate_firmware_size_relevant` in [`pr-gate-lib.sh`](../../../tools/agent-hooks/pr-gate-lib.sh)),
+   measure size and stack first ([size rule](../../rules/firmware-size-budget.md)):
    ```bash
-   ./scripts/idf-docker.sh idf.py -B build set-target esp32s3 build
+   ./scripts/idf-docker.sh ./scripts/ci-build-verify.sh "$(cat version.txt)" "$(git rev-parse HEAD)"
    ```
+   If Docker is unavailable, stop and report the firmware contract as **not run**; never skip it
+   silently.
 
 **Fix Loop**: If any check fails, analyze the root cause, apply the fix to code or tests, and re-run Phase 1 until all checks pass cleanly.
 
@@ -160,6 +167,8 @@ Before committing or pushing, verify workspace cleanliness, code style, unit tes
 
 Read and execute the complete [ship procedure](../ship/SKILL.md) as a **required** part of this phase,
 using the already authorized lifecycle, exact PR head, identified board and explicit OTA/live scopes.
+For device delivery, set `DEVICE_IP` to the explicitly approved board address before following
+`$ship`, and retain that same value for every Phase 5 device or cluster request.
 Its merge gate, canonical squash command, exact MERGE_SHA main-run/channel/artifact selection,
 metadata/signature validation and bounded OTA probation monitor all apply unchanged. Stable Release
 requires separate manual-dispatch authorization; never substitute latest Release for the main run.
@@ -180,18 +189,22 @@ Run tests tailored specifically to the code changed in the PR:
 ### 5b. Comprehensive Health & Diagnostic Test
 Check overall device stability and telemetry health:
 ```bash
-curl -fsS "http://$TARGET_HOST/status" | jq '{version, paired, connected: .ble.connected, heap: .sys.free_heap, min_heap: .sys.min_free_heap, largest_block: .sys.largest_block, uptime: .sys.uptime_s}'
-curl -fsS "http://$TARGET_HOST/api/proxy/1/version" | jq .
-curl -fsS "http://$TARGET_HOST/diag?redact=1" | grep -iE 'error|warn|fail|panic' || true
+: "${DEVICE_IP:?retain the explicitly approved board address from Phase 4}"
+curl -fsS "http://$DEVICE_IP/status" | jq '{version, paired, connected: .ble.connected, heap: .sys.free_heap, min_heap: .sys.min_free_heap, largest_block: .sys.largest_block, uptime: .sys.uptime_s}'
+curl -fsS "http://$DEVICE_IP/api/proxy/1/version" | jq .
+curl -fsS "http://$DEVICE_IP/diag?redact=1" | grep -iE 'error|warn|fail|panic' || true
 ```
 Query VictoriaLogs (via `mcp-logs` or HTTP) for the target device over the last 15 minutes:
 - Verify **zero** crash dumps, panics, or FreeRTOS task watchdog warnings.
 - Verify heap stability (largest free contiguous block remains healthy).
 
 ### 5c. End-to-End evcc Verification
-Execute the canonical repository E2E test script against the cluster evcc pod:
+Only after separate approval for the cluster and vehicle-read scope, execute the canonical E2E
+test from the evcc pod against that same approved board:
 ```bash
-bash scripts/e2e_evcc.sh
+: "${DEVICE_IP:?retain the explicitly approved board address from Phase 4}"
+RUN_COMMANDS=0 ALLOW_CHARGE_TOGGLE=0 RUN_ALL_COMMANDS=0 \
+  ESP32_URL="http://$DEVICE_IP" bash scripts/e2e_evcc.sh
 ```
 This verifies:
 1. Passive `/status` and `/api/proxy/1/version` reads from inside the cluster evcc pod.

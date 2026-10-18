@@ -392,4 +392,5 @@ expect_failure "Antigravity async blocking hook" "$fixture" "must not be async"
 
 echo
 python3 "$ROOT/test/test_codex_setup.py"
+python3 "$ROOT/test/test_deploy_target.py"
 echo "agent-config selftest: all $passes mutation canaries caught"
