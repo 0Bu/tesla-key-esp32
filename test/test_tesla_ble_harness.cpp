@@ -1,4 +1,4 @@
-// Host integration harness against the real yoziru/tesla-ble v6.1.1 (with the repository patch
+// Host integration harness against the real yoziru/tesla-ble v6.2.0 (with the repository patch
 // series, including the PSA port), Nanopb, and the Mbed TLS 4.1 / TF-PSA-Crypto commit that the
 // pinned ESP-IDF v6.1 builds into the firmware.
 //

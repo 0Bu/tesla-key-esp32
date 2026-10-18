@@ -87,7 +87,7 @@ struct RowStatus {
 struct RowView {
     Row       row{Row::Idle};
     Countdown cd{Countdown::None};
-    bool      stateless{false};   // linked but no signed round-trip yet ⇒ amber, not green
+    bool      stateless{false};   // linked but reachability unknown/stale ⇒ amber, not green
 };
 
 // A VIN gates pairing entirely; the firmware reports "UNKNOWN" when none is stored.

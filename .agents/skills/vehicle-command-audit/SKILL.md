@@ -26,7 +26,7 @@ other**?"; this skill asks "do they agree with **Tesla's protocol**, and is each
 
 `teslamotors/vehicle-command` is the **truth**, but it is NOT what we run. We run
 **yoziru/tesla-ble** (pinned in [`main/idf_component.yml`](../../../main/idf_component.yml) — **read
-the pin first**, currently `v6.1.1`). The Go SDK exposes commands, builders, fields and enum
+the pin first**, currently `v6.2.0`). The Go SDK exposes commands, builders, fields and enum
 values the pinned C++ port may **not** have. So every comparison is **three-way**, and a
 divergence from upstream does **not** automatically mean "change the code":
 
@@ -71,10 +71,10 @@ Verify these paths at the reviewed upstream revision:
 
 ### Feasibility — `yoziru/tesla-ble` at the pinned tag
 Fetch raw at the **pin** (base `https://raw.githubusercontent.com/yoziru/tesla-ble/<pin>`; confirm
-`<pin>` from `idf_component.yml`). Layout at v6.1.1:
+`<pin>` from `idf_component.yml`). Layout at v6.2.0:
 `include/{vehicle.h, client.h, command_error.h, message_builders.h, peer.h, vin_utils.h, errors.h, …}`
 and `src/{vehicle.cpp, client.cpp, peer.cpp, message_builders.cpp, message_processor.cpp, crypto_context.cpp, vin_utils.cpp, errors.cpp, …}`.
-- **Does a command builder exist?** → `src/message_builders.cpp`. v6.1.1 registers both
+- **Does a command builder exist?** → `src/message_builders.cpp`. v6.2.0 registers both
   `scheduledChargingAction` and `scheduledDepartureAction`; the firmware deliberately does not
   expose scheduled departure. Builder availability alone is not implementation, role or hardware acceptance.
 - **Enum / API values** (roles, form factors) → `include/client.h`; firmware-level `SleepState`, `WakePolicy` → `main/logic/command_runner.hpp`.
@@ -124,10 +124,14 @@ Verify every dimension against the reviewed revisions; previous audit results ar
    real-time 1-hour reuse window. Restore is attempted before controller init; absent/unreadable
    `last_time` or a failed clock set can leave the inherited negative-age acceptance path. Do not
    claim guaranteed expiry from this restore.
-4. **Pairing / whitelist** — add-key carries role + `KEY_FORM_FACTOR_CLOUD_KEY`, no key name (car
-   shows "Unknown key"), requires an **NFC card on the console reader**, verify via a SessionInfo
-   probe. (Note: the **"3"** is the simultaneous-BLE-**connection** limit; a
-   car stores up to **19 keys** — don't call it a 3-key cap.)
+4. **Pairing / whitelist** — Whitelist Add requires an explicit user action that sends the
+   existing Charging-Manager key through `POST /send_key`; the supervisor never enrolls
+   automatically. Automatic key generation is limited to verified first-boot key absence.
+   Add-key carries role + `KEY_FORM_FACTOR_CLOUD_KEY`, no key name (car shows "Unknown key"),
+   and requires an **NFC card on the console reader**. Local transmission completion is not
+   vehicle approval; verify acceptance through an authenticated session/status observation.
+   (Note: the **"3"** is the simultaneous-BLE-**connection** limit; a car stores up to
+   **19 keys** — don't call it a 3-key cap.)
 5. **Command params / ranges** — amps **0–48** (faithful to real chargers; upstream has no cap),
    charge-limit **50–100**, scheduled-charging `start_minutes` **0–1439** after local midnight.
    REST and MCP reject supplied fractional/out-of-range values rather than silently executing a
@@ -135,12 +139,16 @@ Verify every dimension against the reviewed revisions; previous audit results ar
 6. **Wake / sleep** — wake is a **VCSEC-domain** `RKE_ACTION_WAKE_VEHICLE` (not infotainment);
    `vehicleSleepStatus`/`vehicleLockState`/`userPresence` string values match the upstream enums;
    the "trust debounced VCSEC ASLEEP, never VCSEC AWAKE" asymmetry is a correct reading.
-7. **Error / fault taxonomy + revocation heuristic** — `OperationStatus`, `MessageFault`
+7. **Error / fault taxonomy and recovery hints** — `OperationStatus`, `MessageFault`
    (`UNKNOWN_KEY_ID=3`, `INACTIVE_KEY=4`, `INSUFFICIENT_PRIVILEGES=7`, `INVALID_KEY_HANDLE=27`),
-   `SESSION_INFO_STATUS_KEY_NOT_ON_WHITELIST`. Confirm the firmware's three detectors stay sound:
-   the `set_message_callback` fault match (the path that actually fires on a **cached** session),
-   the `"whitelist"` substring (session-info handshake only), and the two-strike `"authentication
-   failed"` **gated to the health probe** so a role-denied user command can't destroy a pairing.
+   `SESSION_INFO_STATUS_KEY_NOT_ON_WHITELIST`. Check the native
+   `handle_signed_message_fault_` → `on_vehicle_message_` path, the `"whitelist"` error match,
+   and the health-probe-only authentication-failure streak. These signals do not prove key
+   deletion or authorize key replacement, persisted-session removal or Whitelist Add.
+   In-memory peer/session resets remain distinct from deleting persisted records.
+   `paired` reports stored VCSEC-session presence; `reauth` may coexist with `paired:true`.
+   Finding a stored session does not clear the hint. A successful health response can clear
+   this advisory hint; that outcome alone does not prove an authenticated response.
 8. **Library-version claims** — every command the firmware calls resolves to a real builder at the
    pin; distinguish the firmware registry's no-exposure policy (scheduled departure) from builder
    availability in `message_builders.cpp` and from role/hardware acceptance.
@@ -157,7 +165,7 @@ Verify every dimension against the reviewed revisions; previous audit results ar
     through root CMake to the managed dependency tree, and are rebased explicitly on every pin bump; 0006 must
     keep the V1 vectors in `test/test_tesla_ble_harness.cpp` byte-identical and keep verifying response tags
     against response metadata bound to the counter the response carries (`Signer.Decrypt`), never the
-    request counter (v6.1.1 now verifies/passes it upstream; PSA preserves that behavior): every `Peer::decrypt_response` call site passes `AES_GCM_Response_data.counter`.
+    request counter (v6.2.0 now verifies/passes it upstream; PSA preserves that behavior): every `Peer::decrypt_response` call site passes `AES_GCM_Response_data.counter`.
     Encrypted VCSEC additionally requires an initialized peer and non-empty domain request hash;
     missing context, failed tag or repeated response counter (including zero) drops before decoding,
     sleep/status updates and callbacks. Plaintext passive status is a separate path. Fresh sessions

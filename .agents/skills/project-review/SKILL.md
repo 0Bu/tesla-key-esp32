@@ -77,7 +77,7 @@ current implementation. These are review questions, not substitute implementatio
 
 | Area | Required checks |
 |---|---|
-| Sleep/wake | Cached status/MQTT/display never wake; NO_WAKE background polls pause under commands; signed health probe does not open Infotainment; fresh-contact charging and recent-command active window; debounce, retry and episode quiescence survive repeated cycles. |
+| Sleep/wake | Cached status/MQTT/display never wake; NO_WAKE background polls pause under commands; non-waking VCSEC GET_STATUS health probe does not open Infotainment; fresh-contact charging and recent-command active window; debounce, retry and episode quiescence survive repeated cycles. |
 | Link/presentation | One link-state owner; live Infotainment proves awake, debounced VCSEC proves sleep, reachability proves idle; unknown/unreachable and last-known labels remain honest across UI/MQTT/API; phase timers/presenter mirrors agree. |
 | Commands/protocol | One registry/dispatcher; required/optional bounds and REST/MCP differences; complete fixed evcc charge_state versus optional status/MQTT fields and imperial versus metric units; Charging-Manager feasibility; request UUID/replay/authentication binding, initialized-secret admission and fail-closed encrypted VCSEC before telemetry; late completion generation/lifetime; charging-current ACK plus fresh exact readback. |
 | Heap/locks | INTERNAL largest block, bounded payloads, all allocation outcomes and unwind paths; RAII ordering; no Vehicle lock while waiting; POD callbacks/zero-wait host locks; parse after unlock; sticky JSON with exactly one failure reply and no partial retained publish. |
@@ -86,7 +86,7 @@ current implementation. These are review questions, not substitute implementatio
 | OTA | Bounded complete manifest/JSON/version intake; exact manifest/descriptor equality, channel/preview/return exceptions; wrong target/signature; shared operation ownership; no false health confirmation from setup, automatic recovery or partial runtime; network/heap/NimBLE evidence. |
 | Network | Trial WiFi rollback, reconnect after proven lease, transport/lease/gateway-bound baseline and stale in-flight verdict rejection, no ICMP-induced restart; cached board detection before GPIO drive, ordered W5500 probe/all-later-board pin safety/partial unwind; route/lease ownership; quarantined asynchronous ping generations. |
 | MQTT/Syslog | TLS credentials/certification policy, no command subscription; presence/units/identity; discovery→availability→state retries and invalid-cache clearing; post-unlock sinks, bounded logging, generation-safe redaction and storm throttling. |
-| Build/publication | Exact four targets; v6.1.1 pin and full patch chain; pinned IDF/locks; effective-build closure and flags; both host gates plus concurrent producer/independent target legs; size/stack/projection; fresh independent bytes; protected key boundary; production RSA-PSS pin; immutable reuse, Release/Pages equality and stale-preview cleanup. |
+| Build/publication | Exact four targets; v6.2.0 pin and full patch chain; pinned IDF/locks; effective-build closure and flags; both host gates plus concurrent producer/independent target legs; size/stack/projection; fresh independent bytes; protected key boundary; production RSA-PSS pin; immutable reuse, Release/Pages equality and stale-preview cleanup. |
 
 ## Cross-cutting consistency
 

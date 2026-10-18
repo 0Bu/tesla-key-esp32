@@ -3,8 +3,9 @@
 Apply [AGENTS.md](../../AGENTS.md), [runtime sleep/link policy](../../docs/ARCHITECTURE.md#sleep--link-state-the-single-source-of-truth)
 and [ADR-0005](../../docs/adr/0005-tesla-ble-seam.md).
 
-- No unsolicited command, wake or Infotainment session for a sleeping car. Only the scheduled signed
-  VCSEC health probe may connect outside the active window without waking; no other background path
+- No unsolicited command, wake or Infotainment session for a sleeping car. Only the scheduled non-waking
+  VCSEC `GET_STATUS` health probe may connect outside the active window; its plaintext response
+  is advisory and never authorizes identity/session mutation; no other background path
   may silently open a connection/session. The bounded wake/bootstrap one-shot may refresh charge
   and drive on an already connected independently awake car with NO_WAKE_SKIP, retry backoff and
   episode quiescence. Status, logs and telemetry read caches.

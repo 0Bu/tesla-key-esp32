@@ -58,9 +58,13 @@ Enterprise authentication is not supported.
 
 ## Pairing and identity
 
-A configured VIN is required before any automatic enrollment. The key remains on the device.
-Pairing enrolls Charging Manager only; `POST /send_key` can retry enrollment while the NFC keycard
-is on the console reader. `POST /send_key?role=owner` is refused (`403`).
+A configured VIN is required before pairing. The device keeps its key and performs read-only
+status/health probes; it does not enroll automatically. To enroll or retry, place the Tesla NFC
+keycard on the console reader and explicitly use **Send existing key** in the web UI or
+`POST /send_key`. This sends the current Charging Manager key; transmission does not confirm car
+approval, so confirm the prompt on the touchscreen and wait for status to verify the session.
+`POST /send_key?role=owner` is refused (`403`). An ambiguous request result is not resent
+automatically; check status before deciding to try again.
 
 Changing VIN or forcing key generation removes the old pairing. Re-saving the same VIN is a no-op.
 Use these operations only for an intentional identity change, then pair again. Connection timeouts
@@ -133,12 +137,12 @@ change state; distinguish them from reading an existing log or cached status.
 | Installer has no serial port | Data cable, browser Web Serial support, port already in use | Close the serial monitor; hold BOOT while connecting or use BOOT + RESET. |
 | Installer: firmware installed, start not verified | Adapter without reset lines, a native USB port that reconnected late, or an image that does not boot | The firmware is already on flash: press RESET or reconnect the cable. If it still does not start, open the serial monitor and reinstall with Keep configuration rather than Erase. |
 | `.local` will not load | DHCP lease in router | Open the current IP. Use that IP or `.local` for browser saves. |
-| No WiFi | SSID/password, open or WPA2 network | Use setup AP or `provision.py`; do not write partial NVS images. Failed LAN credential changes roll back once. |
-| No pairing prompt | VIN configured, `key_present`, BLE range, NFC card on reader | Keep car awake and confirm on its touchscreen; retry enrollment if the prompt expired. |
+| No WiFi | SSID/password, open or WPA2 network | Use setup AP or `provision.py`; do not write partial NVS images. Failed LAN credential changes roll back once. With saved credentials the device keeps retrying them and the setup AP closes after 10 minutes without a client (30 minutes at most); power-cycle to reopen it. |
+| No pairing prompt | VIN configured, `key_present`, BLE range, NFC card on reader | Explicitly send the existing key, then confirm on the touchscreen. Check status before retrying an ambiguous send result. |
 | BLE connection fails | `/status.ble.connect_fail`, `car_connectable`, log cause | Move closer; disconnect another phone/fob if the car advertises non-connectable. |
 | Command times out | BLE availability and car asleep | An intentional wake may be needed; wait for the link and retry. Preserve keys and logs. |
 | evcc has no SOC/current | `port: 80`, VIN, cache freshness | Inspect `.response.response.charge_state` from `vehicle_data`; active stale telemetry returns `503`. |
-| Key no longer paired | Key removed on car or intentional VIN/key change | Re-pair with the NFC card after confirming the cause. No firmware erase is required. |
+| Key needs attention | `reauth`, stored session and BLE availability | The key is preserved. If enrollment is needed, explicitly send the existing key with the NFC card on the reader and confirm on the touchscreen. No firmware erase is required. |
 | MQTT save fails | `mqtt.error`; HTTP `400`, `502` or `503` | Check credentials, reachability or contiguous heap respectively. A failed probe saves nothing. |
 | Syslog says unreachable | Collector DNS and UDP delivery | ICMP is only advisory; a collector blocking ping may still receive logs. |
 | Restart or crash | `sys.reset_reason`, `last_crash`, `last_reboot`, heap trend | Retain evidence and match a dump to the same build's ELF before clearing it. |

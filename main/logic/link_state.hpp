@@ -25,7 +25,7 @@ inline constexpr uint32_t kAsleepDebounceS  = 120;
 struct LinkInputs {
     bool     have_contact          = false;  // ever received live infotainment data
     uint32_t contact_age_s         = 0;      // seconds since that data (valid iff have_contact)
-    bool     have_reachable        = false;  // ever completed a signed BLE round-trip
+    bool     have_reachable        = false;  // ever observed BLE reachability evidence
     uint32_t reachable_age_s       = 0;      // seconds since reachable (valid iff have_reachable)
     bool     vcsec_stably_asleep   = false;  // VCSEC sleep flag held ASLEEP >= kAsleepDebounceS
 };

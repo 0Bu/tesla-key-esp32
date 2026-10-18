@@ -3,10 +3,12 @@
 #include "logic/http_body.hpp" // http_body_read() — reassemble a multi-segment POST body
 
 #include <array>
+#include <atomic>
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
 #include <cctype>
+#include <cerrno>
 #include <cstdint>
 #include <exception>
 #include <string>
@@ -23,8 +25,10 @@
 #include "lwip/sockets.h"
 #include "logic/vin.hpp"
 #include "logic/captive.hpp"
+#include "logic/setup_portal.hpp"
 #include "logic/wifi_credentials.hpp"
 #include "config_blob.hpp"
+#include "net.hpp"
 #include "boot_fatal.hpp"
 #include "task_config.hpp"
 
@@ -241,9 +245,10 @@ static esp_err_t save_post_impl(httpd_req_t* req) {
     // credentials restore an unrelated older network (logic/config_store.hpp).
     tk::config_apply_setup_wifi(cfg, ssid, pass);
     if (!vin.empty()) cfg.vin = vin;
-    // No rollback backup from HERE: the setup portal is the path taken when there is nothing that
-    // works to fall back to, and arming it would mean a failed first attempt "restores" an empty
-    // configuration — which is this same portal, one reboot later.
+    // No rollback backup from HERE: the form replaces the stored pair outright. First-time setup
+    // has nothing to fall back to, and arming one would mean a failed first attempt "restores" an
+    // empty configuration — this same portal, one reboot later. In the retrying portal the stored
+    // pair is still retried until the form is saved; saving is the explicit choice to replace it.
 
     if (!tk::cfg_save(*g_cfg, cfg)) {
         ESP_LOGE(TAG, "failed to persist setup form; staying in setup mode");
@@ -290,12 +295,22 @@ static esp_err_t save_post(httpd_req_t* req) {
 }
 
 // ─── Captive-portal DNS ───────────────────────────────────────────────────────
-// Answers every A query with 192.168.4.1 so phones (incl. iOS Captive Network
-// Assistant) detect a captive portal and auto-open the setup form.
+// Answers every A query with the portal address so phones (incl. iOS Captive Network
+// Assistant) detect a captive portal and auto-open the setup form. The reply is built by the
+// host-tested tk::build_captive_dns_reply(); malformed or unsupported queries are dropped.
+// The task stops within about a second once s_dns_stop is set (the receive timeout re-checks it).
+
+static std::atomic<bool> s_dns_stop{false};
+static std::atomic<bool> s_dns_running{false};
 
 static void dns_task(void*) {
     int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (sock < 0) { ESP_LOGW(TAG, "DNS socket failed"); vTaskDelete(nullptr); return; }
+    if (sock < 0) {
+        ESP_LOGW(TAG, "DNS socket failed");
+        s_dns_running.store(false);
+        vTaskDelete(nullptr);
+        return;
+    }
 
     sockaddr_in addr{};
     addr.sin_family      = AF_INET;
@@ -304,44 +319,64 @@ static void dns_task(void*) {
     if (bind(sock, (sockaddr*)&addr, sizeof(addr)) < 0) {
         ESP_LOGW(TAG, "DNS bind failed");
         close(sock);
+        s_dns_running.store(false);
+        vTaskDelete(nullptr);
+        return;
+    }
+    timeval timeout{};
+    timeout.tv_sec = 1;
+    if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
+        // Without the timeout the task could not see the stop flag and would outlive the portal,
+        // answering LAN DNS queries with the portal address. The form stays reachable by address.
+        ESP_LOGW(TAG, "DNS receive timeout not set — captive DNS off");
+        close(sock);
+        s_dns_running.store(false);
         vTaskDelete(nullptr);
         return;
     }
 
+    // Both buffers live on this task's stack (4096 B): the task exists only while the portal runs,
+    // so a static reply would cost internal DRAM for the whole uptime.
     uint8_t buf[512];
-    while (true) {
+    uint8_t reply[tk::kCaptiveDnsReplyMax];
+    while (!s_dns_stop.load()) {
         sockaddr_in src{};
         socklen_t srclen = sizeof(src);
-        int n = recvfrom(sock, buf, sizeof(buf), 0, (sockaddr*)&src, &srclen);
-        // Need at least a header (12) + one question; cap so the appended answer fits.
-        if (n < 12 || n > (int)sizeof(buf) - 16) continue;
-
-        buf[2] |= 0x80;   // QR = response
-        buf[3] = 0x80;    // RA = 0, RCODE = 0 (AA bit optional)
-        buf[6] = 0x00; buf[7] = 0x01;   // ANCOUNT = 1
-
-        // Append answer: name pointer to the question (0xC00C), A/IN, TTL 60, 192.168.4.1
-        static const uint8_t answer[] = {
-            0xC0, 0x0C,             // name → offset 12
-            0x00, 0x01,             // type A
-            0x00, 0x01,             // class IN
-            0x00, 0x00, 0x00, 0x3C, // TTL 60s
-            0x00, 0x04,             // RDLENGTH 4
-            192, 168, 4, 1          // RDATA
-        };
-        memcpy(buf + n, answer, sizeof(answer));
-        sendto(sock, buf, n + sizeof(answer), 0, (sockaddr*)&src, srclen);
+        const int n = recvfrom(sock, buf, sizeof(buf), 0, (sockaddr*)&src, &srclen);
+        if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+            vTaskDelay(pdMS_TO_TICKS(100));  // a persistent socket error must not spin this task
+            continue;
+        }
+        if (n <= 0) continue;  // receive timeout: re-check the stop flag
+        const size_t len = tk::build_captive_dns_reply(buf, static_cast<size_t>(n), reply, sizeof(reply));
+        if (len) sendto(sock, reply, len, 0, (sockaddr*)&src, srclen);
     }
+    close(sock);
+    s_dns_running.store(false);
+    vTaskDelete(nullptr);
 }
 
-// ─── Entry point ────────────────────────────────────────────────────────────
+// ─── Portal lifecycle ─────────────────────────────────────────────────────────
 
-void provisioning_run(NvsStorageAdapter& config_store) {
+struct SetupPortal {
+    esp_netif_t*   ap_netif = nullptr;
+    httpd_handle_t server   = nullptr;
+};
+
+// Bring up the setup AP, its DHCP option, the HTTP form and the captive DNS.
+//
+// keep_station: the WiFi driver already runs the station from net_start_wifi(), with its netif and
+// event handlers. The portal then joins it as APSTA, so the stored credentials can be retried in
+// the background, instead of tearing the station down for an AP-only portal.
+static SetupPortal portal_open(NvsStorageAdapter& config_store, bool keep_station) {
     g_cfg = &config_store;
+    SetupPortal portal;
 
-    // Defensive teardown in case a STA connection attempt ran first.
-    esp_wifi_stop();
-    esp_wifi_deinit();
+    if (!keep_station) {
+        // Defensive teardown in case a STA connection attempt ran first.
+        esp_wifi_stop();
+        esp_wifi_deinit();
+    }
 
     const esp_err_t netif_err = esp_netif_init();
     if (netif_err != ESP_OK && netif_err != ESP_ERR_INVALID_STATE) {
@@ -353,6 +388,7 @@ void provisioning_run(NvsStorageAdapter& config_store) {
     }
     esp_netif_t* ap_netif = esp_netif_create_default_wifi_ap();
     if (!ap_netif) boot_fatal("setup AP network interface");
+    portal.ap_netif = ap_netif;
 
     // RFC 8910 (DHCP option 114): hand the joining client the portal URI in its DHCP lease. Recent
     // iOS and Android prefer this over probing at all, so the portal opens without depending on the
@@ -361,7 +397,7 @@ void provisioning_run(NvsStorageAdapter& config_store) {
     //
     // The buffer is STATIC on purpose: esp_netif stores the POINTER it is handed, not a copy, so a
     // stack buffer here would leave the DHCP server reading freed memory for the life of the AP.
-    if (ap_netif) {
+    {
         // Copied at runtime rather than brace-initialised: CAPTIVE_PORTAL_URI is a `const char*`
         // (one definition shared with the DNS answer and the Location header), and a char array
         // cannot be initialised from a pointer. The COPY is what matters anyway — esp_netif wants a
@@ -382,8 +418,10 @@ void provisioning_run(NvsStorageAdapter& config_store) {
         esp_netif_dhcps_start(ap_netif);
     }
 
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    provisioning_boot_require(esp_wifi_init(&cfg), "setup WiFi driver initialization");
+    if (!keep_station) {
+        wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+        provisioning_boot_require(esp_wifi_init(&cfg), "setup WiFi driver initialization");
+    }
 
     wifi_config_t ap{};
     strncpy((char*)ap.ap.ssid, AP_SSID, sizeof(ap.ap.ssid) - 1);
@@ -392,19 +430,19 @@ void provisioning_run(NvsStorageAdapter& config_store) {
     ap.ap.max_connection = 4;
     ap.ap.authmode       = WIFI_AUTH_OPEN;   // open network for easy setup
 
-    // AP only — the portal is the sole WiFi setup path.
-    provisioning_boot_require(esp_wifi_set_mode(WIFI_MODE_AP), "setup AP mode");
+    // The portal is the sole WiFi setup path; with stored credentials the station stays beside it.
+    provisioning_boot_require(esp_wifi_set_mode(keep_station ? WIFI_MODE_APSTA : WIFI_MODE_AP),
+                              "setup AP mode");
     provisioning_boot_require(esp_wifi_set_config(WIFI_IF_AP, &ap), "setup AP configuration");
-    provisioning_boot_require(esp_wifi_start(), "setup AP start");
+    if (!keep_station) provisioning_boot_require(esp_wifi_start(), "setup AP start");
 
-    ESP_LOGI(TAG, "Setup AP up. Join WiFi '%s' and open http://192.168.4.1", AP_SSID);
+    ESP_LOGI(TAG, "Setup AP up. Join WiFi '%s' and open %s", AP_SSID, tk::CAPTIVE_PORTAL_URI);
 
     httpd_config_t hcfg   = HTTPD_DEFAULT_CONFIG();
     hcfg.recv_wait_timeout = tk::BODY_RECV_TIMEOUT_SECONDS;
     hcfg.uri_match_fn     = httpd_uri_match_wildcard;
     hcfg.max_uri_handlers = 4;
-    httpd_handle_t server = nullptr;
-    if (httpd_start(&server, &hcfg) != ESP_OK) {
+    if (httpd_start(&portal.server, &hcfg) != ESP_OK) {
         boot_fatal("setup HTTP server");
     }
 
@@ -413,18 +451,114 @@ void provisioning_run(NvsStorageAdapter& config_store) {
     // Wildcard GET → form (also serves captive-portal probe requests)
     httpd_uri_t form = { .uri = "/*", .method = HTTP_GET,
                          .handler = form_get, .user_ctx = nullptr };
-    if (httpd_register_uri_handler(server, &save) != ESP_OK ||
-        httpd_register_uri_handler(server, &form) != ESP_OK) {
+    if (httpd_register_uri_handler(portal.server, &save) != ESP_OK ||
+        httpd_register_uri_handler(portal.server, &form) != ESP_OK) {
         ESP_LOGE(TAG, "setup portal handler registration failed; halting setup mode");
-        httpd_stop(server);
+        httpd_stop(portal.server);
         boot_fatal("setup HTTP handlers");
     }
 
     // Redirect phones only after the entire HTTP surface is ready. Otherwise an orphaned DNS
     // task could keep pointing clients at a portal that failed to start.
-    if (xTaskCreate(dns_task, "captive_dns", 4096, nullptr, tk::kPrioCaptiveDns, nullptr) != pdPASS)
-        ESP_LOGW(TAG, "captive DNS task not started — portal still reachable at 192.168.4.1");
+    s_dns_stop.store(false);
+    s_dns_running.store(true);
+    if (xTaskCreate(dns_task, "captive_dns", 4096, nullptr, tk::kPrioCaptiveDns, nullptr) != pdPASS) {
+        s_dns_running.store(false);
+        ESP_LOGW(TAG, "captive DNS task not started — portal still reachable at %s", tk::CAPTIVE_PORTAL_IP);
+    }
+    return portal;
+}
 
+// Stop advertising the setup AP: captive DNS, the form's HTTP server, then the AP interface. The
+// station keeps running, so background retries continue and the normal web server can start.
+// Returns false while the AP is still up; the caller reports it with tk::portal_close_failed() and
+// retries after the backoff (idempotent).
+static bool portal_close_ap(SetupPortal& portal) {
+    s_dns_stop.store(true);
+    for (int i = 0; i < 30 && s_dns_running.load(); ++i) vTaskDelay(pdMS_TO_TICKS(100));
+    if (portal.server) {
+        const esp_err_t stop_err = httpd_stop(portal.server);
+        if (stop_err != ESP_OK) {
+            // A failed stop can leave the server running. Retain its handle and retry through
+            // the existing close backoff before allowing the normal port-80 server to start.
+            ESP_LOGW(TAG, "setup HTTP server not stopped: %s", esp_err_to_name(stop_err));
+            return false;
+        }
+        portal.server = nullptr;
+    }
+    const esp_err_t mode_err = esp_wifi_set_mode(WIFI_MODE_STA);
+    if (mode_err != ESP_OK) {
+        // The AP still runs on this netif; destroying it under the driver is worse than keeping it.
+        ESP_LOGW(TAG, "setup AP not switched off: %s", esp_err_to_name(mode_err));
+        return false;
+    }
+    // The mode switch posts WIFI_EVENT_AP_STOP; its default handler stops the DHCP server through
+    // this netif. Give the event task (higher priority) the chance to run it before the netif is
+    // destroyed, so the DHCP server is not left running on a freed interface.
+    vTaskDelay(pdMS_TO_TICKS(200));
+    if (portal.ap_netif) {
+        esp_netif_destroy_default_wifi(portal.ap_netif);
+        portal.ap_netif = nullptr;
+    }
+    return true;
+}
+
+static uint32_t portal_ap_clients() {
+    wifi_sta_list_t stations{};
+    return esp_wifi_ap_get_sta_list(&stations) == ESP_OK ? static_cast<uint32_t>(stations.num) : 0;
+}
+
+// ─── Entry points ───────────────────────────────────────────────────────────
+
+void provisioning_run(NvsStorageAdapter& config_store) {
+    portal_open(config_store, /*keep_station=*/false);
     // Never returns — the device stays in setup mode until the form reboots it.
     while (true) vTaskDelay(pdMS_TO_TICKS(1000));
+}
+
+void provisioning_run_with_retry(NvsStorageAdapter& config_store) {
+    if (!tk::net_wifi_station_started()) {
+        // net_start_wifi() rejected the stored credentials before the driver existed (legacy or
+        // build-time values that skipped validation). Retrying them is pointless and APSTA needs
+        // a running station, so this is the terminal first-time portal.
+        ESP_LOGW(TAG, "stored WiFi credentials unusable — setup portal without retry");
+        provisioning_run(config_store);
+    }
+    SetupPortal portal = portal_open(config_store, /*keep_station=*/true);
+    ESP_LOGW(TAG, "setup portal open; retrying the stored WiFi network in the background");
+    // The host-tested logic/setup_portal.hpp defers its attempts under an AP client before the cap;
+    // station-event retries remain independent. Close requests at idle/open-time limits use backoff
+    // on failure. This loop samples inputs once a second using the 64-bit timer.
+    tk::PortalState state{};
+    bool ap_open = true;
+    const int64_t opened_us = esp_timer_get_time();
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        const uint32_t now_s = static_cast<uint32_t>((esp_timer_get_time() - opened_us) / 1000000);
+        const uint32_t clients = ap_open ? portal_ap_clients() : 0;
+        switch (tk::portal_step(state, {tk::net_is_up(), ap_open, clients, now_s})) {
+            case tk::PortalAction::AttemptStation:
+                ESP_LOGI(TAG, "retrying the stored WiFi network (attempt %u)", (unsigned)state.attempts);
+                tk::net_wifi_retry_station();
+                break;
+            case tk::PortalAction::CloseAp:
+                ESP_LOGW(TAG, "closing the open setup AP (open %u s, idle %u s); retries continue, "
+                              "and a power cycle reopens it", (unsigned)now_s,
+                         (unsigned)(now_s - state.idle_since_s));
+                if (portal_close_ap(portal)) ap_open = false;
+                else tk::portal_close_failed(state, now_s);
+                break;
+            case tk::PortalAction::Leave:
+                // Fail closed: the boot continues (normal web server, BLE) only once the open AP
+                // is down; a failed close is retried with backoff (logic/setup_portal.hpp).
+                if (ap_open && !portal_close_ap(portal)) {
+                    tk::portal_close_failed(state, now_s);
+                    break;
+                }
+                ESP_LOGI(TAG, "network up via %s — leaving the setup portal", tk::net_link_str(tk::net_kind()));
+                return;
+            case tk::PortalAction::None:
+                break;
+        }
+    }
 }

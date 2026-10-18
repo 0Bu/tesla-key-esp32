@@ -1,5 +1,5 @@
 // Command dispatch: the BLE connect helper, the shared result callback (incl. the
-// revocation / desync-backstop heuristics), the generic VCSEC/Infotainment command
+// advisory recovery-hint / desync-backstop heuristics), the generic VCSEC/Infotainment command
 // runners, and every user-facing command (wake/charge/limit/port/lock/climate/…).
 // Part of the VehicleController implementation split — see vehicle_ctrl_internal.hpp.
 
@@ -170,7 +170,7 @@ void VehicleController::invalidate_and_flush_(uint32_t generation) {
 
 void VehicleController::note_completion_timeout_(
         const char* name, tk::CompletionTimeoutPolicy timeout_policy) {
-    // Callers hold command_mutex_, so the health-timeout state is serialized with every signed
+    // Callers hold command_mutex_, so the health-timeout state is serialized with every
     // command path. The logging consequence is identical for the generic command runner and the
     // direct vehicle-status callback path; keeping it here prevents either from bypassing policy.
     const uint64_t now_ms = static_cast<uint64_t>(esp_timer_get_time()) / 1000ULL;
@@ -227,8 +227,8 @@ VehicleController::CommandOutcome VehicleController::await_completion_(
 
 VehicleController::ResultCb VehicleController::make_result_cb_(
         const std::shared_ptr<CommandCompletion>& completion,
-        uint32_t generation, bool auth_fail_is_revocation) {
-    return [this, completion, generation, auth_fail_is_revocation](tk::OperationResult result) {
+        uint32_t generation, bool auth_fail_is_health_probe) {
+    return [this, completion, generation, auth_fail_is_health_probe](tk::OperationResult result) {
       // A timeout flush synchronously invokes queued callbacks. Generation is deliberately
       // checked before any state mutation, so such callbacks cannot complete a later request.
       if (command_generation_.load() != generation) return;
@@ -236,8 +236,8 @@ VehicleController::ResultCb VehicleController::make_result_cb_(
         completion->completed = true;
         completion->success = result.compatible_success();
         if (completion->success) {
-            // A good response proves the car still trusts our key — clear any pending
-            // "key might be gone" streak so a later one-off glitch starts from zero.
+            // Any successful command breaks a consecutive-error streak. Only the supervisor's
+            // successful health response clears the volatile recovery hint itself.
             auth_fail_streak_ = 0;
             cmd_fail_streak_.store(0);  // link is answering cleanly → reset the desync backstop
             // It also proves the car is reachable over BLE right now (this fires for the
@@ -273,45 +273,22 @@ VehicleController::ResultCb VehicleController::make_result_cb_(
                     }
                     break;
             }
-            // Two distinct ways a Tesla signals "your key is no longer whitelisted"
-            // (it was deleted on the car side); both must invalidate the pairing so the
-            // supervisor re-keys + re-pairs and the UI/evcc stop showing a dead pairing:
-            //
-            //  a) KEY_NOT_ON_WHITELIST → "… key not on whitelist - pairing required".
-            //     Definitive, act immediately — honoured for EVERY command, but only
-            //     while we believe we're paired: during enrolment an incoming foreground
-            //     command (e.g. evcc traffic) legitimately fails its handshake with
-            //     KEY_NOT_ON_WHITELIST, and treating that as a revocation would rotate
-            //     the key under the user mid-enrolment (the key just confirmed on the
-            //     car would then belong to a stale keypair). Same gate as the primary
-            //     set_message_callback observer.
-            //  b) The car answers a signed command with a session-info reply that has no
-            //     HMAC tag (it can't authenticate a key it no longer holds) → the library
-            //     reports "auth response authentication failed". Observed in the field as
-            //     the actual response to key deletion. BUT the car returns the *same*
-            //     message when it authenticates the key fine yet REFUSES the operation for
-            //     the key's role — a Charging-Manager key sending door_lock/door_unlock/
-            //     flash_lights/honk_horn/climate/sentry/etc. gets "authentication failed"
-            //     too. A role refusal is therefore indistinguishable from a revocation at
-            //     this layer, so counting (b) on arbitrary user commands would let two
-            //     role-denied calls in a row destroy a perfectly good pairing (forcing a
-            //     physical NFC re-enrol). Hence (b) is honoured ONLY for the dedicated
-            //     health probe (auth_fail_is_revocation), which sends a GET_STATUS the
-            //     Charging-Manager key is always authorised for — there an auth failure
-            //     genuinely means revocation. The supervisor runs that probe ~30 s, so a
-            //     real deletion is still caught even with no evcc traffic. Two in a row are
-            //     required (one-off glitch guard); the counter resets on any success above
-            //     and on a BLE disconnect.
+            // These response strings are only recovery hints. A text match cannot establish
+            // that the vehicle deleted a key, and it must never rotate identity, erase stored
+            // sessions, or schedule a Whitelist Add. The UI can offer an explicit same-key
+            // enrolment action; a successful health response clears the hint.
             if (msg.find("whitelist") != msg.npos) {
                 if (believed_paired_.load()) {
-                    pairing_lost_      = true;
-                    auth_fail_streak_  = 0;
+                    pairing_recovery_hint_.store(true, std::memory_order_release);
+                    repair_notice_.store(true, std::memory_order_release);
+                    auth_fail_streak_.store(0, std::memory_order_release);
                 }
-            } else if (auth_fail_is_revocation &&
+            } else if (auth_fail_is_health_probe &&
                        msg.find("authentication failed") != msg.npos) {
-                if (++auth_fail_streak_ >= 2) {
-                    pairing_lost_     = true;
-                    auth_fail_streak_ = 0;
+                if (auth_fail_streak_.fetch_add(1, std::memory_order_acq_rel) + 1 >= 2) {
+                    pairing_recovery_hint_.store(true, std::memory_order_release);
+                    repair_notice_.store(true, std::memory_order_release);
+                    auth_fail_streak_.store(0, std::memory_order_release);
                 }
             }
         }
@@ -330,7 +307,7 @@ VehicleController::ResultCb VehicleController::make_result_cb_(
 
 bool VehicleController::send_vcsec_(const std::string& name, Builder builder,
                                      WakePolicy wp, int timeout_ms,
-                                     tk::ConnectOrigin origin, bool auth_fail_is_revocation,
+                                     tk::ConnectOrigin origin, bool auth_fail_is_health_probe,
                                      tk::CompletionTimeoutPolicy timeout_policy,
                                      bool completes_on_transmit) {
     const bool foreground = origin == tk::ConnectOrigin::Foreground;
@@ -353,7 +330,7 @@ bool VehicleController::send_vcsec_(const std::string& name, Builder builder,
     // car never gets to idle/sleep).
     if (foreground) last_cmd_ticks_.store(xTaskGetTickCount());
     out = send_vcsec_locked_(name, std::move(builder), wp, deadline,
-                             origin, auth_fail_is_revocation, timeout_policy,
+                             origin, auth_fail_is_health_probe, timeout_policy,
                              completes_on_transmit);
     if (foreground) publish_command_outcome_(out);
     return out.success;
@@ -361,9 +338,9 @@ bool VehicleController::send_vcsec_(const std::string& name, Builder builder,
 
 VehicleController::CommandOutcome VehicleController::send_vcsec_locked_(
         const std::string& name, Builder builder, WakePolicy wp,
-        uint32_t deadline, tk::ConnectOrigin origin, bool auth_fail_is_revocation,
+        uint32_t deadline, tk::ConnectOrigin origin, bool auth_fail_is_health_probe,
         tk::CompletionTimeoutPolicy timeout_policy,
-        bool completes_on_transmit) {
+        bool completes_on_transmit, uint32_t max_retries) {
     CommandOutcome out;
     if (!command_identity_ready_()) {
         out.error = "runtime key is not verified; reboot or regenerate required";
@@ -395,7 +372,7 @@ VehicleController::CommandOutcome VehicleController::send_vcsec_locked_(
         const uint32_t now_ms = static_cast<uint32_t>(pdTICKS_TO_MS(xTaskGetTickCount()));
         const uint32_t timeout_ms = remaining_ms_(deadline);
 
-        auto cb = make_result_cb_(completion, generation, auth_fail_is_revocation);
+        auto cb = make_result_cb_(completion, generation, auth_fail_is_health_probe);
         auto on_done = [cb](bool success, const std::string& err) {
             if (success) {
                 cb(tk::OperationResult::success());
@@ -408,7 +385,7 @@ VehicleController::CommandOutcome VehicleController::send_vcsec_locked_(
         };
         cmd_id = command_runner_.enqueue(
             name, tk::BleDomain::VehicleSecurity, wp, timeout_ms, now_ms, {}, std::move(on_done),
-            completes_on_transmit);
+            completes_on_transmit, max_retries);
         if (cmd_id == 0) {
             out.error = "command queue full";
             return out;

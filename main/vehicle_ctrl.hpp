@@ -133,10 +133,10 @@ public:
         return true;
     }
 
-    // Seconds since the car was last REACHABLE over BLE (any successful signed round-trip,
+    // Seconds since the car was last REACHABLE over BLE (any successful command/status observation,
     // incl. the idle VCSEC health poll). Returns false if never reached since boot / re-pair.
     // Unlike seconds_since_contact this keeps refreshing while the car only sleeps nearby
-    // (the health poll still answers), so a stale value means genuinely unreachable.
+    // (the health poll still answers), so a stale value means no recent reachability evidence.
     bool seconds_since_reachable(uint32_t& out) const {
         uint32_t t = last_reachable_ticks_.load();
         if (t == 0) return false;
@@ -197,8 +197,8 @@ public:
     // checked under that same lock, so auto-pair cannot create a key between a preflight check and
     // mutation. The bool wrapper is retained for trusted first-boot/auto-pair callers.
     KeyGenerationResult generate_key_result(bool allow_replace);
-    // Auto-pair-only wrapper: re-samples revocation, durable-key presence and runtime safety
-    // together under command_mutex_ before it authorizes mutation.
+    // Supervisor-only wrapper: re-samples the recovery hint, durable-key presence and runtime
+    // safety under command_mutex_; generation is allowed only for verified first-boot absence.
     bool generate_key();
     // Always enrolls a Charging Manager key (charging + wake only); never an owner key.
     bool pair(tk::ConnectOrigin origin, int timeout_ms = 30000);
@@ -248,10 +248,9 @@ public:
     // connection limit), 1 connectable. Tells "car at its ~3-device limit" from "link failing".
     int ble_target_connectable() const { return ble_ ? ble_->target_connectable() : -1; }
     bool has_key();      // a private key exists in NVS
-    bool has_session();  // a VCSEC session exists in NVS (i.e. paired & handshaked)
-    // True after a pairing was *lost* (key deleted on the car side) and a re-pair is
-    // pending. Lets the UI explain why it's asking to pair again rather than showing
-    // the generic first-time prompt. Cleared once a fresh session is established.
+    bool has_session();  // a VCSEC session record exists in NVS; this does not prove current reachability
+    // True when the vehicle connection needs attention. It is a hint, not proof of key deletion;
+    // the UI keeps it visible even while an NVS session exists and offers explicit same-key send.
     bool reauth_required() const { return repair_notice_; }
     // Tesla public-key id of the stored key (SHA-1(pubkey)[:4], "AB:CD:EF:01"),
     // matching the key list shown on the vehicle. Empty if no key is present.
@@ -435,24 +434,20 @@ private:
     std::string compute_key_fingerprint_();
     std::string key_fingerprint_cache_{};
 
-    // Signed VCSEC GET_STATUS poll used purely to detect that our key was deleted on the
-    // car side (the response then carries KEY_NOT_ON_WHITELIST, or a tagless session-info →
-    // "authentication failed", which trips pairing_lost_ via make_result_cb_). It is the
-    // ONLY caller that passes auth_fail_is_revocation, because GET_STATUS is the one signed
-    // command every key role may run — so an auth failure here cannot be a role refusal.
-    // Benign/read-only; does not wake the car.
+    // Non-waking VCSEC GET_STATUS health poll. Rejection/error responses are only volatile hints;
+    // they never rotate the key, erase sessions, or enrol automatically. Benign/read-only and
+    // does not wake the car.
     bool health_probe_(int timeout_ms = 8000);
     // Idle until the next health poll, arming the "next attempt in…" countdown for it.
     void idle_until_next_health_poll_();
 
-    // Enqueue an Infotainment or VCSEC command and wait for the callback. auth_fail_is_revocation
-    // forwards to make_result_cb_: set ONLY for the health probe, so a role-denied user command
-    // (door/flash/honk/climate/sentry on a Charging-Manager key — all answered "authentication
-    // failed") cannot be mistaken for a revocation and destroy the pairing.
+    // Enqueue an Infotainment or VCSEC command and wait for the callback. auth_fail_is_health_probe
+    // lets the health poll count repeated authentication errors as a volatile UI hint; the
+    // hint never mutates the key or stored sessions.
     bool send_vcsec_(const std::string& name, Builder builder,
                      WakePolicy wp, int timeout_ms,
                      tk::ConnectOrigin origin = tk::ConnectOrigin::Foreground,
-                     bool auth_fail_is_revocation = false,
+                     bool auth_fail_is_health_probe = false,
                      tk::CompletionTimeoutPolicy timeout_policy =
                          tk::CompletionTimeoutPolicy::ForegroundWarn,
                      bool completes_on_transmit = false);
@@ -467,16 +462,17 @@ private:
 
     CommandOutcome send_vcsec_locked_(const std::string& name, Builder builder,
                                       WakePolicy wp, uint32_t deadline,
-                                      tk::ConnectOrigin origin, bool auth_fail_is_revocation,
+                                      tk::ConnectOrigin origin, bool auth_fail_is_health_probe,
                                       tk::CompletionTimeoutPolicy timeout_policy,
-                                      bool completes_on_transmit = false);
+                                      bool completes_on_transmit = false,
+                                      uint32_t max_retries = 3);
 
-    // Build the per-command result callback. auth_fail_is_revocation gates whether an
-    // "authentication failed" reply may count toward the two-strike pairing_lost_ heuristic
-    // (true only for the authorised health probe); an explicit "whitelist" fault always trips.
+    // Build the per-command result callback. auth_fail_is_health_probe gates whether an
+    // "authentication failed" reply contributes to the volatile recovery hint. Neither that
+    // hint nor an explicit "whitelist" fault authorizes identity or session mutation.
     ResultCb make_result_cb_(const std::shared_ptr<CommandCompletion>& completion,
                              uint32_t generation,
-                             bool auth_fail_is_revocation = false);
+                             bool auth_fail_is_health_probe = false);
     std::shared_ptr<CommandCompletion> begin_completion_(uint32_t& generation);
     CommandOutcome await_completion_(const std::shared_ptr<CommandCompletion>& completion,
                                      uint32_t generation, uint32_t deadline,
@@ -536,7 +532,7 @@ private:
     // publish here, so they cannot replace a foreground request's error between its bool return
     // and the HTTP/MCP layer reading last_command_error().
     SemaphoreHandle_t result_mutex_{nullptr};
-    // Failure text from the most recent signed command (the Tesla "...action failed:
+    // Failure text from the most recent foreground command (the Tesla "...action failed:
     // <reason>" message), or empty after a success / when no response came back. Lets
     // the HTTP layer report the real reason (e.g. "complete") instead of a generic one.
     std::string       last_error_;
@@ -568,30 +564,24 @@ private:
     // telemetry task could sign/re-key using a request whose persisted VIN is still in flight.
     std::atomic<bool> vin_transition_pending_{false};
 
-    // Set from tesla-ble's serialized message/result callback when the vehicle reports
-    // KEY_NOT_ON_WHITELIST — i.e. our key was removed on the car side. The auto-pair
-    // supervisor consumes it to re-key and restart pairing. atomic: cross-task flag.
-    std::atomic<bool> pairing_lost_{false};
+    // Set from status/result callbacks when a response suggests enrolment needs attention. It
+    // is advisory, may be based on ambiguous remote text, and can never authorize key/session
+    // mutation. A successful health response clears it. atomic: cross-task flag.
+    std::atomic<bool> pairing_recovery_hint_{false};
 
-    // Consecutive "authentication failed" responses from the signed VCSEC health probe ONLY.
-    // A car whose whitelist no longer holds our key replies to a signed command with an
-    // untagged session-info → "auth response authentication failed" (not KEY_NOT_ON_WHITELIST).
-    // That same message, however, is also the car's answer to a command the key's role is not
-    // allowed to run, so it is counted ONLY for the health probe (auth_fail_is_revocation) — a
-    // GET_STATUS every role may issue — never for role-deniable user commands. Two in a row are
-    // required before pairing_lost_ is set (one-off glitch guard) — and they must be consecutive
-    // on ONE continuous link, so the streak is reset on any successful response AND on a BLE
-    // disconnect (a flaky link dropping between two glitches is not a revocation). atomic: cross-task.
+    // Consecutive "authentication failed" responses from the VCSEC health probe ONLY.
+    // The same response can also mean a role refusal, so it is only a volatile recovery hint,
+    // never evidence for key/session mutation. Two consecutive failures are required; success
+    // and BLE disconnect reset the streak. atomic: cross-task.
     std::atomic<int> auth_fail_streak_{0};
 
-    // True only while the supervisor believes we are paired (in the health-check phase).
-    // Gates the message observer so a key-rejection fault seen during *enrolment* (when
-    // rejections are expected) can't trip a re-key, while one seen while paired does.
+    // True only while a session is stored and the supervisor is in its health-check phase.
+    // Gates the message observer so expected faults during explicit enrollment do not create
+    // a recovery hint.
     std::atomic<bool> believed_paired_{false};
 
-    // Sticky "re-pairing needed" notice for the UI: set when a lost pairing is handled,
-    // cleared when a new session is established. Distinguishes a re-pair-after-revocation
-    // from a never-paired device. atomic: written/read across tasks.
+    // Sticky "pairing needs attention" notice for the UI. A stored session alone does not
+    // clear it; a successful health response does. atomic: written/read across tasks.
     std::atomic<bool> repair_notice_{false};
 
     // ── Sleep / active-window gating ────────────────────────────────────────────────
@@ -635,7 +625,7 @@ private:
     tk::ConnectFailState connect_fail_{};
     tk::CompletionTimeoutState completion_timeout_{};
 
-    // Consecutive failed signed round-trips seen in make_result_cb_ (foreground commands +
+    // Consecutive command failures reported through make_result_cb_ (foreground commands +
     // the VCSEC health poll). On an awake, busy link an unrecoverable desync or repeated auth
     // failure can cause consecutive timeouts. After kCmdFailDropStreak
     // failures in a row, while paired, we proactively raise ble_fault_ to drop the link once:
@@ -664,7 +654,7 @@ private:
     std::atomic<uint32_t> climate_state_generation_{0};
     std::atomic<bool>     charge_cache_stale_reported_{false};
     // Uptime tick of the last time the car was confirmed REACHABLE over BLE — any successful
-    // signed round-trip, including the idle VCSEC health poll that keeps answering while the
+    // command response or accepted status observation, including the idle VCSEC health poll while the
     // car merely sleeps nearby (the body controller is always on). This is what tells a
     // parked, sleeping car (reachable) apart from one that has driven off / is out of range
     // (unreachable) — telemetry freshness alone cannot, since both stop the live polls.
@@ -766,10 +756,8 @@ private:
     TaskHandle_t loop_task_{nullptr};
     static void loop_task_fn_(void* arg);
 
-    // Automatic pairing: while not paired, periodically connect to the configured
-    // vehicle and (re)send the whitelist-add so the car keeps prompting "Add key?".
-    // Once the user taps the key card, the VCSEC handshake establishes a session and
-    // the loop goes idle. No manual scan/pair needed.
+    // Pairing supervisor: while configured, perform read-only status and health probes.
+    // Whitelist Add is sent only by the explicit foreground /send_key action.
     TaskHandle_t auto_pair_task_{nullptr};
     static void auto_pair_task_fn_(void* arg);
 };

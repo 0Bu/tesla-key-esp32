@@ -365,64 +365,26 @@ function chargeStats(v,charging){
   if(v.amps>0)  c.push(stat('Current', Math.round(v.amps),        'A',  'ok'));
   return c.join('');
 }
-/* Live AC wall draw (charger actual_current × voltage × phases) in kW — but ONLY when the
-   awake car reports a POSITIVE draw. Returns null when the car is asleep (no live charge
-   object), didn't report the fields, or the draw is 0/negative. charger_power (battery DC, 0 at
-   "Complete") is deliberately not used. The car reports current and voltage PER PHASE, so the
-   total wall draw is current × voltage × phases — dropping the phase count undercounts a
-   multi-phase charge (an EU 3-phase car reports phases=2, so omitting it halves the kW: a real
-   228 V × 3 A × 2 = 1.4 kW reads as 0.7). phases falls back to 1 when the car didn't report it
-   (single-phase / unknown). One decimal, trailing ".0" dropped → "1 kW". A null result means
-   "nothing is actually being pulled right now", so callers show no active chip. */
-function liveKw(s){
-  var v=(s&&s.vehicle)||{};
-  if(v.actual_amps==null||v.volts==null) return null;
-  var w=v.actual_amps*v.volts*(v.phases||1);
-  if(w<=0) return null;
-  return (w/1000).toFixed(1).replace(/\.0$/,'')+' kW';
-}
-/* Is the climate telemetry fresh enough to trust a FAST-CHANGING state (defrosting)? It is
-   refreshed only while the active poll window is open (a recent evcc/manual command, or
-   charging); the moment the car parks and the window closes the climate cache FREEZES, so past
-   this age we must not assert a live "defrosting now". last_seen_s is the age of the most recent
-   telemetry of any kind (the 10 s charge poll keeps it near 0 while the window is open); the
-   per-domain climate lag is bounded by the ~120 s rotation, so 180 s clears one full rotation
-   with margin. */
-function climateFresh(s){ return !!s && (s.last_seen_s==null || s.last_seen_s<=180); }
-/* Overheat (COP) chip — shows the live AC wall draw the car pulls FOR Cabin Overheat
-   Protection, in kW (the #99 requirement), and ONLY while that is actually happening:
-     • COP is armed (reliable `cop` setting = "On"/"FanOnly"; Off/absent → no chip),
-     • the car is awake AND pulling a POSITIVE draw (liveKw — a real measurement), and
-     • it is NOT charging (a charging car's wall draw is the charger, shown by the charge chips).
-   An armed-but-idle COP draws nothing, so we show NO chip rather than a meaningless
-   "OVERHEAT 0 kW" / "On" — being armed (a persistent setting) is not the same as running.
-   cop_cooling is intentionally not used: it reads true even below the activation threshold;
-   the real wall draw is the honest "COP is running now" signal. */
+/* Climate has no per-domain age in /status. Show explicitly cached settings/states, never
+   infer current activity from another domain's last_seen_s or attribute charger input to a
+   climate function. Raw charger_phases also does not establish the AC topology multiplier. */
 function copChip(s){
-  var c=s&&s.tele&&s.tele.climate, v=s&&s.vehicle;
-  if(!c||!c.cop||c.cop==='Off'||c.cop==='Unknown') return '';   // COP must be armed
-  if(v&&/charg/i.test(v.status||'')) return '';                 // charging → wall draw is the charger
-  var kw=liveKw(s);
-  if(!kw) return '';                                            // no positive draw → COP idle → no chip
-  var tip='Cabin overheat protection'+(c.cop_temp?' · '+c.cop_temp:'')+' · '+kw+' AC draw';
-  return '<div class="stat warn" title="'+esc(tip)+'"><div class="k">Overheat</div>'+
-         '<div class="v">'+kw.replace(/ kW$/,'')+'<small>kW</small></div></div>';
+  var c=s&&s.tele&&s.tele.climate;
+  if(!c||(c.cop!=='On'&&c.cop!=='FanOnly')) return '';
+  var tip='Last reported cabin overheat protection setting; current activity and power are unknown'+
+          (c.cop_temp?' · '+c.cop_temp:'');
+  return '<div class="stat cached" title="'+esc(tip)+'"><div class="k"><span>Overheat setting</span></div>'+
+         '<div class="v">'+(c.cop==='FanOnly'?'Fan only':'On')+'</div></div>';
 }
-/* Defrost chip — shown when the car is defrosting (front or rear defroster on, or Max-defrost
-   mode engaged) AND a live AC draw is available, since the only thing we surface is the power
-   the car pulls for it. No live draw — car asleep or the figure not reported — means no chip;
-   the car is never woken to obtain one. Separate from is_climate_on. */
 function defrostChip(s){
   var c=s&&s.tele&&s.tele.climate;
-  if(!c||!climateFresh(s)) return '';
-  if(!(c.front_defrost===true||c.rear_defrost===true||(c.defrost_mode&&c.defrost_mode!=='Off'))) return '';
-  var kw=liveKw(s);
-  if(!kw) return '';                                           // no live draw → nothing to show
-  var p=[]; if(c.front_defrost===true)p.push('front'); if(c.rear_defrost===true)p.push('rear');
-  if(c.defrost_mode&&c.defrost_mode!=='Off')p.push(c.defrost_mode.toLowerCase());
-  var tip='Defrost'+(p.length?' · '+p.join(', '):'');
-  return '<div class="stat info" title="'+esc(tip)+'"><div class="k">Defrost</div>'+
-         '<div class="v">'+kw.replace(/ kW$/,'')+'<small>kW</small></div></div>';
+  if(!c) return '';
+  var p=[]; if(c.front_defrost===true)p.push('Front'); if(c.rear_defrost===true)p.push('Rear');
+  if(c.defrost_mode==='Normal'||c.defrost_mode==='Max')p.push(c.defrost_mode);
+  if(!p.length) return '';
+  var tip='Last reported defrost state; current activity and power are unknown';
+  return '<div class="stat cached" title="'+tip+'"><div class="k"><span>Defrost (cached)</span></div>'+
+         '<div class="v">'+p.join(' / ')+'</div></div>';
 }
 // battery at/above its target and not charging → starting a charge is a no-op the car only
 // rejects as "complete". charge_limit is emitted by /status only when the car reported it, so
@@ -466,6 +428,29 @@ function setHeroAct(label,icon,fn,busyText){
 }
 var bannerFn=null;
 function bannerAction(){ if(isOtaRunning()) return; if(bannerFn) return bannerFn(); }
+var sendKeyInFlight=false;
+function sendExistingKey(){
+  if(isOtaRunning() || sendKeyInFlight) return Promise.resolve();
+  sendKeyInFlight=true;
+  var button=$("bannerAct"); if(button) button.disabled=true;
+  return requestJsonResultWithTimeout('/send_key',{method:'POST'},15000).then(function(res){
+    var body=res.json&&res.json.response?res.json.response:res.json;
+    if(res.ok&&body&&body.result===true){
+      toast('Existing key request transmitted. Place the Tesla keycard on the console reader and confirm on the touchscreen; approval is not yet confirmed.','ok','send-key');
+    } else {
+      toast('Key transmission was not confirmed. Check vehicle status before trying again.','err','send-key');
+    }
+    poll();
+  }).catch(function(){
+    // The POST may have reached the device even if its response was lost. Never resend
+    // automatically; the user can check status and choose whether to try again.
+    toast('The key request result is unknown. Check vehicle status before trying again.','err','send-key');
+    poll();
+  }).then(function(){
+    sendKeyInFlight=false;
+    if(button) button.disabled=isOtaRunning();
+  });
+}
 
 /* ---------- render ---------- */
 // Connection row: tone ('ok' | 'warn' | '') colours the icon dot, status line and signal glyph.
@@ -513,14 +498,21 @@ function render(s){
 
   // re-pair / Safe Mode notice
   var rb=$("reauthBanner"), ba=$("bannerAct");
-  if(s.reauth && !paired){
-    rb.classList.add('show');
-    setHTML(rb.querySelector('.bt'),'<b>Key was reset</b> — The vehicle removed this device’s key, so a fresh one was generated automatically. Approve the new pairing on your Tesla’s touchscreen.');
-    if(ba) ba.textContent='Open setup'; bannerFn=function(){ scrollToKey(); };
-  } else if(safe){
+  if(safe){
     rb.classList.add('show');
     setHTML(rb.querySelector('.bt'),'<b>Safe Mode active</b> — Vehicle Bluetooth, commands, and telemetry are stopped. Use this recovery dashboard to inspect diagnostics or update firmware.');
     if(ba) ba.textContent='Check for update'; bannerFn=otaCheck;
+  } else if(s.reauth || (s.key_present && !paired)){
+    rb.classList.add('show');
+    if(s.key_present){
+      setHTML(rb.querySelector('.bt'), s.reauth
+        ? '<b>Vehicle connection needs attention</b> — Your existing key was preserved. If enrolment is needed, place the Tesla keycard on the console reader, then send the existing key and confirm on the touchscreen.'
+        : '<b>No active pairing is stored</b> — Your existing key is unchanged. Place the Tesla keycard on the console reader, then send the existing key and confirm on the touchscreen.');
+      if(ba) ba.textContent='Send existing key'; bannerFn=sendExistingKey;
+    } else {
+      setHTML(rb.querySelector('.bt'),'<b>Key setup required</b> — No existing key is available. Open setup to generate one before enrolling.');
+      if(ba) ba.textContent='Open setup'; bannerFn=function(){ scrollToKey(); };
+    }
   } else { rb.classList.remove('show'); bannerFn=null; }
 
   // hero — single source of overall status. The gauge markup is written only when it actually
@@ -551,8 +543,7 @@ function render(s){
       // Proven reachable-but-sleeping: the always-on VCSEC health poll answered recently, so
       // "asleep" is a fact and the wake button is meaningful. Last-known battery + how long the
       // car has been asleep come from the retained cache — shown without waking the car.
-      // No Overheat/Defrost chips: their value is the live AC draw, which only exists while the
-      // car is awake and reporting, and we never wake the car to obtain it.
+      // Keep the asleep card to last-known charge data; climate chips never trigger a poll.
       g={mode:'sleep', pct:lk.soc, glyph:'moon'};
       head='Vehicle asleep'; sub='Tap the icon to wake the car.'; chips=lk.html;
       act=wakeCar; actLabel='Wake the car'; actIcon='alarm';
@@ -590,7 +581,7 @@ function render(s){
     act=hasVin?genKey:editVin; actLabel=hasVin?'Generate key':'Add VIN'; actIcon=hasVin?'key':'pencil';
   } else if(linked){
     g={mode:'neutral', glyph:'link'};
-    head='Pairing'; sub='Approve the request on your Tesla’s touchscreen.';
+    head='Ready to pair'; sub='Send the existing key above, then approve the request on your Tesla’s touchscreen.';
   } else if((s.ble&&s.ble.connect_fail)>=2){
     // The car WAS found (advert heard, name matches the VIN) but every connection attempt times
     // out. Don't blame range. car_connectable===false → the car is at its BLE connection limit;
@@ -641,7 +632,7 @@ function render(s){
     // No VIN and nothing seen yet — the one "Searching…" with nothing to count down.
     setRow('ble','warn','Searching…','Scanning for Teslas',searchBarsHTML());
   } else if(d.row==='linked'){
-    // The GATT link is up. Stateless (paired but no signed round-trip yet) shows the amber wave
+    // The GATT link is up. Stateless (paired but reachability unknown/stale) shows the amber wave
     // instead of healthy green bars — the link is connected yet knows nothing.
     var br=num(ble.rssi);
     setRow('ble', d.stateless?'warn':'ok', ble.addr?'<span class="mono">'+esc(ble.addr)+'</span>':'Connected',
@@ -714,7 +705,7 @@ function render(s){
   if(s.key_present){
     $("keyVal").innerHTML=esc(s.key_fingerprint||'');
     var created=s.key_created?('Created '+new Date(s.key_created*1000).toLocaleDateString(undefined,{year:'numeric',month:'short',day:'numeric'})):'';
-    if(s.reauth&&!paired) setSub("keySub",'New key — approve it on the touchscreen','warn');
+    if(s.reauth) setSub("keySub",'Existing key preserved — connection needs attention','warn');
     else if(paired) setSub("keySub",created?created+' · paired':'Paired with the vehicle','ok');
     else setSub("keySub",(created?created+' · ':'')+'not paired yet','');
   } else {

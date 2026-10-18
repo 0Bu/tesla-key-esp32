@@ -1,4 +1,4 @@
-// VehicleController core: wiring (init — BLE callbacks, revocation observer, task
+// VehicleController core: wiring (init — BLE callbacks, recovery-hint observer, task
 // startup), the VIN plausibility gate, and the link_state() glue into the host-tested
 // four-state machine. The other concerns live in vehicle_commands.cpp (command
 // dispatch), vehicle_telemetry.cpp (parsers/caches/background poll) and
@@ -271,7 +271,8 @@ void VehicleController::on_vehicle_message_(
         case UniversalMessage_MessageFault_E_MESSAGEFAULT_ERROR_UNKNOWN_KEY_ID:
         case UniversalMessage_MessageFault_E_MESSAGEFAULT_ERROR_INACTIVE_KEY:
         case UniversalMessage_MessageFault_E_MESSAGEFAULT_ERROR_INVALID_KEY_HANDLE:
-            pairing_lost_.store(true, std::memory_order_release);
+            pairing_recovery_hint_.store(true, std::memory_order_release);
+            repair_notice_.store(true, std::memory_order_release);
             break;
         default:
             break;

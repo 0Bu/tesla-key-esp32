@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <string_view>
 
 // Pure, hardware-free logic shared by the firmware and the host-side mock build
@@ -43,12 +44,9 @@ namespace tk {
 //
 // Pure and host-testable rather than an `if` inside the handler, because the STA carve-out is
 // the regression nobody would notice: a portal that stops popping gets reported within a day, a
-// dashboard link that starts redirecting does not.
-//
-// NO FIRMWARE CALLER YET — provisioning.cpp's wildcard GET still answers 200 with the gzipped
-// page for every path, and its DNS task still carries its own literal 192.168.4.1 in the answer
-// template. This header is where that address and that decision belong once the reply is wired
-// through it.
+// dashboard link that starts redirecting does not. provisioning.cpp's catch-all GET calls
+// captive_reply_for(), and its DNS task answers through build_captive_dns_reply() below, so the
+// address below is the single source for the DNS answer, the DHCP option and the Location header.
 
 // The SoftAP's own address, in the two forms the firmware needs. Written ONCE here so the places
 // that advertise it cannot drift apart: the DNS A-record answer and the AP's own address use the
@@ -58,8 +56,7 @@ namespace tk {
 // hangs, and the report says "the portal doesn't open".
 //
 // The value is 192.168.4.1: IDF's default SoftAP subnet, which provisioning.cpp takes as-is (it
-// sets no custom IP info) and already prints in its own "open http://192.168.4.1" boot line and
-// hardcodes in its DNS answer bytes.
+// sets no custom IP info) and prints in its own "open http://192.168.4.1" boot line.
 inline constexpr unsigned char CAPTIVE_PORTAL_OCTETS[4] = {192, 168, 4, 1};
 inline constexpr const char*   CAPTIVE_PORTAL_IP        = "192.168.4.1";
 inline constexpr const char*   CAPTIVE_PORTAL_URI       = "http://192.168.4.1/";
@@ -70,8 +67,8 @@ enum class CaptiveReply {
 };
 
 // `setup_mode` = a SoftAP is live, i.e. this is the provisioning portal rather than the normal
-// LAN surface. On this device that is unambiguous: provisioning_run() sets WIFI_MODE_AP and
-// never returns, so the two HTTP surfaces are never both up.
+// LAN surface. On this device that is unambiguous: the portal's HTTP server is stopped before
+// the boot continues to the normal web server, so the two HTTP surfaces are never both up.
 //
 // The portal ROOT stays a Page even though it is reachable as its own path: the catch-all should
 // never see "/", but a redirect loop if it ever did would cost the user the only way into the
@@ -82,6 +79,59 @@ inline CaptiveReply captive_reply_for(std::string_view path, bool setup_mode) {
     if (!setup_mode) return CaptiveReply::Page;
     if (path == "/" || path == "/index.html") return CaptiveReply::Page;
     return CaptiveReply::Redirect;
+}
+
+// Captive DNS reply (F-079). The portal's DNS task answers every name with the portal address so
+// a joining phone's connectivity probe lands on the setup page. The reply is BUILT, not patched
+// into the query buffer: echoing the query and appending an answer would leave any additional
+// section (an EDNS OPT record) in front of it, so a client would read OPT as the answer.
+//
+// Accepted: a standard query (QR=0, OPCODE=0) with exactly one question, no answer or authority
+// records, any number of additional records (dropped from the reply), an uncompressed name of at
+// most 255 bytes and class IN. Type A or ANY gets one A answer; any other type (e.g. AAAA) gets
+// an empty NOERROR answer, so the client falls back to A instead of waiting. Anything else is
+// dropped (return 0). The reply sets QR, keeps RD, sets RA and RCODE 0, and never exceeds
+// kCaptiveDnsReplyMax bytes.
+inline constexpr std::size_t kCaptiveDnsHeader   = 12;
+inline constexpr std::size_t kCaptiveDnsReplyMax = kCaptiveDnsHeader + 255 + 4 + 16;
+
+inline std::size_t build_captive_dns_reply(const unsigned char* query, std::size_t len, unsigned char* out,
+                                           std::size_t cap) noexcept {
+    if (!query || !out || len < kCaptiveDnsHeader + 5 || cap < kCaptiveDnsReplyMax) return 0;
+    auto u16 = [&](std::size_t at) { return static_cast<unsigned>(query[at] << 8 | query[at + 1]); };
+    if ((query[2] & 0x80) != 0 || (query[2] & 0x78) != 0) return 0;  // a response, or not OPCODE 0
+    if (u16(4) != 1 || u16(6) != 0 || u16(8) != 0) return 0;          // one question, nothing else
+    std::size_t at = kCaptiveDnsHeader;
+    for (;;) {
+        if (at >= len) return 0;
+        const unsigned label = query[at];
+        if (label == 0) break;
+        if (label > 63) return 0;  // compression pointers and reserved label types
+        at += 1 + label;
+        if (at - kCaptiveDnsHeader > 254) return 0;
+    }
+    const std::size_t question_end = at + 1 + 4;  // root label, QTYPE, QCLASS
+    if (question_end > len) return 0;
+    const unsigned qtype  = u16(at + 1);
+    const unsigned qclass = u16(at + 3);
+    if (qclass != 1) return 0;
+    const bool answer_a = qtype == 1 || qtype == 255;
+
+    for (std::size_t i = 0; i < question_end; ++i) out[i] = query[i];
+    out[2] = static_cast<unsigned char>(0x80 | (query[2] & 0x01));  // QR, OPCODE 0, AA 0, TC 0, RD kept
+    out[3] = 0x80;                                                  // RA, Z 0, RCODE 0
+    out[6] = 0x00; out[7] = answer_a ? 0x01 : 0x00;                 // ANCOUNT
+    out[8] = out[9] = out[10] = out[11] = 0x00;                     // NSCOUNT, ARCOUNT
+    if (!answer_a) return question_end;
+    const unsigned char answer[] = {
+        0xC0, 0x0C,              // name: pointer to the question at offset 12
+        0x00, 0x01, 0x00, 0x01,  // type A, class IN
+        0x00, 0x00, 0x00, 0x3C,  // TTL 60 s
+        0x00, 0x04,              // RDLENGTH 4
+        CAPTIVE_PORTAL_OCTETS[0], CAPTIVE_PORTAL_OCTETS[1], CAPTIVE_PORTAL_OCTETS[2], CAPTIVE_PORTAL_OCTETS[3],
+    };
+    for (std::size_t i = 0; i < sizeof answer; ++i) out[question_end + i] = answer[i];
+    return question_end + sizeof answer;
 }
 
 }  // namespace tk
