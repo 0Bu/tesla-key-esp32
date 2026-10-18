@@ -252,9 +252,17 @@ Board mappings are owned by [User guide](USER_GUIDE.md#wired-networking-optional
 
 ### Keeping the link up
 
-Before any successful lease, ten fast WiFi failures allow setup fallback. Once online, event-driven
-reconnect continues indefinitely. The 30 s gateway watchdog recovers after two failures only if the
-link claims up and that transport's gateway answered at least once. Never-answering ICMP is unusable
+Before any successful lease, the 30 s boot window, or ten fast WiFi failures within it, ends the
+boot attempt. Without usable stored credentials the setup portal then waits for the form. With
+stored credentials the portal joins the station as APSTA and keeps retrying them in the background
+(`logic/setup_portal.hpp`): first after 30 s, then with doubling backoff up to 5 min; before the
+30 min open-time cap it starts none while a phone is on the setup AP. Once a lease (WiFi or wired)
+exists, the portal is torn down and the boot continues in place. The open AP closes after 10 min
+without a client and 30 min after opening; retries continue. A failed AP close is retried with the
+same backoff, and the boot does not continue while the AP is up. Nothing here reboots: a timed restart would revert a pending OTA image,
+defeat the crash counter and re-seed the vehicle window. Once online, event-driven reconnect
+continues indefinitely. The 30 s gateway watchdog recovers after two failures only if the link
+claims up and that transport's gateway answered at least once. Never-answering ICMP is unusable
 evidence. Probe setup errors fail open; missing lease/gateway or unanswered probes are unreachable.
 Recovery disconnects WiFi (the event handler reconnects) or restarts Ethernet; it never reboots.
 
