@@ -30,9 +30,10 @@ Channel validity does not prove a particular device's installed signing authorit
 | [`$ship`](../ship/SKILL.md) | Take a **specific PR** to the board: squash-merge → watch post-merge CI → download the signed artifact → USB-flash or OTA → verify version. |
 | **this skill** | Verify the **already-published** release channel (Pages manifest + the per-target images it points at + version coherence) is internally consistent — no build, no flash, no single PR. |
 
-Do not duplicate their steps. If the manifest is coherent but a *particular device* still won't
-update, that is a per-board TOFU/anchor issue → see the interpretation table and
-[`docs/SECURITY.md`](../../../docs/SECURITY.md), not this channel check.
+Do not duplicate their steps. A coherent manifest does not diagnose a device-specific update
+failure. Check candidate eligibility, transport, image validation and the installed signing
+authority before proposing recovery; see the interpretation table and
+[`docs/SECURITY.md`](../../../docs/SECURITY.md).
 
 ## Ground truth
 
@@ -242,8 +243,9 @@ END_ASSET_SET=$(printf '%s' "$LATEST_RELEASE_JSON" | release_asset_set) || {
 }
 ```
 
-`new_install_prompt_erase:true` is expected (it wipes NVS on a **fresh USB install** via
-esp-web-tools — it does **not** affect OTA, which never rewrites `nvs@0x9000`).
+`new_install_prompt_erase:true` preselects **Erase everything** in the project's installer using
+vendored esptool-js. Selecting Erase wipes NVS; **Keep configuration** preserves it on an existing
+compatible layout. The flag does not affect OTA, which never rewrites `nvs@0x9000`.
 
 ### 3. Verify every app's embedded version and chip family
 

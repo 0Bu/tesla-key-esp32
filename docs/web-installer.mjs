@@ -776,9 +776,9 @@ export async function flashDevice({
       }
     };
 
-    // Keep-mode may start on ota_1. Write bootloader/table/new ota_0 first; only after all of those
-    // succeeded write ota_data_initial in its own final phase, atomically selecting the new ota_0.
-    // A failure before this phase leaves the previously active image selected and bootable.
+    // Leave otadata unchanged until all preceding writes have succeeded. This preserves boot-
+    // selection metadata, not the previous app bytes or guaranteed bootability: ota_0 or the
+    // partition table may already have been overwritten.
     await writePhase(fileArray.slice(0, 3), 0, "writing", "Writing firmware");
     throwIfAborted(controller.signal, "Firmware installation stopped.");
     await writePhase(fileArray.slice(3), 3, "activating", "Activating new firmware");

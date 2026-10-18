@@ -22,8 +22,8 @@ one that runs. Never copy logic into a header and leave the original behind.
 There are **two kinds of unit**, and they reach that differently:
 - **Delegated** (the usual case) — the consumer is firmware C++, so it `#include`s the header and
   calls `tk::…`. Follow step 2.
-- **Mirrored** — the consumer is the browser or a Python tool, which cannot include a C++ header.
-  Then the header is a **spec** no firmware TU includes, the consumer carries a mirror of it, and a
+- **Mirrored** — a browser or Python consumer cannot include a C++ header, so it carries a mirror
+  of the native header. Firmware may also include and use that same header. A
   **parity harness** compiles the C++, dumps its decisions over an exhaustive sweep, re-decides the
   same inputs with the shipped consumer source, and diffs. Follow step 2b instead.
   Existing examples: `logic/display_model.hpp` ↔ `tools/display_sim.py`, and
