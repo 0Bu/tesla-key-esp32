@@ -117,19 +117,19 @@ const usbOtaNotStateChanging = /(?:GET|POST) \/ota\/check[^.!?]*(?:is not|isn't|
 const usbAbsentApprovalProceeds = /(?:(?:approval|authorization)[^.!?]*(?:absent|missing|not obtained)|without (?:separate )?(?:approval|authorization))[^.!?]*(?:continue|proceed|run|contact|send|request)/i;
 const reviewedSkillSha256 = new Map([
   ["add-logic-test", "565e7fd944695e8f90035a8d0033267af49b50b9e71c26253d2d3af09da6df39"],
-  ["ci-heal", "b20e6e9c2cc0c43226ef9ce69b88d684108b31a4a2afce6e899ff60498567c58"],
-  ["deploy", "0660b9a7f88c7d0e58fedfc10ce9e22cfdaec77c6fa08eda3828122b38686703"],
-  ["device-diag", "7d9d6eb7907195fc61b56a3325e79a03844fd794b64fa7d4a50a81a7d79af170"],
-  ["display-preview", "e565dd7bb96f08c69d3ed6ed58c51164e3493f2e246b8a954a89eff39d05d0a4"],
+  ["ci-heal", "ea3440e3333ff118413f28c88ac0ac71d4d51ab1d62cdadbea5b18d187e72074"],
+  ["deploy", "611cdc6653dea5ee10cee0a11fa96e5c06cc2795d87bb014101aa0af081a9528"],
+  ["device-diag", "ce0a4340dd439276837b6baef9ab2800f78ee0a6e16ae5f0eb18c2e27db571e4"],
+  ["display-preview", "dd95c766cdec68e5ef175090d0f6137056cbd5ed3333488e4c1a25fa3500c25a"],
   ["feature-docs", "17a486258723b88a5d1257284a33e295529bd52331d3b066335e832b666f1884"],
   ["flash-esp32", "09709dd8b6c8609c22c8a4094ce4e02c54965309b27fe2d4ecab80f5d10de27b"],
   ["mock-test", "a440930b6ade485b1ca206a5cca56798deaa89a6606cc9eaee306b7f93042d9f"],
-  ["ota-release-verify", "be87cac35d352d395bb8af0e22e4b5526c9414c02c6d11fd409192dc808d5e13"],
+  ["ota-release-verify", "ced9ee5fe846332f8fc19ab06ab2a6ad7b5e7f9f27197ebef08cfd8dc6140280"],
   ["pr-hygiene", "8491da669686acc5e00741e5e1fcfec6d2caf29abb8ebff0479ca973f20e87f1"],
   ["project-review", "4f3aa62e4c45fd576c8594201d0f12efac7a7369c0a1de3c1b2292e16f100cf8"],
-  ["ship", "4682fce356d2ae85d6a147a27935701251d1b3a84a2c33c35da48a90bf3637fd"],
-  ["skill-audit", "732909b46e4459cf1b17304a86d615d99f09742ae482838bf1c102aa546c32f5"],
-  ["usb-recovery", "4b1204f124f3408f0e1ff7152ba15c33a1e762791c50923ba27e56ddf9b07135"],
+  ["ship", "e06bdbc3cb50fce47cef77aad5444db87ec1f49398e757e97cd62de2158d3f26"],
+  ["skill-audit", "18c0d355ee51c0fc9609844bae5173d179ec774a4663f73d0e1dec687a87e3af"],
+  ["usb-recovery", "0b6d7ff67e2f2c3086dd116dd9232daf7f5c613215618f39cbcc7567f71eb092"],
   ["vehicle-command-audit", "b62da429c8d9230ab85ebb5b913244dee948686b6cd621250fb9049a3a52ebe6"],
 ]);
 const featureDocsScopeTokens = [
@@ -148,6 +148,7 @@ const shipMergeGateContracts = [
   "- [x] $project-review clean — merge gate @ <sha>",
   "- [x] $pr-hygiene clean — content gate @ <sha>",
   "- [x] $feature-docs synced — merge gate @ <sha>",
+  "- [x] $vehicle-command-audit clean — merge gate @ <sha>",
   "`$project-review` does not establish `$pr-hygiene` readiness",
 ];
 const productionFlashAuthorityCommand =
