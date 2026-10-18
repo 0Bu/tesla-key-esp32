@@ -373,7 +373,7 @@ function copChip(s){
   if(!c||(c.cop!=='On'&&c.cop!=='FanOnly')) return '';
   var tip='Last reported cabin overheat protection setting; current activity and power are unknown'+
           (c.cop_temp?' · '+c.cop_temp:'');
-  return '<div class="stat" title="'+esc(tip)+'"><div class="k">Overheat setting</div>'+
+  return '<div class="stat cached" title="'+esc(tip)+'"><div class="k"><span>Overheat setting</span></div>'+
          '<div class="v">'+(c.cop==='FanOnly'?'Fan only':'On')+'</div></div>';
 }
 function defrostChip(s){
@@ -383,7 +383,7 @@ function defrostChip(s){
   if(c.defrost_mode==='Normal'||c.defrost_mode==='Max')p.push(c.defrost_mode);
   if(!p.length) return '';
   var tip='Last reported defrost state; current activity and power are unknown';
-  return '<div class="stat" title="'+tip+'"><div class="k">Defrost (cached)</div>'+
+  return '<div class="stat cached" title="'+tip+'"><div class="k"><span>Defrost (cached)</span></div>'+
          '<div class="v">'+p.join(' / ')+'</div></div>';
 }
 // battery at/above its target and not charging → starting a charge is a no-op the car only

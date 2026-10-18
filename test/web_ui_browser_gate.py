@@ -124,6 +124,19 @@ console.error = function() {
     check(!climateChips.textContent.includes("kW"), "charger fields are not attributed to climate power");
     check(Array.from(climateChips.children).every(chip => chip.title.includes("current activity and power are unknown")),
           "climate titles disclose activity and power limits");
+    const checkChipBounds = () => {
+      for (const chip of climateChips.children) {
+        check(chip.scrollWidth <= chip.clientWidth + 1, "chip content fits its tile");
+        for (const text of chip.children) {
+          check(text.scrollWidth <= text.clientWidth + 1, "chip label/value wraps within its tile");
+        }
+      }
+    };
+    checkChipBounds();
+    render({paired: true, last_seen_s: 0,
+      vehicle: {status: "Charging", power: 11, amps: 16, actual_amps: 16, volts: 230, phases: 2},
+      tele: {climate: {cop: "FanOnly", front_defrost: true, rear_defrost: true, defrost_mode: "Max"}}});
+    checkChipBounds();
     check(window.__browserGateFetchCalls === 2, "rendering climate does not request vehicle data");
 
     check(getComputedStyle(document.body).display !== "none", "body is rendered");

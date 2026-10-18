@@ -137,14 +137,16 @@ svg{display:block}
 .htext{display:flex; flex-direction:column; gap:4px; align-items:center; margin:0}
 .hlabel{margin:0; font-size:20px; font-weight:650; letter-spacing:-.5px; line-height:1.2; text-align:center}
 .hsub{margin:0; font-size:13px; font-weight:550; color:var(--muted); max-width:32ch; text-align:center; white-space:normal; overflow-wrap:break-word}
-.hstats{display:flex; gap:10px; width:100%; max-width:340px; margin-top:4px}
+.hstats{display:flex; flex-wrap:wrap; gap:10px; width:100%; max-width:340px; margin-top:4px}
 .hstats:empty{display:none}
-.stat{flex:1 1 0; min-width:0; background:var(--card); border:1px solid var(--border); border-radius:var(--r-tile);
+.stat{flex:1 1 120px; min-width:0; background:var(--card); border:1px solid var(--border); border-radius:var(--r-tile);
   padding:8px 10px; display:flex; flex-direction:column; gap:2px; text-align:left}
 .stat .k{display:flex; align-items:center; gap:6px; font-size:10px; font-weight:650; letter-spacing:.5px; text-transform:uppercase; color:var(--muted)}
 .stat .k:before{content:""; width:6px; height:6px; border-radius:50%; background:var(--muted); flex:none}
 .stat .v{font-size:18px; font-weight:650; letter-spacing:-.3px; font-variant-numeric:tabular-nums; white-space:nowrap}
 .stat .v small{font-size:12px; margin-left:2px}
+.stat.cached .k span{min-width:0; overflow-wrap:anywhere}
+.stat.cached .v{white-space:normal; overflow-wrap:anywhere}
 .stat.ok .v{color:var(--ok-text)} .stat.ok .k:before{background:var(--ok)}
 .stat.warn .v{color:var(--warn-text)} .stat.warn .k:before{background:var(--warn)}
 .stat.info .v{color:var(--info-text)} .stat.info .k:before{background:var(--info)}
