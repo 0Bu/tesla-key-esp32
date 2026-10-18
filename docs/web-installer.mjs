@@ -94,12 +94,12 @@ function terminalAdapter(onLog) {
   };
 }
 
-async function settleTransport(transport, loader, resetMode, timeoutMs = TRANSPORT_CLEANUP_TIMEOUT_MS) {
-  if (resetMode && loader && loader.chip && typeof loader.after === "function") {
+async function settleTransport(transport, restart, timeoutMs = TRANSPORT_CLEANUP_TIMEOUT_MS) {
+  if (restart) {
     try {
-      await withTimeout(loader.after(resetMode), timeoutMs, new Error("Device reset timed out."));
+      await withTimeout(restart(), timeoutMs, new Error("Device reset timed out."));
     } catch (_error) {
-      // Cleanup still has to close the port if a reset signal is not supported by the adapter.
+      // Cleanup still has to close the port if the adapter cannot drive the reset lines.
     }
   }
   if (transport && typeof transport.disconnect === "function") {
@@ -393,7 +393,8 @@ export async function probeDevice({
   ESPLoaderCtor,
   onLog = () => {},
   timeoutMs = DEVICE_PROBE_TIMEOUT_MS,
-  cleanupTimeoutMs = TRANSPORT_CLEANUP_TIMEOUT_MS
+  cleanupTimeoutMs = TRANSPORT_CLEANUP_TIMEOUT_MS,
+  delay = sleep
 }) {
   const transport = new TransportCtor(port);
   const loader = new ESPLoaderCtor({
@@ -423,9 +424,11 @@ export async function probeDevice({
       "The serial device did not answer in flashing mode. Select the ESP chip's native USB port when available; otherwise hold BOOT, tap RESET, then try again."
     ));
   } finally {
-    // The compatibility probe runs the flasher stub. Explicitly hand control back to the installed
+    // The compatibility probe runs the flasher stub, and esptool-js refuses a stub soft reset on
+    // every chip except the ESP8266. Pulse EN with IO0 high to hand control back to the installed
     // application before releasing the serial port.
-    await settleTransport(transport, loader, loaderReady ? "soft_reset" : undefined, cleanupTimeoutMs);
+    await settleTransport(transport, loaderReady ? () => resetToUserFirmware(port, delay) : undefined,
+      cleanupTimeoutMs);
   }
 }
 
@@ -441,7 +444,8 @@ export async function flashDevice({
   onState = () => {},
   onLog = () => {},
   timeoutMs = FLASH_OPERATION_TIMEOUT_MS,
-  cleanupTimeoutMs = TRANSPORT_CLEANUP_TIMEOUT_MS
+  cleanupTimeoutMs = TRANSPORT_CLEANUP_TIMEOUT_MS,
+  delay = sleep
 }) {
   const transport = new TransportCtor(port);
   const loader = new ESPLoaderCtor({
@@ -454,7 +458,7 @@ export async function flashDevice({
   let completed = false;
 
   try {
-    return await withTimeout((async () => {
+    const written = await withTimeout((async () => {
     validateManifest(manifest, manifestUrl);
     onState({ stage: "connecting", percentage: 0, message: "Checking device" });
     await loader.main();
@@ -506,15 +510,53 @@ export async function flashDevice({
     // A failure before this phase leaves the previously active image selected and bootable.
     await writePhase(fileArray.slice(0, 3), 0, "writing", "Writing firmware");
     await writePhase(fileArray.slice(3), 3, "activating", "Activating new firmware");
-
-    onState({ stage: "restarting", percentage: 100, message: "Starting firmware" });
-    await loader.after("soft_reset");
     completed = true;
     return { chipFamily, build };
     })(), timeoutMs, errorWithName("FlashTimeoutError", "Firmware installation timed out before it completed."));
+
+    // Both write phases succeeded, so the firmware is installed; the restart runs outside the
+    // install deadline so it can never turn a completed write into a timeout. The flasher stub
+    // cannot soft-reset any supported chip, and esptool-js 0.6.1's hard_reset only releases RTS
+    // without pulsing EN, so restart with an explicit EN pulse. A restart failure is not an install
+    // failure: the caller still verifies the boot, and the board then only needs a manual RESET.
+    onState({ stage: "restarting", percentage: 100, message: "Starting firmware" });
+    let restarted = true;
+    try {
+      await withTimeout(resetToUserFirmware(port, delay), cleanupTimeoutMs, new Error("Device reset timed out."));
+    } catch (error) {
+      restarted = false;
+      onLog(`Automatic restart unavailable: ${errorMessage(error)}\n`);
+    }
+    return { ...written, restarted };
   } finally {
-    await settleTransport(transport, loader, completed ? undefined : "soft_reset", cleanupTimeoutMs);
+    // After a failed install, restart the chip as a power cycle would: in Keep mode the bootloader
+    // still finds the previously selected application; after an erase nothing boots and the ROM
+    // loader waits for the next attempt. Either beats leaving the flasher stub running.
+    const restart = !completed && loader.chip ? () => resetToUserFirmware(port, delay) : undefined;
+    await settleTransport(transport, restart, cleanupTimeoutMs);
   }
+}
+
+// Page status after an install attempt threw. Once both write phases completed the firmware is on
+// flash, so a failed automatic restart or boot check is reported as an installed-but-unverified
+// firmware that needs a manual restart, never as a failed installation.
+export function installFailureStatus(error, { written = false, version = "" } = {}) {
+  const reason = errorMessage(error);
+  if (written) {
+    return {
+      kind: "warning",
+      step: 4,
+      message: `Firmware ${version} installed, but its start was not verified: ${reason} ` +
+        "Restart the board with its RESET button or by reconnecting the USB cable.",
+      statusLine: `Firmware ${version} installed; boot verification failed: ${reason}`
+    };
+  }
+  return {
+    kind: "error",
+    step: 2,
+    message: `Installation failed: ${reason}`,
+    statusLine: `Installation failed: ${reason}`
+  };
 }
 
 export function attachWebInstaller({
@@ -808,9 +850,10 @@ export function attachWebInstaller({
     setPageStatus("Keep this page open and leave the USB cable connected.");
     appendStatusLine(`Firmware installation ${manifest.version || ""} started`);
 
+    let written = false;
     try {
       const eraseFirst = Boolean(root.querySelector('input[name="install-mode"]:checked')?.value === "erase");
-      await flashDevice({
+      const flashed = await flashDevice({
         port: selectedPort,
         manifest,
         manifestUrl: new URL(manifestPath, location.href).toString(),
@@ -823,6 +866,10 @@ export function attachWebInstaller({
           setProgress(state.message, state.percentage);
         }
       });
+      written = true;
+      if (flashed && flashed.restarted === false) {
+        appendStatusLine("Automatic restart unavailable. Press RESET on the board if the boot check does not finish.");
+      }
       setProgress("Verifying firmware boot", 100);
       setPageStatus(`Firmware written. Waiting for version ${manifest.version} to boot…`);
       await verifyBootImpl({
@@ -840,9 +887,10 @@ export function attachWebInstaller({
     } catch (error) {
       root.dataset.flashing = "false";
       root.dataset.finished = "false";
-      setPageStatus(`Installation failed: ${errorMessage(error)}`, "error");
-      appendStatusLine(`Installation failed: ${errorMessage(error)}`);
-      markSteps(2);
+      const status = installFailureStatus(error, { written, version: manifest.version });
+      setPageStatus(status.message, status.kind);
+      appendStatusLine(status.statusLine);
+      markSteps(status.step);
     } finally {
       busy = false;
       const connected = Boolean(selectedPort && root.dataset.connected === "true");

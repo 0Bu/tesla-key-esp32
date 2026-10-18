@@ -125,6 +125,7 @@ change state; distinguish them from reading an existing log or cached status.
 | Symptom | Check | Next step |
 |---|---|---|
 | Installer has no serial port | Data cable, browser Web Serial support, port already in use | Close the serial monitor; hold BOOT while connecting or use BOOT + RESET. |
+| Installer: firmware installed, start not verified | Adapter without reset lines, a native USB port that reconnected late, or an image that does not boot | The firmware is already on flash: press RESET or reconnect the cable. If it still does not start, open the serial monitor and reinstall with Keep configuration rather than Erase. |
 | `.local` will not load | DHCP lease in router | Open the current IP. Use that IP or `.local` for browser saves. |
 | No WiFi | SSID/password, open or WPA2 network | Use setup AP or `provision.py`; do not write partial NVS images. Failed LAN credential changes roll back once. |
 | No pairing prompt | VIN configured, `key_present`, BLE range, NFC card on reader | Keep car awake and confirm on its touchscreen; retry enrollment if the prompt expired. |

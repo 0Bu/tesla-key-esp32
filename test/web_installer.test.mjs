@@ -4,12 +4,14 @@ import fs from "node:fs";
 import test from "node:test";
 
 import {
+  attachWebInstaller,
   bootLogHasVersion,
   combinedProgress,
   describeSerialConnection,
   detectedSerialType,
   fetchFirmwareParts,
   flashDevice,
+  installFailureStatus,
   probeDevice,
   resetConnectedDevice,
   resetToUserFirmware,
@@ -203,7 +205,7 @@ test("serial log parsing preserves split line endings and classifies IDF levels"
   assert.equal(stripSerialAnsi(second.lines[0].text), "W (7700) uart: pin busy");
 });
 
-function fakeEsptool(chipFamily = "ESP32-S3", { chipRevision } = {}) {
+function fakeEsptool(chipFamily = "ESP32-S3", { chipRevision, info, resetLines = true, writeError } = {}) {
   const calls = [];
   class Transport {
     constructor(port) { this.port = port; calls.push("transport"); }
@@ -212,6 +214,7 @@ function fakeEsptool(chipFamily = "ESP32-S3", { chipRevision } = {}) {
   class Loader {
     constructor(options) {
       this.options = options;
+      this.IS_STUB = false;
       this.chip = { CHIP_NAME: chipFamily };
       if (chipRevision !== undefined) {
         this.chip.getChipRevision = async () => chipRevision;
@@ -219,30 +222,55 @@ function fakeEsptool(chipFamily = "ESP32-S3", { chipRevision } = {}) {
       }
       calls.push("loader");
     }
-    async main() { calls.push("main"); }
+    // Like esptool-js, main() leaves the flasher stub running.
+    async main() { calls.push("main"); this.IS_STUB = true; }
     async flashId() { calls.push("flashId"); }
     async eraseFlash() { calls.push("erase"); }
     async writeFlash(options) {
       calls.push(["write", options.fileArray.map((file) => file.address)]);
+      if (writeError) throw writeError;
       options.reportProgress(0, options.fileArray[0].data.length, options.fileArray[0].data.length);
     }
-    async after(mode) { calls.push(`reset:${mode}`); }
+    // Models the vendored esptool-js 0.6.1: with the stub running, a soft reset throws on every
+    // chip except the ESP8266.
+    async after(mode) {
+      calls.push(`reset:${mode}`);
+      if (mode === "soft_reset" && this.IS_STUB && this.chip.CHIP_NAME !== "ESP8266") {
+        throw new Error("Soft resetting is currently only supported on ESP8266");
+      }
+    }
   }
-  return { calls, Transport, Loader };
+  const port = { getInfo() { return info || { usbVendorId: 0x303a, usbProductId: 0x1001 }; } };
+  if (resetLines) port.setSignals = async (signals) => { calls.push(["signals", signals]); };
+  return { calls, Transport, Loader, port };
 }
 
-test("device probing validates the manifest and always resets and closes the port", async () => {
+// The firmware-mode reset: EN pulsed low while IO0 stays high.
+const EN_PULSE = [
+  ["signals", { dataTerminalReady: false, requestToSend: true }],
+  ["signals", { dataTerminalReady: false, requestToSend: false }]
+];
+const noDelay = async () => {};
+
+test("the installer fake refuses a soft reset once the flasher stub runs", async () => {
   const fake = fakeEsptool();
-  const port = { getInfo() { return { usbVendorId: 0x303a, usbProductId: 0x1001 }; } };
+  const loader = new fake.Loader({});
+  await loader.main();
+  await assert.rejects(loader.after("soft_reset"), /only supported on ESP8266/);
+});
+
+test("device probing validates the manifest, pulses EN back to the app and closes the port", async () => {
+  const fake = fakeEsptool();
   const result = await probeDevice({
-    port,
+    port: fake.port,
     manifest,
     TransportCtor: fake.Transport,
-    ESPLoaderCtor: fake.Loader
+    ESPLoaderCtor: fake.Loader,
+    delay: noDelay
   });
 
   assert.equal(result.chipFamily, "ESP32-S3");
-  assert.deepEqual(fake.calls, ["transport", "loader", "main", "flashId", "reset:soft_reset", "disconnect"]);
+  assert.deepEqual(fake.calls, ["transport", "loader", "main", "flashId", ...EN_PULSE, "disconnect"]);
 });
 
 test("device probing times out and releases an unresponsive serial device", async () => {
@@ -274,11 +302,12 @@ test("device probing times out and releases an unresponsive serial device", asyn
   assert.deepEqual(calls, ["transport", "loader", "main", "disconnect"]);
 });
 
-async function runFlash(eraseFirst) {
-  const fake = fakeEsptool();
+async function runFlash(eraseFirst, fakeOptions = {}) {
+  const fake = fakeEsptool("ESP32-S3", fakeOptions);
   const states = [];
+  const logs = [];
   const result = await flashDevice({
-    port: { getInfo() { return { usbVendorId: 0x303a, usbProductId: 0x1001 }; } },
+    port: fake.port,
     manifest,
     manifestUrl: "https://example.test/manifest.json",
     eraseFirst,
@@ -286,23 +315,224 @@ async function runFlash(eraseFirst) {
     ESPLoaderCtor: fake.Loader,
     fetchImpl: async (url) => firmwareResponse(url),
     cryptoImpl: webcrypto,
-    onState(state) { states.push(state); }
+    onState(state) { states.push(state); },
+    onLog(text) { logs.push(text); },
+    delay: noDelay
   });
-  return { fake, states, result };
+  return { fake, states, logs, result };
 }
 
-test("keep-configuration writes ota_0 first and activates it with otadata last", async () => {
+test("keep-configuration writes ota_0 first, activates it with otadata last and restarts via EN", async () => {
   const { fake, states, result } = await runFlash(false);
   assert.equal(result.chipFamily, "ESP32-S3");
+  assert.equal(result.restarted, true);
   assert.equal(fake.calls.includes("erase"), false);
-  assert.deepEqual(fake.calls.slice(-4), [
+  assert.deepEqual(fake.calls.slice(-5), [
     ["write", [0, 0x8000, 0x20000]],
     ["write", [0xf000]],
-    "reset:soft_reset",
+    ...EN_PULSE,
     "disconnect"
   ]);
+  assert.equal(fake.calls.some((call) => typeof call === "string" && call.startsWith("reset:")), false);
   assert.equal(states.some((item) => item.stage === "activating"), true);
+  assert.equal(states.at(-1).stage, "restarting");
   assert.equal(states.at(-1).percentage, 100);
+});
+
+test("a completed write stays a successful install when the adapter cannot drive the reset lines", async () => {
+  const { fake, logs, result } = await runFlash(false, { resetLines: false });
+  assert.equal(result.chipFamily, "ESP32-S3");
+  assert.equal(result.restarted, false);
+  assert.match(logs.join(""), /Automatic restart unavailable/);
+  assert.deepEqual(fake.calls.slice(-3), [["write", [0, 0x8000, 0x20000]], ["write", [0xf000]], "disconnect"]);
+});
+
+test("a failed write hands control back to the selected app and closes the port", async () => {
+  const fake = fakeEsptool("ESP32-S3", { writeError: new Error("write failed") });
+  await assert.rejects(
+    flashDevice({
+      port: fake.port,
+      manifest,
+      manifestUrl: "https://example.test/manifest.json",
+      eraseFirst: false,
+      TransportCtor: fake.Transport,
+      ESPLoaderCtor: fake.Loader,
+      fetchImpl: async (url) => firmwareResponse(url),
+      cryptoImpl: webcrypto,
+      delay: noDelay
+    }),
+    /write failed/
+  );
+  assert.deepEqual(fake.calls.slice(-4), [["write", [0, 0x8000, 0x20000]], ...EN_PULSE, "disconnect"]);
+});
+
+test("after a completed write a failed restart or boot check is reported as installed, not failed", () => {
+  const unverified = installFailureStatus(new Error("Timed out waiting for firmware 1.2.3 to boot."), {
+    written: true,
+    version: "1.2.3"
+  });
+  assert.equal(unverified.kind, "warning");
+  assert.equal(unverified.step, 4);
+  assert.match(unverified.message, /^Firmware 1\.2\.3 installed, but its start was not verified: Timed out/);
+  assert.match(unverified.message, /RESET button or by reconnecting/);
+  assert.doesNotMatch(`${unverified.message} ${unverified.statusLine}`, /Installation failed/);
+
+  const failed = installFailureStatus(new Error("write failed"), { written: false, version: "1.2.3" });
+  assert.deepEqual(failed, {
+    kind: "error",
+    step: 2,
+    message: "Installation failed: write failed",
+    statusLine: "Installation failed: write failed"
+  });
+});
+
+test("the install handler marks the firmware written before verifying the boot", () => {
+  // The page handler is DOM-bound; pin its wiring to the tested status decision.
+  const source = fs.readFileSync(new URL("../docs/web-installer.mjs", import.meta.url), "utf8");
+  const handler = source.match(/const install = async \(\) => \{([\s\S]*?)\n  \};/)?.[1];
+  assert.ok(handler, "install handler found");
+  assert.match(handler, /let written = false;[\s\S]*await flashDevice\([\s\S]*?\}\);\s*written = true;[\s\S]*await verifyBootImpl\(/);
+  assert.match(handler, /catch \(error\) \{[\s\S]*installFailureStatus\(error, \{ written, version: manifest\.version \}\)/);
+  const html = fs.readFileSync(new URL("../docs/index.html", import.meta.url), "utf8");
+  assert.match(html, /\.installer-page-status\[data-kind="warning"\]\{color:var\(--warn-text\)\}/);
+});
+
+test("a hanging restart after a completed write neither times out the install nor blocks it", { timeout: 5000 }, async () => {
+  const fake = fakeEsptool();
+  fake.port.setSignals = () => new Promise(() => {});
+  const logs = [];
+  const result = await flashDevice({
+    port: fake.port,
+    manifest,
+    manifestUrl: "https://example.test/manifest.json",
+    eraseFirst: false,
+    TransportCtor: fake.Transport,
+    ESPLoaderCtor: fake.Loader,
+    fetchImpl: async (url) => firmwareResponse(url),
+    cryptoImpl: webcrypto,
+    onLog(text) { logs.push(text); },
+    // The install deadline is shorter than the restart bound: only a restart outside the timed
+    // install can still report the completed write.
+    timeoutMs: 200,
+    cleanupTimeoutMs: 400,
+    delay: noDelay
+  });
+  assert.equal(result.restarted, false);
+  assert.match(logs.join(""), /Automatic restart unavailable: Device reset timed out\./);
+  assert.equal(fake.calls.at(-1), "disconnect");
+});
+
+// Minimal stand-in for the installer page: elements by id, the four steps and the mode radios.
+function fakeInstallerPage() {
+  const elements = new Map();
+  const element = (id) => {
+    if (!elements.has(id)) {
+      elements.set(id, {
+        id,
+        textContent: "",
+        hidden: false,
+        disabled: false,
+        dataset: {},
+        style: {},
+        attributes: {},
+        scrollTop: 0,
+        scrollHeight: 0,
+        addEventListener() {},
+        setAttribute(name, value) { this.attributes[name] = value; },
+        append(child) { this.textContent += child.textContent; },
+        replaceChildren() { this.textContent = ""; },
+        ownerDocument: { createElement: () => ({ className: "", textContent: "" }) }
+      });
+    }
+    return elements.get(id);
+  };
+  const steps = [1, 2, 3, 4].map(() => ({ dataset: {} }));
+  const modes = [{ value: "keep", checked: true }, { value: "erase", checked: false }];
+  const root = {
+    dataset: {},
+    querySelector(selector) {
+      if (selector.startsWith("#")) return element(selector.slice(1));
+      if (selector === 'input[name="install-mode"]:checked') return modes.find((mode) => mode.checked) || null;
+      if (selector === 'input[name="install-mode"][value="erase"]') return modes[1];
+      return null;
+    },
+    querySelectorAll(selector) { return selector === ".installer-step" ? steps : []; }
+  };
+  return { root, element, steps };
+}
+
+async function runPageInstall({ fakeOptions = {}, verifyBootImpl }) {
+  const saved = { location: globalThis.location, isSecureContext: globalThis.isSecureContext };
+  globalThis.location = { href: "https://example.test/", pathname: "/" };
+  globalThis.isSecureContext = true;
+  try {
+    const fake = fakeEsptool("ESP32-S3", fakeOptions);
+    const page = fakeInstallerPage();
+    const installer = attachWebInstaller({
+      root: page.root,
+      serial: { requestPort: async () => fake.port, addEventListener() {} },
+      TransportCtor: fake.Transport,
+      ESPLoaderCtor: fake.Loader,
+      fetchImpl: async (url) => url.endsWith("manifest.json")
+        ? { ok: true, status: 200, json: async () => manifest }
+        : firmwareResponse(url),
+      verifyBootImpl: async (options) => {
+        fake.calls.push("verify");
+        return verifyBootImpl(options);
+      }
+    });
+    for (let tries = 0; page.element("firmware-version-value").textContent === "" && tries < 50; tries++) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    await installer.connect();
+    await installer.install();
+    const status = page.element("page-status");
+    return {
+      fake,
+      kind: status.dataset.kind,
+      message: status.textContent,
+      finished: page.root.dataset.finished,
+      activeStep: page.steps.findIndex((step) => step.dataset.state === "active") + 1,
+      monitor: page.element("serial-monitor-output").textContent
+    };
+  } finally {
+    globalThis.location = saved.location;
+    globalThis.isSecureContext = saved.isSecureContext;
+  }
+}
+
+test("the page reports a verified install after the write and the boot check", async () => {
+  const page = await runPageInstall({ verifyBootImpl: async () => ({ version: manifest.version }) });
+  assert.equal(page.kind, "success");
+  assert.equal(page.message, `Firmware ${manifest.version} booted and was verified successfully.`);
+  assert.equal(page.finished, "true");
+  assert.equal(page.activeStep, 4);
+  const lastWrite = page.fake.calls.findLastIndex((call) => Array.isArray(call) && call[0] === "write");
+  assert.ok(lastWrite >= 0 && page.fake.calls.indexOf("verify") > lastWrite, "boot check runs after the write");
+});
+
+test("the page reports an installed but unverified firmware when the restart and boot check fail", async () => {
+  const page = await runPageInstall({
+    fakeOptions: { resetLines: false },
+    verifyBootImpl: async () => { throw new Error("Timed out waiting for firmware 1.4.75 to boot."); }
+  });
+  assert.equal(page.kind, "warning");
+  assert.match(page.message, /^Firmware 1\.4\.75 installed, but its start was not verified: Timed out/);
+  assert.equal(page.finished, "false");
+  assert.equal(page.activeStep, 4);
+  assert.match(page.monitor, /Automatic restart unavailable/);
+  assert.doesNotMatch(`${page.message}\n${page.monitor}`, /Installation failed/);
+});
+
+test("the page reports a failed install when the write fails, without a boot check", async () => {
+  const page = await runPageInstall({
+    fakeOptions: { writeError: new Error("write failed") },
+    verifyBootImpl: async () => ({ version: manifest.version })
+  });
+  assert.equal(page.kind, "error");
+  assert.equal(page.message, "Installation failed: write failed");
+  assert.equal(page.activeStep, 2);
+  assert.equal(page.fake.calls.includes("verify"), false);
 });
 
 test("factory-reset mode erases before writing the same manifest parts", async () => {
@@ -337,19 +567,20 @@ test("an integrity error occurs before erase or either write phase", async () =>
 });
 
 test("probing refuses a pre-ECO3 classic ESP32 and still releases the port", async () => {
-  const fake = fakeEsptool("ESP32", { chipRevision: 1 });
+  const fake = fakeEsptool("ESP32", { chipRevision: 1, info: { usbVendorId: 0x10c4, usbProductId: 0xea60 } });
   await assert.rejects(
     probeDevice({
-      port: { getInfo() { return { usbVendorId: 0x10c4, usbProductId: 0xea60 }; } },
+      port: fake.port,
       manifest,
       TransportCtor: fake.Transport,
-      ESPLoaderCtor: fake.Loader
+      ESPLoaderCtor: fake.Loader,
+      delay: noDelay
     }),
     (error) => error.name === "UnsupportedChipRevisionError" &&
       /ECO3/.test(error.message) && /v3\.0/.test(error.message)
   );
   // The rejected probe still hands control back to the app and closes the port.
-  assert.deepEqual(fake.calls, ["transport", "loader", "main", "flashId", "reset:soft_reset", "disconnect"]);
+  assert.deepEqual(fake.calls, ["transport", "loader", "main", "flashId", ...EN_PULSE, "disconnect"]);
 });
 
 test("probing accepts an ECO3 (revision v3) classic ESP32", async () => {
