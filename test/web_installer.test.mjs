@@ -4,6 +4,7 @@ import fs from "node:fs";
 import test from "node:test";
 
 import {
+  attachWebInstaller,
   bootLogHasVersion,
   combinedProgress,
   describeSerialConnection,
@@ -228,7 +229,8 @@ function fakeEsptool(chipFamily = "ESP32-S3", { chipRevision } = {}) {
     }
     async after(mode) { calls.push(`reset:${mode}`); }
   }
-  return { calls, Transport, Loader };
+  const port = { getInfo() { return { usbVendorId: 0x303a, usbProductId: 0x1001 }; } };
+  return { calls, port, Transport, Loader };
 }
 
 test("device probing validates the manifest and always resets and closes the port", async () => {
@@ -291,6 +293,53 @@ async function runFlash(eraseFirst) {
   return { fake, states, result };
 }
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((accept, decline) => {
+    resolve = accept;
+    reject = decline;
+  });
+  return { promise, resolve, reject };
+}
+
+function fakeInstallerPage() {
+  const elements = new Map();
+  const element = (id) => {
+    if (!elements.has(id)) {
+      elements.set(id, {
+        textContent: "",
+        hidden: false,
+        disabled: false,
+        dataset: {},
+        style: {},
+        attributes: {},
+        scrollTop: 0,
+        scrollHeight: 0,
+        addEventListener() {},
+        setAttribute(name, value) { this.attributes[name] = value; },
+        append(child) { this.textContent += child.textContent; },
+        replaceChildren() { this.textContent = ""; },
+        ownerDocument: { createElement: () => ({ className: "", textContent: "" }) }
+      });
+    }
+    return elements.get(id);
+  };
+  const steps = [1, 2, 3, 4].map(() => ({ dataset: {} }));
+  const modes = [{ value: "keep", checked: true }, { value: "erase", checked: false }];
+  const root = {
+    dataset: {},
+    querySelector(selector) {
+      if (selector.startsWith("#")) return element(selector.slice(1));
+      if (selector === 'input[name="install-mode"]:checked') return modes.find((mode) => mode.checked) || null;
+      if (selector === 'input[name="install-mode"][value="erase"]') return modes[1];
+      return null;
+    },
+    querySelectorAll(selector) { return selector === ".installer-step" ? steps : []; }
+  };
+  return { root, element, steps };
+}
+
 test("keep-configuration writes ota_0 first and activates it with otadata last", async () => {
   const { fake, states, result } = await runFlash(false);
   assert.equal(result.chipFamily, "ESP32-S3");
@@ -303,6 +352,212 @@ test("keep-configuration writes ota_0 first and activates it with otadata last",
   ]);
   assert.equal(states.some((item) => item.stage === "activating"), true);
   assert.equal(states.at(-1).percentage, 100);
+});
+
+test("a flash timeout aborts delayed downloads before any flash phase can start", async () => {
+  const fake = fakeEsptool();
+  const requests = [];
+  const flash = flashDevice({
+    port: fake.port,
+    manifest,
+    manifestUrl: "https://example.test/manifest.json",
+    eraseFirst: false,
+    TransportCtor: fake.Transport,
+    ESPLoaderCtor: fake.Loader,
+    fetchImpl(url, options) {
+      const pending = deferred();
+      requests.push({ url, signal: options.signal, ...pending });
+      return pending.promise;
+    },
+    cryptoImpl: webcrypto,
+    timeoutMs: 20,
+    cleanupTimeoutMs: 10
+  });
+
+  await assert.rejects(flash, { name: "FlashTimeoutError" });
+  assert.equal(requests.length, 4);
+  assert.ok(requests.every((request) => request.signal instanceof AbortSignal && request.signal.aborted));
+  requests.forEach(({ url, resolve }) => resolve(firmwareResponse(url)));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(fake.calls.some((call) => Array.isArray(call) && call[0] === "write"), false);
+  assert.deepEqual(fake.calls.slice(-2), ["reset:soft_reset", "disconnect"]);
+});
+
+test("a flash timeout stops a delayed write before the OTA activation phase", async () => {
+  const fake = fakeEsptool();
+  let finishWrite;
+  let delayedWrite;
+  class DelayedLoader extends fake.Loader {
+    writeFlash(options) {
+      fake.calls.push(["write", options.fileArray.map((part) => part.address)]);
+      delayedWrite = new Promise((resolve, reject) => {
+        finishWrite = () => {
+          try {
+            options.reportProgress(0, options.fileArray[0].data.length, options.fileArray[0].data.length);
+            resolve();
+          } catch (error) {
+            reject(error);
+          }
+        };
+      });
+      return delayedWrite;
+    }
+  }
+
+  const flash = flashDevice({
+    port: fake.port,
+    manifest,
+    manifestUrl: "https://example.test/manifest.json",
+    eraseFirst: false,
+    TransportCtor: fake.Transport,
+    ESPLoaderCtor: DelayedLoader,
+    fetchImpl: async (url) => firmwareResponse(url),
+    cryptoImpl: webcrypto,
+    timeoutMs: 20,
+    cleanupTimeoutMs: 10
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.equal(fake.calls.includes("reset:soft_reset"), false);
+  assert.equal(fake.calls.includes("disconnect"), false);
+  assert.deepEqual(fake.calls.filter((call) => Array.isArray(call) && call[0] === "write"), [
+    ["write", [0, 0x8000, 0x20000]]
+  ]);
+
+  finishWrite();
+  await assert.rejects(flash, { name: "FlashTimeoutError" });
+  assert.deepEqual(fake.calls.filter((call) => Array.isArray(call) && call[0] === "write"), [
+    ["write", [0, 0x8000, 0x20000]]
+  ]);
+  assert.deepEqual(fake.calls.slice(-2), ["reset:soft_reset", "disconnect"]);
+  await assert.rejects(delayedWrite, { name: "FlashTimeoutError" });
+  assert.deepEqual(fake.calls.filter((call) => Array.isArray(call) && call[0] === "write"), [
+    ["write", [0, 0x8000, 0x20000]]
+  ]);
+});
+
+test("a flash timeout waits for a pending loader command before transport cleanup", async () => {
+  const fake = fakeEsptool();
+  let finishMain;
+  class DelayedLoader extends fake.Loader {
+    main() {
+      fake.calls.push("main-pending");
+      return new Promise((resolve) => { finishMain = resolve; });
+    }
+  }
+
+  const flash = flashDevice({
+    port: fake.port,
+    manifest,
+    manifestUrl: "https://example.test/manifest.json",
+    eraseFirst: false,
+    TransportCtor: fake.Transport,
+    ESPLoaderCtor: DelayedLoader,
+    fetchImpl: async (url) => firmwareResponse(url),
+    cryptoImpl: webcrypto,
+    timeoutMs: 20,
+    cleanupTimeoutMs: 10
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.equal(fake.calls.includes("reset:soft_reset"), false);
+  assert.equal(fake.calls.includes("disconnect"), false);
+  finishMain();
+  await assert.rejects(flash, { name: "FlashTimeoutError" });
+  assert.equal(fake.calls.includes("flashId"), false);
+  assert.equal(fake.calls.some((call) => Array.isArray(call) && call[0] === "write"), false);
+  assert.deepEqual(fake.calls.slice(-2), ["reset:soft_reset", "disconnect"]);
+});
+
+test("a flash timeout waits for a pending erase and never starts a write phase", async () => {
+  const fake = fakeEsptool();
+  let finishErase;
+  class DelayedEraseLoader extends fake.Loader {
+    eraseFlash() {
+      fake.calls.push("erase-pending");
+      return new Promise((resolve) => { finishErase = resolve; });
+    }
+  }
+
+  const flash = flashDevice({
+    port: fake.port,
+    manifest,
+    manifestUrl: "https://example.test/manifest.json",
+    eraseFirst: true,
+    TransportCtor: fake.Transport,
+    ESPLoaderCtor: DelayedEraseLoader,
+    fetchImpl: async (url) => firmwareResponse(url),
+    cryptoImpl: webcrypto,
+    timeoutMs: 20,
+    cleanupTimeoutMs: 10
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.equal(fake.calls.includes("reset:soft_reset"), false);
+  assert.equal(fake.calls.includes("disconnect"), false);
+  assert.equal(fake.calls.some((call) => Array.isArray(call) && call[0] === "write"), false);
+  finishErase();
+  await assert.rejects(flash, { name: "FlashTimeoutError" });
+  assert.equal(fake.calls.some((call) => Array.isArray(call) && call[0] === "write"), false);
+  assert.deepEqual(fake.calls.slice(-2), ["reset:soft_reset", "disconnect"]);
+});
+
+test("the installer disconnect event aborts a pending flash and keeps its late fetch inert", async () => {
+  const previous = { location: globalThis.location, isSecureContext: globalThis.isSecureContext };
+  globalThis.location = { href: "https://example.test/", pathname: "/" };
+  globalThis.isSecureContext = true;
+  try {
+    const pageManifest = structuredClone(manifest);
+    pageManifest.new_install_prompt_erase = false;
+    const fake = fakeEsptool();
+    const page = fakeInstallerPage();
+    const requests = [];
+    let disconnectHandler;
+    const serial = {
+      async requestPort() { return fake.port; },
+      addEventListener(name, handler) { if (name === "disconnect") disconnectHandler = handler; }
+    };
+    const installer = attachWebInstaller({
+      root: page.root,
+      serial,
+      TransportCtor: fake.Transport,
+      ESPLoaderCtor: fake.Loader,
+      fetchImpl(url, options) {
+        if (url.endsWith("manifest.json")) {
+          return Promise.resolve({ ok: true, status: 200, json: async () => pageManifest });
+        }
+        const pending = deferred();
+        requests.push({ url, signal: options.signal, ...pending });
+        return pending.promise;
+      }
+    });
+    for (let attempt = 0; page.element("firmware-version-value").textContent === "" && attempt < 50; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+
+    await installer.connect();
+    assert.equal(page.root.dataset.connected, "true");
+    const install = installer.install();
+    for (let attempt = 0; requests.length < 4 && attempt < 50; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    assert.equal(requests.length, 4);
+    await disconnectHandler({ target: fake.port });
+    await install;
+    requests.forEach(({ url, resolve }) => resolve(firmwareResponse(url)));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.ok(requests.every((request) => request.signal instanceof AbortSignal && request.signal.aborted));
+    assert.equal(page.root.dataset.connected, "false");
+    assert.match(page.element("page-status").textContent, /USB disconnected during installation/);
+    assert.equal(page.element("install-button").disabled, true);
+    assert.equal(page.element("connect-button").disabled, false);
+    assert.equal(fake.calls.some((call) => Array.isArray(call) && call[0] === "write"), false);
+  } finally {
+    globalThis.location = previous.location;
+    globalThis.isSecureContext = previous.isSecureContext;
+  }
 });
 
 test("factory-reset mode erases before writing the same manifest parts", async () => {

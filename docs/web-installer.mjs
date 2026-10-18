@@ -61,16 +61,40 @@ export function splitSerialChunk(pending, text, flush = false) {
   return { lines, pending: nextPending };
 }
 
-async function withTimeout(operation, milliseconds, timeoutError) {
+async function withTimeout(operation, milliseconds, timeoutError, onTimeout, signal) {
   let timeoutId;
-  const timeout = new Promise((_, reject) => {
-    timeoutId = setTimeout(() => reject(timeoutError), milliseconds);
-  });
+  let abortHandler;
+  const pending = [Promise.resolve(operation), new Promise((_, reject) => {
+    timeoutId = setTimeout(() => {
+      try {
+        if (typeof onTimeout === "function") onTimeout();
+      } catch (_error) {
+        // The deadline still rejects the operation if its cancellation hook itself fails.
+      } finally {
+        reject(timeoutError);
+      }
+    }, milliseconds);
+  })];
+  if (signal) {
+    pending.push(new Promise((_, reject) => {
+      abortHandler = () => reject(signal.reason instanceof Error
+        ? signal.reason
+        : errorWithName("AbortError", "The operation was aborted."));
+      if (signal.aborted) abortHandler();
+      else signal.addEventListener("abort", abortHandler, { once: true });
+    }));
+  }
   try {
-    return await Promise.race([Promise.resolve(operation), timeout]);
+    return await Promise.race(pending);
   } finally {
     clearTimeout(timeoutId);
+    if (signal && abortHandler) signal.removeEventListener("abort", abortHandler);
   }
+}
+
+function throwIfAborted(signal, fallback = "The operation was aborted.") {
+  if (!signal || !signal.aborted) return;
+  throw signal.reason instanceof Error ? signal.reason : errorWithName("AbortError", fallback);
 }
 
 export async function stopSerialReader(reader, loop, timeoutMs = TRANSPORT_CLEANUP_TIMEOUT_MS) {
@@ -249,13 +273,16 @@ export async function sha256Hex(data, cryptoImpl = globalThis.crypto) {
   return Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-export async function fetchFirmwareParts(build, manifestUrl, fetchImpl = fetch, cryptoImpl = globalThis.crypto) {
+export async function fetchFirmwareParts(build, manifestUrl, fetchImpl = fetch, cryptoImpl = globalThis.crypto, signal) {
   validateBuild(build, manifestUrl);
 
   const baseDirectory = new URL("./", manifestUrl);
   return Promise.all(build.parts.map(async (part, index) => {
     const url = new URL(part.path, baseDirectory).toString();
-    const response = await fetchImpl(url, { cache: "no-store" });
+    const requestOptions = { cache: "no-store" };
+    if (signal) requestOptions.signal = signal;
+    const response = await fetchImpl(url, requestOptions);
+    throwIfAborted(signal, "Firmware download stopped.");
     if (!response.ok) {
       throw errorWithName(
         "FirmwareDownloadError",
@@ -293,7 +320,8 @@ export async function verifyBootVersion({
   onLog = () => {},
   timeoutMs = BOOT_VERIFICATION_TIMEOUT_MS,
   cleanupTimeoutMs = TRANSPORT_CLEANUP_TIMEOUT_MS,
-  delay = sleep
+  delay = sleep,
+  signal
 }) {
   if (!port) throw errorWithName("BootVerificationError", "The serial port disappeared before boot verification.");
   if (typeof expectedVersion !== "string" || !expectedVersion) {
@@ -303,11 +331,14 @@ export async function verifyBootVersion({
   const deadline = Date.now() + timeoutMs;
   let lastOpenError = null;
   while (!port.readable && Date.now() < deadline) {
+    throwIfAborted(signal, "Boot verification stopped.");
     try {
       await withTimeout(
         port.open({ baudRate: 115200, bufferSize: 8192 }),
         Math.min(2000, Math.max(1, deadline - Date.now())),
-        new Error("Opening the serial port timed out.")
+        new Error("Opening the serial port timed out."),
+        undefined,
+        signal
       );
     } catch (error) {
       lastOpenError = error;
@@ -320,6 +351,7 @@ export async function verifyBootVersion({
       `The flashed device did not reconnect for version verification${lastOpenError ? `: ${errorMessage(lastOpenError)}` : "."}`
     );
   }
+  throwIfAborted(signal, "Boot verification stopped.");
 
   const reader = port.readable.getReader();
   const decoder = new TextDecoder();
@@ -342,7 +374,9 @@ export async function verifyBootVersion({
     const verified = await withTimeout(
       readLoop,
       Math.max(1, deadline - Date.now()),
-      errorWithName("BootVerificationError", `Timed out waiting for firmware ${expectedVersion} to boot.`)
+      errorWithName("BootVerificationError", `Timed out waiting for firmware ${expectedVersion} to boot.`),
+      undefined,
+      signal
     );
     if (!verified) {
       throw errorWithName("BootVerificationError", `The serial stream ended before firmware ${expectedVersion} was observed.`);
@@ -441,7 +475,8 @@ export async function flashDevice({
   onState = () => {},
   onLog = () => {},
   timeoutMs = FLASH_OPERATION_TIMEOUT_MS,
-  cleanupTimeoutMs = TRANSPORT_CLEANUP_TIMEOUT_MS
+  cleanupTimeoutMs = TRANSPORT_CLEANUP_TIMEOUT_MS,
+  signal: callerSignal
 }) {
   const transport = new TransportCtor(port);
   const loader = new ESPLoaderCtor({
@@ -452,13 +487,42 @@ export async function flashDevice({
     enableTracing: false
   });
   let completed = false;
+  let activeOperation = null;
+  const timeoutError = errorWithName("FlashTimeoutError", "Firmware installation timed out before it completed.");
+  const controller = new AbortController();
+  const stop = (error) => {
+    if (!controller.signal.aborted) controller.abort(error);
+  };
+  const abortFromCaller = () => {
+    stop(callerSignal?.reason instanceof Error
+      ? callerSignal.reason
+      : errorWithName("FlashAbortedError", "The USB connection ended during firmware installation."));
+  };
+  if (callerSignal) {
+    if (callerSignal.aborted) abortFromCaller();
+    else callerSignal.addEventListener("abort", abortFromCaller, { once: true });
+  }
+  const runDeviceOperation = async (operation) => {
+    throwIfAborted(controller.signal, "Firmware installation stopped.");
+    const pendingOperation = Promise.resolve().then(operation);
+    activeOperation = pendingOperation;
+    try {
+      await pendingOperation;
+    } finally {
+      if (activeOperation === pendingOperation) activeOperation = null;
+    }
+    throwIfAborted(controller.signal, "Firmware installation stopped.");
+  };
 
   try {
     return await withTimeout((async () => {
+    throwIfAborted(controller.signal, "Firmware installation stopped.");
     validateManifest(manifest, manifestUrl);
     onState({ stage: "connecting", percentage: 0, message: "Checking device" });
-    await loader.main();
-    if (typeof loader.flashId === "function") await loader.flashId();
+    await runDeviceOperation(() => loader.main());
+    throwIfAborted(controller.signal, "Firmware installation stopped.");
+    if (typeof loader.flashId === "function") await runDeviceOperation(() => loader.flashId());
+    throwIfAborted(controller.signal, "Firmware installation stopped.");
 
     const chipFamily = loader.chip && loader.chip.CHIP_NAME;
     const build = selectManifestBuild(manifest, chipFamily, port.getInfo());
@@ -468,23 +532,27 @@ export async function flashDevice({
         chipFamily ? `${chipFamily} is not supported by this firmware.` : "The ESP chip could not be identified."
       );
     }
-    await assertChipRevisionSupported(loader, chipFamily);
+    await runDeviceOperation(() => assertChipRevisionSupported(loader, chipFamily));
+    throwIfAborted(controller.signal, "Firmware installation stopped.");
 
     onState({ stage: "preparing", percentage: 0, message: "Loading firmware" });
-    const fileArray = await fetchFirmwareParts(build, manifestUrl, fetchImpl, cryptoImpl);
+    const fileArray = await fetchFirmwareParts(build, manifestUrl, fetchImpl, cryptoImpl, controller.signal);
+    throwIfAborted(controller.signal, "Firmware download stopped.");
 
     if (eraseFirst) {
+      throwIfAborted(controller.signal, "Firmware installation stopped.");
       onState({ stage: "erasing", percentage: 0, message: "Erasing flash" });
-      await loader.eraseFlash();
+      await runDeviceOperation(() => loader.eraseFlash());
     }
 
     const writePhase = async (phaseFiles, firstGlobalIndex, stage, message) => {
+      throwIfAborted(controller.signal, "Firmware installation stopped.");
       onState({
         stage,
         percentage: combinedProgress(fileArray, firstGlobalIndex, 0, phaseFiles[0].data.length),
         message
       });
-      await loader.writeFlash({
+      await runDeviceOperation(() => loader.writeFlash({
         fileArray: phaseFiles,
         flashSize: "keep",
         flashMode: "keep",
@@ -492,27 +560,42 @@ export async function flashDevice({
         eraseAll: false,
         compress: true,
         reportProgress(fileIndex, written, total) {
+          throwIfAborted(controller.signal, "Firmware write stopped.");
           onState({
             stage,
             percentage: combinedProgress(fileArray, firstGlobalIndex + fileIndex, written, total),
             message
           });
         }
-      });
+      }));
     };
 
     // Keep-mode may start on ota_1. Write bootloader/table/new ota_0 first; only after all of those
     // succeeded write ota_data_initial in its own final phase, atomically selecting the new ota_0.
     // A failure before this phase leaves the previously active image selected and bootable.
     await writePhase(fileArray.slice(0, 3), 0, "writing", "Writing firmware");
+    throwIfAborted(controller.signal, "Firmware installation stopped.");
     await writePhase(fileArray.slice(3), 3, "activating", "Activating new firmware");
 
+    throwIfAborted(controller.signal, "Firmware installation stopped.");
     onState({ stage: "restarting", percentage: 100, message: "Starting firmware" });
-    await loader.after("soft_reset");
+    await runDeviceOperation(() => loader.after("soft_reset"));
+    throwIfAborted(controller.signal, "Firmware installation stopped.");
     completed = true;
     return { chipFamily, build };
-    })(), timeoutMs, errorWithName("FlashTimeoutError", "Firmware installation timed out before it completed."));
+    })(), timeoutMs, timeoutError, () => stop(timeoutError), controller.signal);
   } finally {
+    if (callerSignal) callerSignal.removeEventListener("abort", abortFromCaller);
+    if (controller.signal.aborted && activeOperation) {
+      try {
+        // The loader owns this serial command until it settles. Resetting or disconnecting while
+        // it is pending can let a late chunk race cleanup; loader commands have their own bounded
+        // protocol timeouts, so wait for that command before beginning transport cleanup.
+        await activeOperation;
+      } catch (_error) {
+        // The failed command has settled; the aborted signal prevents any following phase.
+      }
+    }
     await settleTransport(transport, loader, completed ? undefined : "soft_reset", cleanupTimeoutMs);
   }
 }
@@ -560,6 +643,7 @@ export function attachWebInstaller({
   let monitorLoop = null;
   let monitorPendingLine = "";
   let busy = false;
+  let activeInstallController = null;
   const serialSupported = Boolean(
     serial && typeof serial.requestPort === "function" && globalThis.isSecureContext
   );
@@ -718,6 +802,13 @@ export function attachWebInstaller({
   };
 
   const disconnect = async () => {
+    if (busy && activeInstallController) {
+      activeInstallController.abort(errorWithName(
+        "FlashAbortedError",
+        "The USB connection ended during firmware installation."
+      ));
+      return;
+    }
     busy = false;
     await stopMonitor();
     await closePort();
@@ -796,6 +887,8 @@ export function attachWebInstaller({
   const install = async () => {
     if (!selectedPort || !manifest || busy) return;
     busy = true;
+    const installController = new AbortController();
+    activeInstallController = installController;
     await stopMonitor();
     root.dataset.flashing = "true";
     root.dataset.finished = "false";
@@ -818,6 +911,7 @@ export function attachWebInstaller({
         TransportCtor,
         ESPLoaderCtor,
         fetchImpl,
+        signal: installController.signal,
         onLog: appendMonitor,
         onState(state) {
           setProgress(state.message, state.percentage);
@@ -828,8 +922,10 @@ export function attachWebInstaller({
       await verifyBootImpl({
         port: selectedPort,
         expectedVersion: manifest.version,
-        onLog: appendMonitor
+        onLog: appendMonitor,
+        signal: installController.signal
       });
+      throwIfAborted(installController.signal, "Boot verification stopped.");
       root.dataset.flashing = "false";
       root.dataset.finished = "true";
       connectionLabel.textContent = "Restart complete";
@@ -840,10 +936,22 @@ export function attachWebInstaller({
     } catch (error) {
       root.dataset.flashing = "false";
       root.dataset.finished = "false";
-      setPageStatus(`Installation failed: ${errorMessage(error)}`, "error");
-      appendStatusLine(`Installation failed: ${errorMessage(error)}`);
-      markSteps(2);
+      if (error && (error.name === "FlashTimeoutError" || error.name === "FlashAbortedError" || error.name === "AbortError")) {
+        const message = error.name === "FlashTimeoutError"
+          ? "Installation timed out. Further flash phases were stopped. Reconnect and inspect the board before retrying."
+          : "USB disconnected during installation. Further flash phases were stopped. Reconnect and inspect the board before retrying.";
+        await closePort();
+        selectedPort = null;
+        setDisconnected();
+        setPageStatus(message, "error");
+        appendStatusLine(message);
+      } else {
+        setPageStatus(`Installation failed: ${errorMessage(error)}`, "error");
+        appendStatusLine(`Installation failed: ${errorMessage(error)}`);
+        markSteps(2);
+      }
     } finally {
+      activeInstallController = null;
       busy = false;
       const connected = Boolean(selectedPort && root.dataset.connected === "true");
       installButton.disabled = !connected;

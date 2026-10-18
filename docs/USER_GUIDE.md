@@ -74,7 +74,10 @@ the device to reboot. Click the version to select **Release** (official releases
 
 For USB recovery, **Keep configuration** is available for an existing dual-OTA layout.
 **Erase everything** and a merged-image write erase WiFi, VIN and pairing; back up secret NVS
-before an intentional destructive recovery. Never flash an unsigned local build: it cannot boot.
+before an intentional destructive recovery. If an installation times out or USB disconnects, the
+installer stops before starting another flash phase and waits for any active serial command to
+settle before cleanup. Reconnect and inspect the board's firmware before retrying. Never flash an
+unsigned local build: it cannot boot.
 [Verified delivery procedures](DEVELOPMENT.md#delivery).
 
 A reviewed same-repository PR with the `signed-preview` label may offer a signed installer at
