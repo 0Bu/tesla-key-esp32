@@ -141,15 +141,15 @@ enrollment. No host link keys exist. A peer SMP request is dropped with no reply
 error; that numeric BLE_HS_ENOMEM means unsupported SMP here, not an allocation failure.
 Controller `BLE_INIT ... SMP:1` describes its separate unchanged capability. [ATT/SMP departures](adr/0005-tesla-ble-seam.md#2-platform-forced-departures-and-reference-deviations).
 
-All targets use the manifest-pinned v6.1.1 graph and lexical, hash-checked patch series. The firmware
+All targets use the manifest-pinned v6.2.0 graph and lexical, hash-checked patch series. The firmware
 uses `TeslaBLE::Client` directly; `main/logic/` owns framing, UUID/session tracking and an eight-slot
 command runner: VCSEC auth → wake → Infotainment auth → payload, with backoff. Strict 2-byte BE
 length framing has bounded buffering and inter-chunk timeout; TX preserves the builder's frame.
 
 Patches 0001–0003 are retired. Current patches trim unused Parental Controls (0004), align session
 counter `max(local, reported)` plus epoch/time with `signer.go` (0005), and port crypto to PSA with
-response-tag verification against the response's counter (0006). v6.1.1 supplies that verification
-and counter upstream; the PSA rebase preserves it, failure wiping and a separate response-AAD helper.
+response-tag verification against the response's counter (0006). Upstream supplies that verification
+and counter; the PSA rebase preserves it, failure wiping and a separate response-AAD helper.
 Patch 0007 refuses message construction when routing-address or request-UUID randomness fails.
 Peer admission requires an initialized shared secret, including restored sessions. Domain request
 hashes remain isolated. Encrypted VCSEC requires an initialized peer and non-empty request hash;
@@ -157,6 +157,8 @@ missing context, failed tags or repeated carried counters (including zero) drop 
 sleep updates or callbacks, never falling through to plaintext. Passive plaintext VehicleStatus
 keeps its separate path. Native retries rebuild/sign new UUID/counter bytes; upstream Vehicle's
 identical-byte retry does not change this policy. Upstream C5 support does not add a firmware target.
+The v6.2.0 charging-power estimator belongs to upstream `Vehicle`; native charge telemetry still
+reports the vehicle's raw power and phase fields without inferred AC watts or phases.
 [ADR-0005](adr/0005-tesla-ble-seam.md) records all departures;
 [ADR-0002](adr/0002-idf6-mbedtls4-crypto-seam.md) records wire/key compatibility.
 

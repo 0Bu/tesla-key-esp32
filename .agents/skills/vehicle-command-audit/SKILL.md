@@ -26,7 +26,7 @@ other**?"; this skill asks "do they agree with **Tesla's protocol**, and is each
 
 `teslamotors/vehicle-command` is the **truth**, but it is NOT what we run. We run
 **yoziru/tesla-ble** (pinned in [`main/idf_component.yml`](../../../main/idf_component.yml) — **read
-the pin first**, currently `v6.1.1`). The Go SDK exposes commands, builders, fields and enum
+the pin first**, currently `v6.2.0`). The Go SDK exposes commands, builders, fields and enum
 values the pinned C++ port may **not** have. So every comparison is **three-way**, and a
 divergence from upstream does **not** automatically mean "change the code":
 
@@ -71,10 +71,10 @@ Verify these paths at the reviewed upstream revision:
 
 ### Feasibility — `yoziru/tesla-ble` at the pinned tag
 Fetch raw at the **pin** (base `https://raw.githubusercontent.com/yoziru/tesla-ble/<pin>`; confirm
-`<pin>` from `idf_component.yml`). Layout at v6.1.1:
+`<pin>` from `idf_component.yml`). Layout at v6.2.0:
 `include/{vehicle.h, client.h, command_error.h, message_builders.h, peer.h, vin_utils.h, errors.h, …}`
 and `src/{vehicle.cpp, client.cpp, peer.cpp, message_builders.cpp, message_processor.cpp, crypto_context.cpp, vin_utils.cpp, errors.cpp, …}`.
-- **Does a command builder exist?** → `src/message_builders.cpp`. v6.1.1 registers both
+- **Does a command builder exist?** → `src/message_builders.cpp`. v6.2.0 registers both
   `scheduledChargingAction` and `scheduledDepartureAction`; the firmware deliberately does not
   expose scheduled departure. Builder availability alone is not implementation, role or hardware acceptance.
 - **Enum / API values** (roles, form factors) → `include/client.h`; firmware-level `SleepState`, `WakePolicy` → `main/logic/command_runner.hpp`.
@@ -157,7 +157,7 @@ Verify every dimension against the reviewed revisions; previous audit results ar
     through root CMake to the managed dependency tree, and are rebased explicitly on every pin bump; 0006 must
     keep the V1 vectors in `test/test_tesla_ble_harness.cpp` byte-identical and keep verifying response tags
     against response metadata bound to the counter the response carries (`Signer.Decrypt`), never the
-    request counter (v6.1.1 now verifies/passes it upstream; PSA preserves that behavior): every `Peer::decrypt_response` call site passes `AES_GCM_Response_data.counter`.
+    request counter (v6.2.0 now verifies/passes it upstream; PSA preserves that behavior): every `Peer::decrypt_response` call site passes `AES_GCM_Response_data.counter`.
     Encrypted VCSEC additionally requires an initialized peer and non-empty domain request hash;
     missing context, failed tag or repeated response counter (including zero) drops before decoding,
     sleep/status updates and callbacks. Plaintext passive status is a separate path. Fresh sessions
