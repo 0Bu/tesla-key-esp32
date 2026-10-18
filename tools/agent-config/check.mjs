@@ -118,7 +118,7 @@ const usbAbsentApprovalProceeds = /(?:(?:approval|authorization)[^.!?]*(?:absent
 const reviewedSkillSha256 = new Map([
   ["add-logic-test", "565e7fd944695e8f90035a8d0033267af49b50b9e71c26253d2d3af09da6df39"],
   ["ci-heal", "b20e6e9c2cc0c43226ef9ce69b88d684108b31a4a2afce6e899ff60498567c58"],
-  ["deploy", "d3e876cdc221b10eee25fe44a3e304b0ac4fc763978e89fd92e749af9a0db5f6"],
+  ["deploy", "611cdc6653dea5ee10cee0a11fa96e5c06cc2795d87bb014101aa0af081a9528"],
   ["device-diag", "ce0a4340dd439276837b6baef9ab2800f78ee0a6e16ae5f0eb18c2e27db571e4"],
   ["display-preview", "e565dd7bb96f08c69d3ed6ed58c51164e3493f2e246b8a954a89eff39d05d0a4"],
   ["feature-docs", "17a486258723b88a5d1257284a33e295529bd52331d3b066335e832b666f1884"],
