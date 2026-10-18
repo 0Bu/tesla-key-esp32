@@ -10,12 +10,14 @@ additional authorization. Canonical skills live under `.agents/skills/`; hooks e
 
 [`tools/display_sim.py`](../../../tools/display_sim.py) is the layout **simulator** and the 5x7
 **font source of truth** for the on-device ST7735 panel (LilyGo T-Dongle-S3). Its
-`compose()` / `compose_portrait()` draw the screen pixel-for-pixel the way the firmware's
-`draw_landscape()` / `draw_portrait()` do in [`main/display.cpp`](../../../main/display.cpp),
-reading the same "what to show" decision from the pure presenter
+`compose()` / `compose_portrait()` approximate the layouts drawn by the firmware's
+`draw_landscape()` / `draw_portrait()` in [`main/display.cpp`](../../../main/display.cpp),
+mirroring the "what to show" decisions from the pure presenter
 [`main/logic/display_model.hpp`](../../../main/logic/display_model.hpp) (fed
 [`main/logic/ui_state.hpp`](../../../main/logic/ui_state.hpp)). This skill runs the sim's render
-modes to produce **PNGs a human can look at** — the complement to the automated correctness gate.
+modes to produce **PNGs a human can look at** — the complement to the automated decision-parity gate.
+Known rendering difference: portrait network search displays "WiFi" in the simulator even when
+`eth_present` makes the firmware display "LAN". The simulator does not establish pixel equality.
 
 It needs only **python3 (stdlib — no Pillow, no board, no ESP-IDF, no Docker)**, so it works in a
 cloud session as well as on a host. It writes image files; it changes no source.
@@ -34,8 +36,8 @@ Any time you touch the presenter or the renderer and want to confirm the pixels 
   the sim is the only cheap way to sanity-check that geometry before flashing.
 
 > **Parity green ≠ "looks right".** The automated gate proves the sim *decides* the same thing the
-> C++ presenter decides; it says nothing about whether the resulting frame is legible or well
-> laid-out. That judgement is exactly what this eyeball pass is for — render, then look.
+> C++ presenter decides; it does not compare rendered pixels or establish that a frame is legible
+> or well laid-out. Use this eyeball pass to inspect the simulated layout with its known limits.
 
 ## Scope boundary — what this is NOT
 
@@ -102,7 +104,7 @@ trusting the PNGs, because they're then rendering a decision the device won't ma
 ## Notes
 
 - The display code only compiles in under `CONFIG_TESLA_DISPLAY_ENABLED`
-  (`sdkconfig.defaults.esp32s3`); the sim renders the same layout with no build at all.
+  (`sdkconfig.defaults.esp32s3`); the sim renders its approximation with no firmware build.
 - The presenter is **cache-only** (never wakes the car), so nothing here touches the vehicle — it's
   pure layout math over a `UiSnapshot`.
 - To see the rendered frames on an actual panel instead, build + flash a T-Dongle-S3 with the
