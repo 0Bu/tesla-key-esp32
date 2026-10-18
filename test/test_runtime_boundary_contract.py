@@ -3118,6 +3118,26 @@ def require_explicit_idf_boot_error_contract(main_source: str, net_source: str,
             raise AssertionError(f"setup AP fail-closed route missing {token!r}")
     require_before("setup handler failure stops partial server", setup,
                    "httpd_stop(portal.server);", 'boot_fatal("setup HTTP handlers");')
+    close = function_body_in(provisioning_source, "portal_close_ap")
+    close_code = " ".join(scrub_cpp(close).split())
+    if not re.search(r"if \(stop_err != ESP_OK\) \{[^{}]*return false; \}", close_code):
+        raise AssertionError("setup HTTP stop failure must retain ownership and defer the close")
+    require_before("setup HTTP stop checked before forgetting its handle", close,
+                   "const esp_err_t stop_err = httpd_stop(portal.server);", "if (stop_err != ESP_OK)")
+    require_before("setup HTTP stop checked before forgetting its handle", close,
+                   "if (stop_err != ESP_OK)", "portal.server = nullptr;")
+    require_before("setup server stopped before changing WiFi mode", close,
+                   "portal.server = nullptr;", "esp_wifi_set_mode(WIFI_MODE_STA)")
+    failed_stop = re.search(r"if \(stop_err != ESP_OK\) \{([^{}]*)\}", close_code)
+    if failed_stop and "portal.server =" in failed_stop.group(1):
+        raise AssertionError("setup HTTP stop failure must not forget the running server")
+    # Portal scheduling only suppresses its own new calls. A station whose boot deadline expired
+    # before MAX_RETRY still reconnects from its event handler, including while an AP client exists.
+    event = " ".join(scrub_cpp(function_body_in(net_source, "wifi_event_handler")).split())
+    if "!s_ever_up.load() && !s_rollback_active.load() && s_retry_num >= MAX_RETRY" not in event:
+        raise AssertionError("review the shared station/portal retry ownership after an event-policy change")
+    if not re.search(r"else \{ esp_wifi_connect\(\); s_retry_num\+\+;", event):
+        raise AssertionError("remaining boot retries must be accounted for independently of portal scheduling")
     # First-time setup stays terminal; the stored-credential portal returns only through the
     # host-tested policy (logic/setup_portal.hpp) and never restarts the device itself.
     terminal = " ".join(function_body_in(provisioning_source, "provisioning_run").split())
@@ -6110,6 +6130,23 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
                 "false",
                 1,
             ),
+            provisioning_source,
+        ),
+        (
+            "setup HTTP stop error ignored",
+            main_source, net_source,
+            provisioning_source.replace("if (stop_err != ESP_OK)", "if (false)", 1),
+        ),
+        (
+            "setup HTTP stop failure loses running handle",
+            main_source, net_source,
+            provisioning_source.replace("if (stop_err != ESP_OK) {",
+                                        "if (stop_err != ESP_OK) { portal.server = nullptr;", 1),
+        ),
+        (
+            "remaining event-driven retries omitted from portal ownership",
+            main_source,
+            net_source.replace("s_retry_num >= MAX_RETRY", "false", 1),
             provisioning_source,
         ),
     ):

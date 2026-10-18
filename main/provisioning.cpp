@@ -477,7 +477,13 @@ static bool portal_close_ap(SetupPortal& portal) {
     s_dns_stop.store(true);
     for (int i = 0; i < 30 && s_dns_running.load(); ++i) vTaskDelay(pdMS_TO_TICKS(100));
     if (portal.server) {
-        httpd_stop(portal.server);
+        const esp_err_t stop_err = httpd_stop(portal.server);
+        if (stop_err != ESP_OK) {
+            // A failed stop can leave the server running. Retain its handle and retry through
+            // the existing close backoff before allowing the normal port-80 server to start.
+            ESP_LOGW(TAG, "setup HTTP server not stopped: %s", esp_err_to_name(stop_err));
+            return false;
+        }
         portal.server = nullptr;
     }
     const esp_err_t mode_err = esp_wifi_set_mode(WIFI_MODE_STA);

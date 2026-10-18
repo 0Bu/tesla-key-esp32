@@ -19,8 +19,9 @@ namespace tk {
 // The portal now keeps the stored credentials in use instead of surrendering to the form:
 //   * The station retries the stored pair in the background: the first attempt kPortalRetryFirstS
 //     after the portal opens, then with doubling backoff capped at kPortalRetryMaxS.
-//   * Before the open-time cap, no attempt starts while a phone is on the setup AP: the station
-//     scan hops channels, and the single radio would drop the person typing into the form.
+//   * Before the open-time cap, this policy starts no new attempt while a phone is on the setup
+//     AP. The station event handler can still finish its remaining boot retry budget when the
+//     boot window timed out first (net.hpp); this is not exclusive ownership of station retries.
 //   * The open setup AP closes after kPortalIdleCloseS without a client, and at the latest
 //     kPortalApMaxOpenS after it opened even with one, which bounds its window (docs/SECURITY.md).
 //     The cap also keeps a station that stays associated (anyone in range, or a phone that
@@ -67,7 +68,7 @@ enum class PortalAction {
 
 // One decision per tick. Leave wins over CloseAp, which wins over an attempt.
 //
-// Closing the AP can fail (the WiFi mode switch). The shell then reports it with
+// Closing the AP can fail (the HTTP server stop or WiFi mode switch). The shell then reports it with
 // portal_close_failed() and keeps the AP marked open: the next close (CloseAp, or Leave while the
 // AP is open) waits with the same doubling backoff as attempts, so a persistent failure neither
 // crowds out the attempts nor floods the log, and the boot never continues with the AP up.
