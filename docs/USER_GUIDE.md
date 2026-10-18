@@ -7,7 +7,8 @@ Install and pair using the [quick start](../README.md). This guide covers ongoin
 Supports **esp32, esp32s3, esp32c3 and esp32c6**, with 2.4 GHz WiFi/BLE and at least 4 MB flash
 for dual OTA; PSRAM is not required. First installation needs a USB data cable. Classic esp32
 requires revision v3.0 (ECO3) or newer; pre-ECO3 chips such as ESP32-PICO-D4 are refused before
-flashing. Other targets have no revision floor. ESP32-S2 lacks BLE; H2/P4 lack WiFi.
+flashing. esp32c3 builds keep ESP-IDF's default minimum of revision v0.3; esp32s3 and esp32c6
+have no revision floor. ESP32-S2 lacks BLE; H2/P4 lack WiFi.
 
 The pinned library also declares C5, but this firmware does not support it: restoring C5 requires
 separate firmware, signing-size and hardware acceptance. Undeclared chips such as esp32c61 need

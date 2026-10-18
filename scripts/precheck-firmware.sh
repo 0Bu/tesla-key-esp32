@@ -6,13 +6,14 @@
 # baseline violation costs a whole push -> wait -> fix -> push cycle. Measured over 24 days,
 # 24 of the 25 late build failures were exactly these gates, and 18 of those 24 failed ONLY on
 # esp32/esp32s3/esp32c3 -- a pre-push check that built just esp32c6 was blind to them. The numbers
-# are a pure function of the source tree and the pinned toolchain image, and a local rebuild in that
-# image reproduces CI's figures byte for byte, so a local failure here IS the CI failure.
+# are a function of the source tree and the pinned toolchain image: with the same locked
+# dependencies, a local rebuild in that image reproduces CI's size and stack figures, so a failure
+# here is CI's failure. A pass is not a CI pass (see below).
 #
 # What it deliberately is NOT: a replacement for CI. It runs neither the effective-compiler
 # semantics gate nor the reproducibility rebuild nor any release/signing contract; those stay
 # authoritative in CI (scripts/ci-build-all.sh, scripts/ci-build-verify.sh). Use
-# scripts/check-firmware-size.sh for the slow, authoritative single-target equivalent.
+# scripts/check-firmware-size.sh for the slow, authoritative full-build equivalent.
 #
 # It is fast because every target keeps a persistent build directory in idf-docker.sh's Fast-Build
 # volume (/build_cache/precheck/<target>), so a typical push only recompiles the objects it touched.
@@ -201,13 +202,14 @@ run_inner() {
   if (( ${#failed[@]} != 0 )); then
     echo "" >&2
     echo "precheck-firmware: FAILED for: ${failed[*]}" >&2
-    echo "These are the same gates CI enforces after its full build. If the growth is intentional and" >&2
-    echo "reviewed, regenerate the failing baseline from authoritative builds and commit it. Do the" >&2
-    echo "stack baseline first: ci-build-all.sh aborts at the stack check before a size update can run." >&2
+    echo "These are CI's size and stack gates. If the growth is intentional and reviewed, update the" >&2
+    echo "failing baseline from authoritative builds in raise mode and record each changed entry with" >&2
+    echo "its measured cause in the PR. Do the stack baseline first: ci-build-all.sh aborts at the" >&2
+    echo "stack check before a size update can run." >&2
     echo "  stack: scripts/idf-docker.sh ./scripts/ci-build-all.sh --no-enforce-budget local local" >&2
     echo "         (all four targets are built before it exits non-zero at the stack check), then" >&2
     echo "         python3 scripts/check-stack-usage.py --observed-dir dist \\" >&2
-    echo "           --write-baseline scripts/firmware-stack-baseline.json" >&2
+    echo "           --write-baseline scripts/firmware-stack-baseline.json --mode raise" >&2
     echo "  size:  scripts/check-firmware-size.sh --target <target> --update-baseline" >&2
     return 1
   fi

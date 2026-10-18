@@ -111,7 +111,8 @@ Use a verified signed artifact and an explicitly authorized delivery procedure.
 ### Trust anchor (trust-on-first-use)
 
 Without an eFuse key digest, the running signed app supplies the trusted key. Later OTA must use
-that same authority. Classic esp32 needs ECO3/revision v3.0+; the other targets have no such floor.
+that same authority. Classic esp32 needs ECO3/revision v3.0+; the other floors are in the
+[user guide](USER_GUIDE.md).
 USB can establish a different authority, but ordinary OTA cannot.
 
 `scripts/ota-signing-public-key.sha256` independently pins production authority. Every production app

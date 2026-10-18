@@ -712,6 +712,7 @@ size_relevant_samples=(
   "scripts/apply-tesla-ble-patches.sh"
   "scripts/ci-build-all.sh"
   "scripts/idf-docker.sh"
+  "scripts/idf-version.sh"
   "scripts/firmware-size-baseline.json"
   "scripts/firmware-stack-baseline.json"
 )
@@ -732,6 +733,14 @@ if printf '%s\n' "docs/README.md" "test/test_logic.cpp" ".agents/rules/ble.md" |
   fail_case 'gate_firmware_size_relevant rejects docs and host test changes'
 else
   pass_case 'gate_firmware_size_relevant rejects docs and host test changes'
+fi
+
+# The evaluate-only gate tools are deliberate, documented exemptions (host-tested by their self-tests).
+if printf '%s\n' "scripts/precheck-firmware.sh" "scripts/check-stack-usage.py" "scripts/report-firmware-size.py" \
+    "scripts/check-sdkconfig-defaults.py" | gate_firmware_size_relevant; then
+  fail_case 'gate_firmware_size_relevant keeps evaluate-only gate tools exempt'
+else
+  pass_case 'gate_firmware_size_relevant keeps evaluate-only gate tools exempt'
 fi
 
 ( GATE_PROJ="$root"; PATH="$tmp/bin:$PATH" TEST_REAL_GIT="$real_git" TEST_HEAD="$sha" TEST_CHANGED=2 gate_pr_changed_files 123 >/dev/null 2>&1 )

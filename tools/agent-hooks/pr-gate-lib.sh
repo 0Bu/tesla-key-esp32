@@ -97,9 +97,14 @@ gate_vehicle_command_relevant() {
 
 # gate_firmware_size_relevant
 #   Reads repo-relative changed paths on stdin and succeeds when firmware binary size
-#   or stack/size baseline inputs can have moved.
+#   or stack/size baseline inputs can have moved: sources, configuration, patches, locks, the
+#   toolchain contract and its reader (idf-version.sh selects the build image), the build and
+#   container scripts, and the baselines themselves. The gate tools that only evaluate a build
+#   are exempt, because changing them moves no measured number: precheck-firmware.sh,
+#   check-stack-usage.py and report-firmware-size.py (self-tests in scripts/test-build-contracts.sh)
+#   and check-sdkconfig-defaults.py (self-test in the build workflow).
 gate_firmware_size_relevant() {
-  grep -Eq '^(main/|CMakeLists\.txt$|sdkconfig|partitions\.csv$|patches/tesla-ble/|dependencies\.lock\.|esp-idf-toolchain\.txt$|scripts/(apply-tesla-ble-patches\.sh|ci-build-all\.sh|idf-docker\.sh|firmware-size-baseline\.json|firmware-stack-baseline\.json)$)'
+  grep -Eq '^(main/|CMakeLists\.txt$|sdkconfig|partitions\.csv$|patches/tesla-ble/|dependencies\.lock\.|esp-idf-toolchain\.txt$|scripts/(apply-tesla-ble-patches\.sh|ci-build-all\.sh|idf-docker\.sh|idf-version\.sh|firmware-size-baseline\.json|firmware-stack-baseline\.json)$)'
 }
 
 
