@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'sha256-0niK5V1ZqALRVwC3GwNl6fk5YQWIk+PpQX2mrLriz98='; connect-src 'self'; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-src 'none'; worker-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'sha256-XqIkjhrZo1XZG501JJTXBBVdRFfitun7Zl8hXQnXUv4='; connect-src 'self'; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-src 'none'; worker-src 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#e82127">
 <title>Install tesla-key-esp32</title>
@@ -12,7 +12,7 @@
   --brand:#e82127; --brand-strong:#bd151b; --brand-tint:#fff0f1;
   --bg:#f6f7f9; --card:#fff; --fg:#1a1d21; --muted:#5b626b; --line:#e6e8ec; --soft:#f1f3f5;
   --success:#18794e; --success-bg:#eef9f2; --success-line:#b9e2c9;
-  --warn:#c9740a; --err:#d23b3b; --terminal:#111820; --terminal-head:#18212a;
+  --warn:#c9740a; --warn-text:#9a5800; --err:#d23b3b; --terminal:#111820; --terminal-head:#18212a;
   --focus-ring:rgba(232,33,39,.22);
   --shadow-logo:0 2px 8px rgba(232,33,39,.35); --shadow-cta:0 3px 12px rgba(232,33,39,.3);
   --shadow-card:0 1px 2px rgba(16,20,28,.05),0 7px 22px rgba(16,20,28,.07);
@@ -25,7 +25,7 @@
     --brand:#ff5a5f; --brand-strong:#e82127; --brand-tint:#2d171a;
     --bg:#0f1115; --card:#171a20; --fg:#f2f3f5; --muted:#9aa1ab; --line:#262a31; --soft:#1f242c;
     --success:#70d5a0; --success-bg:#163326; --success-line:#2d6b49;
-    --warn:#e08a2b; --err:#ea5a5a;
+    --warn:#e08a2b; --warn-text:#e08a2b; --err:#ea5a5a;
     --shadow-card:0 1px 2px rgba(0,0,0,.5),0 10px 28px rgba(0,0,0,.45);
   }
 }
@@ -151,6 +151,7 @@ button:disabled{cursor:default;opacity:.55;transform:none}
 .installer-browser-note{color:var(--muted);font-size:12px}
 .installer-page-status{margin:12px 0 0;color:var(--muted);font-size:12px}
 .installer-page-status[data-kind="success"]{color:var(--success)}
+.installer-page-status[data-kind="warning"]{color:var(--warn-text)}
 .installer-page-status[data-kind="error"],.installer-unsupported{color:var(--err)}
 .installer-usb-release{margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}
 .installer-usb-release .release-help{margin:6px 0 0}
