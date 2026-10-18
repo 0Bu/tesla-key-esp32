@@ -503,11 +503,15 @@ curl -fsS "http://$DEVICE_IP/ota/status" | jq .
 ```
 
 - `version` / `platform` should read the just-flashed release (not the old `1.4.0` floor).
-- `paired:true` confirms `nvs@0x9000` was preserved — no NFC re-enrol needed.
-- `/ota/status` should now settle to up-to-date / no `available` update, and future OTAs verify
-  because the running app's signature block (its trust anchor) is once again the CI key — no more
-  "signature bad". A live *successful* OTA can't be demonstrated when you've just flashed the
-  newest release (the downgrade gate refuses a same-version image before the signature check).
+- `paired:true` reports the firmware's VCSEC-session presence result. It does not prove private-key
+  or other configuration preservation, complete NVS integrity, or a successful vehicle handshake.
+  The prescribed app/otadata write ranges do not overlap NVS; assess this status field only as
+  session-presence evidence.
+- Interpret `/ota/status` against the selected recovery version and retained channel. An older
+  valid recovery candidate can legitimately report a newer offer; that alone is not a recovery
+  failure. An up-to-date result does not demonstrate OTA signature verification: a same-version
+  candidate can be rejected before that check. A later successful OTA requires its own separately
+  authorized run and evidence.
 
 To confirm the live device is otherwise healthy (BLE up, no evcc timeouts), propose
 global `$tesla-key-e2e-evcc` skill and obtain its separate explicit live-test approval.

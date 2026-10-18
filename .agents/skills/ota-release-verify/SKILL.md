@@ -275,9 +275,10 @@ curl -s "http://$IP/ota/status" | jq
 #   {state, progress, message, available, update_available, current}
 ```
 
-`update_available:true` + `available` == the release means the device sees the channel and will
-take it on `POST /ota/update`. A non-empty `message` on `state:"error"` is the diagnosis — read the
-table below before retrying. (Endpoints: [`main/http_ota.cpp`](../../../main/http_ota.cpp),
+`update_available:true` + `available` == the release reports a channel offer. Download, image
+validation and update admission still need to succeed. A non-empty `message` on `state:"error"`
+describes the failure symptom; use the table below to investigate before retrying.
+(Endpoints: [`main/http_ota.cpp`](../../../main/http_ota.cpp),
 [`main/http_api.cpp`](../../../main/http_api.cpp).)
 
 ## Interpreting failures — keyed on the known break modes
@@ -290,9 +291,9 @@ table below before retrying. (Endpoints: [`main/http_ota.cpp`](../../../main/htt
 | manifest length/SHA-256 differs from any downloaded part | step 2 | partial branch publication, cache race, or bytes changed underneath the manifest | do not OTA; let branch-backed Pages settle or republish, then rerun from a fresh snapshot |
 | Pages part differs from its byte range in the Release merged asset | step 2 | same-version/source manifest was regenerated around bytes that were not attached to the bound GitHub Release | do not OTA; republish Pages exclusively from the signed Release staging tree and rerun |
 | an app's embedded target/version differs from its manifest family/Release | step 2/3 | stale or cross-target app was published under the expected basename | do not OTA; rebuild/sign/publish the exact Release and verify all four descriptors |
-| `/ota/status` `message:"downloaded image is invalid"` (serial: `image valid, signature bad`) | step 4, `state:"error"` | **TOFU key mismatch** — the running image's trust anchor ≠ the current `OTA_SIGNING_KEY`; the channel is fine, the *device* can't accept it | USB-reflash the published signed `.bin` to `0x20000` + erase otadata (keeps NVS) — see [`$usb-recovery`](../usb-recovery/SKILL.md) and [`docs/SECURITY.md`](../../../docs/SECURITY.md) "Trust anchor (trust-on-first-use)" |
+| `/ota/status` `message:"downloaded image is invalid"` | step 4, `state:"error"` | image validation failed; a TOFU trust-anchor mismatch is one possible cause, not proven by this message | verify candidate chip/revision, integrity and signature evidence; only after establishing the cause, propose separately authorized [`$usb-recovery`](../usb-recovery/SKILL.md) if appropriate; see [`docs/SECURITY.md`](../../../docs/SECURITY.md) "Trust anchor (trust-on-first-use)" |
 | `/ota/status` `message:"no newer version available"` | step 4, `state:"error"` | **version eligibility gate** — the candidate fails the selected channel/PR policy (for ordinary stable updates, an equal or older version; intentional return/preview exceptions still apply) | benign if the device already runs the release; otherwise verify candidate identity and the selected channel/PR → check step 2 |
-| manifest `version` ≠ latest Release tag, or a device loops on "update available" with no version change | step 2 / step 4 `current` vs `available` | **floor-vs-stamped drift** — the published binary/manifest froze at the `version.txt` floor instead of the stamped release | inspect the "Stamp firmware version" step in [`.github/workflows/build.yml`](../../../.github/workflows/build.yml); the manifest must be built with `steps.stamp.outputs.disp` |
+| manifest `version` ≠ latest Release tag, or repeated "update available" with no version change | step 2 / step 4 `current` vs `available` | verify Release/Pages/candidate identity; floor-vs-stamped drift is one possible cause of a version mismatch. Repeated checks only report an offer and do not prove a stamping defect or perform an update | compare the selected Release, manifest and embedded version; if stamping drift is confirmed, inspect "Stamp firmware version" in [`.github/workflows/build.yml`](../../../.github/workflows/build.yml) and `steps.stamp.outputs.disp` |
 | fewer than 4 builds / wrong chipFamily set / wrong part offset | step 2 | a target failed to stage, or the suffix/offset maps drifted | reconcile `image_suffix()`/`boot_offset()` across `ci-sign-artifacts.sh`, `build-pages.sh`, `ota_update.cpp`, `target.hpp` |
 
 ## See also

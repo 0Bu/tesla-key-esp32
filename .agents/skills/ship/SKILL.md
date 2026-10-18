@@ -37,7 +37,10 @@ gh pr view "$PR" --json number,state,mergeable,headRefOid,body
 - **Merge gate:** [`tools/agent-hooks/require-pr-gates.sh`](../../../tools/agent-hooks/require-pr-gates.sh)
   blocks merge unless the PR body's `- [x] $project-review clean — merge gate @ <sha>` and
   `- [x] $pr-hygiene clean — content gate @ <sha>` boxes are ticked and current. A
-  feature-relevant diff also requires `- [x] $feature-docs synced — merge gate @ <sha>`. The
+  feature-relevant diff also requires `- [x] $feature-docs synced — merge gate @ <sha>`, and a
+  vehicle-command-relevant diff (`gate_vehicle_command_relevant` in
+  [`pr-gate-lib.sh`](../../../tools/agent-hooks/pr-gate-lib.sh)) also requires
+  `- [x] $vehicle-command-audit clean — merge gate @ <sha>`. The
   command must carry that same full head SHA in `--match-head-commit`. If any record is missing or
   stale, run the corresponding read-only review/sync workflow and report that a separately
   authorized PR-body update is needed; `$project-review` does not establish `$pr-hygiene`
@@ -102,8 +105,11 @@ signed build goes to `gh-pages:/dev/` with a `X.Y.Z-dev.N` version, and no GitHu
 Pages change is produced. The stable Release and root Pages come exclusively from a manually
 dispatched `build` run with `release: true` on current `main`; that needs its own explicit user
 authorization and is never started by this skill (select it here with
-`CHANNEL_RUN=workflow_dispatch`). A docs/config-only merge produces no firmware to deploy; say so
-and stop instead of flashing an unchanged rebuild.
+`CHANNEL_RUN=workflow_dispatch`). Check the selected main run's actual `firmware` output and
+publication jobs. When it reports `firmware=no` and publication/deployment are skipped, report
+that no firmware was produced and stop. A docs/config-only diff alone cannot establish this:
+the Dev classifier compares cumulative changes against the published baseline and schedules
+a build when that baseline cannot be verified.
 
 ## 3. Download the signed image
 

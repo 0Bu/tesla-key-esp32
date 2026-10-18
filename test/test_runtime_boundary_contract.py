@@ -1159,6 +1159,35 @@ CLIMATE_GETTER_FORBIDDEN = (
 )
 
 
+def if_statement_at(code: str, at: int, label: str) -> tuple[str, int, int]:
+    """Return (condition, body_open, body_close) of the braced `if (...) { ... }` starting at `at`.
+
+    `code` must be scrubbed with layout preserved, so braces in comments or literals do not count.
+    """
+    if not re.match(r"if\s*\(", code[at:]):
+        raise AssertionError(f"{label}: expected an if statement")
+    paren = skip_space(code, at + 2, len(code))
+    condition_end = balanced_end(code, paren, "(", ")", label)
+    body_open = skip_space(code, condition_end + 1, len(code))
+    body_close = balanced_end(code, body_open, "{", "}", label)
+    return " ".join(code[paren + 1:condition_end].split()), body_open, body_close
+
+
+def enclosing_scope(code: str, at: int, label: str) -> tuple[int, int]:
+    """Return (open, close) of the innermost brace scope that contains offset `at`."""
+    opens: list[int] = []
+    for pos, char in enumerate(code[:at]):
+        if char == "{":
+            opens.append(pos)
+        elif char == "}":
+            if not opens:
+                raise AssertionError(f"{label}: unbalanced braces before the statement")
+            opens.pop()
+    if not opens:
+        raise AssertionError(f"{label}: statement is not inside a brace scope")
+    return opens[-1], balanced_end(code, opens[-1], "{", "}", label)
+
+
 def scope_around(code: str, marker: str) -> tuple[int, int]:
     """Return (start, end) of the lexical brace scope that owns the first `marker` in `code`."""
     at = code.index(marker)
@@ -2007,12 +2036,24 @@ def require_vin_transition_cleanup_contract(main_source: str) -> None:
     )
 
 
+def cache_writes(code: str, name: str) -> list[int]:
+    """Offsets of every write to `name`: assignment, member assignment or swap."""
+    field = re.escape(name)
+    pattern = (rf"\b{field}\s*(?:(?:\.|->)\s*\w+\s*)?=(?!=)"
+               rf"|\bswap\s*\([^;]*\b{field}\b"
+               rf"|\b{field}\s*\.\s*(?:store|fetch_add|fetch_sub|exchange)\s*\(")
+    return [match.start() for match in re.finditer(pattern, code)]
+
+
 def require_telemetry_epoch_cache_contract(telemetry_source: str) -> None:
-    body = function_body_in(telemetry_source, "process_pending_telemetry_")
+    # Scrub once, before any search: a flag name or brace inside a comment or log literal must not
+    # move a block boundary.
+    body = scrub_cpp_preserving_layout(function_body_in(telemetry_source, "process_pending_telemetry_"))
     critical_end = body.find("portEXIT_CRITICAL(&telemetry_pending_mux_);")
     if critical_end < 0:
         raise AssertionError("process_pending_telemetry_ missing portEXIT_CRITICAL")
     processing_body = body[critical_end:]
+    epoch_expr = "identity_epoch_.load(std::memory_order_acquire)"
     kinds = (
         ("charge", "PendingCharge", "charge_epoch", "last_known_charge_"),
         ("climate", "PendingClimate", "climate_epoch", "last_known_climate_"),
@@ -2020,6 +2061,9 @@ def require_telemetry_epoch_cache_contract(telemetry_source: str) -> None:
         ("tires", "PendingTires", "tires_epoch", "last_known_tires_"),
         ("closures", "PendingClosures", "closures_epoch", "last_known_closures_"),
     )
+    # The charge cache carries its freshness stamps; they must move with the sample they date.
+    companions = {"charge": ("last_charge_ticks_", "charge_state_generation_", "charge_cache_stale_reported_")}
+    branches: dict[str, tuple[int, int]] = {}
     for name, flag, epoch_var, target in kinds:
         flag_pos = processing_body.find(f"pending & {flag}")
         if flag_pos < 0:
@@ -2032,30 +2076,52 @@ def require_telemetry_epoch_cache_contract(telemetry_source: str) -> None:
             if 0 <= pos < next_pos:
                 next_pos = pos
         block = processing_body[flag_pos:next_pos]
+        label = f"process_pending_telemetry_ {name}"
 
         mutex_match = re.search(r"tk::MutexGuard\s+\w+\(cache_mutex_\);", block)
         if not mutex_match:
-            raise AssertionError(f"process_pending_telemetry_ {name} missing cache_mutex_ guard")
+            raise AssertionError(f"{label} missing cache_mutex_ guard")
+        # The guard's lexical scope is the critical section; a statement after its closing brace
+        # runs unlocked even though it still follows the guard in token order.
+        _, scope_close = enclosing_scope(block, mutex_match.start(), label)
 
-        target_pos = block.find(f"{target} =")
-        if target_pos < 0:
-            raise AssertionError(f"process_pending_telemetry_ {name} missing assignment to {target}")
-
-        if mutex_match.start() >= target_pos:
-            raise AssertionError(f"process_pending_telemetry_ {name} assignment {target} outside cache_mutex_")
-
-        mutex_body = block[mutex_match.end():]
         epoch_check = f"tk::telemetry_epoch_matches({epoch_var}"
-        epoch_pos = mutex_body.find(epoch_check)
-        if epoch_pos < 0:
-            raise AssertionError(
-                f"process_pending_telemetry_ {name} missing epoch check {epoch_check!r} under cache_mutex_"
-            )
-        target_in_mutex = mutex_body.find(f"{target} =")
-        if target_in_mutex < 0 or epoch_pos >= target_in_mutex:
-            raise AssertionError(
-                f"process_pending_telemetry_ {name} epoch check must precede {target} under cache_mutex_"
-            )
+        epoch_if = re.search(r"\bif\s*\(\s*" + re.escape(epoch_check), block[mutex_match.end():scope_close])
+        if not epoch_if:
+            raise AssertionError(f"{label} missing epoch check {epoch_check!r} under cache_mutex_")
+        condition, body_open, body_close = if_statement_at(
+            block, mutex_match.end() + epoch_if.start(), f"{label} epoch check")
+        expected = f"tk::telemetry_epoch_matches({epoch_var}, {epoch_expr})"
+        if condition != expected:
+            raise AssertionError(f"{label} epoch check must be exactly {expected!r}, found {condition!r}")
+        # An unlocked pre-check (charge) may skip a stale sample early, but must not be weakened.
+        for early in re.finditer(r"\bif\s*\(", block[:mutex_match.start()]):
+            early_condition, _, _ = if_statement_at(block, early.start(), f"{label} early epoch check")
+            if epoch_check in early_condition and early_condition != f"!{expected}":
+                raise AssertionError(f"{label} early epoch check must be exactly '!{expected}'")
+        branches[name] = (flag_pos + body_open, flag_pos + body_close)
+        if not re.search(r"\bnote_contact_\s*\(\s*\)\s*;", block[body_open:body_close]):
+            raise AssertionError(f"{label} must note contact inside its epoch-checked cache_mutex_ branch")
+
+    # Publication must happen only in the epoch-checked branch, inside the locked scope. Writes are
+    # searched in the whole processing body, so a write placed in another kind's block is caught.
+    def inside(pos: int, branch: tuple[int, int]) -> bool:
+        return branch[0] < pos < branch[1]
+
+    for name, _, _, target in kinds:
+        label = f"process_pending_telemetry_ {name}"
+        writes = cache_writes(processing_body, target)
+        if not writes:
+            raise AssertionError(f"{label} missing assignment to {target}")
+        if any(not inside(pos, branches[name]) for pos in writes):
+            raise AssertionError(f"{label} assigns {target} outside its epoch-checked cache_mutex_ branch")
+        for companion in companions.get(name, ()):
+            stamps = cache_writes(processing_body, companion)
+            if not stamps or any(not inside(pos, branches[name]) for pos in stamps):
+                raise AssertionError(f"{label} must update {companion} only inside its epoch-checked branch")
+    for match in re.finditer(r"\bnote_contact_\s*\(\s*\)\s*;", processing_body):
+        if not any(inside(match.start(), branch) for branch in branches.values()):
+            raise AssertionError("process_pending_telemetry_ notes contact outside every epoch-checked branch")
 
 
 def require_pairing_cleanup_epoch_contract(pairing_source: str) -> None:
@@ -2684,6 +2750,32 @@ def require_coredump_stream_contract(status_source: str, runtime_tests: str) -> 
         raise AssertionError("coredump flash-read failure does not abort the HTTP stream")
     if re.search(r"\bbreak\s*;", read_failure_region):
         raise AssertionError("coredump flash-read failure can fall through to a clean terminator")
+    # Token order alone accepts a guard that can never fire (`if (false && read_err != ESP_OK)`):
+    # require the one guard between read and send to test the read result itself and to own the
+    # failure return.
+    clean_loop = scrub_cpp_preserving_layout(loop)
+    if not re.search(r"\bconst\s+esp_err_t\s+read_err\s*=\s*esp_partition_read\(part,\s*off,\s*buf,\s*n\)\s*;",
+                     clean_loop[:send_at]):
+        raise AssertionError("coredump flash read result is not kept in read_err")
+    guard = re.search(r"\bif\s*\(", clean_loop[read_at:send_at])
+    if not guard:
+        raise AssertionError("coredump flash read has no failure guard before its chunk is sent")
+    condition, body_open, body_close = if_statement_at(clean_loop, read_at + guard.start(), "coredump read guard")
+    if condition != "read_err != ESP_OK":
+        raise AssertionError(f"coredump read guard must test exactly read_err != ESP_OK, found {condition!r}")
+    if body_close >= send_at:
+        raise AssertionError("coredump read guard does not close before the chunk is sent")
+    # The failure return must be an unconditional statement of the guard body: at its top brace
+    # level and directly after the previous statement, not behind a nested or unbraced condition.
+    guard_body = clean_loop[body_open + 1:body_close]
+    owned = False
+    for match in re.finditer(r"\breturn\s+ESP_FAIL\s*;", guard_body):
+        depth = guard_body[:match.start()].count("{") - guard_body[:match.start()].count("}")
+        previous = guard_body[:match.start()].rstrip()
+        if depth == 0 and (not previous or previous[-1] in ";}"):
+            owned = True
+    if not owned:
+        raise AssertionError("coredump read guard does not own an unconditional failure return")
     if handler.count("httpd_resp_send_chunk(req, nullptr, 0)") != 1:
         raise AssertionError("coredump stream must have exactly one success-only terminating chunk")
     require_before("coredump final data chunk before terminator", handler,
@@ -5840,6 +5932,32 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
         "coredump read failure clean-termination fallthrough",
         lambda: require_coredump_stream_contract(read_fallthrough, runtime_tests),
     )
+    # F-003 countercontrol: a guard that can never fire keeps every token in order.
+    read_guard_disabled = status_source.replace(
+        "if (read_err != ESP_OK) {", "if (false && read_err != ESP_OK) {", 1)
+    if read_guard_disabled == status_source:
+        raise AssertionError("coredump disabled-guard mutation did not apply")
+    require_mutation_rejected(
+        "coredump read-error guard disabled",
+        lambda: require_coredump_stream_contract(read_guard_disabled, runtime_tests),
+    )
+    for label, old, new in (
+        (
+            "coredump failure return behind a nested condition",
+            "esp_err_to_name(read_err));\n            return ESP_FAIL;",
+            "esp_err_to_name(read_err));\n            if (off == 0) return ESP_FAIL;",
+        ),
+        (
+            "coredump read result not kept in the guarded variable",
+            "const esp_err_t read_err = esp_partition_read(part, off, buf, n);",
+            "esp_partition_read(part, off, buf, n);\n        const esp_err_t read_err = ESP_OK;",
+        ),
+    ):
+        mutated = status_source.replace(old, new, 1)
+        if mutated == status_source:
+            raise AssertionError(f"{label} mutation did not apply")
+        require_mutation_rejected(
+            label, lambda mutated=mutated: require_coredump_stream_contract(mutated, runtime_tests))
 
     heap_stream = (MAIN / "logic/heap_json_stream.hpp").read_text(encoding="utf-8")
     logic_tests = (ROOT / "test/test_logic.cpp").read_text(encoding="utf-8")
@@ -6501,6 +6619,90 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
         "telemetry cache update without epoch check under cache_mutex_",
         lambda: require_telemetry_epoch_cache_contract(telemetry_no_epoch),
     )
+
+    # F-003 countercontrols: each keeps the expected token order but publishes unlocked, outside
+    # the epoch-checked branch, or behind a predicate that always holds.
+    tires_epoch_if = ("if (tk::telemetry_epoch_matches(tires_epoch, "
+                      "identity_epoch_.load(std::memory_order_acquire))) {")
+    charge_epoch_if = ("if (tk::telemetry_epoch_matches(charge_epoch, "
+                       "identity_epoch_.load(std::memory_order_acquire))) {")
+    for label, old, new in (
+        (
+            "telemetry Tires publication after the lock and epoch scopes",
+            tires_epoch_if + "\n                last_known_tires_ = std::move(parsed);\n"
+            "                note_contact_();\n            }\n        }",
+            tires_epoch_if + "}\n        }\n        last_known_tires_ = std::move(parsed);\n"
+            "        note_contact_();",
+        ),
+        (
+            "telemetry Tires epoch predicate that always holds (prefix)",
+            tires_epoch_if,
+            tires_epoch_if.replace("if (tk::", "if (true || tk::", 1),
+        ),
+        (
+            "telemetry Tires epoch predicate that always holds (suffix)",
+            tires_epoch_if,
+            tires_epoch_if.replace(")) {", ") || true) {", 1),
+        ),
+        (
+            "telemetry charge publication beside, not inside, the epoch branch",
+            charge_epoch_if + "\n                last_known_charge_ = std::move(parsed);",
+            charge_epoch_if + "}\n            {\n                last_known_charge_ = std::move(parsed);",
+        ),
+        (
+            "telemetry Tires assignment alone moved after the scopes",
+            tires_epoch_if + "\n                last_known_tires_ = std::move(parsed);\n"
+            "                note_contact_();\n            }\n        }",
+            tires_epoch_if + "\n                note_contact_();\n            }\n        }\n"
+            "        last_known_tires_ = std::move(parsed);",
+        ),
+        (
+            "telemetry closures note_contact_ alone moved after the scopes",
+            "                last_known_closures_ = std::move(parsed);\n                note_contact_();\n"
+            "            }\n        }",
+            "                last_known_closures_ = std::move(parsed);\n            }\n        }\n"
+            "        note_contact_();",
+        ),
+        (
+            "telemetry drive branch without note_contact_",
+            "                last_known_drive_ = std::move(parsed);\n                note_contact_();",
+            "                last_known_drive_ = std::move(parsed);",
+        ),
+        (
+            "telemetry extra note_contact_ outside every branch",
+            "    if (pending & PendingClosures) {\n        ClosuresStateResult parsed{};",
+            "    note_contact_();\n    if (pending & PendingClosures) {\n        ClosuresStateResult parsed{};",
+        ),
+        (
+            "telemetry Tires guard in a sibling scope",
+            "tk::MutexGuard g(cache_mutex_);\n            " + tires_epoch_if,
+            "{ tk::MutexGuard g(cache_mutex_); }\n            " + tires_epoch_if,
+        ),
+        (
+            "telemetry Tires cache written from the closures block",
+            "                last_known_closures_ = std::move(parsed);",
+            "                last_known_closures_ = std::move(parsed);\n"
+            "                last_known_tires_ = TirePressureResult{};",
+        ),
+        (
+            "telemetry charge generation bumped after the scopes",
+            "                charge_state_generation_.fetch_add(1);\n"
+            "                charge_cache_stale_reported_.store(false);\n"
+            "                note_contact_();\n            }\n        }\n    }",
+            "                charge_cache_stale_reported_.store(false);\n"
+            "                note_contact_();\n            }\n        }\n"
+            "        charge_state_generation_.fetch_add(1);\n    }",
+        ),
+        (
+            "telemetry charge early epoch check that never skips",
+            "if (!tk::telemetry_epoch_matches(charge_epoch,",
+            "if (false && !tk::telemetry_epoch_matches(charge_epoch,",
+        ),
+    ):
+        mutated = telemetry_source.replace(old, new, 1)
+        if mutated == telemetry_source:
+            raise AssertionError(f"{label} mutation did not apply")
+        require_mutation_rejected(label, lambda mutated=mutated: require_telemetry_epoch_cache_contract(mutated))
 
     # F07: Pairing cleanup ordering in clear_session_and_cache_
     pairing_inverted_epoch = pairing_source.replace(

@@ -7,7 +7,12 @@ description: Read-only, cache-only triage of tesla-key-esp32 health from existin
 
 Invoke `$device-diag`. Read [AGENTS.md](../../../AGENTS.md). Prefer existing logs/status/captures.
 This skill is read-only and cache-only: diagnose and hand off, without wake, commands, pairing,
-configuration, signing, flash/OTA, NVS changes or crash/log deletion.
+configuration, signing, flash/OTA, explicit NVS operations or crash/log deletion.
+
+An approved `GET /status` can make the firmware persist a missing or invalid `paired_at` date
+when a session exists and the clock is authoritative. This is autonomous metadata stamping, not
+an explicit configuration or identity operation. Prefer collected evidence when even that storage
+side effect must be avoided; do not describe a live status read as guaranteeing unchanged NVS.
 
 Before live HTTP, require explicit user approval for the identified board/host and read endpoints.
 A generic diagnosis request grants none. Default requests do not change `verbose`/`clear`; those

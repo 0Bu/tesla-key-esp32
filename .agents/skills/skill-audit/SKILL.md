@@ -48,7 +48,8 @@ workflow scripts and [deep document owners](../../../docs/README.md), not histor
 - **`$deploy`**: phase permissions, independent fix/review loop, current-head gates and delegated
   `$ship` procedure, target/channel-bound OTA, targeted/health/evcc evidence and authorized cleanup.
 - **`$ci-heal`**: script never authors commits/reviews; explicit gate attestations, green current-head
-  CI, local HEAD equality, mergeability/relevance and unchanged-head check before stamping/readiness;
+  CI, local HEAD equality, mergeability/relevance and unchanged-head check before merge-readiness
+  stamping; Phase 3 pre-push records attest the independently reviewed local fix commit;
   iteration cap, actual red/green selftests and separate merge authority.
 - **`$vehicle-command-audit`**: upstream/local/pinned-library feasibility, lexical full patch chain,
   resolved upstream paths, role restrictions, replay/authentication/request binding and clock domains.

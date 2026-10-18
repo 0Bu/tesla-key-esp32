@@ -36,14 +36,15 @@ verifies that the PR reaches a mergeable state with current gate records.
   check such as `node tools/agent-config/check.mjs` is **not** a `$skill-audit`, and a green CI
   run is **not** a `$project-review`. Without an attestation the run ends with exit code 3 and the
   exact `--attest` flags that are missing.
-- **Readiness is about one commit.** Stamping, `READY FOR MERGE` and `--auto-merge` all require
+- **Readiness is about one commit.** Merge-readiness stamping, `READY FOR MERGE` and `--auto-merge` all require
   green CI on the PR head, local `HEAD` equal to that head, a clean working tree, the PR reporting
   `MERGEABLE`, and an unchanged head immediately before the body edit. Any mismatch stops the run
-  before anything is stamped.
+  before any merge-readiness record is stamped. Phase 3 pre-push records instead attest the
+  independently reviewed local fix commit before it has green remote CI.
 - **Relevance matches the merge hook.** The gates a PR needs come from the same GitHub-side
   changed-file list and the same shared predicates (`gate_feature_docs_relevant`,
   `gate_vehicle_command_relevant`, `gate_is_renovate_maintenance`) as
-  `tools/agent-hooks/require-pr-gates.sh`. If that list cannot be read, nothing is stamped.
+  `tools/agent-hooks/require-pr-gates.sh`. If that list cannot be read, no merge-readiness record is stamped.
 - **It fails closed on its own inputs.** A missing or incomplete `tools/agent-hooks/pr-gate-lib.sh`,
   an unknown gate name, a non-numeric PR number or a non-40-hex head is a hard stop. The merge
   runs as a direct `gh` invocation with validated arguments, never through `eval`.
