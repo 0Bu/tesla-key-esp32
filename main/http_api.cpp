@@ -182,9 +182,9 @@ esp_err_t handle_command(GuardedReq rq) {
     }
 
     // Parse the body once. Empty is valid for no-argument and legacy-optional commands.
-    // evcc's generic boolean setter sends the JSON scalar true for charge_start and false
-    // for charge_stop; the shared registry policy admits exactly those two compatibility
-    // forms while keeping every other non-object body invalid.
+    // evcc's generic boolean setter sends the JSON scalar true for charge_start and wake_up
+    // and false for charge_stop; the shared registry policy admits exactly those three
+    // compatibility forms while keeping every other non-object body invalid.
     tk::BodyReadResult body = read_body_result(req);
     if (body.status == tk::BodyReadStatus::TooLarge) {
         return send_json(req, 413, make_response(false, cmd, vin, "request body too large"));
