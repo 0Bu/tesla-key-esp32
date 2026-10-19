@@ -6,46 +6,46 @@
     "esp32": {
       "memoryModel": "split",
       "staticCapacity": 124580,
-      "maxStaticUsed": 79176,
-      "maxBss": 55088,
+      "maxStaticUsed": 77960,
+      "maxBss": 53872,
       "iramCapacity": 131072,
       "maxIramUsed": 115559,
       "maxUnsignedApp": 1638400,
-      "maxElfTotal": 1575713,
-      "maxFlashCodeAndRodata": 1437206
+      "maxElfTotal": 1574641,
+      "maxFlashCodeAndRodata": 1436134
     },
     "esp32s3": {
       "memoryModel": "unified",
       "staticCapacity": 341760,
-      "maxStaticUsed": 167207,
-      "maxBss": 51128,
+      "maxStaticUsed": 165975,
+      "maxBss": 49896,
       "iramCapacity": 16384,
       "maxIramUsed": 16384,
       "maxUnsignedApp": 1703936,
-      "maxElfTotal": 1652761,
-      "maxFlashCodeAndRodata": 1521442
+      "maxElfTotal": 1651701,
+      "maxFlashCodeAndRodata": 1520382
     },
     "esp32c3": {
       "memoryModel": "unified",
       "staticCapacity": 321296,
-      "maxStaticUsed": 159340,
-      "maxBss": 52304,
+      "maxStaticUsed": 158116,
+      "maxBss": 51080,
       "iramCapacity": 0,
       "maxIramUsed": 0,
       "maxUnsignedApp": 1769472,
-      "maxElfTotal": 1715550,
-      "maxFlashCodeAndRodata": 1609942
+      "maxElfTotal": 1714476,
+      "maxFlashCodeAndRodata": 1608868
     },
     "esp32c6": {
       "memoryModel": "unified",
       "staticCapacity": 452112,
-      "maxStaticUsed": 195142,
-      "maxBss": 56424,
+      "maxStaticUsed": 193918,
+      "maxBss": 55200,
       "iramCapacity": 0,
       "maxIramUsed": 0,
       "maxUnsignedApp": 1966080,
-      "maxElfTotal": 1937794,
-      "maxFlashCodeAndRodata": 1800540
+      "maxElfTotal": 1936714,
+      "maxFlashCodeAndRodata": 1799460
     }
   }
 }

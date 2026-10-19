@@ -29,7 +29,7 @@ POST /api/1/vehicles/{VIN}/command/{command}   Content-Type: application/json
   `charge_stop` accepts `false` (evcc's generic setter); mismatched booleans and all other
   non-object bodies are `400`.
 - **`wake_up` waits for the car:** an already awake car returns at once. Otherwise the call returns
-  once live charge telemetry confirms the infotainment is awake, or answers `502` "wake
+  once live infotainment telemetry confirms it is awake, or answers `502` "wake
   confirmation timed out" after about 20 s. The single HTTP task serves other requests only
   afterwards. evcc's tesla-ble template gives setters evcc's fixed 10 s HTTP timeout (its
   `timeout` setting applies only to reads), so evcc may log a timeout for a wake that still

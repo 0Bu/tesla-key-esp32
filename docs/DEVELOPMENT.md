@@ -69,21 +69,33 @@ The effective-build validator closes every C/C++ compilation unit to reviewed so
 pinned compilers/includes. It verifies generated producers, Ninja commands/dependencies, archive
 objects, linker response files and the exact ELF-to-image chain. One literal main-component `SRCS`
 registration is permitted; hidden attachment, escaped sources or forced includes fail.
-Global optimization is `-Og`, with the reviewed Mbed TLS/TF-PSA-Crypto `-Os` exception. Each unit
-emits `-fstack-usage`; main privately enforces C++17 and return-value/format warnings.
+The gate checks that every main-component unit compiles with `-Og` and emits `-fstack-usage`;
+the other components are covered by the checked `CONFIG_COMPILER_OPTIMIZATION_DEBUG=y` Kconfig
+value, Mbed TLS/TF-PSA-Crypto `-Os` is checked as the effective Kconfig value, and the bootloader,
+which builds with size optimization, is compared only between independent builds. Main privately
+enforces C++17 and return-value/format warnings.
 Compiler/include/search and `CCACHE_*` overrides are rejected, and ccache is disabled.
 
-The raw-app policy gate is slot minus 32 KiB (`0x1e8000`). Projected signing separately rounds to
-64 KiB and adds one 4 KiB sector, bounded by the `0x1f0000` slot. Size reports are current evidence;
-historical prose values are not. `--update-baseline` raises maxima only; `--tighten-baseline`
+The size policy limits the projected signed app to slot minus 32 KiB (`0x1e8000`): the app is
+padded to 64 KiB and signing adds one 4 KiB sector, bounded by the `0x1f0000` slot. Because size
+moves in 64 KiB steps, each size report also shows the content headroom to the next step. Size
+reports are current evidence; historical prose values are not. `--update-baseline` raises maxima only; `--tighten-baseline`
 requires the old baseline to pass, then lowers each checked target to measured values. Memory-model
-and static/IRAM capacities are identity fields, immutable under either ratchet. Stack reports inventory frames, reject unbounded dynamic frames
+and static/IRAM capacities are identity fields, immutable under either ratchet. The stack baseline
+uses the same modes (`check-stack-usage.py --observed-dir dist --write-baseline <file> --mode
+raise|tighten`) and lists every changed entry; a PR lists each raised entry with its cause.
+Stack tighten forbids growth and newly reviewed frames or translation units; it permits removed
+units and removed or below-threshold frames, then lowers the remaining maxima to measurements.
+`check-firmware-size.sh` builds all four targets by default. The pre-push hook runs the
+incremental `precheck-firmware.sh` on all four (`PRE_PUSH_TARGETS` narrows it deliberately); it
+checks only the size and stack gates, not CI's dependency, partition, otadata, semantics,
+artifact-identity, reproducibility or signing gates. Stack reports inventory frames, reject unbounded dynamic frames
 and frames over 4096 B; they do not prove call depth or runtime stack margin.
 
 ## Delivery
 
 Unsigned local images **cannot boot**. Use provenance-bound signed artifacts and the canonical
-`$flash-esp32`, `$ship`, `$deploy` or `$usb-recovery` procedure, as appropriate. Every physical write
+`$flash-esp32`, `$deploy-bench`, `$ship` or `$usb-recovery` procedure, as appropriate. Every physical write
 requires explicit authorization for the board, target and scope. Verify every image's signature;
 production and preview artifacts must match the production public-key pin. An authorized local
 development image must match the supplied development key. Size/chip/version checks alone do not
@@ -93,6 +105,12 @@ App-only USB delivery writes the signed app at `0x20000`, then activates by eras
 last. NVS stays intact. Merged-image writes and full erases destroy configuration and keys;
 [retention and signing](SECURITY.md) explain recovery limits. Signing with a development key creates
 a separate trust lineage and needs an explicit key and scope.
+
+`$deploy` handles commit, push, PR creation, current-head reviews/CI and canonical squash merge,
+then observes the main build. It does not contact devices.
+[`$deploy-bench`](../.agents/skills/deploy-bench/SKILL.md) identifies the physical USB bench across
+Tesla/Daikin firmware, delegates flashing to `$flash-esp32`, and tests the implementation on that
+same board. Device delivery after merge remains a separately requested `$ship` operation.
 
 ## Reviews and documentation
 
