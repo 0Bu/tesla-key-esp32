@@ -180,7 +180,7 @@ fi
 #    PRE_PUSH_TARGETS="esp32s3 esp32c3" narrows it for a deliberate, targeted push.
 if [[ "$has_firmware_changes" -eq 1 ]]; then
   echo "🔍 Firmware-relevant changes detected in push."
-  echo "   Running incremental firmware size/stack baseline pre-check (all targets)..."
+  echo "   Running incremental firmware size/stack baseline pre-check (${PRE_PUSH_TARGETS:-all targets})..."
 
   target_args=()
   for pre_push_target in ${PRE_PUSH_TARGETS:-}; do
@@ -190,7 +190,7 @@ if [[ "$has_firmware_changes" -eq 1 ]]; then
   if ! "$root/scripts/precheck-firmware.sh" ${target_args[@]+"${target_args[@]}"}; then
     echo "" >&2
     echo "❌ Push rejected: firmware size or stack usage exceeds the reviewed baseline!" >&2
-    echo "   Run './scripts/precheck-firmware.sh' to reproduce (same gates CI enforces)." >&2
+    echo "   Run './scripts/precheck-firmware.sh' to reproduce (CI's size and stack gates only)." >&2
     echo "   If this growth was intentional and reviewed, follow the baseline-regeneration steps the" >&2
     echo "   precheck printed above (stack baseline first, then size) and commit the result." >&2
     exit 1
