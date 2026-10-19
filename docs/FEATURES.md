@@ -118,6 +118,7 @@ unresolved material findings prevent a clean verdict.
 | Feature | Where | Prevents |
 |---|---|---|
 | Runner-neutral agent policy and five SHA-bound PR gates | `AGENTS.md`, `.agents/`, `.codex/`, `tools/agent-hooks/`, `tools/agent-config/`, `scripts/with-host-python.sh`; [build and review](DEVELOPMENT.md) | Unsafe authority, stale review records, polling changes escaping protocol review, or publishing personal/private identifiers or non-English PR/docs content. |
+| Separate publication and USB bench acceptance | `.agents/skills/deploy/SKILL.md`, `.agents/skills/deploy-bench/SKILL.md`, `test/test_deploy_target.py`; [delivery](DEVELOPMENT.md#delivery) | A Git/PR workflow silently contacting devices, flashing the wrong board in a mixed-firmware USB inventory, or accepting tests from a different artifact or target. |
 | Resource-bounded build container | `scripts/idf-docker.sh`, `scripts/check-build-gate-contract.py` | A local ESP-IDF compile starving a shared k3s/Docker node. |
 | Fail-closed host verification | `scripts/run-mock-tests.sh --require-all`, `run-sanitizer-tests.sh`, `run-fuzz-smoke.sh`; [test scope](../test/README.md) | Skipped CI coverage, unsafe runtime boundaries, partial JSON, parser UB or browser-only failures. |
 | Split host gates and concurrent target builds | `.github/workflows/build.yml` (`logic-test`, `logic-harness`, `build-target`), `scripts/check-workflow-policy.py` | Serial host/firmware waits or an aggregate build that omits a host gate. |

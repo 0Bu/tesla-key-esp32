@@ -45,8 +45,11 @@ workflow scripts and [deep document owners](../../../docs/README.md), not histor
   separate USB/OTA scopes. OTA requires candidate equality and ≥100 s monotonic+wall-clock delta
   from first post-OTA baseline, no hidden reboot and boot-local mark-valid success. USB has only
   bounded boot retries. Manual stable release is separate from main Dev publication.
-- **`$deploy`**: phase permissions, independent fix/review loop, current-head gates and delegated
-  `$ship` procedure, target/channel-bound OTA, targeted/health/evcc evidence and authorized cleanup.
+- **`$deploy`**: authorized commit/push/PR/merge phases, independent fix/review loop, current-head
+  gates, canonical squash and exact-main CI/publication observation; no device delivery.
+- **`$deploy-bench`**: physical USB identity across Tesla/Daikin firmware, no probing unrelated boards,
+  explicit port/chip and compatible retained layout, delegated signed `$flash-esp32`, exact-source
+  targeted positive/negative tests and same-board health evidence; separate vehicle/cluster scope.
 - **`$ci-heal`**: script never authors commits/reviews; explicit gate attestations, green current-head
   CI, local HEAD equality, mergeability/relevance and unchanged-head check before merge-readiness
   stamping; Phase 3 pre-push records attest the independently reviewed local fix commit;
