@@ -95,7 +95,7 @@ and frames over 4096 B; they do not prove call depth or runtime stack margin.
 ## Delivery
 
 Unsigned local images **cannot boot**. Use provenance-bound signed artifacts and the canonical
-`$flash-esp32`, `$ship`, `$deploy` or `$usb-recovery` procedure, as appropriate. Every physical write
+`$flash-esp32`, `$deploy-bench`, `$ship` or `$usb-recovery` procedure, as appropriate. Every physical write
 requires explicit authorization for the board, target and scope. Verify every image's signature;
 production and preview artifacts must match the production public-key pin. An authorized local
 development image must match the supplied development key. Size/chip/version checks alone do not
@@ -105,6 +105,12 @@ App-only USB delivery writes the signed app at `0x20000`, then activates by eras
 last. NVS stays intact. Merged-image writes and full erases destroy configuration and keys;
 [retention and signing](SECURITY.md) explain recovery limits. Signing with a development key creates
 a separate trust lineage and needs an explicit key and scope.
+
+`$deploy` handles commit, push, PR creation, current-head reviews/CI and canonical squash merge,
+then observes the main build. It does not contact devices.
+[`$deploy-bench`](../.agents/skills/deploy-bench/SKILL.md) identifies the physical USB bench across
+Tesla/Daikin firmware, delegates flashing to `$flash-esp32`, and tests the implementation on that
+same board. Device delivery after merge remains a separately requested `$ship` operation.
 
 ## Reviews and documentation
 
