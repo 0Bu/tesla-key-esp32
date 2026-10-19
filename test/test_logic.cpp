@@ -1766,8 +1766,9 @@ static void test_mcp() {
 
     // REST body compatibility. Empty bodies and objects retain the normal
     // TeslaBleHttpProxy contract for every command. evcc's generic boolean setter emits
-    // the scalar true for charge_start and false for charge_stop; admit only those exact
-    // command/value pairs, never a mismatched toggle or a scalar for another command.
+    // the scalar true for charge_start and wake_up and false for charge_stop; admit only
+    // those exact command/value pairs, never a mismatched toggle or a scalar for another
+    // command (an argument-bearing command would skip its object-key validation).
     using BS = tk::RestBodyShape;
     CHECK(tk::rest_body_allowed(tk::CmdKind::ChargeStart, BS::Empty));
     CHECK(tk::rest_body_allowed(tk::CmdKind::ChargeStart, BS::Object));
@@ -1776,9 +1777,26 @@ static void test_mcp() {
     CHECK(!tk::rest_body_allowed(tk::CmdKind::ChargeStart, BS::BoolFalse));
     CHECK(tk::rest_body_allowed(tk::CmdKind::ChargeStop, BS::BoolFalse));
     CHECK(!tk::rest_body_allowed(tk::CmdKind::ChargeStop, BS::BoolTrue));
-    CHECK(!tk::rest_body_allowed(tk::CmdKind::WakeUp, BS::BoolTrue));
+    CHECK(tk::rest_body_allowed(tk::CmdKind::WakeUp, BS::Empty));
+    CHECK(tk::rest_body_allowed(tk::CmdKind::WakeUp, BS::BoolTrue));
+    CHECK(!tk::rest_body_allowed(tk::CmdKind::WakeUp, BS::BoolFalse));
+    CHECK(!tk::rest_body_allowed(tk::CmdKind::WakeUp, BS::Other));
     CHECK(!tk::rest_body_allowed(tk::CmdKind::SetChargingAmps, BS::BoolFalse));
+    CHECK(!tk::rest_body_allowed(tk::CmdKind::SetChargingAmps, BS::BoolTrue));
+    CHECK(!tk::rest_body_allowed(tk::CmdKind::SetChargeLimit, BS::BoolTrue));
+    CHECK(!tk::rest_body_allowed(tk::CmdKind::SetScheduledCharging, BS::BoolTrue));
+    CHECK(!tk::rest_body_allowed(tk::CmdKind::SetScheduledCharging, BS::BoolFalse));
     CHECK(!tk::rest_body_allowed(tk::CmdKind::ChargeStart, BS::Other));
+    // Every command that takes a REST argument, present or future, stays object-only.
+    for (const auto& t : tk::kCommands) {
+        bool has_rest_arg = false;
+        for (const auto& a : t.args) has_rest_arg = has_rest_arg || a.api_key != nullptr;
+        if (!has_rest_arg) continue;
+        CHECK(tk::rest_body_allowed(t.kind, BS::Object));
+        CHECK(!tk::rest_body_allowed(t.kind, BS::BoolTrue));
+        CHECK(!tk::rest_body_allowed(t.kind, BS::BoolFalse));
+        CHECK(!tk::rest_body_allowed(t.kind, BS::Other));
+    }
 
     // tools/list wire order is table order — pin the 9 MCP rows exactly (a reorder
     // would change the serialized tools/list even with identical content).

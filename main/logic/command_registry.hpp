@@ -51,7 +51,8 @@ enum class CmdKind {
 
 // Parsed REST request-body shape. TeslaBleHttpProxy-compatible callers normally send
 // objects (or no body), but evcc's generic boolean setter serializes chargeEnable as the
-// JSON scalar true/false. Keep that exception command-specific: accepting arbitrary
+// JSON scalar true/false and wakeup as the scalar true (its tesla-ble template gives
+// neither setter a body). Keep that exception command-specific: accepting arbitrary
 // scalars for argument-bearing commands would bypass their object-key validation.
 enum class RestBodyShape {
     Empty,
@@ -64,7 +65,8 @@ enum class RestBodyShape {
 inline constexpr bool rest_body_allowed(CmdKind kind, RestBodyShape shape) {
     if (shape == RestBodyShape::Empty || shape == RestBodyShape::Object) return true;
     return (kind == CmdKind::ChargeStart && shape == RestBodyShape::BoolTrue) ||
-           (kind == CmdKind::ChargeStop && shape == RestBodyShape::BoolFalse);
+           (kind == CmdKind::ChargeStop && shape == RestBodyShape::BoolFalse) ||
+           (kind == CmdKind::WakeUp && shape == RestBodyShape::BoolTrue);
 }
 
 enum class CmdArgType { None, Int, Bool };
