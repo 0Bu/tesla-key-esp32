@@ -5,8 +5,8 @@
 # 0x1e1000 (~1.97 MB) on the largest target (esp32c6; esp32c3 is next) — each image's code
 # rounds up to a 64 KB Secure-Boot boundary with a 4 KB
 # signature appended, still keeping healthy headroom (the ci-build-all.sh app-size gate sits
-# 32 KB below the slot). Every target builds at the base -Og. A larger flash (e.g. an 8 MB S3)
-# just leaves the top unused, so
+# 32 KB below the slot). Main compiles with -Og; the bootloader uses size optimization
+# and Mbed TLS/TF-PSA-Crypto uses its reviewed -Os exception. A larger flash leaves the top unused, so
 # ONE table serves every board. esp_https_ota writes the INACTIVE slot, so OTA updates
 # never touch nvs (0x9000) → WiFi / VIN / key survive upgrades. otadata tracks the active
 # slot; a blank otadata (after a full erase) boots ota_0. ota_0 stays at 0x20000 so a

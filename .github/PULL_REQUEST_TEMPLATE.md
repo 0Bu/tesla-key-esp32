@@ -20,7 +20,8 @@ cannot build or USB-flash — see AGENTS.md).
 - [ ] `scripts/run-mock-tests.sh` passes (host-side logic tests — CI's `logic-test` gate)
 - [ ] `tools/agent-config/selftest.sh` passes when agent config, skills, or hooks changed
 - [ ] Firmware built (`scripts/idf-docker.sh idf.py build`, or relied on CI) — N/A in a cloud session (no Docker daemon / no USB)
-- [ ] Firmware size budget verified (`scripts/check-firmware-size.sh`) — within 64 KiB boundary and reviewed baseline
+- [ ] Firmware size and stack budgets verified on all four targets (`scripts/precheck-firmware.sh`, or `scripts/check-firmware-size.sh` for the full build) — within the slot policy and the reviewed baselines
+- [ ] Every raised size or stack baseline entry is listed here with its measured delta and cause (copy the update tool's change lines) — N/A when no maximum was raised
 
 ## Checklist
 

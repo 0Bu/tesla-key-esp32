@@ -97,9 +97,15 @@ gate_vehicle_command_relevant() {
 
 # gate_firmware_size_relevant
 #   Reads repo-relative changed paths on stdin and succeeds when firmware binary size
-#   or stack/size baseline inputs can have moved.
+#   or stack/size baseline inputs can have moved: sources, configuration, patches, locks, the
+#   toolchain contract and its reader (idf-version.sh selects the build image), the build and
+#   container scripts, and the baselines themselves. precheck-firmware.sh is a separate local
+#   compile/measurement wrapper, not an input to canonical CI/publication builds.
+#   check-stack-usage.py, report-firmware-size.py and check-sdkconfig-defaults.py evaluate builds
+#   without changing their compiled inputs. Self-tests for the local wrapper and evaluators run in
+#   scripts/test-build-contracts.sh; sdkconfig validation is self-tested in the build workflow.
 gate_firmware_size_relevant() {
-  grep -Eq '^(main/|CMakeLists\.txt$|sdkconfig|partitions\.csv$|patches/tesla-ble/|dependencies\.lock\.|esp-idf-toolchain\.txt$|scripts/(apply-tesla-ble-patches\.sh|ci-build-all\.sh|idf-docker\.sh|firmware-size-baseline\.json|firmware-stack-baseline\.json)$)'
+  grep -Eq '^(main/|CMakeLists\.txt$|sdkconfig|partitions\.csv$|patches/tesla-ble/|dependencies\.lock\.|esp-idf-toolchain\.txt$|scripts/(apply-tesla-ble-patches\.sh|ci-build-all\.sh|idf-docker\.sh|idf-version\.sh|firmware-size-baseline\.json|firmware-stack-baseline\.json)$)'
 }
 
 

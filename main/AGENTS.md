@@ -7,8 +7,9 @@ Apply [repository policy](../AGENTS.md) and the normative
   stream large responses and use bounded pools/static buffers rather than large stack locals.
 - Check C allocation failures explicitly. Own every cJSON tree through its cleanup/RAII path;
   a failed response must not become a partial success.
-- Keep task stacks within reviewed `scripts/firmware-stack-baseline.json` limits. Compiler frame
-  reports and runtime stack minima provide different evidence.
+- Keep per-function stack frames within the reviewed `scripts/firmware-stack-baseline.json`; size
+  task stacks from measured runtime minima. Compiler frame reports and runtime stack minima provide
+  different evidence.
 - Leaf cache/result locks allow only small bounded struct/string snapshots with `tk::SemGuard`
   RAII against allocation failure. Release them before logging, network/flash I/O, unbounded
   allocation or calls out. Serialize library access through the documented Vehicle lock,

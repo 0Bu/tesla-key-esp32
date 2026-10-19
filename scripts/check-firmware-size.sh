@@ -4,9 +4,11 @@
 # hard partition limits and scripts/firmware-size-baseline.json.
 #
 # Usage:
-#   scripts/check-firmware-size.sh [--target <target>] [--update-baseline | --tighten-baseline]
-#   scripts/check-firmware-size.sh --all [--update-baseline | --tighten-baseline]
+#   scripts/check-firmware-size.sh [--target <target> ...] [--update-baseline | --tighten-baseline]
+#   scripts/check-firmware-size.sh [--all] [--update-baseline | --tighten-baseline]
 #   scripts/check-firmware-size.sh --self-test
+#
+# Without --target it checks all four targets, the same set CI enforces.
 #
 # Reviewed baseline updates (mutually exclusive; include the updated baseline in the same commit):
 #   --update-baseline   Intentional, reviewed growth: raise each maximum to max(old, measured).
@@ -19,10 +21,11 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "$repo_root"
 
-TARGETS_DEFAULT=("esp32c6")
 ALL_TARGETS=("esp32" "esp32s3" "esp32c3" "esp32c6")
-APP_POLICY_LIMIT=$((0x1e8000)) # 1,998,848 B (32 KiB below 0x1f0000)
-C6_64K_CLIFF=$((1966080))      # 0x1e0000 boundary for Secure Boot v2 projection
+TARGETS_DEFAULT=("${ALL_TARGETS[@]}")
+# Projected signed app limit, 32 KiB below the 0x1f0000 slot. The app is padded to 64 KiB, so this
+# also catches the step past 0x1e0000 on every target (signed 0x1f1000 would not fit the slot).
+APP_POLICY_LIMIT=$((0x1e8000))
 
 target_list=()
 update_baseline=0
@@ -58,8 +61,9 @@ while [[ $# -gt 0 ]]; do
 Usage: $(basename "$0") [options]
 
 Options:
-  --target <chip>    Target chip (esp32, esp32s3, esp32c3, esp32c6). Default: esp32c6
-  --all              Check all four supported targets
+  --target <chip>    Target chip (esp32, esp32s3, esp32c3, esp32c6); repeatable.
+                     Default: all four targets
+  --all              Check all four supported targets (the default)
   --update-baseline  Raise reviewed maxima in scripts/firmware-size-baseline.json to the measured
                      values if the build passes policy (reviewed growth; never lowers a maximum)
   --tighten-baseline Lock in a reviewed size reduction: set every maximum of the checked target(s)
@@ -90,6 +94,11 @@ fi
 
 if [[ "$self_test" -eq 1 ]]; then
   echo "check-firmware-size: running self-test..."
+  # A local check that silently covers one target is how size failures reached CI late.
+  if [[ "${ALL_TARGETS[*]}" != "esp32 esp32s3 esp32c3 esp32c6" || "${TARGETS_DEFAULT[*]}" != "${ALL_TARGETS[*]}" ]]; then
+    echo "check-firmware-size: self-test FAILED: the default must be exactly the four supported targets" >&2
+    exit 1
+  fi
   python3 scripts/report-firmware-size.py --self-test
   echo "check-firmware-size: self-test PASS"
   exit 0
@@ -144,12 +153,6 @@ for target in "${target_list[@]}"; do
 
   if (( projected_signed_size > APP_POLICY_LIMIT )); then
     echo "❌ ERROR: $target exceeds policy limit $APP_POLICY_LIMIT B!" >&2
-    overall_failed=1
-  fi
-
-  if [[ "$target" == "esp32c6" ]] && (( unsigned_size > C6_64K_CLIFF )); then
-    echo "❌ CRITICAL: esp32c6 unsigned app exceeds 64 KiB quantization boundary ($C6_64K_CLIFF B)!" >&2
-    echo "   Signed app will overflow the 0x1f0000 OTA flash partition!" >&2
     overall_failed=1
   fi
 
