@@ -72,7 +72,8 @@ CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
 # Manager, so its symbol no longer exists and is not set here.
 CONFIG_BT_NIMBLE_SECURITY_ENABLE=n
 
-# BLE MTU - request larger MTU for fewer fragments
+# Preferred ATT MTU only; the firmware does not initiate an exchange. Writes use 20-byte chunks
+# until a negotiated-MTU event updates their limit (docs/adr/0005-tesla-ble-seam.md).
 CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=247
 
 # WiFi
@@ -108,9 +109,10 @@ CONFIG_LWIP_MAX_SOCKETS=16
 CONFIG_LWIP_TCP_SND_BUF_DEFAULT=11520
 CONFIG_LWIP_TCP_WND_DEFAULT=11520
 
-# Stack sizes — the NimBLE host task runs our notify-RX callback, which does
-# tesla-ble protobuf parsing + mbedtls crypto (ECDH/AES-GCM). The 4K default
-# overflows during the session handshake, so give the host task a larger stack.
+# Stack sizes. The NimBLE host task once ran tesla-ble protobuf parsing and mbedtls crypto in its
+# notify-RX callback; that work now runs in the vehicle task, and the host adapters only queue
+# bounded records (docs/ARCHITECTURE.md). The 8 KiB host stack stays until a measured runtime
+# minimum shows that a smaller one is safe.
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=8192
 
@@ -122,9 +124,8 @@ CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 # A frame that writes SPARSELY below its limit can step over the canary words entirely, and the
 # task then keeps running with a corrupted neighbour — the crash surfaces later, somewhere else,
 # with a backtrace pointing at whatever innocent code happened to touch the damage. This firmware
-# is exactly the shape that hides such a write: the NimBLE host task runs tesla-ble protobuf
-# parsing plus mbedtls ECDH/AES-GCM (which is why its stack is hand-raised to 8192 above), and
-# several tasks build JSON on the stack. A watchpoint panics AT the offending instruction instead,
+# is exactly the shape that hides such a write: the vehicle task runs tesla-ble protobuf parsing
+# plus mbedtls ECDH/AES-GCM, and several tasks build JSON on the stack. A watchpoint panics AT the offending instruction instead,
 # so the dump names the real culprit. Cost: one hardware debug watchpoint, which this project does
 # not otherwise use — it debugs from core dumps, not JTAG.
 CONFIG_FREERTOS_WATCHPOINT_END_OF_STACK=y

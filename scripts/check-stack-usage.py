@@ -174,6 +174,73 @@ def baseline_document(targets: dict[str, FrameInventory]) -> dict[str, Any]:
     }
 
 
+UPDATE_MODES = ("raise", "tighten")
+
+
+def updated_baseline_document(
+    old_path: Path, targets: dict[str, FrameInventory], mode: str
+) -> tuple[dict[str, Any], list[str]]:
+    """Return the reviewed baseline after a measured four-target build, plus one line per change.
+
+    raise:   every reviewed frame keeps max(old, measured), so no maximum of a frame that stays
+             reviewed is lowered; frames newly at or above the review threshold are added and
+             frames or translation units that disappeared are dropped.
+    tighten: no frame may grow above its old maximum, and no newly reviewed frame or translation
+             unit may be added. Removed units and removed/below-threshold frames are reductions
+             and may be dropped even though ordinary compare() rejects their set drift. Every
+             remaining maximum becomes the measured value, so no maximum can grow.
+    The old baseline is never rewritten wholesale: each change is listed for its review record.
+    """
+    if mode not in UPDATE_MODES:
+        raise StackUsageError(f"stack baseline update mode must be one of {UPDATE_MODES}, got {mode!r}")
+    if set(targets) != set(TARGETS):
+        raise StackUsageError("baseline updates require exactly all four supported targets")
+    document = baseline_document(targets)
+    changes: list[str] = []
+    for target in TARGETS:
+        old_files = load_baseline(old_path, target)["files"]
+        frames = targets[target]
+        failures = compare(frames)  # the absolute frame policy holds in both modes
+        if mode == "tighten":
+            # Dropped frames and translation units are reductions; growth, newly reviewed frames and
+            # new translation units are not.
+            for name in sorted(set(frames) - set(old_files)):
+                failures.append(f"{name} is a new translation unit")
+            for name, file_frames in sorted(frames.items()):
+                for identity, frame in sorted(reviewed_frames(file_frames).items()):
+                    before = old_files.get(name, {}).get(identity)
+                    if before is None:
+                        failures.append(f"{name}/{identity} is a new reviewed frame ({frame.bytes} B)")
+                    elif frame.bytes > before:
+                        failures.append(f"{name}/{identity} grew {before} -> {frame.bytes} B")
+        if failures:
+            raise StackUsageError(
+                f"refusing to {mode} the stack baseline for {target}: " + "; ".join(failures)
+            )
+        new_files = document["targets"][target]["files"]
+        for name in sorted(set(old_files) | set(new_files)):
+            old_entries = old_files.get(name, {})
+            new_entries = new_files.get(name)
+            if new_entries is None:
+                changes.append(f"{target} {name}: translation unit dropped")
+                continue
+            if name not in old_files:
+                changes.append(f"{target} {name}: new translation unit")
+            for identity in sorted(set(old_entries) | set(new_entries)):
+                before = old_entries.get(identity)
+                if identity not in new_entries:
+                    changes.append(f"{target} {name}/{identity}: {before} B -> dropped (below review threshold)")
+                    continue
+                measured = new_entries[identity]
+                after = measured if mode == "tighten" or before is None else max(before, measured)
+                new_entries[identity] = after
+                if before is None:
+                    changes.append(f"{target} {name}/{identity}: new reviewed frame {after} B")
+                elif after != before:
+                    changes.append(f"{target} {name}/{identity}: {before} -> {after} B ({after - before:+d})")
+    return document, changes
+
+
 def load_baseline(path: Path, target: str) -> dict[str, Any]:
     root = json.loads(path.read_text(encoding="utf-8"))
     expected_top = {
@@ -365,6 +432,87 @@ def self_test() -> None:
         oversized = collect(stack)
         assert "absolute" in compare(oversized)[0]
 
+        # Reviewed updates: raise never lowers a still-reviewed frame, tighten never lets one grow,
+        # and every change is listed for the review record.
+        def su(*lines: str) -> FrameInventory:
+            (stack / "one.su").write_text("".join(f"{line}\n" for line in lines), encoding="utf-8")
+            return collect(stack)
+
+        update_path = root / "update-baseline.json"
+        old_frames = su("/project/main/one.cpp:10:3:first()\t320\tstatic",
+                        "/project/main/one.cpp:20:3:second()\t512\tstatic")
+        update_path.write_text(json.dumps(baseline_document({t: old_frames for t in TARGETS})),
+                               encoding="utf-8")
+        shrunk = su("/project/main/one.cpp:10:3:first()\t288\tstatic",
+                    "/project/main/one.cpp:20:3:second()\t200\tstatic")
+        tightened, changes = updated_baseline_document(update_path, {t: shrunk for t in TARGETS}, "tighten")
+        assert tightened["targets"]["esp32"]["files"]["one.su"] == {first_id: 288}
+        assert any("first()" in c and "320 -> 288 B (-32)" in c for c in changes)
+        assert any("second()" in c and "dropped" in c for c in changes)
+        raised, changes = updated_baseline_document(update_path, {t: shrunk for t in TARGETS}, "raise")
+        assert raised["targets"]["esp32"]["files"]["one.su"] == {first_id: 320}
+        grown_more = su("/project/main/one.cpp:10:3:first()\t352\tstatic",
+                        "/project/main/one.cpp:20:3:second()\t512\tstatic",
+                        "/project/main/one.cpp:30:3:new_large()\t300\tstatic")
+        raised, changes = updated_baseline_document(update_path, {t: grown_more for t in TARGETS}, "raise")
+        assert raised["targets"]["esp32"]["files"]["one.su"][first_id] == 352
+        assert any("320 -> 352 B (+32)" in c for c in changes)
+        assert any("new reviewed frame 300 B" in c for c in changes)
+        for label, measured in (("grown frame", su("/project/main/one.cpp:10:3:first()\t352\tstatic",
+                                                   "/project/main/one.cpp:20:3:second()\t512\tstatic")),
+                                ("new reviewed frame", su("/project/main/one.cpp:10:3:first()\t320\tstatic",
+                                                          "/project/main/one.cpp:20:3:second()\t512\tstatic",
+                                                          "/project/main/one.cpp:30:3:new_large()\t300\tstatic"))):
+            try:
+                updated_baseline_document(update_path, {t: measured for t in TARGETS}, "tighten")
+            except StackUsageError as exc:
+                assert "refusing to tighten" in str(exc)
+            else:
+                raise AssertionError(f"tighten accepted a {label}, i.e. a raise outside raise mode")
+        # A new translation unit is listed in raise mode and refused in tighten mode.
+        su("/project/main/one.cpp:10:3:first()\t320\tstatic",
+           "/project/main/one.cpp:20:3:second()\t512\tstatic")
+        (stack / "three.su").write_text("/project/main/three.cpp:1:1:small()\t64\tstatic\n", encoding="utf-8")
+        with_unit = collect(stack)
+        _, changes = updated_baseline_document(update_path, {t: with_unit for t in TARGETS}, "raise")
+        assert any("three.su: new translation unit" in c for c in changes)
+        try:
+            updated_baseline_document(update_path, {t: with_unit for t in TARGETS}, "tighten")
+        except StackUsageError as exc:
+            assert "new translation unit" in str(exc)
+        else:
+            raise AssertionError("tighten accepted a new translation unit")
+        (stack / "three.su").unlink()
+        (stack / "two.su").unlink()
+        without_unit = collect(stack)
+        tightened, changes = updated_baseline_document(
+            update_path, {t: without_unit for t in TARGETS}, "tighten"
+        )
+        assert set(tightened["targets"]["esp32"]["files"]) == {"one.su"}
+        assert any("two.su: translation unit dropped" in c for c in changes)
+        assert any("translation-unit set drifted" in c
+                   for c in compare(without_unit, load_baseline(update_path, "esp32")))
+        try:
+            updated_baseline_document(update_path, {t: shrunk for t in TARGETS}, "rewrite")
+        except StackUsageError:
+            pass
+        else:
+            raise AssertionError("an unreviewed baseline rewrite mode was accepted")
+
+        for mode in UPDATE_MODES:
+            try:
+                updated_baseline_document(update_path, {t: oversized for t in TARGETS}, mode)
+            except StackUsageError as exc:
+                assert "absolute" in str(exc)
+            else:
+                raise AssertionError(f"{mode} accepted a frame above the absolute limit")
+            try:
+                updated_baseline_document(update_path, {t: shrunk for t in TARGETS[:-1]}, mode)
+            except StackUsageError as exc:
+                assert "exactly all four" in str(exc)
+            else:
+                raise AssertionError(f"{mode} accepted a missing target")
+
         (stack / "one.su").write_text(
             "/project/main/one.cpp:10:3:first()\t16\tdynamic\n", encoding="utf-8"
         )
@@ -386,15 +534,18 @@ def main() -> int:
     parser.add_argument("--baseline", type=Path)
     parser.add_argument("--write-observed", type=Path)
     parser.add_argument("--write-baseline", type=Path)
+    parser.add_argument("--mode", choices=UPDATE_MODES,
+                        help="with --write-baseline: raise (reviewed growth) or tighten (lock in a reduction)")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
     if args.self_test:
         self_test()
         return 0
-    if args.observed_dir is not None or args.write_baseline is not None:
+    if args.observed_dir is not None or args.write_baseline is not None or args.mode is not None:
         if (
             args.observed_dir is None
             or args.write_baseline is None
+            or args.mode is None
             or args.target is not None
             or args.stack_root is not None
             or args.observed_json is not None
@@ -402,7 +553,8 @@ def main() -> int:
             or args.write_observed is not None
         ):
             parser.error(
-                "--observed-dir and --write-baseline must be used together without target mode"
+                "--observed-dir, --write-baseline and --mode raise|tighten must be used together "
+                "without target mode"
             )
         try:
             snapshots = {
@@ -413,22 +565,15 @@ def main() -> int:
             }
             if args.write_baseline.is_symlink():
                 raise StackUsageError("refusing to overwrite a symlinked stack baseline")
-            args.write_baseline.write_text(
-                json.dumps(baseline_document(snapshots), indent=2) + "\n",
-                encoding="utf-8",
-            )
+            document, changes = updated_baseline_document(args.write_baseline, snapshots, args.mode)
+            args.write_baseline.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
         except (OSError, UnicodeError, json.JSONDecodeError, StackUsageError) as exc:
-            print(f"firmware stack-usage baseline generation failed: {exc}", file=sys.stderr)
+            print(f"firmware stack-usage baseline update failed: {exc}", file=sys.stderr)
             return 1
-        reviewed = sum(
-            len(reviewed_frames(file_frames))
-            for frames in snapshots.values()
-            for file_frames in frames.values()
-        )
-        print(
-            f"firmware stack-usage baseline: WROTE {args.write_baseline} "
-            f"({len(TARGETS)} targets, {reviewed} reviewed frames)"
-        )
+        print(f"firmware stack-usage baseline: {args.mode} wrote {args.write_baseline} "
+              f"({len(changes)} change(s); record each with its measured cause in the PR)")
+        for change in changes:
+            print(f"  {change}")
         return 0
     if args.target is None:
         parser.error("--target is required")

@@ -8,6 +8,7 @@ import contextlib
 import dataclasses
 import json
 import pathlib
+import struct
 import sys
 import tempfile
 from collections.abc import Callable, Iterator
@@ -103,9 +104,39 @@ def target_region(indexed: dict[str, dict[str, Any]], name: str, target: str) ->
     return region
 
 
-def part_size(region: dict[str, Any], part: str) -> int:
+def part_size(region: dict[str, Any], part: str, *, required: bool = False) -> int:
     entry = region["parts"].get(part)
+    if entry is None and required:
+        # A renamed or missing part would otherwise read as 0 and pass its maximum vacuously.
+        raise ValueError(f"size report region {region.get('name', '?')!r} has no {part} part")
     return 0 if entry is None else entry["size"]
+
+
+def secure_pad_bytes(image: bytes) -> int:
+    """Length of the zero-filled --secure-pad-v2 segment that pads the unsigned app to 64 KiB.
+
+    An ESP app image is a 24-byte header (magic 0xE9, segment count at byte 1) followed by segments,
+    each an 8-byte little-endian (load address, length) header plus data. The pad segment is the
+    last one, at load address 0 and all zero. Its length is the content headroom to the next 64 KiB
+    step: the app moves to the next step once its content grows by more than this. Unlike the ELF
+    total_size, it accounts for the image and segment headers, checksum padding and the SHA-256.
+    """
+    if len(image) < 24 or image[0] != 0xE9:
+        raise ValueError("unsigned app is not an ESP app image")
+    position = 24
+    last: tuple[int, bytes] | None = None
+    for _ in range(image[1]):
+        if position + 8 > len(image):
+            raise ValueError("unsigned app segment header is truncated")
+        address, length = struct.unpack_from("<II", image, position)
+        position += 8
+        if position + length > len(image):
+            raise ValueError("unsigned app segment is truncated")
+        last = (address, image[position:position + length])
+        position += length
+    if last is None or last[0] != 0 or any(last[1]):
+        raise ValueError("unsigned app has no zero-filled secure pad segment")
+    return len(last[1])
 
 
 def kib(value: int) -> str:
@@ -125,7 +156,7 @@ def memory_usage(data: dict[str, Any], target: str) -> MemoryUsage:
         model,
         static["used"],
         static["total"],
-        part_size(static, ".bss"),
+        part_size(static, ".bss", required=True),
         iram["used"] if iram else 0,
         iram["total"] if iram else 0,
     )
@@ -316,6 +347,7 @@ def render(
     policy_limit: int,
     target: str,
     budget: dict[str, Any] | None = None,
+    pad_bytes: int | None = None,
 ) -> str:
     if min(unsigned_size, projected_signed_size, policy_limit) <= 0:
         raise ValueError("binary sizes and policy limit must be positive")
@@ -330,6 +362,7 @@ def render(
             f"signature sector: expected {expected_signed_size}, got {projected_signed_size}"
         )
     image = image_usage(data, target, unsigned_size)
+    step_end = (image.unsigned_app + SIGNATURE_ALIGNMENT - 1) // SIGNATURE_ALIGNMENT * SIGNATURE_ALIGNMENT
     margin = policy_limit - projected_signed_size
     state = "PASS" if margin >= 0 else "FAIL"
     rows = [
@@ -341,6 +374,18 @@ def render(
         f"| Unsigned app binary | {kib(image.unsigned_app)} | — | — |",
         f"| ELF image footprint | {kib(image.elf_total)} | — | — |",
     ]
+    # The app is padded to 64 KiB, so its size and the signed projection move only in 64 KiB steps:
+    # this row is the warning the policy row cannot give before the next step. The exact headroom
+    # is the secure pad segment of the image; the ELF total_size misses headers, checksum padding
+    # and the hash, so without the image it is only an upper bound.
+    if pad_bytes is not None:
+        if not 0 <= pad_bytes <= image.unsigned_app:
+            raise ValueError(f"secure pad of {pad_bytes} B does not fit a {image.unsigned_app} B app")
+        rows.append(f"| Content headroom to the next 64 KiB step | {kib(image.unsigned_app - pad_bytes)} | "
+                    f"{kib(step_end)} | {kib(pad_bytes)} |")
+    else:
+        rows.append(f"| Content headroom to the next 64 KiB step (ELF upper bound) | {kib(image.elf_total)} | "
+                    f"{kib(step_end)} | {kib(step_end - image.elf_total)} |")
     # Xtensa ESP32 reports split DRAM/IRAM, while S3 and RISC-V targets primarily report a
     # unified D/IRAM region. Never print plausible-looking zero rows for the wrong memory model.
     usage = memory_usage(data, target)
@@ -691,6 +736,45 @@ def self_test() -> None:
     assert "4.0 KiB" in report
     assert "DRAM `.bss` | 11.7 KiB" in report
     assert "Flash code + rodata | 156.2 KiB" in report
+    # Without the image the row is the ELF upper bound: 173000 B of ELF content in a 192 KiB step.
+    assert "| Content headroom to the next 64 KiB step (ELF upper bound) | 168.9 KiB | 192.0 KiB | 23.1 KiB |" in report
+    # With the image the exact pad segment is used: a 196608 B app whose last segment pads 1024 B.
+    exact = render(fixture, 196608, 200704, 204800, "esp32", pad_bytes=1024)
+    assert "| Content headroom to the next 64 KiB step | 191.0 KiB | 192.0 KiB | 1.0 KiB |" in exact
+    try:
+        render(fixture, 196608, 200704, 204800, "esp32", pad_bytes=196609)
+    except ValueError as exc:
+        assert "does not fit" in str(exc)
+    else:
+        raise AssertionError("a secure pad larger than the app was accepted")
+
+    def app_image(*segments: tuple[int, bytes]) -> bytes:
+        header = bytes([0xE9, len(segments)]) + bytes(22)
+        return header + b"".join(struct.pack("<II", address, len(data)) + data for address, data in segments)
+
+    assert secure_pad_bytes(app_image((0x3F400020, b"\x11" * 100), (0, bytes(40)))) == 40
+    for label, image in (
+        ("wrong magic", b"\x00" + app_image((0, bytes(8)))[1:]),
+        ("truncated segment", app_image((0x3F400020, b"\x11" * 100), (0, bytes(40)))[:-1]),
+        ("pad not at address 0", app_image((0x3F400020, b"\x11" * 100), (0x10, bytes(40)))),
+        ("non-zero pad", app_image((0x3F400020, b"\x11" * 100), (0, b"\x00" * 39 + b"\x01"))),
+        ("no segments", app_image()),
+    ):
+        try:
+            secure_pad_bytes(image)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"secure pad parser accepted an image with {label}")
+    # A size report without a .bss part must fail instead of passing maxBss with 0.
+    no_bss = with_region(fixture, "DRAM", parts={".data": {"size": 17000}, ".noinit": {"size": 1000}},
+                         used=18000, free=82000)
+    try:
+        memory_usage(no_bss, "esp32")
+    except ValueError as exc:
+        assert "has no .bss part" in str(exc), exc
+    else:
+        raise AssertionError("a size report without a .bss part was accepted")
     # esp32c6-shaped unified report: one flash region, shared D/IRAM named DIRAM.
     unified = size_report(
         173000,
@@ -1007,6 +1091,7 @@ def main() -> int:
         parser.error("--enforce-budget requires --budget-baseline")
     budget = load_budget(args.budget_baseline, args.target) if args.budget_baseline else None
     unsigned_size = args.unsigned_app.stat().st_size
+    pad_bytes = secure_pad_bytes(args.unsigned_app.read_bytes())
     print(
         render(
             data,
@@ -1015,6 +1100,7 @@ def main() -> int:
             args.policy_limit,
             args.target,
             budget,
+            pad_bytes,
         ),
         end="",
     )
