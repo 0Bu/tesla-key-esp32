@@ -126,6 +126,9 @@ same board. Device delivery after merge remains a separately requested `$ship` o
 
 Required independent checks and exact-head records are in [AGENTS.md](../AGENTS.md#pr-and-review).
 Skills specify how to perform them; a green build does not substitute for review.
+Before PR creation or a new push, publication reviews can bind a clean local candidate with
+verified branch, base and ancestry. Recheck the exact GitHub head after push; these records do
+not establish remote CI or merge acceptance.
 Update the owning document with each changed contract. Keep [FEATURES](FEATURES.md) as an index,
 not a second narrative. `$project-review` always assesses documentation structure, clarity,
 concision and completeness; unresolved material documentation findings prevent a clean result.
