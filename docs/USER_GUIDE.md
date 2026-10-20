@@ -142,7 +142,7 @@ change state; distinguish them from reading an existing log or cached status.
 | Installer: firmware installed, start not verified | Adapter without reset lines, a native USB port that reconnected late, or an image that does not boot | The firmware is already on flash: press RESET or reconnect the cable. If it still does not start, open the serial monitor and reinstall with Keep configuration rather than Erase. |
 | `.local` will not load | DHCP lease in router | Open the current IP. Use that IP or `.local` for browser saves. |
 | No WiFi | SSID/password, open or WPA2 network | Use setup AP or `provision.py`; do not write partial NVS images. Failed LAN credential changes roll back once. With saved credentials the device keeps retrying them and the setup AP closes after 10 minutes without a client (30 minutes at most); power-cycle to reopen it. |
-| No pairing prompt | VIN configured, `key_present`, BLE range, NFC card on reader | Explicitly send the existing key, then confirm on the touchscreen. Check status before retrying an ambiguous send result. |
+| No pairing prompt | VIN configured, `key_present`, BLE range, NFC card on reader | Place the keycard on the reader and wait for the automatic same-key retry with backoff, then confirm on the touchscreen. |
 | BLE connection fails | `/status.ble.connect_fail`, `car_connectable`, log cause | Move closer; disconnect another phone/fob if the car advertises non-connectable. |
 | Command times out | BLE availability and car asleep | An intentional wake may be needed; wait for the link and retry. Preserve keys and logs. |
 | evcc has no SOC/current | `port: 80`, VIN, cache freshness | Inspect `.response.response.charge_state` from `vehicle_data`; active stale telemetry returns `503`. |

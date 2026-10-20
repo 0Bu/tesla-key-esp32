@@ -1,7 +1,8 @@
 # Host tests
 
 The host suite exercises IDF-free decisions and selected production glue with deterministic stubs.
-It does not require Docker, USB or a vehicle. Firmware compilation is a separate
+Fast C++ and normal host checks run without Docker. Strict mode on macOS also requires Docker
+for the real Linux browser check. No host check requires USB or a vehicle. Firmware compilation is a separate
 [development gate](../docs/DEVELOPMENT.md#validate-a-change).
 
 ## Run it
