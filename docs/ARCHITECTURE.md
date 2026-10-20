@@ -314,14 +314,22 @@ Health/enrollment timeout policies are distinct from foreground command timeouts
 ## Pairing lifecycle / invalidation
 
 Pairing requires a plausible 17-character VIN. Without it, the supervisor idles and listing-only
-scans show nearby cars without connect/enrol. The supervisor performs bounded read-only status and
-health probes; only an explicit `POST /send_key` sends Whitelist Add. See [User guide](USER_GUIDE.md#pairing-and-identity).
+scans show nearby cars without connect/enrol. The supervisor probes status before automatically
+sending the existing Charging Manager key. There is no manual enrollment endpoint or UI action.
+See [User guide](USER_GUIDE.md#pairing-and-identity).
 
 `paired` means a VCSEC session is stored, not that the car has freshly accepted it. Remote status
-faults and command error text set only a volatile `reauth` hint; they never erase sessions, rotate
-the key or trigger enrollment. A successful health response clears the hint. A missing
-session also prompts the user to submit the existing key explicitly; successful local transmission
-does not prove vehicle approval. Forced key generation and changed VIN are explicit identity changes
+faults and command error text set a volatile `reauth` hint; they never erase sessions or rotate
+the key. A successful health response clears only the hint, without proving authenticated acceptance.
+After a status probe, positively established session absence or a persistent recovery hint permits
+same-key enrollment. Both durable and usable RAM sessions suppress enrollment without a recovery
+hint, so failed session persistence alone cannot resubmit the key. Storage or runtime-snapshot
+errors fail closed. `logic/auto_enrollment.hpp` reserves backoff before
+I/O (60, 120, 240, then 300 seconds), including unconfirmed sends and exceptions. Healthy/hint
+oscillation does not reset it. The sender rechecks VIN, runtime/key/session state under the command
+FIFO and holds Stable-only OTA exclusion through transmission. It uses Background provenance,
+NoWakeFail and zero immediate BLE retries; it never opens Infotainment or requests a wake.
+Successful local transmission does not prove vehicle approval. Forced key generation and changed VIN are explicit identity changes
 that clear sessions/cache; a changed VIN also forgets the BLE MAC and reboots. Same VIN is a no-op.
 Successful NVS existence probes are cached; read errors retry instead of becoming absent.
 
@@ -382,7 +390,7 @@ Sticky `JsonBuilder` failure discards the entire tree. `json_http_reply` sets no
 sends bytes before printing succeeds; OOM sets 503 before exactly one fixed fallback.
 Pinned-cJSON allocation matrices verify these production seams, not the device scheduler/allocator.
 
-While downloading/flashing, send_key/time/MQTT/Syslog/WiFi/channel mutations return 409 before body
+While downloading/flashing, time/MQTT/Syslog/WiFi/channel mutations return 409 before body
 intake. This is an entry snapshot, not atomic exclusion. A check holds the shared OTA gate but does
 not trip 409: config can save with reboot postponed, while key/VIN mutations return 503. Crash
 clear/dismiss routes are outside this guard. External fields/errors are in [API](API.md).
@@ -435,7 +443,7 @@ Priorities come only from `task_config.hpp`; stacks remain at creation sites.
 | `captive_dns` | `kPrioCaptiveDns` = 5 | 4096 | `provisioning.cpp` | captive-portal DNS (setup-AP mode only; vehicle stack not running) |
 | `ota` | `kPrioOta` = 5 | 8192 | `ota_update.cpp` | OTA download + flash (transient) |
 | `ota_chk` | `kPrioOtaCheck` = 5 | 8192 | `ota_update.cpp` | OTA manifest check (transient) |
-| `auto_pair` | `kPrioAutoPair` = 4 | 8192 | `vehicle_ctrl.cpp` (fn: `vehicle_pairing.cpp`) | pairing supervisor: read-only status and health probes |
+| `auto_pair` | `kPrioAutoPair` = 4 | 8192 | `vehicle_ctrl.cpp` (fn: `vehicle_pairing.cpp`) | pairing supervisor: status/health probes and bounded automatic same-key enrollment |
 | `net_wd` | `kPrioWifiWatchdog` = 4 | 3072 | `net.cpp` | ghost-link watchdog (forces the active transport to re-establish, never reboots) |
 | `mqtt_pub` | `kPrioMqttPub` = 4 | 6144 | `mqtt_ha.cpp` | MQTT/HA publisher (reads the caches) |
 | `display` | `kPrioDisplay` = 3 | 6144 | `display.cpp` | ST7735 renderer (`CONFIG_TESLA_DISPLAY_ENABLED` builds) |

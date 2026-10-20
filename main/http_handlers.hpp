@@ -117,7 +117,6 @@ esp_err_t handle_ota_changelog(GuardedReq rq);    // GET  /ota/changelog
 
 // http_config.cpp — setup / pairing / persisted-config endpoints
 esp_err_t handle_gen_keys(GuardedReq rq);         // POST /gen_keys[?force=1]
-esp_err_t handle_send_key(GuardedReq rq);         // POST /send_key
 esp_err_t handle_set_time(GuardedReq rq);         // POST /set_time
 esp_err_t handle_set_vin(GuardedReq rq);          // POST /set_vin
 esp_err_t handle_set_mqtt(GuardedReq rq);         // POST /set_mqtt

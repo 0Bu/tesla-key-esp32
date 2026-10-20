@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Host-side mock build: compile and run the IDF-free pure-logic tests (test/) with the
-# system toolchain — no ESP-IDF, no Docker, no board. Catches logic regressions in
+# system toolchain — no ESP-IDF or board. Strict macOS browser checks use Linux Docker. Catches logic regressions in
 # seconds, in any environment (local terminal, CI, remote coding session). This is the
 # real "run it and see" loop a cloud session has (it cannot build firmware or USB-flash).
 #
@@ -91,6 +91,9 @@ if [ "$REQUIRE_ALL" = 1 ]; then
         test/web_ui_http.test.mjs \
         test/tesla_protocol_vectors.test.mjs \
         scripts/check-ble-row-parity.sh \
+        scripts/run-browser-tests-linux.sh \
+        tools/browser/Dockerfile \
+        test/test_web_ui_browser_gate.py \
         test/web_ui_browser_gate.py; do
         gate_file "$required"
     done
@@ -158,6 +161,7 @@ if command -v python3 >/dev/null 2>&1; then
         python3 scripts/check-host-gate-contract.py
     run_gate "exact NVS namespace/key/owner/retention contract" 120 \
         python3 scripts/check-nvs-contract.py --self-test
+    run_gate "browser launch policy" 120 python3 test/test_web_ui_browser_gate.py
     run_gate "deterministic parser fuzz smoke" 120 scripts/run-fuzz-smoke.sh
 else
     echo "run-mock-tests: python3 not found — skipping display-sim parity check" >&2
@@ -173,8 +177,12 @@ if command -v node >/dev/null 2>&1; then
         test/tesla_protocol_vectors.test.mjs
     run_gate "BLE browser-row parity" 120 scripts/check-ble-row-parity.sh
     if [ "$REQUIRE_ALL" = 1 ]; then
-        run_gate "real-browser DOM and accessibility contract" 120 \
-            python3 test/web_ui_browser_gate.py --require-browser
+        if [ "$(uname -s)" = Darwin ]; then
+            run_gate "Linux-container DOM and accessibility contract" 120 scripts/run-browser-tests-linux.sh
+        else
+            run_gate "real-browser DOM and accessibility contract" 120 \
+                python3 test/web_ui_browser_gate.py --require-browser
+        fi
     else
         python3 test/web_ui_browser_gate.py
     fi

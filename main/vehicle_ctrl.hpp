@@ -3,6 +3,7 @@
 #include <client.h>
 #include "logic/command_result.hpp"
 #include "logic/command_runner.hpp"
+#include "logic/auto_enrollment.hpp"
 #include <string>
 #include <functional>
 #include <memory>
@@ -200,8 +201,6 @@ public:
     // Supervisor-only wrapper: re-samples the recovery hint, durable-key presence and runtime
     // safety under command_mutex_; generation is allowed only for verified first-boot absence.
     bool generate_key();
-    // Always enrolls a Charging Manager key (charging + wake only); never an owner key.
-    bool pair(tk::ConnectOrigin origin, int timeout_ms = 30000);
 
     struct NewVehicleResetResult {
         tk::VinTransitionApply state{tk::VinTransitionApply::IdentityUnverified};
@@ -250,7 +249,7 @@ public:
     bool has_key();      // a private key exists in NVS
     bool has_session();  // a VCSEC session record exists in NVS; this does not prove current reachability
     // True when the vehicle connection needs attention. It is a hint, not proof of key deletion;
-    // the UI keeps it visible even while an NVS session exists and offers explicit same-key send.
+    // the hero shows automatic reconnection/pairing while an NVS session may still exist.
     bool reauth_required() const { return repair_notice_; }
     // Tesla public-key id of the stored key (SHA-1(pubkey)[:4], "AB:CD:EF:01"),
     // matching the key list shown on the vehicle. Empty if no key is present.
@@ -435,7 +434,7 @@ private:
     std::string key_fingerprint_cache_{};
 
     // Non-waking VCSEC GET_STATUS health poll. Rejection/error responses are only volatile hints;
-    // they never rotate the key, erase sessions, or enrol automatically. Benign/read-only and
+    // they never rotate the key or erase sessions. The supervisor may retry the same key later. This probe
     // does not wake the car.
     bool health_probe_(int timeout_ms = 8000);
     // Idle until the next health poll, arming the "next attempt in…" countdown for it.
@@ -576,7 +575,7 @@ private:
     std::atomic<int> auth_fail_streak_{0};
 
     // True only while a session is stored and the supervisor is in its health-check phase.
-    // Gates the message observer so expected faults during explicit enrollment do not create
+    // Gates the message observer so expected faults during automatic enrollment do not create
     // a recovery hint.
     std::atomic<bool> believed_paired_{false};
 
@@ -618,7 +617,7 @@ private:
     // that is simply parked elsewhere states that once and then on a slow heartbeat instead of
     // an ERROR line every 40 s forever (logic/connect_outcome.hpp holds the rule and the
     // measurement that motivated it). NOT atomic and deliberately so: every ensure_connected_
-    // caller (send_vcsec_, send_infotainment_, get_vehicle_status, pair) holds command_mutex_
+    // caller (send_vcsec_, send_infotainment_, get_vehicle_status, enroll_existing_key_) holds command_mutex_
     // for the whole attempt, so this is single-writer under that lock — the same lock that
     // already serializes connect attempts themselves. Adding an atomic here would imply a
     // concurrency that does not exist and hide that invariant.
@@ -756,8 +755,11 @@ private:
     TaskHandle_t loop_task_{nullptr};
     static void loop_task_fn_(void* arg);
 
-    // Pairing supervisor: while configured, perform read-only status and health probes.
-    // Whitelist Add is sent only by the explicit foreground /send_key action.
+    // Pairing supervisor: probe first, then automatically submit the existing Charging Manager
+    // key with backoff when no durable/runtime session exists or a recovery hint persists.
+    bool poll_existing_key_();
+    tk::AutoEnrollmentSession enrollment_session_snapshot_(TickType_t wait_ticks);
+    bool enroll_existing_key_(int timeout_ms = 6000);
     TaskHandle_t auto_pair_task_{nullptr};
     static void auto_pair_task_fn_(void* arg);
 };

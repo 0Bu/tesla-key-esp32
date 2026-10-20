@@ -33,6 +33,7 @@
 #include "logic/target.hpp"
 #include "logic/mcp.hpp"
 #include "logic/command_registry.hpp"
+#include "logic/auto_enrollment.hpp"
 #include "logic/status_model.hpp"
 #include "logic/command_result.hpp"
 #include "logic/ui_state.hpp"
@@ -4745,7 +4746,7 @@ static void test_http_route() {
     using tk::HttpRoute;
     using tk::HttpVerb;
 
-    static_assert(tk::kFixedHttpRoutes.size() == 26,
+    static_assert(tk::kFixedHttpRoutes.size() == 25,
                   "extend the complete fixed-route matrix when a route is added");
     for (const tk::FixedHttpRoute& fixed : tk::kFixedHttpRoutes) {
         CHECK(tk::classify_http_route(fixed.verb, fixed.path) == fixed.route);
@@ -4812,11 +4813,11 @@ static void test_http_route() {
           HttpRoute::NotFound);
     CHECK(tk::classify_http_route(HttpVerb::Get, "/unknown") == HttpRoute::NotFound);
 
-    // Exact fail-closed admission map. The eight vehicle-touching wildcard routes must return 503
+    // Exact fail-closed admission map. The seven vehicle-touching wildcard routes must return 503
     // during Booting, SafeMode and Fatal; recovery/status/config/OTA routes stay available.
-    constexpr std::array<HttpRoute, 8> gated{{
+    constexpr std::array<HttpRoute, 7> gated{{
         HttpRoute::Command, HttpRoute::VehicleData, HttpRoute::BodyController,
-        HttpRoute::GenKeys, HttpRoute::SendKey, HttpRoute::SetVin,
+        HttpRoute::GenKeys, HttpRoute::SetVin,
         HttpRoute::Scan, HttpRoute::McpPost,
     }};
     for (HttpRoute route : gated) CHECK(tk::http_route_requires_vehicle_runtime(route));
@@ -4833,13 +4834,12 @@ static void test_http_route() {
 
     // ── Route conflict matrix during active OTA update ─────────────────────────────
     // Exact documented behavior from docs/API.md and docs/FEATURES.md:
-    // - Six runtime/config mutation endpoints return 409 Conflict with reason "an OTA update is in progress"
+    // - Five runtime/config mutation endpoints return 409 Conflict with reason "an OTA update is in progress"
     // - Two identity mutation endpoints (/gen_keys, /set_vin) return 503 via OtaIdentityMutationGuard
     // - All other routes return None (0) and are not rejected by the update conflict guard
     CHECK(tk::kOtaUpdateInProgressReason == "an OTA update is in progress");
 
-    constexpr std::array<HttpRoute, 6> ota_conflicts_409{{
-        HttpRoute::SendKey,
+    constexpr std::array<HttpRoute, 5> ota_conflicts_409{{
         HttpRoute::SetTime,
         HttpRoute::SetMqtt,
         HttpRoute::SetSyslog,
@@ -4889,7 +4889,7 @@ static void test_http_route() {
     }
 
     // Verify fixed URL path resolution and corresponding OTA conflict mapping
-    CHECK(tk::http_route_ota_conflict(tk::classify_http_route(HttpVerb::Post, "/send_key")) == tk::HttpRouteOtaConflict::Reject409);
+    CHECK(tk::classify_http_route(HttpVerb::Post, "/send_key") == HttpRoute::NotFound);
     CHECK(tk::http_route_ota_conflict(tk::classify_http_route(HttpVerb::Post, "/set_time")) == tk::HttpRouteOtaConflict::Reject409);
     CHECK(tk::http_route_ota_conflict(tk::classify_http_route(HttpVerb::Post, "/set_mqtt")) == tk::HttpRouteOtaConflict::Reject409);
     CHECK(tk::http_route_ota_conflict(tk::classify_http_route(HttpVerb::Post, "/set_syslog")) == tk::HttpRouteOtaConflict::Reject409);
@@ -5079,7 +5079,7 @@ static void test_health_gate() {
     // PENDING_VERIFY reboot can roll back the executable, so every rotation entry point stays
     // mutation-free until probation completes. Unknown OTA state is fail-closed as well.
     for (const E entry : {E::HttpGenerateKey, E::HttpSetVin,
-                          E::InitialKey, E::AutomaticKey}) {
+                          E::InitialKey, E::AutomaticKey, E::AutomaticEnrollment}) {
         CHECK(tk::identity_mutation_allowed(O::Stable, entry));
         CHECK(!tk::identity_mutation_allowed(O::PendingVerify, entry));
         CHECK(!tk::identity_mutation_allowed(O::Unknown, entry));
@@ -5481,6 +5481,81 @@ static void test_wifi_rollback() {
     Cfg fresh{};
     tk::stage_wifi_change(fresh, std::string("first"), std::string("pass"));
     CHECK(!fresh.wifi_rollback_active && fresh.wifi_ssid_backup.empty() && fresh.wifi_ssid == "first");
+}
+
+static void test_auto_enrollment() {
+    tk::AutoEnrollmentState state;
+    CHECK(tk::auto_enrollment_due(state, 0, {true, false, true, false}, false, true, true));
+    CHECK(!tk::auto_enrollment_due(state, 0, {false, false, true, false}, false, true, true));
+    CHECK(!tk::auto_enrollment_due(state, 0, {true, true, true, false}, false, true, true));
+    CHECK(!tk::auto_enrollment_due(state, 0, {true, false, true, false}, false, false, true));
+    CHECK(!tk::auto_enrollment_due(state, 0, {true, false, true, false}, false, true, false));
+    CHECK(tk::auto_enrollment_due(state, 0, {true, true, true, false}, true, true, true));
+
+    // A late NFC approval, timeouts and allocation failures use the same reserved cadence.
+    // Every attempt is consumed before I/O; neither an exception nor an ambiguous write
+    // permits another attempt at the same tick or in the following supervision round.
+    std::vector<uint64_t> attempts;
+    for (uint64_t now = 0; now <= 900000; now += 1000) {
+        if (tk::auto_enrollment_due(state, now, {true, false, true, false}, false, true, true)) {
+            attempts.push_back(now);
+            tk::auto_enrollment_started(state, now);
+            CHECK(!tk::auto_enrollment_due(state, now, {true, false, true, false}, false, true, true));
+        }
+    }
+    CHECK((attempts == std::vector<uint64_t>{0, 60000, 180000, 420000, 720000}));
+    CHECK(state.retry_ms == tk::kEnrollmentRetryMaxMs);
+    CHECK(!tk::auto_enrollment_due(state, 1020000 - 1, {true, false, true, false}, false, true, true));
+    CHECK(tk::auto_enrollment_due(state, 1020000, {true, false, true, false}, false, true, true));
+
+    tk::AutoEnrollmentState flapping;
+    std::vector<uint64_t> recovery_attempts;
+    for (uint64_t now = 0; now <= 900000; now += 1000) {
+        const bool hint = now % 2000 == 0;
+        if (tk::auto_enrollment_due(flapping, now, {true, true, true, false}, hint, true, true)) {
+            recovery_attempts.push_back(now);
+            tk::auto_enrollment_started(flapping, now);
+        }
+    }
+    CHECK(recovery_attempts == attempts);
+
+    // A paired device without a recovery hint remains quiet across 15 minutes.
+    for (uint64_t now = 0; now <= 900000; now += 1000) {
+        CHECK(!tk::auto_enrollment_due({}, now, {true, true, true, false}, false, true, true));
+    }
+    // A successful handshake can remain usable when NVS persistence fails. Even a false
+    // status probe must not cause another enrollment while that RAM session is available.
+    for (uint64_t now = 0; now <= 900000; now += 1000) {
+        CHECK(!tk::auto_enrollment_due({}, now, {true, false, true, true}, false, true, true));
+    }
+    // Unknown RAM or NVS state fails closed, including with a recovery hint.
+    CHECK(!tk::auto_enrollment_due({}, 0, {true, false, false, false}, true, true, true));
+    CHECK(!tk::auto_enrollment_due({}, 0, {false, false, true, true}, true, true, true));
+    CHECK(!tk::auto_enrollment_due({}, 0, {true, true, false, false}, true, true, true));
+    CHECK(tk::auto_enrollment_due({}, 0, {true, false, true, true}, true, true, true));
+    // A session established between the supervisor and sender suppresses the latter recheck.
+    CHECK(tk::auto_enrollment_needed({true, false, true, false}, false));
+    CHECK(!tk::auto_enrollment_needed({true, false, true, true}, false));
+    tk::AutoEnrollmentState late;
+    unsigned sends = 0;
+    for (uint64_t now = 0; now <= 900000; now += 1000) {
+        const bool accepted = now >= 250000;
+        if (tk::auto_enrollment_due(late, now, {true, accepted, true, false},
+                false, true, true)) {
+            ++sends;
+            tk::auto_enrollment_started(late, now);
+        }
+    }
+    CHECK(sends == 3);
+    // OTA probation/ownership and a failed NVS read never spend the first pairing attempt.
+    tk::AutoEnrollmentState held;
+    CHECK(!tk::auto_enrollment_due(held, 900000, {true, false, true, false}, false, true, false));
+    CHECK(!tk::auto_enrollment_due(held, 900000, {false, false, true, false}, true, true, true));
+    CHECK(held.next_attempt_ms == 0);
+    CHECK(tk::auto_enrollment_due(held, 900000, {true, false, true, false}, false, true, true));
+    tk::auto_enrollment_started(held, UINT64_MAX - 1);
+    CHECK(held.next_attempt_ms == UINT64_MAX);
+    CHECK(!tk::auto_enrollment_due(held, UINT64_MAX, {true, false, true, false}, false, true, true));
 }
 
 static void test_setup_portal() {
@@ -8583,6 +8658,7 @@ int main() {
     test_ble_deferred_event();
     test_wifi_rollback();
     test_setup_portal();
+    test_auto_enrollment();
     test_net_link();
     test_status_eth();
     test_eth_board();

@@ -1,6 +1,7 @@
 {
   "schema_version": 1,
   "headers": {
+    "auto_enrollment.hpp": {"test": "test/test_logic.cpp", "evidence": "test_auto_enrollment("},
     "active_window.hpp": {"test": "test/test_logic.cpp", "evidence": "test_active_window("},
     "ble_chunk.hpp": {"test": "test/test_logic.cpp", "evidence": "test_ble_chunk("},
     "ble_deferred_event.hpp": {"test": "test/test_logic.cpp", "evidence": "test_ble_deferred_event("},

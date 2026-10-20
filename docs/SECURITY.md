@@ -17,8 +17,10 @@ charging, but cannot unlock or drive. NVS also holds WiFi credentials, VIN and M
 
 First-boot key generation enables hardware entropy before WiFi/BLE. IDF6 PSA draws from the hardware
 RNG. Devices keyed before this fix need a deliberate re-key/re-pair, not an automatic identity change.
-Remote pairing faults and error text are advisory only: they cannot rotate the key, erase sessions,
-or trigger enrollment. Re-enrollment uses the stored key only after an explicit user request.
+Remote pairing faults and error text are advisory only: they cannot rotate the key or erase sessions.
+Automatic enrollment reuses the stored Charging Manager key with bounded backoff after status
+probes; a recovery hint is not proof that the car removed a key. Vehicle approval still requires
+the NFC keycard and touchscreen confirmation. See [pairing](USER_GUIDE.md#pairing-and-identity).
 Rotation rolls back failed persistence and blocks signing while identity/cleanup is ambiguous.
 VIN transitions durably journal cross-namespace work. Protocol/key compatibility and reference
 departures are recorded in [ADR-0002](adr/0002-idf6-mbedtls4-crypto-seam.md) and

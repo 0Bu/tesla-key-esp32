@@ -38,11 +38,11 @@
     </header>
 
     <main class="grid">
-      <!-- re-pair / Safe Mode notice -->
-      <div class="banner" id="reauthBanner">
+      <!-- Safe Mode recovery notice -->
+      <div class="banner" id="safeModeBanner">
         <span class="bi" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#ic-warn"/></svg></span>
         <span class="bt"></span>
-        <button type="button" class="pill sm" id="bannerAct" onclick="bannerAction()">Open setup</button>
+        <button type="button" class="pill sm" onclick="otaCheck()">Check for update</button>
       </div>
 
       <!-- vehicle hero. Starts hidden: the first /status frame reveals it, so the empty
@@ -157,7 +157,7 @@
   <div class="sheet modal-card" tabindex="-1">
     <div class="ota-head"><h2 class="sheet-title" id="otaModalTitle">Firmware update</h2><span class="chip-badge" id="otaChannel"></span></div>
     <div class="ota-version mono" id="otaVersionLine"></div>
-    <ul class="ota-changes" id="otaChanges"></ul>
+    <ul class="ota-changes" id="otaChanges" tabindex="0" aria-label="Changes in this update"></ul>
     <p class="note" id="otaNoChanges" hidden>No changelog was supplied for this update.</p>
     <p class="note" id="otaHelp">The device downloads the firmware and reboots when done.</p>
     <div class="actions">

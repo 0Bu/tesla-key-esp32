@@ -151,7 +151,6 @@ static esp_err_t handle_all_dispatch(httpd_req_t* req) {
         case tk::HttpRoute::OtaStatus:      return handle_ota_status({req});
         case tk::HttpRoute::OtaChangelog:   return handle_ota_changelog({req});
         case tk::HttpRoute::GenKeys:        return handle_gen_keys({req});
-        case tk::HttpRoute::SendKey:        return handle_send_key({req});
         case tk::HttpRoute::SetTime:        return handle_set_time({req});
         case tk::HttpRoute::SetVin:         return handle_set_vin({req});
         case tk::HttpRoute::SetMqtt:        return handle_set_mqtt({req});

@@ -60,6 +60,7 @@ enum class IdentityMutationEntry : uint8_t {
     HttpSetVin,
     InitialKey,
     AutomaticKey,
+    AutomaticEnrollment,
 };
 
 // One process-wide exclusion gate binds OTA workers, identity transactions, deliberate fault
@@ -146,6 +147,7 @@ constexpr const char* identity_mutation_entry_name(IdentityMutationEntry entry) 
         case IdentityMutationEntry::HttpSetVin:      return "HTTP VIN transition";
         case IdentityMutationEntry::InitialKey:      return "initial key generation";
         case IdentityMutationEntry::AutomaticKey:    return "automatic key rotation";
+        case IdentityMutationEntry::AutomaticEnrollment: return "automatic key enrollment";
     }
     return "identity mutation";
 }

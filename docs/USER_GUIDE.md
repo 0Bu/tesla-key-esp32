@@ -59,13 +59,15 @@ Enterprise authentication is not supported.
 
 ## Pairing and identity
 
-A configured VIN is required before pairing. The device keeps its key and performs read-only
-status/health probes; it does not enroll automatically. To enroll or retry, place the Tesla NFC
-keycard on the console reader and explicitly use **Send existing key** in the web UI or
-`POST /send_key`. This sends the current Charging Manager key; transmission does not confirm car
-approval, so confirm the prompt on the touchscreen and wait for status to verify the session.
-`POST /send_key?role=owner` is refused (`403`). An ambiguous request result is not resent
-automatically; check status before deciding to try again.
+A configured VIN is required before pairing. The device sends its existing Charging Manager key
+automatically; there is no manual send button or HTTP endpoint. Place the Tesla NFC keycard on the
+console reader and approve the request on the touchscreen. The hero shows the pairing status.
+Sending the request does not confirm vehicle approval; wait for the session to be established.
+
+Before each attempt the device probes status. Unconfirmed attempts use backoff of 60, 120, 240,
+then 300 seconds, allowing a keycard placed later to complete pairing. Connection-recovery hints
+can request the same bounded flow with an existing session; they never replace the key or delete
+sessions. A failed storage read or active OTA operation prevents enrollment.
 
 Changing VIN or forcing key generation removes the old pairing. Re-saving the same VIN is a no-op.
 Use these operations only for an intentional identity change, then pair again. Connection timeouts
@@ -76,6 +78,7 @@ alone do not require a new key. [Pairing lifecycle](ARCHITECTURE.md#pairing-life
 In the web UI, click the download icon on **Firmware**, confirm the offered update and wait for
 the device to reboot. Click the version to select **Release** (official releases, default) or
 **Dev** (main builds). OTA preserves configuration and keys.
+The update dialog shows up to five change entries at once. Scroll inside the list to read more.
 
 For USB recovery, **Keep configuration** is available for an existing dual-OTA layout.
 **Erase everything** and a merged-image write erase WiFi, VIN and pairing; back up secret NVS
@@ -143,7 +146,7 @@ change state; distinguish them from reading an existing log or cached status.
 | BLE connection fails | `/status.ble.connect_fail`, `car_connectable`, log cause | Move closer; disconnect another phone/fob if the car advertises non-connectable. |
 | Command times out | BLE availability and car asleep | An intentional wake may be needed; wait for the link and retry. Preserve keys and logs. |
 | evcc has no SOC/current | `port: 80`, VIN, cache freshness | Inspect `.response.response.charge_state` from `vehicle_data`; active stale telemetry returns `503`. |
-| Key needs attention | `reauth`, stored session and BLE availability | The key is preserved. If enrollment is needed, explicitly send the existing key with the NFC card on the reader and confirm on the touchscreen. No firmware erase is required. |
+| Key needs attention | `reauth`, stored session and BLE availability | Reconnection and same-key pairing run automatically. Place the NFC card on the reader and confirm a pairing prompt on the touchscreen. No firmware erase is required. |
 | MQTT save fails | `mqtt.error`; HTTP `400`, `502` or `503` | Check credentials, reachability or contiguous heap respectively. A failed probe saves nothing. |
 | Syslog says unreachable | Collector DNS and UDP delivery | ICMP is only advisory; a collector blocking ping may still receive logs. |
 | Restart or crash | `sys.reset_reason`, `last_crash`, `last_reboot`, heap trend | Retain evidence and match a dump to the same build's ELF before clearing it. |

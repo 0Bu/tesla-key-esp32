@@ -158,8 +158,8 @@ CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
 # leaves the heap looking perfect and is invisible to it. This is the other half.
 #   TIMEOUT_S=60 — the budget must exceed the LONGEST time a subscribed task can legitimately be
 #     blocked, and here that is not the loop cadence (50 ms) but the vehicle mutex: loop_task waits
-#     on vehicle_mutex_ while a foreground command holds it, which is up to 20 s for a normal
-#     command and 30 s for pair(). 60 s is 2x the worst legitimate hold, so only a real hang fires.
+#     for bounded BLE work rather than its 50 ms polling cadence. Foreground commands have a
+#     20 s budget and automatic enrollment a 6 s budget; the watchdog remains at 60 s.
 #     Setting it near the cadence instead would reboot the device mid-pairing.
 #   PANIC=y — a timeout REBOOTS through the panic handler rather than only printing. That is what
 #     makes it useful here: esp_reset_reason() then reports ESP_RST_TASK_WDT, the crash pipeline

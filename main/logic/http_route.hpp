@@ -17,7 +17,6 @@ enum class HttpRoute {
     OtaStatus,
     OtaChangelog,
     GenKeys,
-    SendKey,
     SetTime,
     SetVin,
     SetMqtt,
@@ -42,14 +41,13 @@ struct FixedHttpRoute {
     HttpRoute route;
 };
 
-inline constexpr std::array<FixedHttpRoute, 26> kFixedHttpRoutes{{
+inline constexpr std::array<FixedHttpRoute, 25> kFixedHttpRoutes{{
     {HttpVerb::Get,  "/ota/check",           HttpRoute::OtaCheck},
     {HttpVerb::Post, "/ota/check",           HttpRoute::OtaCheck},
     {HttpVerb::Post, "/ota/update",          HttpRoute::OtaUpdate},
     {HttpVerb::Get,  "/ota/status",          HttpRoute::OtaStatus},
     {HttpVerb::Get,  "/ota/changelog",       HttpRoute::OtaChangelog},
     {HttpVerb::Post, "/gen_keys",            HttpRoute::GenKeys},
-    {HttpVerb::Post, "/send_key",            HttpRoute::SendKey},
     {HttpVerb::Post, "/set_time",            HttpRoute::SetTime},
     {HttpVerb::Post, "/set_vin",             HttpRoute::SetVin},
     {HttpVerb::Post, "/set_mqtt",            HttpRoute::SetMqtt},
@@ -128,7 +126,6 @@ inline constexpr bool http_route_requires_vehicle_runtime(HttpRoute route) noexc
         case HttpRoute::VehicleData:
         case HttpRoute::BodyController:
         case HttpRoute::GenKeys:
-        case HttpRoute::SendKey:
         case HttpRoute::SetVin:
         case HttpRoute::Scan:
         case HttpRoute::McpPost:
@@ -173,7 +170,6 @@ enum class HttpRouteOtaConflict {
 // partition. /ota/check and /ota/update serialize themselves through the OTA gate.
 inline constexpr HttpRouteOtaConflict http_route_ota_conflict(HttpRoute route) noexcept {
     switch (route) {
-        case HttpRoute::SendKey:
         case HttpRoute::SetTime:
         case HttpRoute::SetMqtt:
         case HttpRoute::SetSyslog:

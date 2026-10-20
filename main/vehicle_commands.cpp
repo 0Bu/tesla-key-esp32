@@ -274,9 +274,9 @@ VehicleController::ResultCb VehicleController::make_result_cb_(
                     break;
             }
             // These response strings are only recovery hints. A text match cannot establish
-            // that the vehicle deleted a key, and it must never rotate identity, erase stored
-            // sessions, or schedule a Whitelist Add. The UI can offer an explicit same-key
-            // enrolment action; a successful health response clears the hint.
+            // that the vehicle deleted a key. The supervisor can retry enrollment with the
+            // same stored key and bounded backoff, but never rotate identity or erase sessions.
+            // A successful health response clears only this advisory connection hint.
             if (msg.find("whitelist") != msg.npos) {
                 if (believed_paired_.load()) {
                     pairing_recovery_hint_.store(true, std::memory_order_release);

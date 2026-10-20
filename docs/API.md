@@ -115,7 +115,6 @@ GET /api/1/vehicles/{VIN}/body_controller_state
 | `POST /crash/dismiss` | Deletes this boot's crash report; a failed erase returns `500` and retains the report. |
 | `GET /heap` | `{dt, b0, b_boot, unit:"KiB", scale:10, free[], largest[]}` — 24 h memory trend; interpretation below. |
 | `POST /gen_keys[?force=1]` | Generate the ECDSA P-256 key (refuses overwrite without `force`, `409`). Identity mutation is Stable-only: `PendingVerify`, unknown OTA state or an active OTA/update returns `503` before anything changes. |
-| `POST /send_key` | Explicitly transmit the existing Charging Manager key as Whitelist Add. `result:true` means local transmission completed, not car approval; confirm on the touchscreen and verify `/status`. |
 | `POST /set_vin` | Persist the VIN, regenerate the key, clear the paired BLE MAC/session and reboot. Same Stable-only `503` rule as `/gen_keys`. |
 | `POST /set_mqtt` | `{"broker":"host:port"}` or full `"mqtt://…"`; `""` disables. Changed brokers are tested before persistence; failure saves nothing. |
 | `POST /set_syslog` | `{"server":"host:port"}` (a bare host defaults to 514; `""` disables) and reboot. |
@@ -129,8 +128,11 @@ GET /api/1/vehicles/{VIN}/body_controller_state
 | `GET /api/proxy/1/version` | `{version, platform}` (`"ESP32"`/`"ESP32-S3"`/`"ESP32-C3"`/`"ESP32-C6"`). |
 | `POST /mcp` | MCP server for AI agents (Streamable HTTP, stateless JSON-RPC 2.0; `GET` → `405`, no SSE): [MCP.md](MCP.md). |
 
-All of `POST /send_key`, `/set_time`, `/set_mqtt`, `/set_syslog`, `/set_wifi` and `/set_ota` return
+All of `/set_time`, `/set_mqtt`, `/set_syslog`, `/set_wifi` and `/set_ota` return
 `409` while an OTA update is flashing ([ARCHITECTURE](ARCHITECTURE.md#http-request-body-and-allocator-failure-contract)).
+
+Key enrollment runs automatically with the existing Charging Manager key; it has no HTTP command.
+See [pairing](USER_GUIDE.md#pairing-and-identity) for the NFC card and vehicle confirmation steps.
 
 ### Diagnostic export and heap trend
 

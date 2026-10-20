@@ -124,9 +124,12 @@ Verify every dimension against the reviewed revisions; previous audit results ar
    real-time 1-hour reuse window. Restore is attempted before controller init; absent/unreadable
    `last_time` or a failed clock set can leave the inherited negative-age acceptance path. Do not
    claim guaranteed expiry from this restore.
-4. **Pairing / whitelist** — Whitelist Add requires an explicit user action that sends the
-   existing Charging-Manager key through `POST /send_key`; the supervisor never enrolls
-   automatically. Automatic key generation is limited to verified first-boot key absence.
+4. **Pairing / whitelist** — the configured supervisor sends the existing Charging-Manager key
+   automatically after status probes, with bounded backoff and no manual HTTP/UI send path.
+   Verify storage-error rejection, the under-FIFO key/session/VIN recheck, Stable-only OTA
+   exclusion and zero immediate BLE retries. A recovery hint can request the same-key flow but
+   never proves key removal or authorizes key replacement/session deletion. Hint oscillation
+   must not reset the send cadence. Automatic generation remains limited to verified first-boot absence.
    Add-key carries role + `KEY_FORM_FACTOR_CLOUD_KEY`, no key name (car shows "Unknown key"),
    and requires an **NFC card on the console reader**. Local transmission completion is not
    vehicle approval; verify acceptance through an authenticated session/status observation.
@@ -144,7 +147,8 @@ Verify every dimension against the reviewed revisions; previous audit results ar
    `SESSION_INFO_STATUS_KEY_NOT_ON_WHITELIST`. Check the native
    `handle_signed_message_fault_` → `on_vehicle_message_` path, the `"whitelist"` error match,
    and the health-probe-only authentication-failure streak. These signals do not prove key
-   deletion or authorize key replacement, persisted-session removal or Whitelist Add.
+   deletion or authorize key replacement or persisted-session removal. Under the automatic pairing
+   policy they can request only a bounded same-key Whitelist Add after status probes (dimension 4).
    In-memory peer/session resets remain distinct from deleting persisted records.
    `paired` reports stored VCSEC-session presence; `reauth` may coexist with `paired:true`.
    Finding a stored session does not clear the hint. A successful health response can clear

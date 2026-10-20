@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the assembled device page in a real, dependency-free headless browser."""
+"""Exercise the assembled device page in a real Linux headless browser."""
 
 from __future__ import annotations
 
@@ -22,6 +22,8 @@ TERMINATION_GRACE_SECONDS = 2
 
 
 def browser_binary() -> str | None:
+    if sys.platform != "linux":
+        return None
     configured = os.environ.get("BROWSER_BIN")
     if configured:
         return shutil.which(configured) or (configured if Path(configured).is_file() else None)
@@ -29,8 +31,7 @@ def browser_binary() -> str | None:
         found = shutil.which(name)
         if found:
             return found
-    mac = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
-    return str(mac) if mac.is_file() else None
+    return None
 
 
 def assembled_page() -> str:
@@ -139,6 +140,75 @@ console.error = function() {
     checkChipBounds();
     check(window.__browserGateFetchCalls === 2, "rendering climate does not request vehicle data");
 
+    const notesList = document.getElementById("otaChanges");
+    const otaCard = document.querySelector("#otaModal .sheet");
+    const update = {current: "1.6.2-PR-400", available: "1.6.3-dev.19", channel: "dev"};
+    const visibleNotes = () => {
+      const box = notesList.getBoundingClientRect();
+      return Array.from(notesList.children).filter(item => {
+        const row = item.getBoundingClientRect();
+        return row.top >= box.top - 1 && row.bottom <= box.bottom + 1;
+      }).length;
+    };
+    const checkNotesLayout = label => {
+      check(visibleNotes() <= 5, label + ": at most five complete entries visible");
+      check(notesList.scrollWidth <= notesList.clientWidth + 1, label + ": notes wrap horizontally");
+      check(otaCard.scrollHeight <= otaCard.clientHeight + 1, label + ": only the notes need scrolling");
+      const cardBox = otaCard.getBoundingClientRect();
+      check(cardBox.left >= 0 && cardBox.right <= window.innerWidth + 1 &&
+            cardBox.top >= 0 && cardBox.bottom <= window.innerHeight + 1,
+            label + ": dialog stays inside the viewport");
+      for (const id of ["otaHelp", "otaCancel", "otaInstall"]) {
+        const box = document.getElementById(id).getBoundingClientRect();
+        check(box.top >= cardBox.top && box.bottom <= cardBox.bottom,
+              label + ": help and actions stay visible: " + id);
+      }
+    };
+    for (const count of [0, 1, 5, 6, 13]) {
+      const notes = Array.from({length: count}, (_, i) => "Change " + (i + 1));
+      askOtaInstall(update, notes.join("\n"));
+      check(notesList.children.length === count, "all " + count + " notes retained");
+      check(notesList.scrollTop === 0, "new dialog starts at the first note");
+      checkNotesLayout(count + " short notes");
+      if (count <= 5) {
+        check(notesList.hidden === (count === 0), "empty list visibility");
+        if (count) check(visibleNotes() === count, "short list fits without truncation");
+      } else {
+        check(notesList.scrollHeight > notesList.clientHeight, "long list scrolls");
+        check(notesList.tabIndex === 0 && notesList.getAttribute("aria-label"), "notes are keyboard reachable and named");
+        notesList.focus();
+        check(document.activeElement === notesList, "scrolling list receives keyboard focus");
+        notesList.scrollTop = notesList.scrollHeight;
+        checkNotesLayout("last of " + count + " notes");
+        const last = notesList.lastElementChild.getBoundingClientRect();
+        check(last.bottom <= notesList.getBoundingClientRect().bottom + 1, "last note can be read");
+      }
+      closeOtaModal(false);
+    }
+    askOtaInstall(update, Array.from({length: 13}, (_, i) => i < 5
+      ? "Change " + i + " — " + "A wrapped maintenance and reliability improvement. ".repeat(3)
+      : "Change " + i).join("\n"));
+    checkNotesLayout("mixed wrapped notes");
+    notesList.scrollTop = notesList.scrollHeight;
+    checkNotesLayout("short notes after wrapped notes");
+    otaCard.style.width = "300px";
+    window.dispatchEvent(new Event("resize"));
+    checkNotesLayout("resized dialog");
+    notesList.scrollTop = notesList.scrollHeight;
+    checkNotesLayout("resized last notes");
+    otaCard.style.width = "";
+    closeOtaModal(false);
+    askOtaInstall(update, Array.from({length: 6}, (_, i) =>
+      "Change " + i + " — " + "A maintenance improvement. ".repeat(3)).join("\n"));
+    const wideLimit = parseFloat(notesList.style.maxHeight);
+    otaCard.style.width = "260px";
+    window.dispatchEvent(new Event("resize"));
+    check(parseFloat(notesList.style.maxHeight) > wideLimit, "five-note height follows narrower text wrapping");
+    checkNotesLayout("all wrapped notes after resize");
+    otaCard.style.width = "";
+    closeOtaModal(false);
+    check(window.__browserGateFetchCalls === 2, "reading notes does not contact the device");
+
     check(getComputedStyle(document.body).display !== "none", "body is rendered");
     check(document.querySelector(".wrap").getBoundingClientRect().width > 0, "main layout has width");
     check(document.documentElement.scrollWidth <= window.innerWidth + 1, "no horizontal overflow");
@@ -165,6 +235,8 @@ console.error = function() {
 
 
 def run_profile(browser: str, html: Path, profile: str, size: str, user_data: Path) -> None:
+    if sys.platform != "linux":
+        raise RuntimeError("automatic browser processes are supported only on Linux")
     command = [
         browser,
         "--headless",
@@ -200,8 +272,8 @@ def run_profile(browser: str, html: Path, profile: str, size: str, user_data: Pa
         try:
             returncode = process.wait(timeout=PROFILE_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
-            # Chrome for Testing on macOS can finish --dump-dom and then remain alive while its
-            # updater/crash helper drains. Terminate the isolated process group; a completed DOM
+            # A browser can finish --dump-dom while a child process is still draining.
+            # Terminate only this test's isolated process group; a completed DOM
             # below is still authoritative, while an incomplete dump remains a hard failure.
             timed_out = True
             try:
@@ -238,6 +310,14 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--require-browser", action="store_true")
     args = parser.parse_args()
+    if sys.platform != "linux":
+        message = ("web-ui-browser: automatic native browser launch is disabled outside Linux; "
+                   "run scripts/run-browser-tests-linux.sh or the Linux CI gate")
+        if args.require_browser:
+            print(message, file=sys.stderr)
+            return 2
+        print(message + "; SKIP (no real-browser evidence)")
+        return 0
     browser = browser_binary()
     if not browser:
         message = "web-ui-browser: no Chrome/Chromium binary found"

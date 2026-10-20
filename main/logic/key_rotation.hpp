@@ -123,7 +123,7 @@ constexpr AutomaticKeyAction decide_automatic_key_action(bool probe_ok,
     // Verified first-boot absence remains the sole unsafe-runtime generation case.
     if (key_exists && !runtime_safe) return AutomaticKeyAction::RebootRequired;
     // A remote pairing hint is not authority to replace a durable identity. Keep the existing
-    // key and require an explicit user action to re-enrol it; this also covers the inconsistent
+    // key and probe its enrollment without changing identity; this also covers the inconsistent
     // case where the key is absent but the runtime flag claims the identity is safe.
     if (recovery_hint) return AutomaticKeyAction::RecoveryRequired;
     if (!key_exists) {

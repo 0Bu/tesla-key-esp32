@@ -45,6 +45,7 @@ def validate(root: Path) -> None:
         "scripts/prepare-reused-release.py",
         "scripts/run-fuzz-smoke.sh",
         "test/web_ui_browser_gate.py",
+        "test/test_web_ui_browser_gate.py",
     ):
         require(path in run_mock, f"run-mock-tests.sh strict inventory omits {path}")
     require("python3 scripts/check-logic-test-ownership.py --compile --self-test" in run_mock,
@@ -98,7 +99,7 @@ def validate(root: Path) -> None:
             "cmake-less fallback does not compile and execute nvs_storage_tests")
     require(
         'run_gate "real-browser DOM and accessibility contract" 120 \\\n'
-        "            python3 test/web_ui_browser_gate.py --require-browser" in run_mock,
+        "                python3 test/web_ui_browser_gate.py --require-browser" in run_mock,
         "strict real-browser gate must retain its 120-second outer timeout",
     )
     require(
@@ -108,6 +109,13 @@ def validate(root: Path) -> None:
         and browser_gate.count("process.wait(timeout=TERMINATION_GRACE_SECONDS)") == 2,
         "real-browser gate cold-start and termination budgets drifted",
     )
+    require('run_gate "browser launch policy" 120 python3 test/test_web_ui_browser_gate.py' in run_mock,
+            "host suite must execute browser launch-policy tests")
+    require('if [ "$(uname -s)" = Darwin ]; then' in run_mock and
+            'run_gate "Linux-container DOM and accessibility contract" 120 scripts/run-browser-tests-linux.sh' in run_mock,
+            "strict macOS browser gate must execute its Linux container")
+    require(browser_gate.count('if sys.platform != "linux":') == 3,
+            "Linux-only browser launch guards drifted")
     cjson_gate = "CJSON_OOM_SANITIZE=1 bash ./test/run-cjson-oom-tests.sh"
     mqtt_gate = "MQTT_JSON_SANITIZE=1 bash ./test/run-mqtt-json-publish-tests.sh"
     build = './scripts/ci-build-all.sh "$version" "$source_sha"'
@@ -127,6 +135,12 @@ def replace_once(path: Path, old: str, new: str) -> None:
 def self_test(root: Path) -> None:
     validate(root)
     mutations = [
+        ("scripts/run-mock-tests.sh", 'run_gate "Linux-container DOM and accessibility contract" 120 scripts/run-browser-tests-linux.sh',
+         '# removed Linux browser execution', "must execute its Linux container"),
+        ("scripts/run-mock-tests.sh", 'run_gate "browser launch policy" 120 python3 test/test_web_ui_browser_gate.py',
+         '# removed browser policy test', "execute browser launch-policy tests"),
+        ("test/web_ui_browser_gate.py", 'if sys.platform != "linux":',
+         'if False:', "Linux-only browser launch guards"),
         ("scripts/run-mock-tests.sh", "need_tool cmake", "# removed", "cmake"),
         ("scripts/run-mock-tests.sh", "tools/agent-hooks/run_with_timeout.py", "missing.py", "bounded"),
         ("tools/agent-hooks/agent_hook.py", '[str(script), "--require-all"]', "[str(script)]", "strict"),

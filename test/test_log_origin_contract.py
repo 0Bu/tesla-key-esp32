@@ -25,27 +25,26 @@ http_config = source("main/http_config.cpp")
 # Public entry points deliberately require a provenance choice. A default would let a new
 # unattended caller silently become an unthrottled foreground error source again.
 assert "get_vehicle_status(VehicleStatusResult& out, tk::ConnectOrigin origin," in header
-assert "pair(tk::ConnectOrigin origin, int timeout_ms = 30000)" in header
+assert "bool pair(" not in header
+assert "enroll_existing_key_(int timeout_ms = 6000)" in header
 status_decl = re.search(r"bool get_vehicle_status\([^;]+;", header, re.DOTALL)
-pair_decl = re.search(r"bool pair\([^;]+;", header, re.DOTALL)
 assert status_decl and "origin =" not in status_decl.group(0)
-assert pair_decl and "origin =" not in pair_decl.group(0)
+private_pair = header.index("enroll_existing_key_(int timeout_ms")
+assert header.rfind("private:", 0, private_pair) > header.rfind("public:", 0, private_pair)
 
-# The supervisor's only status call is read-only/background; Whitelist Add is an explicit HTTP action.
-assert pairing.count("get_vehicle_status(st, tk::ConnectOrigin::Background") == 1
-assert "pair(tk::ConnectOrigin::Background" not in pairing
-auto_pair = pairing[pairing.index("void VehicleController::auto_pair_task_fn_"):pairing.index("// ─── Key management")]
-assert "self->pair(" not in auto_pair
+# Firmware owns enrollment. UI/HTTP callers cannot choose foreground provenance for it.
+assert pairing.count("get_vehicle_status(status, tk::ConnectOrigin::Background") == 1
+assert "self->enroll_existing_key_();" in pairing
 assert "get_vehicle_status(vs, tk::ConnectOrigin::Foreground)" in http_api
-assert "pair(tk::ConnectOrigin::Foreground)" in http_config
-assert "timeout_ms, tk::ConnectOrigin::Background," in pairing  # paired health probe
+assert "handle_send_key" not in http_config
+assert "timeout_ms, tk::ConnectOrigin::Background," in pairing
 
 # Per-probe summaries must not bypass the lower connect rate limiter.
 assert 'ESP_LOGD(TAG, "auto-pair: car not reachable over BLE' in pairing
 assert 'ESP_LOGW(TAG, "auto-pair: car not reachable over BLE' not in pairing
-pair_body = pairing[pairing.index("bool VehicleController::pair("):]
-assert "if (origin != tk::ConnectOrigin::Foreground)" in pair_body
-assert "automatic Whitelist Add is disabled" in pair_body
+pair_body = pairing[pairing.index("bool VehicleController::enroll_existing_key_("):]
+assert "deadline, tk::ConnectOrigin::Background" in pair_body
+assert "tk::CompletionTimeoutPolicy::ExpectedSilent" in pair_body
 assert "await_completion_(completion, generation, deadline, name.c_str(), timeout_policy)" in commands
 assert 'ESP_LOGD(TAG, "background \'%s\' timed out' in commands
 assert "tk::CompletionTimeoutPolicy::BackgroundHealth" in pairing
@@ -65,8 +64,8 @@ assert "observation.seen_us > e->connectable_us" in ble_client
 assert "pending->seen_us = now_us;" in ble_client
 assert "tk::periodic_log_due(" in pairing
 assert "tk::periodic_log_reset(unpaired_notice)" in pairing
-assert 'ESP_LOGI(TAG, "auto-pair: no stored session — preserving key;' in pairing
-assert 'ESP_LOGD(TAG, "auto-pair: no stored session — preserving key;' in pairing
+assert 'ESP_LOGI(TAG, "auto-pair: pairing automatically with the existing key;' in pairing
+assert 'ESP_LOGD(TAG, "auto-pair: waiting for automatic pairing with the existing key' in pairing
 assert re.search(r"await_completion_\(completion, generation, deadline, name\.c_str\(\),\s*"
                  r"tk::CompletionTimeoutPolicy::ForegroundWarn\)", commands)
 

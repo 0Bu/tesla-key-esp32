@@ -1253,10 +1253,9 @@ void VehicleController::loop_task_fn_(void* arg) {
     // time. This task is the right subscriber because it is the one that must keep ticking for the
     // device to be doing anything at all.
     //
-    // The budget (CONFIG_ESP_TASK_WDT_TIMEOUT_S=60) is sized against this task's LONGEST legitimate
-    // block, which is not its 50 ms cadence but the vehicle mutex: a foreground command holds it
-    // for up to 20 s, pair() for up to 30 s. Feeding once per iteration is therefore both necessary
-    // and sufficient — a slow-but-progressing command never trips it, a genuinely stuck one does.
+    // The 60 s watchdog budget is distinct from the normal 50 ms cadence. Foreground commands
+    // have a 20 s budget and automatic enrollment a 6 s budget. Feed once per completed loop
+    // iteration so stalled BLE work or a blocked dependency does not look like normal polling.
     // A failed subscription is logged and the loop runs on unwatched: losing the watchdog is worse
     // than not having it, but far better than refusing to poll the car.
     TaskWatchdogSubscription watchdog;

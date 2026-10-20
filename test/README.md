@@ -44,7 +44,7 @@ behavior claims. Mirrored C++/Python/JS presenters need parity checks, not merel
 
 | Area | Evidence |
 |---|---|
-| Decisions/state machines | `test_logic.cpp`: VIN/identity, units, link/sleep, active window/wake retry, commands, OTA versions/intake, config/storage, watchdog, admission, asynchronous generations, presenters |
+| Decisions/state machines | `test_logic.cpp`: VIN/identity, units, link/sleep, active window/wake retry, automatic same-key enrollment cadence/admission, commands, OTA versions/intake, config/storage, watchdog, admission, asynchronous generations, presenters |
 | Real tesla-ble/PSA seam | `scripts/test-tesla-ble-harness.sh --require-all`: pinned library/patches, Nanopb and pinned Mbed TLS4/TF-PSA-Crypto; production frame/key helpers and V1 crypto vectors |
 | Presenter mirrors | `check-display-sim-parity.sh`, `check-ble-row-parity.sh`: golden C++ decisions against simulator and shipped JavaScript |
 | Public protocol vectors | `tesla_protocol_vectors.test.mjs`: VIN, ECDH/HMAC/AES-GCM and patch contracts, public test keys only |
@@ -71,7 +71,16 @@ Presenter parity likewise proves decisions, not physical pixels.
 | `tools/agent-config/selftest.sh` / `test_codex_setup.py` | Canonical skills/reviewers/hooks, native adapter parity/trust boundaries, read-only scopes, owner contracts, exact content and approval/artifact canaries |
 | `scripts/test-build-contracts.sh` | Targets, pins, partitions, generated artifacts, size/stack/effective-build and publication contracts; no real signing key |
 | `scripts/test-pr-gates.sh` | Exact-head review records, relevance and canonical Git command boundaries using fixtures |
-| `web_ui_browser_gate.py` | Actual assembled page in Chrome/Chromium: console/request failures, degraded poller, escaping, keyboard/accessibility and desktop/mobile layout |
+| `web_ui_browser_gate.py` / `test_web_ui_browser_gate.py` | Linux-only browser launch policy plus the actual assembled page in Chrome/Chromium: console/request failures, degraded poller, escaping, keyboard/accessibility and desktop/mobile layout |
+
+Automatic browser processes run only on Linux. macOS is refused before binary lookup or process
+creation, including an explicit `BROWSER_BIN`. Optional local mode reports a skip; `--require-all`
+on macOS invokes the Linux container and fails if it cannot complete the actual browser check. `scripts/run-browser-tests-linux.sh` builds a local
+Chromium test image and runs the real desktop/mobile gate with no network and a read-only source
+mount. The image build needs package access; Docker is required. Run the wrapper once to
+prepare a cold image before the strict suite, whose container sub-gate retains a 120 s deadline. Linux CI runs the same DOM gate
+in the strict host suite. Launch-policy unit tests use controlled processes and do not prove DOM
+behavior. Use the provided in-app Browser for an optional offline visual inspection on macOS.
 
 Browser profiles have a 45 s cold-start/DOM deadline within the 120 s outer gate. Missing browser
 capability must be reported and fails strict mode. Deterministic DOM/presenter tests do not replace

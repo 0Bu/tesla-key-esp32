@@ -426,31 +426,6 @@ function setHeroAct(label,icon,fn,busyText){
   var hero=$("hero");
   if(hero) hero.classList.toggle('has-act',!!heroActFn);
 }
-var bannerFn=null;
-function bannerAction(){ if(isOtaRunning()) return; if(bannerFn) return bannerFn(); }
-var sendKeyInFlight=false;
-function sendExistingKey(){
-  if(isOtaRunning() || sendKeyInFlight) return Promise.resolve();
-  sendKeyInFlight=true;
-  var button=$("bannerAct"); if(button) button.disabled=true;
-  return requestJsonResultWithTimeout('/send_key',{method:'POST'},15000).then(function(res){
-    var body=res.json&&res.json.response?res.json.response:res.json;
-    if(res.ok&&body&&body.result===true){
-      toast('Existing key request transmitted. Place the Tesla keycard on the console reader and confirm on the touchscreen; approval is not yet confirmed.','ok','send-key');
-    } else {
-      toast('Key transmission was not confirmed. Check vehicle status before trying again.','err','send-key');
-    }
-    poll();
-  }).catch(function(){
-    // The POST may have reached the device even if its response was lost. Never resend
-    // automatically; the user can check status and choose whether to try again.
-    toast('The key request result is unknown. Check vehicle status before trying again.','err','send-key');
-    poll();
-  }).then(function(){
-    sendKeyInFlight=false;
-    if(button) button.disabled=isOtaRunning();
-  });
-}
 
 /* ---------- render ---------- */
 // Connection row: tone ('ok' | 'warn' | '') colours the icon dot, status line and signal glyph.
@@ -496,24 +471,12 @@ function render(s){
     }
   }
 
-  // re-pair / Safe Mode notice
-  var rb=$("reauthBanner"), ba=$("bannerAct");
+  // Safe Mode recovery is separate from pairing, whose instructions belong in the hero.
+  var rb=$("safeModeBanner");
   if(safe){
     rb.classList.add('show');
     setHTML(rb.querySelector('.bt'),'<b>Safe Mode active</b> — Vehicle Bluetooth, commands, and telemetry are stopped. Use this recovery dashboard to inspect diagnostics or update firmware.');
-    if(ba) ba.textContent='Check for update'; bannerFn=otaCheck;
-  } else if(s.reauth || (s.key_present && !paired)){
-    rb.classList.add('show');
-    if(s.key_present){
-      setHTML(rb.querySelector('.bt'), s.reauth
-        ? '<b>Vehicle connection needs attention</b> — Your existing key was preserved. If enrolment is needed, place the Tesla keycard on the console reader, then send the existing key and confirm on the touchscreen.'
-        : '<b>No active pairing is stored</b> — Your existing key is unchanged. Place the Tesla keycard on the console reader, then send the existing key and confirm on the touchscreen.');
-      if(ba) ba.textContent='Send existing key'; bannerFn=sendExistingKey;
-    } else {
-      setHTML(rb.querySelector('.bt'),'<b>Key setup required</b> — No existing key is available. Open setup to generate one before enrolling.');
-      if(ba) ba.textContent='Open setup'; bannerFn=function(){ scrollToKey(); };
-    }
-  } else { rb.classList.remove('show'); bannerFn=null; }
+  } else { rb.classList.remove('show'); }
 
   // hero — single source of overall status. The gauge markup is written only when it actually
   // changes (setHTML), so a running pulse/flow/spinner keeps its phase instead of restarting
@@ -522,7 +485,10 @@ function render(s){
   var g={mode:'neutral', pct:null, glyph:null, busy:false, limit:null}, head='', sub='', chips='';
   var act=null, actLabel='', actIcon='bolt', busyText=null;
   $("hero").classList.remove('hide');
-  if(paired&&v){
+  if(configured && paired && s.reauth && !safe){
+    g={mode:'neutral', glyph:'link'};
+    head='Reconnecting…'; sub='Reconnecting automatically with your existing key.';
+  } else if(paired&&v){
     if(waking){ waking=false; clearTimeout(wakeTimeout); }   // car is awake & reporting — stop the spinner
     var soc=(v.usable_soc!=null?num(v.usable_soc):num(v.soc));   // null = the car has not reported a level (never 0 %)
     // "Charge complete" = battery reached its target and not charging; the start tap is gated
@@ -581,7 +547,7 @@ function render(s){
     act=hasVin?genKey:editVin; actLabel=hasVin?'Generate key':'Add VIN'; actIcon=hasVin?'key':'pencil';
   } else if(linked){
     g={mode:'neutral', glyph:'link'};
-    head='Ready to pair'; sub='Send the existing key above, then approve the request on your Tesla’s touchscreen.';
+    head='Ready to pair'; sub='Your key is sent automatically. Place your Tesla keycard on the console reader and approve on the touchscreen.';
   } else if((s.ble&&s.ble.connect_fail)>=2){
     // The car WAS found (advert heard, name matches the VIN) but every connection attempt times
     // out. Don't blame range. car_connectable===false → the car is at its BLE connection limit;
@@ -1399,6 +1365,23 @@ function loadOtaChangelog(){
   }, '/ota/changelog', {cache: 'no-store'}, OTA_HTTP_TIMEOUT_MS).catch(function(){ return ''; });
 }
 
+function sizeOtaChanges(){
+  var list = $("otaChanges");
+  if(!list || !isOpen('otaModal')) return;
+  var items = list.children;
+  list.style.maxHeight = '';
+  if(items.length <= 5) return;
+  // Use the shortest five-item span so wrapping cannot expose six complete entries elsewhere.
+  var height = Infinity;
+  for(var i = 4; i < items.length; i++){
+    height = Math.min(height, items[i].offsetTop + items[i].offsetHeight - items[i - 4].offsetTop);
+  }
+  list.style.maxHeight = height + 'px';
+}
+if(typeof window !== 'undefined' && typeof window.addEventListener === 'function'){
+  window.addEventListener('resize', sizeOtaChanges);
+}
+
 function askOtaInstall(status, changelog){
   if(otaDecisionResolve) closeOtaModal(false);
   var title = $("otaModalTitle");
@@ -1436,8 +1419,10 @@ function askOtaInstall(status, changelog){
   var m = $("otaModal");
   if(m && m.classList) m.classList.remove('hide');
   syncModal();
+  sizeOtaChanges();
   var card = m && m.querySelector ? m.querySelector('.modal-card') : null;
   if(card && typeof card.focus === 'function' && !isOpen('askModal')) card.focus();
+  if(list) list.scrollTop = 0;
   return new Promise(function(resolve){
     otaDecisionResolve = resolve;
   });

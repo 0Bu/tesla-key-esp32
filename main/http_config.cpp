@@ -1,6 +1,5 @@
 // Setup / pairing / persisted-config endpoints:
 //   POST /gen_keys[?force=1]  (generate key — refuses overwrite w/o force)
-//   POST /send_key            (pair with vehicle, Charging Manager only)
 //   POST /set_time            (browser wall clock — NTP fallback)
 //   POST /set_vin             (persist VIN + reboot)
 //   POST /set_mqtt            (persist MQTT broker + reboot)
@@ -177,7 +176,7 @@ esp_err_t handle_gen_keys(GuardedReq rq) {
     json.boolean(json.root(), "result", ok);
     json.string(
         json.root(), "reason",
-        ok ? "key generated — use /send_key to pair with vehicle"
+        ok ? "key generated — pairing proceeds automatically"
            : rotation == tk::KeyRotationResult::CommitUnknown
                ? "key commit outcome is ambiguous — rebooting to reload durable identity"
            : reboot_to_restore
@@ -191,42 +190,6 @@ esp_err_t handle_gen_keys(GuardedReq rq) {
         esp_restart();
     }
     return r;
-}
-
-// ─── POST /send_key ───────────────────────────────────────────────────────────
-
-esp_err_t handle_send_key(GuardedReq rq) {
-    httpd_req_t* req = rq.req;
-    if (ota_is_updating()) {
-        tk::JsonBuilder json;
-        json.boolean(json.root(), "ok", false);
-        json.boolean(json.root(), "result", false);
-        json.string(json.root(), "reason", tk::kOtaUpdateInProgressReason.data());
-        return send_json(req, static_cast<int>(tk::HttpRouteOtaConflict::Reject409), json.release());
-    }
-    if (validate_query_string(req) != ESP_OK) {
-        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid query string");
-    }
-    // This firmware only enrolls a Charging Manager key (charging + wake), never an
-    // owner key — its sole purpose is the evcc BLE integration. Reject an explicit
-    // owner request rather than silently enrolling a different role than asked for.
-    if (query_param_is(req, "role", "owner")) {
-        tk::JsonBuilder json;
-        json.boolean(json.root(), "result", false);
-        json.string(json.root(), "role", "owner");
-        json.string(json.root(), "reason",
-            "owner role disabled — this device only enrolls Charging Manager keys");
-        return send_json(req, 403, json.release());
-    }
-
-    bool ok = g_vehicle->pair(tk::ConnectOrigin::Foreground);
-    tk::JsonBuilder json;
-    json.boolean(json.root(), "result", ok);
-    json.string(json.root(), "role", "charging_manager");
-    json.string(json.root(), "reason",
-        ok ? "key request transmitted; confirm it on the car's screen (vehicle approval is not confirmed)"
-           : "key transmission was not confirmed; check vehicle status before retrying");
-    return send_json(req, 200, json.release());
 }
 
 // ─── POST /set_time — set the wall clock from the browser (NTP fallback) ───────

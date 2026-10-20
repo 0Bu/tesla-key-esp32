@@ -2229,7 +2229,7 @@ def require_runtime_admission_contract(logic_header: str, facade_header: str,
             re.findall(r"case\s+HttpRoute::([A-Za-z0-9_]+)\s*:", case_group)
         )
     expected_active = {
-        "Command", "VehicleData", "BodyController", "GenKeys", "SendKey", "SetVin",
+        "Command", "VehicleData", "BodyController", "GenKeys", "SetVin",
         "Scan", "McpPost",
     }
     expected_all = set(HTTP_ROUTE_DISPATCH) | {"NotFound"}
@@ -3890,7 +3890,6 @@ HTTP_ROUTE_DISPATCH = {
     "OtaStatus": "handle_ota_status",
     "OtaChangelog": "handle_ota_changelog",
     "GenKeys": "handle_gen_keys",
-    "SendKey": "handle_send_key",
     "SetTime": "handle_set_time",
     "SetVin": "handle_set_vin",
     "SetMqtt": "handle_set_mqtt",
@@ -6986,34 +6985,43 @@ def self_test_vehicle_recovery_canaries(sources: dict[str, str]) -> None:
 
 
 def require_pairing_recovery_contract(pairing: str, commands: str, telemetry: str) -> None:
-    """Remote pairing hints may surface recovery guidance, never mutate identity or enrol."""
+    """Automatic enrollment reuses verified identity and preserves bounded single-write admission."""
     supervisor = function_body_in(pairing, "auto_pair_task_fn_")
     if "self->pair(" in scrub_cpp(supervisor):
-        raise AssertionError("pairing supervisor must not send automatic Whitelist Add")
+        raise AssertionError("removed manual pairing entry must not return")
+    for token in ("tk::auto_enrollment_due(", "tk::auto_enrollment_started(",
+                  "self->enroll_existing_key_();", "self->enrollment_session_snapshot_(pdMS_TO_TICKS(50))"):
+        if token not in supervisor:
+            raise AssertionError(f"automatic enrollment admission lost {token!r}")
+    if not (supervisor.index("self->poll_existing_key_()") < supervisor.index("self->enrollment_session_snapshot_(") < supervisor.index("tk::auto_enrollment_due(") <
+            supervisor.index("tk::auto_enrollment_started(") < supervisor.index("self->enroll_existing_key_();")):
+        raise AssertionError("enrollment must probe first and reserve backoff before I/O")
+    if "enrollment = {}" in scrub_cpp(supervisor):
+        raise AssertionError("health/hint changes must not reset the reserved send cadence")
     recovery_at = supervisor.find("if (key_action == tk::AutomaticKeyAction::RecoveryRequired)")
     generate_at = supervisor.find("if (key_action == tk::AutomaticKeyAction::Generate)")
     if recovery_at < 0 or generate_at < 0 or recovery_at >= generate_at:
         raise AssertionError("recovery hint must be handled before the first-boot-only generator")
     recovery_branch = supervisor[recovery_at:generate_at]
-    for forbidden in ("generate_key(", "clear_session_and_cache_(", "self->pair(",
+    for forbidden in ("generate_key(", "clear_session_and_cache_(", "enroll_existing_key_(",
                       "storage_->remove(", "finish_key_rotation_cleanup_("):
         if forbidden in scrub_cpp(recovery_branch):
             raise AssertionError(f"recovery hint branch may not perform {forbidden!r}")
     if "self->repair_notice_.store(true)" not in recovery_branch:
         raise AssertionError("recovery hint must remain visible to the user")
 
-    paired_branch = supervisor[supervisor.find("if (self->has_session())"):]
+    paired_branch = supervisor[supervisor.find("if (self->has_session() && !recovery_hint)"): ]
     health = paired_branch.find("bool ok            = self->health_probe_();")
     clear_notice = paired_branch.find("self->repair_notice_.store(false);")
     if health < 0 or clear_notice < health:
         raise AssertionError("a stored session alone must not clear the recovery notice")
-    if "if (self->has_session())" not in paired_branch[:clear_notice]:
+    if "if (self->has_session() && !recovery_hint)" not in paired_branch[:clear_notice]:
         raise AssertionError("health confirmation must remain associated with a stored session")
 
     result_callback = function_body_in(commands, "make_result_cb_")
     scrubbed_callback = scrub_cpp(result_callback)
     for forbidden in ("generate_key(", "clear_session_and_cache_(", "finish_key_rotation_cleanup_(",
-                      "storage_->remove(", "storage_->save(", "pair("):
+                      "storage_->remove(", "storage_->save(", "pair(", "enroll_existing_key_("):
         if forbidden in scrubbed_callback:
             raise AssertionError(f"remote result callback may not perform {forbidden!r}")
     for required in ("pairing_recovery_hint_.store(true, std::memory_order_release)",
@@ -7024,7 +7032,7 @@ def require_pairing_recovery_contract(pairing: str, commands: str, telemetry: st
     fault_handler = function_body_in(telemetry, "handle_signed_message_fault_")
     scrubbed_fault_handler = scrub_cpp(fault_handler)
     for forbidden in ("storage_->remove(", "storage_->save(", "generate_key(",
-                      "finish_key_rotation_cleanup_(", "pair("):
+                      "finish_key_rotation_cleanup_(", "pair(", "enroll_existing_key_("):
         if forbidden in scrubbed_fault_handler:
             raise AssertionError(f"signed message fault may not perform {forbidden!r}")
     for required in ("peer->reset();", "on_vehicle_message_(msg);",
@@ -7032,17 +7040,58 @@ def require_pairing_recovery_contract(pairing: str, commands: str, telemetry: st
         if required not in scrubbed_fault_handler:
             raise AssertionError(f"signed message fault handling lost {required!r}")
 
-    pair_body = function_body_in(pairing, "pair")
-    if "if (origin != tk::ConnectOrigin::Foreground)" not in pair_body:
-        raise AssertionError("Whitelist Add must reject non-user/background origins")
+    pair_body = function_body_in(pairing, "enroll_existing_key_")
+    for token in ("OtaIdentityMutationGuard identity_guard(tk::IdentityMutationEntry::AutomaticEnrollment)",
+                  "if (!identity_guard) return false;", "tk::SemGuard cmd_guard(command_mutex_",
+                  "!tk::runtime_admission_vehicle_ready()", "!has_plausible_vin()",
+                  "storage_->probe_blob(tk::nvs_contract::kPrivateKey, key_present)",
+                  "const auto session = enrollment_session_snapshot_(",
+                  "!key_probe_ok || !key_present || !command_identity_ready_()",
+                  "tk::auto_enrollment_needed(session, pairing_recovery_hint_.load())",
+                  "WakePolicy::NoWakeFail, deadline, tk::ConnectOrigin::Background",
+                  "tk::CompletionTimeoutPolicy::ExpectedSilent"):
+        if token not in pair_body:
+            raise AssertionError(f"automatic enrollment sender lost {token!r}")
+    if not (pair_body.index("tk::SemGuard cmd_guard") < pair_body.index("probe_blob(") <
+            pair_body.index("send_vcsec_locked_(")):
+        raise AssertionError("sender must recheck storage and identity under FIFO before transmission")
+    for token in ("generate_key(", "storage_->remove(", "storage_->save(", "clear_session_and_cache_("):
+        if token in scrub_cpp(pair_body):
+            raise AssertionError(f"automatic same-key enrollment may not perform {token!r}")
+    if "ESP_LOGW(" in scrub_cpp(pair_body) or "ESP_LOGI(" in scrub_cpp(pair_body):
+        raise AssertionError("ordinary unattended enrollment attempts must not bypass background log throttling")
     if "Keys_Role_ROLE_CHARGING_MANAGER" not in pair_body:
-        raise AssertionError("explicit enrollment role changed from Charging Manager")
+        raise AssertionError("automatic enrollment role changed from Charging Manager")
     if "VCSEC_KeyFormFactor_KEY_FORM_FACTOR_CLOUD_KEY" not in pair_body:
-        raise AssertionError("explicit enrollment form factor changed from CLOUD_KEY")
+        raise AssertionError("automatic enrollment form factor changed from CLOUD_KEY")
     if "true /* completes_on_transmit:" not in pair_body:
         raise AssertionError("Whitelist Add result must report local transmission, not wait for car approval")
     if "0 /* max_retries:" not in pair_body:
         raise AssertionError("an ambiguous Whitelist Add write must not be replayed automatically")
+    probe = function_body_in(pairing, "poll_existing_key_")
+    if "get_vehicle_status(status, tk::ConnectOrigin::Background, 6000)" not in probe:
+        raise AssertionError("automatic enrollment must retain the bounded non-waking status probe")
+    snapshot = function_body_in(pairing, "enrollment_session_snapshot_")
+    for token in ("storage_->probe_blob(tk::nvs_contract::kSessionVcsec, snapshot.stored)",
+                  "tk::SemGuard vehicle_guard(vehicle_mutex_, wait_ticks)",
+                  "if (!vehicle_guard || !client_) return snapshot;",
+                  "if (!peer || !peer->is_private_key_initialized()) return snapshot;",
+                  "snapshot.runtime_readable = true;", "snapshot.runtime_ready = peer->is_valid()", "peer->get_epoch()",
+                  "i < 16", "epoch_bits |= epoch[i]", "peer->is_valid()",
+                  "peer->has_shared_secret() && epoch_bits != 0",
+                  "command_runner_.vcsec_session().is_authenticated()"):
+        if token not in snapshot:
+            raise AssertionError(f"runtime session snapshot lost {token!r}")
+    locked = snapshot[snapshot.index("tk::SemGuard vehicle_guard"):]
+    for forbidden in ("storage_->", "ESP_LOG", "can_send_command(", "is_initialized(",
+                      "has_valid_epoch(", "send_vcsec", "xSemaphoreTake", "vTaskDelay"):
+        if forbidden in scrub_cpp(locked):
+            raise AssertionError(f"runtime session snapshot may not perform {forbidden!r} under Vehicle lock")
+    if not (pair_body.index("tk::SemGuard cmd_guard") < pair_body.index("enrollment_session_snapshot_(") <
+            pair_body.index("send_vcsec_locked_(")):
+        raise AssertionError("sender must repeat RAM admission under FIFO before transmission")
+    if "std::min<TickType_t>(ticks_until_(deadline), pdMS_TO_TICKS(50))" not in pair_body:
+        raise AssertionError("sender runtime snapshot must retain its bounded remaining wait")
     vcsec_sender = function_body_in(commands, "send_vcsec_locked_")
     if "completes_on_transmit, max_retries" not in vcsec_sender:
         raise AssertionError("VCSEC sender must preserve each command's retry budget")
@@ -7061,8 +7110,28 @@ def self_test_pairing_recovery_canaries(pairing: str, commands: str,
     anchor = "void VehicleController::auto_pair_task_fn_(void* arg) {"
     if pairing.count(anchor) != 1:
         raise AssertionError("pairing supervisor canary anchor missing")
-    reject("automatic enrollment restored",
+    reject("removed manual pairing entry restored",
            pairing.replace(anchor, anchor + "\n    self->pair(tk::ConnectOrigin::Background);", 1))
+    reject("backoff reservation removed", pairing.replace(
+        "tk::auto_enrollment_started(enrollment, now_ms);", "", 1))
+    reject("hint oscillation resets cadence", pairing.replace(
+        "tk::auto_enrollment_started(enrollment, now_ms);",
+        "enrollment = {}; tk::auto_enrollment_started(enrollment, now_ms);", 1))
+    reject("sender loses tri-state session recheck", pairing.replace(
+        "tk::auto_enrollment_needed(session, pairing_recovery_hint_.load())",
+        "tk::auto_enrollment_needed({true, false, true, false}, pairing_recovery_hint_.load())", 1))
+    reject("RAM session ignored", pairing.replace(
+        "snapshot.runtime_ready = peer->is_valid()", "snapshot.runtime_ready = false && peer->is_valid()", 1))
+    reject("unknown runtime accepted", pairing.replace(
+        "if (!vehicle_guard || !client_) return snapshot;", "if (!client_) return snapshot;", 1))
+    reject("runtime snapshot logs under lock", pairing.replace(
+        "snapshot.runtime_readable = true;", 'ESP_LOGW(TAG, "runtime"); snapshot.runtime_readable = true;', 1))
+    reject("sender can change identity", pairing.replace(
+        "CommandOutcome outcome = send_vcsec_locked_(",
+        "storage_->remove(tk::nvs_contract::kPrivateKey); CommandOutcome outcome = send_vcsec_locked_(", 1))
+    reject("background enrollment warning storm restored", pairing.replace(
+        'ESP_LOGD(TAG, "Whitelist Add transmission was not confirmed:',
+        'ESP_LOGW(TAG, "Whitelist Add transmission was not confirmed:', 1))
     reject("ambiguous Whitelist Add retry restored",
            pairing.replace("0 /* max_retries:", "3 /* max_retries:", 1))
     reject("VCSEC sender discards the explicit retry budget", pairing,

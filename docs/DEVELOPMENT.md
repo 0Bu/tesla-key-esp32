@@ -42,6 +42,16 @@ scripts/test-pr-gates.sh
 tools/agent-config/selftest.sh
 ```
 
+Automatic browser tests are Linux-only. On macOS, use `scripts/run-browser-tests-linux.sh`
+(Docker and package access for the initial image build), or the Linux CI host job. The container
+runs the actual desktop/mobile DOM and accessibility checks without network or writable source
+access. Native macOS browser launches are refused; `--require-all` runs this Linux container
+on macOS and fails if Docker, the image build or the real browser check fails. Prepare a cold
+image with `scripts/run-browser-tests-linux.sh` first; the strict sub-gate keeps its 120-second
+outer deadline, including Docker startup. Controlled launch-policy tests are separate
+from real-browser evidence. For optional local visual review, use the provided in-app Browser
+with an offline fixture; do not launch native Chrome from shell tests.
+
 Before firmware handoff, use the complete four-target contract:
 
 ```bash
