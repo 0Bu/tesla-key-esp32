@@ -34,7 +34,7 @@ Details: [storage](SECURITY.md#nvs-retention).
 | `[[nodiscard]]` NVS writes | `main/nvs_storage.hpp` + `-Werror=unused-result` | A silently dropped write of something unrebuildable: the private key, the VIN, the safe-mode counter. |
 | Exact fail-closed NVS registry | `logic/nvs_contract.hpp`, `main/nvs_storage.cpp`, `scripts/check-nvs-contract.py`, `test/test_nvs_storage.cpp` | Unknown or colliding keys, wrong APIs and unreviewed persistence surfaces. |
 | Cached VCSEC session presence | `main/nvs_storage.{cpp,hpp}`, `main/vehicle_pairing.cpp` | The 50 ms vehicle loop probing flash-backed NVS to rediscover a stable bit. |
-| WiFi credential rollback | `logic/wifi_rollback.hpp`, `main.cpp`, `POST /set_wifi` | An unrecoverable typo. |
+| WiFi credential rollback | `logic/wifi_rollback.hpp`, `main.cpp`, `main/config_blob.cpp`, `POST /set_wifi` | An unrecoverable typo. |
 | Config survives OTA | `partitions.csv` (`nvs` at `0x9000`) | Losing pairing/keys on upgrade. |
 | Shared WiFi credential contract + safe host provisioning | `logic/wifi_credentials.hpp`, `main/provisioning.cpp`, `main/http_config.cpp`; [storage](SECURITY.md#nvs-retention) | Invalid provisioning credentials or a partial NVS image erasing keys and sessions. |
 | MQTT broker test-before-persist + credential-free display | `logic/mqtt_uri.hpp`, `main/http_config.cpp` (`POST /set_mqtt`), `main/mqtt_ha.cpp` | Saving an unusable broker or exposing its credentials. |

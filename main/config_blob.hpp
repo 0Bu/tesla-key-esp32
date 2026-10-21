@@ -71,4 +71,11 @@ bool cfg_load_for_update(NvsStorageAdapter& cfg, ConfigBlob& out);
 // it answers 500 and skips its reboot.
 bool cfg_save(NvsStorageAdapter& cfg, const ConfigBlob& in);
 
+// Seed once from the verified boot configuration before starting services. Successful cfg_save()
+// commits keep this diagnostic current, including when a configuration restart is deferred.
+void cfg_init_wifi_rollback_status(bool rolled_back) noexcept;
+
+// Allocation-free snapshot for cyclic status consumers; never reads NVS.
+bool cfg_wifi_rolled_back() noexcept;
+
 }  // namespace tk
