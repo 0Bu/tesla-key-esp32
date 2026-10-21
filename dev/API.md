@@ -171,6 +171,9 @@ rollback. A successful lease drops the backup; sustained authentication refusal 
 network on the next boot, reboots and exposes `wifi.rolled_back`. An absent SSID gets 180 s before
 rollback. [Shared provisioning contract](USER_GUIDE.md#provision-without-rebuilding).
 
+A successful changed-credentials commit clears `wifi.rolled_back` immediately, including when an
+active OTA check defers the restart. Failed saves and unchanged credentials retain the verdict.
+
 ### Status fields
 
 | Key | Content |
