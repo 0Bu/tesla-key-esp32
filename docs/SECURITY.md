@@ -130,8 +130,26 @@ This pipeline pin is not a second device trust anchor.
 
 A separately authorized key setup uses a dedicated offline RSA-3072 key, exponent 65537,
 unencrypted PKCS#1/PKCS#8 PEM. Do not generate production keys in CI or reuse a GPG key.
-`espsecure.py generate_signing_key --version 2 --scheme rsa3072 <private-path>` is the relevant tool;
-validate with a disposable payload on the trusted machine. Protect at least two offline backups.
+Run **one** of the following alternatives in a private offline directory outside the repository.
+Do not overwrite an existing signing key; `umask 077` restricts newly created files to owner access.
+
+With esptool v5 or later, use the current `espsecure` command and hyphenated subcommand:
+
+```bash
+umask 077
+espsecure generate-signing-key --version 2 --scheme rsa3072 ota_signing_key.pem
+```
+
+Alternatively, generate the same key type with [OpenSSL](https://docs.openssl.org/3.6/man1/openssl-genpkey/):
+
+```bash
+umask 077
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 \
+  -pkeyopt rsa_keygen_pubexp:65537 -out ota_signing_key.pem
+```
+
+OpenSSL writes unencrypted PKCS#8 PEM, which `espsecure` accepts directly.
+Validate with a disposable payload on the trusted machine. Protect at least two offline backups.
 Loss requires fleet USB recovery; compromise defeats signed OTA. Never pass the real key through
 agent tools, logs, repository files or tests. Tests use throwaway keys only.
 
