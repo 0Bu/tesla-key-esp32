@@ -193,10 +193,127 @@ done
 ar rcs "$BUILD_DIR/libtb.a" "$BUILD_DIR"/obj/tb/*.o "$BUILD_DIR"/obj/nanopb/*.o
 
 echo "[harness] Compiling test_tesla_ble_harness..."
+# Compile the actual firmware response adapter against the real protocol/crypto types, replacing
+# only its IDF facade and telemetry sinks. Never copy its admission decisions into the harness.
+python3 - "$ROOT_DIR/main/vehicle_telemetry.cpp" "$BUILD_DIR/carserver-handler.inc" <<'PY'
+from pathlib import Path
+import sys
+source = Path(sys.argv[1]).read_text()
+marker = "void VehicleController::handle_carserver_frame_("
+if source.count(marker) != 1:
+    raise SystemExit("expected exactly one native CarServer response adapter")
+start = source.index(marker)
+end = source.index("\n}", start) + 2
+Path(sys.argv[2]).write_text(source[start:end] + "\n")
+PY
+# Compile the native VCSEC builders, routing, authentication and response entry point unchanged.
+python3 - "$ROOT_DIR/main/vehicle_telemetry.cpp" "$BUILD_DIR/vcsec-native.inc" <<'PY'
+from pathlib import Path
+import sys
+source = Path(sys.argv[1]).read_text()
+begin, end = "// VCSEC_ROUTING_SCOPE_BEGIN", "// VCSEC_ROUTING_SCOPE_END"
+if source.count(begin) != 1 or source.count(end) != 1:
+    raise SystemExit("expected exactly one native routing-address scope")
+methods = [source.split(begin, 1)[1].split(end, 1)[0]]
+for result, name in (
+    ("void", "retire_vcsec_contexts_"), ("bool", "initialize_routing_address_"),
+    ("int", "build_vcsec_attempt_"), ("bool", "vcsec_response_matches_"),
+    ("bool", "deliver_vcsec_response_"), ("void", "handle_empty_vcsec_reply_"),
+    ("bool", "response_matches_current_"), ("bool", "authenticate_fault_reply_"),
+    ("void", "handle_vcsec_frame_"), ("void", "handle_signed_message_fault_"),
+    ("void", "handle_session_info_frame_"), ("void", "process_rx_frame_"),
+    ("void", "drive_command_runner_"), ("bool", "apply_ble_link_state_"),
+    ("tk::SessionRuntimeState", "runtime_session_observation_locked_"),
+    ("void", "publish_session_runtime_locked_"), ("void", "invalidate_session_runtime_locked_"),
+    ("tk::SessionAvailability", "session_availability"), ("bool", "session_available"),
+    ("bool", "persist_session_"), ("bool", "save_session_runtime_locked_"), ("bool", "load_nvs_sessions_"),
+    ("void", "establish_verified_session_locked_"),
+):
+    marker = result + " VehicleController::" + name + "("
+    if source.count(marker) != 1:
+        raise SystemExit("expected exactly one native VCSEC method: " + name)
+    start = source.index(marker)
+    finish = source.index("\n}", start) + 2
+    methods.append(source[start:finish])
+Path(sys.argv[2]).write_text("\n\n".join(methods) + "\n")
+PY
+# The identity-cleanup regression compiles the actual native methods. Replace only the
+# controller class name; storage, locking, link and cache effects are supplied by host fixtures.
+python3 - "$ROOT_DIR/main/vehicle_pairing.cpp" "$BUILD_DIR/pairing-cleanup.inc" "$ROOT_DIR/main/vehicle_telemetry.cpp" <<'PY'
+from pathlib import Path
+import sys
+source = Path(sys.argv[1]).read_text()
+methods = []
+for name in ("clear_session_and_cache_", "finish_key_rotation_cleanup_"):
+    marker = "bool VehicleController::" + name + "("
+    if source.count(marker) != 1:
+        raise SystemExit("expected exactly one native pairing cleanup method: " + name)
+    start = source.index(marker)
+    end = source.index("\n}", start) + 2
+    methods.append(source[start:end].replace("VehicleController::", "PairingCleanupController::", 1))
+source = Path(sys.argv[3]).read_text()
+marker = "void VehicleController::retire_vcsec_contexts_("
+if source.count(marker) != 1:
+    raise SystemExit("expected exactly one native VCSEC retirement method")
+start = source.index(marker)
+end = source.index("\n}", start) + 2
+methods.append(source[start:end].replace("VehicleController::", "PairingCleanupController::", 1))
+Path(sys.argv[2]).write_text("\n\n".join(methods) + "\n")
+PY
+# Exercise unchanged native result completion with deterministic semaphore/clock sinks.
+python3 - "$ROOT_DIR/main/vehicle_commands.cpp" "$ROOT_DIR/main/vehicle_ctrl.hpp" "$BUILD_DIR" <<'PY_COMPLETION'
+from pathlib import Path
+import sys
+source, header = Path(sys.argv[1]).read_text(), Path(sys.argv[2]).read_text()
+out = Path(sys.argv[3])
+types = []
+for name in ("CommandCompletion", "CommandOutcome"):
+    start = header.index("    struct " + name + " {")
+    end = header.index("\n    };", start) + len("\n    };")
+    types.append(header[start:end])
+(out / "completion-types.inc").write_text("\n".join(types) + "\n")
+methods = []
+for result, name in (("void", "publish_command_outcome_"), ("void", "invalidate_and_flush_"),
+                     ("VehicleController::CommandOutcome", "await_completion_"),
+                     ("VehicleController::ResultCb", "make_result_cb_")):
+    marker = result + " VehicleController::" + name + "("
+    if source.count(marker) != 1:
+        raise SystemExit("expected one native completion method: " + name)
+    start = source.index(marker)
+    end = source.index("\n}", start) + 2
+    methods.append(source[start:end].replace("VehicleController::", "CompletionController::"))
+(out / "completion-native.inc").write_text("\n\n".join(methods) + "\n")
+marker = "        auto on_done = [cb]("
+parts = source.split(marker)[1:]
+adapters = ["auto on_done = [cb](" + part.split("\n        };", 1)[0] + "\n};" for part in parts]
+if len(adapters) != 2 or adapters[0] != adapters[1]:
+    raise SystemExit("VCSEC and Infotainment must preserve the same typed completion adapter")
+(out / "completion-on-done.inc").write_text(adapters[0] + "\n")
+methods = []
+for result, name in (("bool", "send_vcsec_"), ("VehicleController::CommandOutcome", "send_vcsec_outcome_"),
+                     ("bool", "wake_up")):
+    marker = result + " VehicleController::" + name + "("
+    if source.count(marker) != 1:
+        raise SystemExit("expected one native wake method: " + name)
+    start = source.index(marker)
+    end = source.index("\n}", start) + 2
+    methods.append(source[start:end].replace("VehicleController::", "WakeController::"))
+(out / "wake-native.inc").write_text("\n\n".join(methods) + "\n")
+clocks = []
+for result, name in (("uint32_t", "deadline_in_"), ("TickType_t", "ticks_until_"),
+                     ("int", "remaining_ms_"), ("uint32_t", "capped_deadline_")):
+    marker = "    static " + result + " " + name + "("
+    if header.count(marker) != 1:
+        raise SystemExit("expected one native clock method: " + name)
+    start = header.index(marker)
+    end = header.index("\n    }", start) + len("\n    }")
+    clocks.append(header[start:end])
+(out / "wake-clock.inc").write_text("\n".join(clocks) + "\n")
+PY_COMPLETION
 # tests/test_constants.h carries the official vehicle-command protocol test keys (never production).
 "$CXX" -std=c++20 -O2 -Wall -Wextra \
     "$ROOT_DIR/test/test_tesla_ble_harness.cpp" \
-    $INC -I "$TB_DIR/tests" "$BUILD_DIR/libtb.a" "$MBEDTLS_LIB" \
+    $INC -I "$TB_DIR/tests" -I "$BUILD_DIR" -I "$ROOT_DIR/test/stubs" "$BUILD_DIR/libtb.a" "$MBEDTLS_LIB" \
     -o "$BUILD_DIR/test_tesla_ble_harness"
 
 echo "[harness] Executing integration harness..."

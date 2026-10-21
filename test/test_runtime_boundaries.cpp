@@ -15,6 +15,7 @@
 #include <freertos/task.h>
 
 #include <cstdarg>
+#include <cstdio>
 #include <cstring>
 #include <cstdlib>
 #include <iostream>
@@ -22,6 +23,8 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+int test_coredump_hash();
 
 struct HostPingSession {
     esp_ping_callbacks_t callbacks{};
@@ -43,7 +46,17 @@ int checks = 0;
     } while (0)
 
 vprintf_like_t log_sink = nullptr;
+bool capture_log_sinks = false;
+std::string captured_serial;
+std::string captured_syslog;
 HostSemaphore* last_mutex = nullptr;
+bool fail_diag_mutex_create = false;
+unsigned log_hook_installs = 0;
+bool inject_hook_reentry = false;
+bool inject_mutex_reentry = false;
+unsigned hook_reentries = 0;
+unsigned mutex_reentries = 0;
+std::string captured_fallback;
 TaskFunction_t created_task = nullptr;
 void* created_task_arg = nullptr;
 BaseType_t task_create_result = pdPASS;
@@ -95,7 +108,15 @@ struct FakeMqttProbeOps {
 
 std::vector<std::string> FakeMqttProbeOps::events;
 
-int discard_log(const char*, va_list) { return 0; }
+int discard_log(const char* fmt, va_list ap) {
+    if (capture_log_sinks) {
+        char buffer[1024];
+        const int n = vsnprintf(buffer, sizeof(buffer), fmt, ap);
+        CHECK(n >= 0 && static_cast<size_t>(n) < sizeof(buffer));
+        captured_serial.assign(buffer, n);
+    }
+    return 0;
+}
 
 int emit_log(const char* format, ...) {
     va_list ap;
@@ -167,6 +188,12 @@ struct HostSemaphore {
 };
 
 extern "C" SemaphoreHandle_t xSemaphoreCreateMutex() {
+    if (inject_mutex_reentry) {
+        ++mutex_reentries;
+        CHECK(diag_log_dump_chunks([](const char*, size_t) { return true; }) == DiagDumpResult::SnapshotInvalidated);
+        emit_log("E (4) mqtt_client: Error parse uri (1) = mqtt://example:secret@broker.invalid\n");
+    }
+    if (fail_diag_mutex_create) { last_mutex = nullptr; return nullptr; }
     last_mutex = new HostSemaphore();
     return last_mutex;
 }
@@ -286,12 +313,35 @@ extern "C" esp_err_t esp_ping_get_profile(esp_ping_handle_t session, int profile
 }
 
 extern "C" vprintf_like_t esp_log_set_vprintf(vprintf_like_t replacement) {
+    ++log_hook_installs;
     vprintf_like_t previous = log_sink;
+    CHECK(previous != replacement);  // never publish our hook as its own previous sink
     log_sink = replacement;
+    if (inject_hook_reentry) {
+        ++hook_reentries;
+        emit_log("E (3) mqtt_client: Error parse uri (1) = mqtt://example:secret@broker.invalid\n");
+    }
     return previous;
 }
 
-void syslog_send(const char*, size_t) {}
+// Deterministic fallback Serial sink for the publication window before s_prev is stored.
+extern "C" int host_test_vprintf(const char* fmt, va_list ap) {
+    char buffer[1024];
+    const int n = vsnprintf(buffer, sizeof(buffer), fmt, ap);
+    CHECK(n >= 0 && static_cast<size_t>(n) < sizeof(buffer));
+    if (capture_log_sinks) {
+        captured_fallback.assign(buffer, n);
+        captured_serial.assign(buffer, n);
+    }
+    return n;
+}
+
+void syslog_send(const char* data, size_t len) {
+    if (capture_log_sinks) {
+        CHECK(!last_mutex || !last_mutex->held);
+        captured_syslog.assign(data, len);
+    }
+}
 
 // Minimal deterministic NvsStorageAdapter implementation for the real safe_mode.cpp glue. The
 // storage methods are fault seams: they can fail normally or throw, proving no exception can
@@ -1060,6 +1110,7 @@ static void test_diag_http_completion_matrix() {
 }
 
 int main() {
+    checks += test_coredump_hash();
     log_sink = discard_log;
 
     test_runtime_admission_default_closed();
@@ -1076,7 +1127,32 @@ int main() {
 
     // Real diag_log.cpp: every sink call must run after the ring mutex has been released. A
     // throwing or early-stopping network sink must leave the shared producer lock usable.
+    const unsigned previous_installs = log_hook_installs;
+    last_mutex = nullptr;
+    fail_diag_mutex_create = true;
+    capture_log_sinks = true;
+    inject_hook_reentry = true;
+    inject_mutex_reentry = true;
     diag_log_init();
+    CHECK(hook_reentries == 1 && mutex_reentries == 1);
+    CHECK(captured_fallback == tk::kDiagMqttUriErrorLine);
+    inject_hook_reentry = false;
+    emit_log("E (1) mqtt_client: Error parse uri (1) = mqtt://example:secret@broker.invalid\n");
+    capture_log_sinks = false;
+    CHECK(captured_serial == tk::kDiagMqttUriErrorLine);
+    CHECK(captured_syslog == tk::kDiagMqttUriErrorLine);
+    CHECK(diag_log_dump_chunks([](const char*, size_t) { return true; }) == DiagDumpResult::SnapshotInvalidated);
+    diag_log_init();  // another failed retry must not replace s_prev with our own hook
+    CHECK(log_hook_installs == previous_installs + 1);
+    fail_diag_mutex_create = false;
+    capture_log_sinks = true;
+    diag_log_init();
+    CHECK(captured_serial == tk::kDiagMqttUriErrorLine && captured_syslog == tk::kDiagMqttUriErrorLine);
+    CHECK(mutex_reentries == 3);
+    inject_mutex_reentry = false;
+    capture_log_sinks = false;
+    diag_log_init();
+    CHECK(log_hook_installs == previous_installs + 1);
     CHECK(last_mutex != nullptr);
     diag_log_clear();
     emit_log("first %d\n", 1);
@@ -1224,6 +1300,109 @@ int main() {
     CHECK(clear_result == DiagDumpResult::SnapshotInvalidated);
     CHECK(clear_chunks == 1);
     CHECK(!last_mutex->held);
+    diag_log_clear();
+
+    auto export_diag_capture = [&]() {
+    std::string exported;
+    tk::DiagLineFrame frame;
+    char input[288]{};
+    char output[tk::diag_redacted_capacity(sizeof(input))]{};
+    auto flush = [&](size_t size) {
+        const auto redacted = tk::redact_diag_line_fixed({input, size}, output, sizeof(output));
+        CHECK(redacted.safe); exported.append(output, redacted.size);
+    };
+    CHECK(diag_log_dump_chunks([&](const char* data, size_t len) {
+        CHECK(!last_mutex->held);
+        for (size_t i = 0; i < len; ++i) {
+            const auto step = tk::diag_line_step(frame, data[i], sizeof(input));
+            if (step.action == tk::DiagLineAction::Append) input[step.size] = data[i];
+            else if (step.action == tk::DiagLineAction::EmitLine) flush(step.size);
+            else if (step.action == tk::DiagLineAction::EmitOverlong) exported += tk::kRedacted;
+        }
+        return true;
+    }, DiagDumpStart::AfterWrappedLineBoundary) == DiagDumpResult::Complete);
+    if (frame.size) flush(frame.size);
+        return exported;
+    };
+    // Real formatted-callback -> ring -> chunk framing -> fixed redactor. Embedded CR/LF,
+    // including a forged log prefix, must not expose a second markerless value. Private Serial
+    // and Syslog receive the original bytes; only the ring copy is normalized.
+    for (bool wrapped : {false, true}) for (bool truncated : {false, true}) {
+        diag_log_clear();
+        std::string record = "I (1) wifi:connected with example\r\nI (0) fake: private-tail";
+        if (truncated) record += std::string(240, 'X');
+        record += "\r\n";
+        capture_log_sinks = true;
+        captured_serial.clear(); captured_syslog.clear();
+        emit_log("%s", record.c_str());
+        capture_log_sinks = false;
+        CHECK(captured_serial == record);
+        CHECK(captured_syslog == record.substr(0, 255));
+        if (truncated) emit_log("\n");  // a later callback terminates the truncated record
+        if (wrapped) {
+            for (int i = 0; i < 350; ++i) {
+                emit_log("%s", record.c_str());
+                if (truncated) emit_log("\n");
+            }
+        }
+        emit_log("I (2) app: after\n");
+        std::string raw;
+        CHECK(diag_log_dump_chunks([&](const char* data, size_t len) {
+            CHECK(!last_mutex->held); raw.append(data, len); return true;
+        }, DiagDumpStart::AfterWrappedLineBoundary) == DiagDumpResult::Complete);
+        CHECK(raw.find("example  I (0) fake: private-tail") != std::string::npos);
+        CHECK(raw.find("\nI (0) fake:") == std::string::npos);
+        const std::string exported = export_diag_capture();
+        CHECK(exported.find("example") == std::string::npos);
+        CHECK(exported.find("private-tail") == std::string::npos);
+        CHECK(exported.find(tk::kRedacted) != std::string::npos);
+    }
+    for (bool truncated : {false, true}) {
+        diag_log_clear();
+        std::string record = "E (123) mqtt_client: Error parse uri (non-hexadecimal data after %) = mqtt://example:secret@broker.invalid\nI (0) fake: private-tail";
+        if (truncated) record += std::string(240, 'X');
+        record += "\n";
+        captured_serial.clear(); captured_syslog.clear(); capture_log_sinks = true;
+        emit_log("%s", record.c_str());
+        capture_log_sinks = false;
+        CHECK(captured_serial == tk::kDiagMqttUriErrorLine);
+        CHECK(captured_syslog == tk::kDiagMqttUriErrorLine);
+        std::string raw;
+        CHECK(diag_log_dump_chunks([&](const char* data, size_t len) { raw.append(data, len); return true; }) == DiagDumpResult::Complete);
+        CHECK(raw == tk::kDiagMqttUriErrorLine);
+        CHECK(export_diag_capture().find("secret") == std::string::npos);
+    }
+    // A forged MQTT error inside another record must not rewrite its private raw sinks.
+    diag_log_clear();
+    const std::string foreign = "I (123) wifi:connected with E (1) mqtt_client: Error parse uri (1) = example\n";
+    captured_serial.clear(); captured_syslog.clear(); capture_log_sinks = true;
+    emit_log("%s", foreign.c_str());
+    capture_log_sinks = false;
+    CHECK(captured_serial == foreign && captured_syslog == foreign);
+
+    // No artificial LF: a truncated callback followed directly by an ordinary complete record,
+    // or an entirely unterminated wrapped ring, may discard the whole export. It must never
+    // emit the markerless value or flush a partial secret as if it were a complete line.
+    for (bool wrapped : {false, true}) for (bool next_record : {false, true}) {
+        diag_log_clear();
+        const std::string long_record =
+            "I (1) wifi:connected with example\nI (0) fake: private-tail" + std::string(240, 'X');
+        for (unsigned i = 0; i < (wrapped ? 350u : 1u); ++i) emit_log("%s", long_record.c_str());
+        if (next_record) emit_log("I (2) app: complete next record\n");
+        const auto exported = export_diag_capture();
+        CHECK(exported.find("example") == std::string::npos);
+        CHECK(exported.find("private-tail") == std::string::npos);
+        CHECK(exported.find("fake:") == std::string::npos);
+        if (wrapped) CHECK(exported.empty());
+    }
+    diag_log_clear();
+    const std::string ordinary = "I (3) app: ordinary\nsecond line\n";
+    emit_log("%s", ordinary.c_str());
+    std::string unchanged;
+    CHECK(diag_log_dump_chunks([&](const char* data, size_t len) {
+        unchanged.append(data, len); return true;
+    }) == DiagDumpResult::Complete);
+    CHECK(unchanged == ordinary);
     diag_log_clear();
 
     // Temporary MQTT probe ownership is deterministic at every acquire stage. In particular, a

@@ -69,7 +69,9 @@ if [ "$REQUIRE_ALL" = 1 ]; then
         test/test_provision.py \
         test/test_capture_wake.py \
         test/test_log_origin_contract.py \
+        test/test_diagnostic_export_guidance.py \
         test/test_runtime_boundary_contract.py \
+        test/run-cjson-oom-tests.sh \
         test/test_codex_setup.py \
         scripts/test-build-contracts.sh \
         scripts/check-dependency-contract.py \
@@ -104,7 +106,7 @@ if command -v cmake >/dev/null 2>&1; then
     run_gate "build host C++ tests" 120 cmake --build "$BUILD_DIR" --parallel
     run_gate "execute host C++ tests" 120 ctest --test-dir "$BUILD_DIR" --output-on-failure
 else
-    # No cmake on this host (e.g. a bare Raspberry Pi) — compile both host targets directly.
+    # No cmake on this host (e.g. a bare Raspberry Pi) — compile every host boundary directly.
     # Keep flags, sources and include paths in sync with test/CMakeLists.txt.
     CXX="${CXX:-}"
     if [ -z "$CXX" ]; then
@@ -119,14 +121,40 @@ else
     run_gate "execute pure-logic tests" 120 "$BUILD_DIR/logic_tests"
     run_gate "compile NVS adapter tests" 120 "$CXX" -std=c++17 -Wall -Wextra -Werror \
         -Itest/stubs -Imain \
-        -o "$BUILD_DIR/nvs_storage_tests" \
+        -pthread -o "$BUILD_DIR/nvs_storage_tests" \
         test/test_nvs_storage.cpp main/nvs_storage.cpp main/config_blob.cpp
     run_gate "execute NVS adapter tests" 120 "$BUILD_DIR/nvs_storage_tests"
     run_gate "compile runtime boundary tests" 120 "$CXX" -std=c++17 -Wall -Wextra -Werror \
-        -Itest/stubs -Imain \
+        -Itest/stubs -Itest/coredump_stubs -Imain \
         -o "$BUILD_DIR/runtime_boundary_tests" \
-        test/test_runtime_boundaries.cpp main/diag_log.cpp main/safe_mode.cpp
+        test/test_runtime_boundaries.cpp test/test_coredump_hash.cpp main/diag_log.cpp main/safe_mode.cpp
     run_gate "execute runtime boundary tests" 120 "$BUILD_DIR/runtime_boundary_tests"
+    run_gate "generate clock shell adapters" 120 python3 test/generate_clock_adapters.py \
+        "$BUILD_DIR/clock_adapters.generated.hpp"
+    run_gate "compile clock shell tests" 120 "$CXX" -std=c++17 -Wall -Wextra -Werror \
+        -Imain -I"$BUILD_DIR" -o "$BUILD_DIR/clock_runtime_tests" test/test_clock_runtime.cpp
+    run_gate "execute clock shell tests" 120 "$BUILD_DIR/clock_runtime_tests"
+    run_gate "generate config shell adapters" 120 python3 test/generate_effect_reply_adapters.py \
+        "$BUILD_DIR/effect_reply_adapters.generated.hpp"
+    run_gate "compile pinned SDK query fixture" 120 "${CC:-cc}" -std=c11 -Wall -Wextra -Werror \
+        -Itest -c test/fixtures/idf_ota_state_query.c -o "$BUILD_DIR/idf_ota_state_query.o"
+    run_gate "compile config shell tests" 120 "$CXX" -std=c++17 -Wall -Wextra -Werror \
+        -Itest -Imain -I"$BUILD_DIR" -o "$BUILD_DIR/config_commit_tests" \
+        test/test_config_commit.cpp "$BUILD_DIR/idf_ota_state_query.o"
+    run_gate "execute config shell tests" 120 "$BUILD_DIR/config_commit_tests"
+    run_gate "generate syslog shell adapters" 120 python3 test/generate_syslog_adapters.py \
+        "$BUILD_DIR/syslog_adapters.generated.hpp"
+    run_gate "compile syslog shell tests" 120 "$CXX" -std=c++17 -Wall -Wextra -Werror \
+        -Imain -I"$BUILD_DIR" -o "$BUILD_DIR/syslog_runtime_tests" test/test_syslog_runtime.cpp
+    run_gate "execute syslog shell tests" 120 "$BUILD_DIR/syslog_runtime_tests"
+    for crash_arch in xtensa riscv; do
+        crash_flags=()
+        if [ "$crash_arch" = riscv ]; then crash_flags=(-DHOST_CRASH_RISCV=1); fi
+        run_gate "compile crash $crash_arch shell tests" 120 "$CXX" -std=c++17 -Wall -Wextra -Werror \
+            ${crash_flags[@]+"${crash_flags[@]}"} -Itest/crash_stubs -Itest/coredump_stubs -Imain \
+            -o "$BUILD_DIR/crash_runtime_${crash_arch}_tests" test/test_crash_runtime.cpp
+        run_gate "execute crash $crash_arch shell tests" 120 "$BUILD_DIR/crash_runtime_${crash_arch}_tests"
+    done
 fi
 
 # Display sim ↔ C++ presenter parity: confirm tools/display_sim.py's decide() still matches
@@ -137,7 +165,9 @@ if command -v python3 >/dev/null 2>&1; then
     run_gate "provisioning tests" 120 python3 test/test_provision.py
     run_gate "capture wake tests" 120 python3 test/test_capture_wake.py
     run_gate "log origin contract" 120 python3 test/test_log_origin_contract.py
+    run_gate "diagnostic export guidance" 120 python3 test/test_diagnostic_export_guidance.py
     run_gate "runtime C-boundary inventory" 120 python3 test/test_runtime_boundary_contract.py
+    run_gate "locked cJSON intake and OOM" 120 bash test/run-cjson-oom-tests.sh
     run_gate "native Codex hook payload contract" 120 python3 test/test_codex_setup.py
     run_gate "build contract tests" 120 scripts/test-build-contracts.sh
     run_gate "exact pinned dependency contract" 120 \

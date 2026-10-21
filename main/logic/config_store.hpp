@@ -1,72 +1,24 @@
 #pragma once
-// The `tesla_cfg` credential/service settings as ONE atomic, CRC-checked, versioned blob.
-// Pure, IDF-free, host-testable (test/, built with the plain system toolchain) — like every
-// other header in main/logic/, so the device runs exactly the code the host test exercises.
+// Credential/service configuration in one versioned CRC-checked NVS blob. Encoding/decoding is
+// IDF-free; config_blob.cpp owns the NVS adapter and save order. cfg_save commits the blob before
+// best-effort legacy mirrors. A failed commit does not prove which snapshot is durable; callers
+// must not infer an intact previous configuration from a false result.
 //
-// WHY THIS EXISTS — the failure mode it removes. Today every one of these settings is its own
-// independent NVS entry: `NvsStorageAdapter::save_str()` (nvs_storage.cpp) does one
-// `nvs_set_str` + one `nvs_commit` per call, and the writers call it once per field. The setup
-// portal is the clearest case — `provisioning.cpp`'s save handler persists `wifi_ssid`,
-// `wifi_pass` and `vin` as THREE separate commits — and `http_config.cpp` adds `/set_vin`,
-// `/set_mqtt` and `/set_syslog` on top. There is no transaction across them, so the window
-// between two commits is a real state the device can be left in: a power cut (or an NVS write
-// error) after the SSID has landed and before the password has leaves the new network's name
-// paired with the old network's password. That pair authenticates against nothing; the device
-// then joins neither network, and the only way back in is the setup AP or an erase.
+// Only exact blob absence permits the legacy per-key/default load. Read, allocation, CRC or schema
+// errors fail closed without stale-mirror fallback. Ordinary saves preserve the WiFi rollback
+// credentials and flags in the same snapshot as the current credentials.
 //
-// The existing code is already as careful as per-key writes allow — the setup handler checks all
-// three results and refuses to reboot unless every one succeeded — and that is exactly the limit
-// worth naming: checking the return value REPORTS a tear, it cannot UNDO the write that already
-// landed, and a power cut reports nothing at all.
-//
-// The one-shot WiFi rollback backup (added alongside this header) would make that strictly
-// worse if it stayed a separate key. The backup exists to survive a bad credential save, so
-// backup-vs-credentials becomes a write-ORDERING problem: commit the credentials first and a
-// crash in between leaves no backup for the very save that needed one; commit the backup first
-// and a crash leaves a "backup" that is armed against a change that never happened. There is no
-// order that is right for both. Putting the backup INSIDE the same blob as the credentials it
-// protects deletes the question instead of answering it.
-//
-// So: one entry, written with a single `nvs_set_blob`, which is atomic at the NVS entry level —
-// either the whole new blob lands or the previous one remains intact. A save is then
-// all-or-nothing across BOTH a mid-write failure AND a power cut, with no per-key rollback and
-// no ordering to get right. `NvsStorageAdapter::save()/load()` already are that blob pair (they
-// carry the tesla-ble session blobs), so this needs no new NVS plumbing — just the key below.
-//
-// OWNERSHIP — why exactly these fields and not the others. Everything in here has ONE writer:
-// the HTTP/provisioning task (the setup portal, `/set_vin`, `/set_mqtt`, `/set_syslog`,
-// `/set_wifi`), which
-// is serialized against itself on the single httpd task. The remaining `tesla_cfg` keys are
-// DELIBERATELY separate because they have different writers OR journal/runtime-state lifetimes;
-// folding them into a whole config snapshot could revert another owner or erase recovery state:
-//   * `ble_mac`   — written by the BLE scanner (vehicle_ctrl.cpp) when it learns the car's
-//                   address. A cache: a stale one costs one rescan, so it self-heals.
-//   * `last_time` — written from the clock path (main.cpp / http_common.cpp) so the wall clock
-//                   survives a reboot and the tesla-ble session blobs stay reusable.
-//   * `reboot_why`— written on the way DOWN, by whoever ends the boot (the heap watchdog's
-//                   `heap:<n>` breadcrumb), and read+cleared on the way up.
-//   * `disp_rot`  — written by the display task on a BOOT-button tap.
-//   * `vin_txn`   — an HTTP-owned cross-namespace transition journal, cleared only after the
-//                   vehicle-key/session side and the config blob agree.
-//   * `boot_fails`— boot-owned crash-loop safety state; malformed/read/write failure latches the
-//                   recovery-only safe mode rather than being rewritten as configuration.
-// None is a normal credential/service value. Its distinct owner or transaction lifetime must not
-// be overwritten by publishing an ordinary httpd-owned configuration snapshot.
-//
-// THE READER MUST KEEP THE LEGACY PER-KEY LAYOUT AS A FALLBACK FOR ABSENT BLOBS. When the `cfg`
-// entry is absent (ESP_ERR_NVS_NOT_FOUND, as on a fresh device or an OTA upgrade from a build
-// that predates this blob), the caller falls back to reading `wifi_ssid` / `wifi_pass` / `vin` /
-// `mqtt_uri` / `syslog_uri` individually, exactly as today. That fallback is the whole reason an
-// OTA does not strand an existing device: without it the first boot on the new firmware finds no blob,
-// reads nothing, and comes up in the setup AP with its credentials and VIN sitting untouched in flash
-// and simply unread. If a blob IS present but corrupted or invalid, the load fails closed as an error
-// rather than falling back to stale legacy keys. (The rollback backup has no legacy key by
-// construction — it is new, and its absence on a pre-blob device is the correct state: no rollback pending.)
+// HTTP/provisioning and boot rollback own coherent credential/service snapshots. Other records
+// remain separate because their writer or recovery lifetime differs: BLE discovery owns ble_mac;
+// clock paths own last_time; reboot producers own reboot_why; the display owns disp_rot; vin_txn
+// and boot_fails are recovery journals/latches. last_time is only a restored wall-clock estimate,
+// not proof that vehicle-relative sessions can be reused. The exact registry is nvs_contract.hpp.
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <string>
 #include "nvs_contract.hpp"
+#include "service_target_limits.hpp"
 
 namespace tk {
 
@@ -147,45 +99,28 @@ inline constexpr uint8_t kConfigBlobMagic1 = 'K';
 inline constexpr uint8_t kConfigBlobMagic2 = 'C';
 inline constexpr uint8_t kConfigBlobMagic3 = '1';
 
-// ── VERSIONING ────────────────────────────────────────────────────────────────────────────────
-// This build WRITES exactly kConfigBlobVersion and READS everything from kConfigBlobVersionMin
-// up to it. Accepting an OLDER blob is the load-bearing half: a device upgraded by OTA carries
-// the blob the PREVIOUS firmware wrote, and refusing it would drop that user's WiFi credentials
-// and VIN on the upgrade — the legacy per-key fallback cannot save them either, because a
-// blob-era device stopped populating those keys.
-//
-// ADDING A FIELD (a version 2) is therefore three edits and one rule:
-//   1. add the member to ConfigBlob, plus a `bool has_<block> = false;` marker if "absent" is
-//      NOT the same as the member's default (see below);
-//   2. APPEND its bytes at the END of config_blob_encode — never in the middle, never reusing a
-//      byte — and bump kConfigBlobVersion to 2;
-//   3. in config_blob_decode, read it under `if (version >= 2) { … c.has_<block> = true; }`, so
-//      a v1 blob still decodes and simply leaves the member at its default.
-// The `has_*` marker exists for the case where the CALLER, not this header, owns the default: if
-// the field used to be a compile-time (Kconfig) setting, then "the blob predates the field" must
-// read as the compile-time value, and silently defaulting it here would turn a working setting
-// off on the OTA that introduced it. Where absent and default genuinely mean the same thing, no
-// marker is needed.
-//
-// THE TRAP: a bump is never free, and it cuts BACKWARDS. A build that does not know a version
-// REJECTS the blob, and on the device that reads as a WIPED CONFIGURATION — the blob is refused,
-// the legacy per-key fallback is empty on a blob-era device, and the board comes up in the setup
-// AP with its credentials intact in flash and unread. So a downgrade (an OTA rollback, a
-// flash-back to an older image, two branches that both invent "v2") loses the user's settings
-// without losing the bytes. Because the Dev → Release channel switch now makes firmware downgrade
-// routine, any future real blob-version bump will wipe configuration on downgrade unless backward
-// compatibility is preserved. Two parallel branches must not claim the same version number: the
-// one that ships second takes the later number.
+// Version1 is the current wire layout, including the explicit OTA-channel reserved-bit encoding.
+// The reader accepts only the stated version interval and fails closed on an unknown version; it
+// does not overwrite the blob or recover from potentially stale mirrors. Any future layout/version
+// change needs an explicit upgrade and downgrade/recovery plan. Legacy mirrors are best-effort,
+// so their existence cannot establish the authoritative blob's contents.
 inline constexpr uint8_t kConfigBlobVersion    = 1;
 inline constexpr uint8_t kConfigBlobVersionMin = 1;
 
 // ── FIELD BOUNDS ──────────────────────────────────────────────────────────────────────────────
 // What each field can legitimately hold on this device. These are enforced on the WRITE side
-// (config_blob_encode refuses an over-long field) so an oversized value can never reach flash.
+// (config_blob_encode refuses an over-long field) before cfg_save attempts a blob write. The decoder has a separate compatibility bound.
 inline constexpr size_t kConfigMaxSsidLen     = 32;   // IEEE 802.11 SSID is at most 32 octets
 inline constexpr size_t kConfigMaxWifiPassLen = 64;   // WPA2 passphrase 8..63, or a 64-hex PSK
 inline constexpr size_t kConfigMaxVinLen      = 17;   // a VIN is exactly 17 (empty = unset)
-inline constexpr size_t kConfigMaxUriLen      = 64;   // "host:port" for the broker / collector
+inline constexpr size_t kConfigMaxUriLen = kServiceTargetPreserveMaxBytes;
+
+// An older v1 writer cannot encode service fields above64. Refuse NEW LAN WiFi trials until
+// explicit service edits fit that writer; the preserved bytes are not silently shortened.
+inline bool config_service_targets_fit_old_writer(const ConfigBlob& config) noexcept {
+    return config.mqtt_uri.size() <= kServiceTargetInputMaxBytes &&
+           config.syslog_uri.size() <= kServiceTargetInputMaxBytes;
+}
 
 // The DECODE-side sanity bound on a stored string length, deliberately looser than the per-field
 // bounds above and deliberately not per-field. A reader stricter than the writer is a way to
@@ -193,6 +128,8 @@ inline constexpr size_t kConfigMaxUriLen      = 64;   // "host:port" for the bro
 // to refuse corruption: a length that does not fit the remaining body is already rejected by the
 // bounds arithmetic, and this catches a garbled length that happens to fit.
 inline constexpr size_t kConfigBlobDecodeMaxStr = 256;
+static_assert(kServiceTargetInputMaxBytes <= kConfigMaxUriLen &&
+              kConfigMaxUriLen <= kConfigBlobDecodeMaxStr);
 
 namespace detail {
 // magic(4) + version(1); the CRC is a fixed 4-byte trailer.
@@ -218,22 +155,11 @@ inline constexpr size_t kConfigBlobEncodedMax =
     detail::blob_str_bytes(kConfigMaxUriLen) +         // syslog_uri
     detail::kBlobCrcBytes;
 
-// The buffer size callers allocate. Headroom over the current layout so a small v2 field does
-// not force every call site to change with it — but bounded, and asserted against, so it stays a
-// stated cap rather than an assumption. A blob this size is a stack/static array on purpose:
-// this is a device where the binding limit is the largest CONTIGUOUS free block, so the config
-// save path deliberately makes no heap allocation at all.
-inline constexpr size_t kConfigBlobCapBytes = 384;
-
-static_assert(kConfigBlobEncodedMax == 361,
-              "the serialized layout moved — if that was intended, bump kConfigBlobVersion and "
-              "update this number and the layout comment together");
-static_assert(kConfigBlobEncodedMax <= kConfigBlobCapBytes,
-              "the config blob outgrew the buffer callers allocate — raise kConfigBlobCapBytes "
-              "in the same commit as the field that grew it");
-
-// A caller-owned buffer of exactly the stated cap: `tk::ConfigBlobBuffer buf; auto n =
-// tk::config_blob_encode(b, buf.data(), buf.size());`
+// cfg_save owns one private static scratch buffer through a nonblocking lease; pure codec
+// callers may supply their own array. No serialized-output heap allocation is needed.
+inline constexpr size_t kConfigBlobCapBytes = 512;
+static_assert(kConfigBlobEncodedMax == 473, "review the exact maximum when field bounds change");
+static_assert(kConfigBlobEncodedMax <= kConfigBlobCapBytes, "config encoding exceeds its buffer");
 using ConfigBlobBuffer = std::array<uint8_t, kConfigBlobCapBytes>;
 
 namespace detail {

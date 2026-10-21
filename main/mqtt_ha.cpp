@@ -366,18 +366,18 @@ static bool publish_state() {
         payload.has_ble_rssi = s_vehicle->ble_rssi(r);
         payload.ble_rssi = r;
         payload.paired = s_vehicle->has_session();
+        payload.session_available = s_vehicle->session_available();
         // Boot time as an ISO-8601 timestamp → HA renders it as auto-scaling relative
         // time ("8 minutes ago" → "2 days ago"), so it's human-readable and each reboot
         // shows as a step change. Only emit once the wall clock is authoritatively synced
-        // (SNTP or browser /set_time), not merely restored from NVS (which represents historical
-        // time from a prior shutdown). Cached once synced so it stays stable per boot.
+        // by NTP, not by browser/restored estimates. Cached once synced so it stays stable per boot.
         static time_t s_boot_epoch = 0;
         static bool   s_latched_via_ntp = false;
         if (clock_is_authoritative()) {
             const bool is_ntp = clock_synced_via_ntp();
             if (s_boot_epoch == 0 || (!s_latched_via_ntp && is_ntp)) {
                 time_t now_ = time(nullptr);
-                if (now_ > 1600000000) {
+                if (tk::historical_date_valid(now_, clock_plausibility_ceiling())) {
                     s_boot_epoch = now_ - (time_t)(esp_timer_get_time() / 1000000);
                     if (is_ntp) s_latched_via_ntp = true;
                 }
@@ -399,7 +399,7 @@ static bool publish_state() {
         payload.min_free_heap =
             (double)heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
 
-        const tk::CrashInfo ci = tk::diag_crash_info_live();
+        const auto ci = tk::diag_crash_info_live();
         payload.reset_reason = tk::reset_reason_slug(ci.reset_code);
         payload.reset_reason_code = (double)ci.reset_code;
         // "a dump for THIS build is downloadable right now" — re-read from flash per publish, since

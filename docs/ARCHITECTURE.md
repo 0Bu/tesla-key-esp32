@@ -42,8 +42,10 @@ activity. Charger input fields do not establish climate power consumption or an 
 
 ## Read-only telemetry and command correctness
 
-`vehicle_loop` rotates climate, drive, tires and closures at roughly 30 s per domain. All background
-requests use `NO_WAKE_SKIP`; command/query ownership, including the VCSEC health probe, pauses them.
+`vehicle_loop` attempts one climate, drive, tires or closures slot roughly every 30 s, rotating
+domains with bounded missing-climate retries. Windowed telemetry uses `NO_WAKE_SKIP`;
+the supervisor's non-waking VCSEC health/enrollment requests use `NoWakeFail`.
+Command/query ownership, including the VCSEC health probe, pauses windowed telemetry.
 Each entry point explicitly chooses foreground/background `ConnectOrigin`.
 
 Synchronous tesla-ble callbacks copy fixed nanopb state into latest-value mailboxes under a short
@@ -62,8 +64,9 @@ Two missing/mismatched readbacks exhaust the budget. An ACK alone never means su
 `vehicle_data` is cache-only and non-blocking; [API](API.md#vehicle-data) owns selectors, units,
 typed fallbacks and availability. Charge and climate use the active-window decision (recent command
 or live Charging/Starting contact <60 s old); charge expires at 30 s, climate at 300 s inside that
-window. Climate/drive reads copy fixed POD plus generation/ticks under `cache_mutex_`, then evaluate
-after unlock; unrelated strings are never copied. All selected domains must be usable for success.
+window. Climate reads copy fixed POD plus generation/ticks under `cache_mutex_`, then evaluate
+after unlock. Drive reads copy fixed POD without a generation or freshness timestamp; unrelated
+strings are never copied. All selected domains must be usable for success.
 `/status.tele` requires a live BLE link; MQTT can retain valid caches.
 
 `logic/wake_poll.hpp` supplies one `NO_WAKE_SKIP` charge poll per self-wake episode. It arms after
@@ -106,8 +109,16 @@ proven network lease, INTERNAL largest block ≥4 KiB and 90 s uptime. At 600 s 
 missing lease, leave PendingVerify armed; do not restart for a router outage. Setup mode never reaches
 Ready, so even its saved configuration cannot confirm an image.
 
-Timed confirmation and successful user MQTT/Syslog/WiFi commits acquire `HealthCommit` against
-OTA/identity/`FaultRestart`, then resample heap. Busy/critical states leave rollback armed.
+Timed confirmation owns `HealthCommit`. Configuration handlers instead acquire a request-owned
+`OtaConfigRestartGuard` before saving and keep its `ConfigRestart` owner through response, outer
+catch and the once-only restart. Changed MQTT/Syslog commits borrow this same lease to confirm only
+raw PendingVerify after Ready, current NimBLE sync/reset and fresh INTERNAL heap checks. They report
+an unconfirmed or uncertain result explicitly; an SDK mark error can follow a durable metadata write.
+WiFi refuses uniformly before credential comparison while verification is pending or unknown;
+Stable no-ops remain write/restart-free. Setup owns the same save/restart lease but never confirms.
+The normal blank-otadata first boot with the pinned no-factory bootloader initializes VALID only
+if its metadata write succeeds; a USB app write alone proves neither that state nor the installed
+bootloader. Raw UNDEFINED is non-probation, not a confirmation by this request. Query errors fail closed.
 Identity mutations require Stable (`OtaIdentityMutationGuard`); pending/unknown/check/update returns
 `503` before journals or keys change. VIN/key recovery, credential rollback, watchdogs and brownouts
 never confirm an image. Already-valid confirmation is a no-op.
@@ -194,23 +205,56 @@ An explicit scheme is honored. Without one, credentials select `mqtts://`, other
 TLS verifies bundled CA roots and never falls back to cleartext; status exposes credential-free
 broker/error/TLS state. The discovery registry is the sole owner of entity rows and metadata.
 Optional fields remain absent, units convert to metric, and presence-aware templates return literal
-`None` for unknown. Boot timestamps latch only after authoritative SNTP/browser synchronization; later NTP upgrades a
-browser-set latch. Stack minima create no discovery entities.
+`None` for unknown. Boot timestamps latch only after NTP establishes clock authority and remain stable
+for that boot. Browser and restored estimates do not establish this timestamp. Stack minima create
+no discovery entities.
 
 On reconnect: discovery → online availability → state; periodic snapshots follow. Invalid caches
 publish `{}` once to remove retained stale readings, then stay quiet. Sticky JSON ownership prevents
 partial retained documents; every build/print/publish failure rearms the entire sequence.
 The 60 s watchdog is fed at loop boundaries and each completed publish, never around a stuck call.
 
+## Crash diagnostics
+
+`diag_crash.cpp` captures once before service tasks. A bounded shared reader admits the installed
+partition header, verifies its SHA-256 through PSA, checks complete serialized ELF identity and
+only then reads the pinned target's TCB/frame ABI. SDK boot parsing and DRAM capture remain off.
+Foreign or unverified artifacts survive boot; full running/dump hashes and explicit summary flags
+keep identity, availability and corruption separate. RISC-V does not invent a stack unwind.
+
+Boot metadata lives in immutable fixed arrays, published before service tasks without dynamic
+payload allocation. Live readers query a bounded header, borrow those arrays and recheck atomic
+admission after constructing the view. Query errors or invalidation suppress current-build downloads
+and summaries for the rest of that boot. Bootstrap uses a nonallocating reset/fault getter.
+Boot console/ring output uses the same bounded `CRASH` records as Syslog at ERROR severity.
+A notable report without a summary adds the complete running ELF hash separately; foreign dumps
+retain their own hash in the header. Ordinary and dismissed reports produce no crash records.
+Formatting and partial log failures leave admission unchanged and trigger no retry. Renderers may
+allocate; the human multiline helper remains available to host presenters.
+
+Export and deletion share a nonblocking request token held across I/O, without a leaf lock.
+Deletion marks the request outcome uncertain and revokes admission before SDK erase; only actual
+absence or successful erase permits dismissal. Existing effect-aware HTTP replies preserve known
+or unknown outcomes through allocation failure. [API](API.md#diagnostic-export-and-heap-trend)
+owns export modes and response classes; no crash data belongs in public evidence.
+
 ## Syslog forwarder
 
 The log hook mirrors console lines into the RAM ring and a fixed 24×256 B forwarding queue.
 RFC5424 facility user severity follows E/W/I/D/V (3/4/6/7), skipping ANSI prefixes; unrecognized
-lines remain info. Syslog is best-effort and [unredacted](SECURITY.md#syslog-and-diagnostic-export).
+lines remain info. Firmware boot replay explicitly marks BOOT as INFO and CRASH as ERROR;
+message text alone cannot acquire either replay type. Replay snapshots the live crash report, so
+a dismissed report is not replayed later. Syslog is best-effort and
+[unredacted](SECURITY.md#syslog-and-diagnostic-export).
 
 The ring lock covers bounded copies and sink snapshot only; invoke sinks after unlock. Chunked
 exports bind append count and clear epoch, stop on generation changes, discard a wrapped first line
-and redact overlong logical lines as a whole. Configuration changes persist then reboot.
+and redact overlong logical lines as a whole. Recognized complete V1 library records flatten
+embedded line breaks in the ring copy. A boot-installed sink replaces known credential-bearing MQTT
+URI parse errors before every output even if the ring mutex fails; other raw Serial/Syslog records
+retain their bytes. The boot owner publishes mutex and previous-sink handles atomically; each
+consumer snapshots its handle once. Export limits live in
+[API](API.md#diagnostic-export-and-heap-trend). Configuration changes persist then reboot.
 
 DNS resolve/reprobe is throttled to about 10 s. Delivery requires resolution, not the advisory
 ARP/ICMP result. Hard route/link errors re-resolve; transient resource errors keep ordinary cadence.
@@ -223,6 +267,14 @@ a scheduled consumer waits until commit, and cancelled unpublished resources unw
 `logic/heap_watchdog.hpp` samples INTERNAL 8-bit largest block at the 30 s heap site. Below 4 KiB
 continuously for five minutes arms restart; one healthy sample resets the run. OTA busy clears it.
 Read `ota_is_busy()` atomically, never an allocating status copy.
+
+Heap history and bootstrap retries use seconds derived from the 64-bit ESP timer through
+`logic/uptime.hpp`. They remain monotonic across the former millisecond and RTOS-tick rollover
+boundaries; the watchdog and short runner deadlines retain their wrap-safe tick arithmetic.
+The diagnostic seconds representation saturates after about 136 years. An unrepresentable
+retained-history carry starts an empty trend rather than wrapping the timeline; it changes no NVS
+or retained-data layout. Bootstrap retry deadlines use unsigned differences and preserve backoff
+and awake-episode quiescence.
 
 Restart requires durable `reboot_why=heap:<n>` first, followed by fixed-buffer logging and a 300 ms
 yield for Syslog. It never confirms PendingVerify. After five consecutive restarts, stop the ladder.
@@ -303,7 +355,19 @@ The request is plaintext; a successful response alone does not prove session aut
 
 `ble_phase.hpp` supplies connecting/waiting deadlines together with rounded-up seconds; connecting
 wins overlap, and zero means now. The C++ `ble_row.hpp` presenter has shipped-JS parity. Scanning is
-not a phase input; only the no-VIN listing scan has no countdown. Local countdowns stop on feed loss.
+not a phase input. The no-VIN listing scan, warm-up connect and manual scan do not arm countdown
+deadlines. Local countdowns stop on feed loss.
+
+Connection scheduling uses caller deadlines, a 15 s warm-up throttle and 30 s supervisor idle
+after each health attempt. Automatic same-key enrollment additionally reserves its own bounded
+backoff. There is no global explicit-wake debounce or exponential reconnect gate; a synchronous
+GAP connect-start failure resumes scanning while connect intent remains. Foreground waiters impose
+their own deadline; the direct warm-up connect does not arm one.
+
+Ordinary telemetry readers use caches. `body_controller_state` is an explicit live foreground
+VCSEC query: it may connect, establish a session and send plaintext `GET_STATUS` without requesting
+a wake. `/status` can save an unknown guarded `paired_at` once and query local HCI RSSI. These are
+exceptions to cache-only wording, not evidence of fresh authenticated vehicle acceptance.
 
 Failure classification uses adverts observed in the current attempt: no target advert means out of
 range, non-connectable means BLE limit, connectable-but-failed means connection failure. Separate
@@ -333,6 +397,20 @@ Successful local transmission does not prove vehicle approval. Forced key genera
 that clear sessions/cache; a changed VIN also forgets the BLE MAC and reboots. Same VIN is a no-op.
 Successful NVS existence probes are cached; read errors retry instead of becoming absent.
 
+A verified SessionInfo establishes the RAM peer and runner tracker before its best-effort NVS
+save. A false return or exception records a persistence error without discarding that usable
+session or retrying the write. A later ordinary SessionInfo can confirm a successful save.
+`logic/session_availability.hpp` defines the bounded per-domain metadata. Vehicle-serialized
+updates publish a cache bound to `identity_epoch_`; readers never inspect a live Peer or NVS.
+Link loss, identity cleanup and authenticated domain repair invalidate the affected RAM cache.
+Ordinary command cancellation preserves it. Temporary identity admission failure hides the cache
+until rollback restores the same identity; a new identity cannot inherit the old metadata.
+`session_available` reports usable VCSEC RAM only. The supervisor, background eligibility and
+UI/display/LED presentation accept durable presence or usable VCSEC RAM, while retaining their
+existing recovery, sleep, wake and foreground arbitration. Infotainment availability is diagnostic
+only. Public `paired` and its guarded timestamp remain durable facts; persistence errors add no
+manual key action or automatic storage retry.
+
 NimBLE posts fixed LinkUp only. The vehicle task owns GATT-ready generation, materializes the MAC
 after unlock and persists it once outside shared locks. Startup MAC strings stay startup-only.
 Attempt Unix-clock restore **before** loading sessions. The inherited Unix-versus-vehicle-epoch
@@ -341,17 +419,59 @@ failed clock set can leave negative-age acceptance. It is not a reliable 1-hour 
 True session reuse across reboot needs epoch/Unix alignment; [ADR-0005](adr/0005-tesla-ble-seam.md)
 records this limitation.
 
-Durable `key_created`, `paired_at` and MQTT `boot_time` require `clock_is_authoritative()`
-(`time_sync.hpp`). Restored `last_time` can reject stale sessions but is not authoritative; SNTP or
-explicit browser time synchronization establishes authority. Do not publish restored cache time as
-a measured event timestamp. The first successful NTP sync of each boot checkpoints `last_time`;
-subsequent callbacks do not rewrite it on every sync.
+New durable `key_created`, `paired_at` and MQTT `boot_time` require an acquired
+`clock_is_authoritative()` before sampling wall time (`time_sync.hpp`). Only a validated successful
+NTP application establishes this boot's authority. Browser time is a temporary estimate; it neither
+writes `last_time` nor permits durable dates. A restored checkpoint is also non-authoritative.
+Historical plausible dates have no stored source marker and remain readable; no provenance is
+invented for them. Date getters require canonical decimal seconds above 1600000000 and below
+January 1 of build year + 10. The stricter clock/browser floor remains 1700000000.
+`paired_at` names the first status observation of a stored session with NTP time, not the vehicle's
+pairing event. A failed metadata save may be retried on a later status read.
+
+The strong IDF `sntp_sync_time` extension replaces the pinned weak clock write. NTP and browser
+writers share one boot-initialized static operation mutex; NTP applies once and commits its authority
+before release, so a later browser writer cannot overwrite that commit. Only IMMED mode is used.
+The 100 ms admission wait is not an operation deadline: libc timekeeping locks can wait indefinitely.
+Early `gettimeofday` initializes libc's private locks before producers; that SDK bootstrap can
+allocate and abort on OOM. No storage, logging or network operation runs under the application clock
+gate. The hook catches exceptions before returning to C; failed sync cannot clear prior authority.
+
+Checkpoint restore validates the full decimal value/window and applies it only while the warm clock
+is below the clock floor, checking the syscall result. Successful NTP samples offer a checkpoint on
+first sync and after six hours since the last confirmed save, with at least five minutes between
+attempts. Existing SNTP callbacks supply opportunities; there is no added task/timer or tight retry.
+The attempt is recorded before fallible work and save success only after storage confirms it.
+Checkpoint NVS/string/log work follows clock-gate release. This policy does not fix the inherited
+session-age epoch mismatch or prove RTC behavior on hardware.
 
 ## Configuration durability
 
+New MQTT/Syslog targets are limited to 64 UTF-8 bytes across HTTP and the UI. The version1
+encoder preserves existing targets up to 120 bytes through unrelated saves, while the unchanged
+reader retains its 256-byte string sanity bound. Short-value wire bytes and CRC/layout are
+unchanged. This is reader compatibility: an older 64-byte writer cannot save a configuration
+containing longer targets. Until both stored targets fit 64 bytes, every otherwise valid LAN WiFi
+submission receives the same refusal before credential comparison or trial staging. This includes
+unchanged credentials, so the refusal cannot reveal equality. With both targets within 64 bytes,
+unchanged WiFi retains its no-write success. Explicit service edits can shorten one target while
+preserving the other. Setup explicitly
+replaces WiFi and retires old trial state; it creates no rollback trial. Values above 120 bytes,
+already-active long-target trials and a downgrade retaining long targets remain unsupported
+recovery boundaries; nothing is silently truncated or disabled.
+
+The encoder owns a private static 512-byte scratch buffer through a nonblocking operation permit.
+Busy/reentrant saves return false before encoding, logging or storage and never touch the owner's
+bytes. Owned exits, including exceptions, wipe the entire buffer through volatile writes before
+releasing the permit. Blob commit and best-effort mirror order are unchanged. This permit waits
+on no lock and acquires no vehicle/cache owner; it is not a leaf cache/result lock. Its permanent
+RAM and compiler frames are separate from measured runtime INTERNAL largest-block margins.
+
 `cfg_load_state()` accepts one complete CRC-checked blob. Only exact absence permits legacy
 per-key loading; present unreadable, CRC/schema-invalid or uncertain blobs fail closed. Saves commit
-the blob atomically and mirror legacy keys best-effort for downgrade compatibility.
+one coherent blob entry before best-effort legacy mirrors for downgrade compatibility. A failed
+write/commit leaves durability unconfirmed; it does not prove the previous blob is intact. A mirror
+failure after a confirmed blob commit does not turn that save into a failed operation.
 
 Every read-modify-save route and provisioning uses `cfg_load_for_update()`. With the blob absent,
 **any** unreadable legacy key rejects the whole snapshot and every mutation; an armed VIN journal
@@ -376,24 +496,50 @@ captive preflight failures return ESP_FAIL to reject unread input.
 | Oversize (> 2 KiB) | `413` | HTTP `413`, `-32600` |
 | Allocation failure (incl. valid JSON whose cJSON tree is null) | `503` | HTTP `503`, `-32603` |
 | Nesting > 16 arrays/objects | `400` | HTTP 200, `-32600` (request-complexity limit, not a parse error) |
+| More than 64 request values | `400` | HTTP 200, `-32600`, `id:null` |
+| Duplicate decoded keys at any depth | `400` | HTTP 200, `-32600` |
 | Malformed raw UTF-8 in a string (bad/truncated/overlong, UTF-16 surrogate, > U+10FFFF) | `400` | `-32700` |
 | Escaped U+0000 (cJSON's NUL-terminated API cannot keep it for exact ID correlation) | `400` | `-32600` |
 
 No rejected input dispatches or persists. `json_syntax.hpp` validates before cJSON; valid supported
-syntax followed by a null parse tree is OOM, not bad input. Copy bounded arguments and release body
-and parse tree before BLE/probe/NVS/restart. Config order is load → probe → durable save → respond →
-restart; failure prevents later steps. Empty MQTT/Syslog values intentionally disable.
+syntax followed by a null parse tree is OOM, not bad input. The three HTTP request materializers
+explicitly cap root/container/scalar values at 64; names do not count. An over-budget flag does not
+stop syntax validation, so existing malformed/NUL/depth errors retain priority. The generic
+materializer's default remains unlimited for OTA manifests. `json_input_validation.hpp` shares
+allocation-free decoded-key uniqueness and canonical decimal-string argument checks across REST
+and MCP; finite/integral/range checks, boolean rules and registry defaults remain in their adapters. Copy bounded arguments and release body
+and parse tree before BLE/probe/NVS/restart. MQTT/Syslog/WiFi use an authoritative config load
+and, for MQTT, an optional broker probe. Changed submissions require a ConfigRestart lease before
+durable save; WiFi acquires it before credential comparison, including a later no-op. The captive
+portal validates its form and performs the authoritative load/VIN guard before the lease, without a
+LAN probe. Rejection or a pre-effect failure prevents later steps. A response failure after a durable
+save or vehicle command cannot undo that effect; reply atomicity remains a separate limitation
+documented in [API](API.md#response-classes). Empty MQTT/Syslog values intentionally disable.
 The separate captive `POST /save` has a fixed 1024 B limit and returns 400 before parsing on empty,
 oversize or receive failure.
 
 Sticky `JsonBuilder` failure discards the entire tree. `json_http_reply` sets no success status or
-sends bytes before printing succeeds; OOM sets 503 before exactly one fixed fallback.
+sends bytes before printing succeeds. Pre-effect OOM sets 503 before one fixed fallback.
+Mutation handlers also carry a trivial request-owned `HttpEffectReply` through `GuardedReq`; it
+outlives handler unwind and stores primary outcome, possible effects, a validated fixed RPC ID and
+an independent already-decided restart continuation. `logic/effect_reply.hpp` owns the pure state.
+`http_effect_reply.hpp` retains normal complete replies and supplies allocation-free project JSON
+on post-effect construction failure. The terminal latch precedes header setup, and every checked
+header/chunk failure stops the attempt. The outer catch cannot start another reply after that latch.
+Continuation consumption precedes the once-only restart attempt, including on response failure.
+Configuration-restart continuations retain their already-held ConfigRestart owner; identity-recovery
+continuations follow their separate transaction rules. There is no effect retry, no borrowed handler-local data and no global outcome snapshot.
+Networking allocations, actual receipt and composed runtime stack headroom still require device
+validation; [API](API.md#response-classes) owns the wire outcome semantics.
 Pinned-cJSON allocation matrices verify these production seams, not the device scheduler/allocator.
 
 While downloading/flashing, time/MQTT/Syslog/WiFi/channel mutations return 409 before body
-intake. This is an entry snapshot, not atomic exclusion. A check holds the shared OTA gate but does
-not trip 409: config can save with reboot postponed, while key/VIN mutations return 503. Crash
-clear/dismiss routes are outside this guard. External fields/errors are in [API](API.md).
+intake. This is an entry snapshot, not atomic exclusion. An OTA check holds the shared operation
+gate without setting the download/flash flag. Changed MQTT/Syslog submissions and WiFi admission
+require ConfigRestart ownership and return 409 before saving when the check owns the gate.
+Unchanged MQTT/Syslog acknowledgements need no restart lease. Key/VIN mutations return 503;
+time/channel retain their entry-snapshot guard. Crash clear/dismiss routes are outside this guard.
+External fields/errors are in [API](API.md).
 
 ## MCP endpoint (/mcp)
 
@@ -403,8 +549,11 @@ defaults. Both reject fractional/out-of-range integers before casts.
 
 Release input trees after fixed ID/argument capture, before blocking work or response construction.
 Static registry strings use cJSON references; sticky ownership prevents partial envelopes, and print
-OOM maps to 503. The production tool/state builders are covered by pinned-cJSON allocation tests.
-Every handler enters through contained `handle_all` and `GuardedReq`.
+OOM before a command attempt maps to 503; post-attempt reply degradation preserves the correlated
+outcome. The production tool/state builders are covered by pinned-cJSON allocation tests.
+Every handler enters through contained `handle_all` and `GuardedReq`. MCP cached charge reads
+use the same `get_charge_state` availability gate as REST and emit `charge_available`; unavailable
+telemetry is omitted. The shared admission/exception fallbacks are not JSON-RPC replies; see [MCP](MCP.md#json-rpc-error-codes).
 
 ## Concurrency (normative contract)
 

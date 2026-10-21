@@ -52,10 +52,11 @@ python3 provision.py --url http://tesla-key-esp32.local --mode lan \
 ```
 
 The retired `--port` path fails closed with a data-loss explanation; for genuine low-level recovery,
-make and verify a complete NVS backup before writing at `0x9000`. The WiFi contract is identical in
-the setup portal, LAN API and host tool: a 1–32-byte UTF-8 SSID plus an explicitly selected open
-network, an 8–63-byte UTF-8 WPA2 passphrase, or exactly 64 ASCII hex characters (raw PSK).
-Enterprise authentication is not supported.
+make and verify a complete NVS backup before writing at `0x9000`. All three provisioning paths
+require a 1–32-byte UTF-8 SSID. The password is an 8–63-byte UTF-8 WPA2 passphrase or exactly
+64 ASCII hex characters (raw PSK). In the setup portal and LAN API an empty password means an
+open network; the host tool requires `--open-network` to select that explicitly. Enterprise
+authentication is not supported.
 
 ## Pairing and identity
 

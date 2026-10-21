@@ -7,6 +7,7 @@
 
 #include "http_handlers.hpp"
 #include "logic/json_syntax.hpp"
+#include "json_input_validation.hpp"
 #include "logic/command_result.hpp"   // outcome text shared with the MCP tools/call path
 #include "logic/vehicle_data.hpp"
 #include "platform.hpp"
@@ -104,16 +105,7 @@ static bool json_int_arg(const cJSON* obj, const tk::CmdArg& arg,
     }
 
     double d;
-    if (cJSON_IsNumber(j)) {
-        d = j->valuedouble;
-    } else if (cJSON_IsString(j) && j->valuestring) {
-        char* end = nullptr;
-        d = strtod(j->valuestring, &end);
-        if (end == j->valuestring || !end || *end != '\0') {
-            problem = "invalid argument";
-            return false;
-        }
-    } else {
+    if (!tk::json_command_number(j, d)) {
         problem = "invalid argument";
         return false;
     }
@@ -154,19 +146,19 @@ bool is_command_route(const char* uri) {
     return parse_uri(uri, vin, sizeof(vin), cmd, sizeof(cmd));
 }
 
-[[gnu::noinline]] static esp_err_t send_command_result(httpd_req_t* req, bool ok,
+[[gnu::noinline]] static esp_err_t send_command_result(GuardedReq rq, bool ok,
                                                        const char* cmd, const char* vin,
                                                        const std::string& err) {
     const bool effective_ok = ok || tk::is_nominal_already_set(err);
     // A false command outcome is not an HTTP success: evcc otherwise accepts the request
     // as delivered and the old current can remain active. Keep the Tesla-compatible JSON
     // body, but make the transport status retryable/observable.
-    return send_json(req, effective_ok ? 200 : 502,
+    return send_effect_json(rq, effective_ok ? 200 : 502,
                      make_response(effective_ok, cmd, vin, tk::command_result_text(effective_ok, err)));
 }
 
 esp_err_t handle_command(GuardedReq rq) {
-    httpd_req_t* req = rq.req;
+    httpd_req_t* req = rq.req();
     char vin[64], cmd[64];
     if (!parse_uri(req->uri, vin, sizeof(vin), cmd, sizeof(cmd))) {
         return send_json(req, 400, make_response(false, "unknown", "?", "invalid URI"));
@@ -187,20 +179,23 @@ esp_err_t handle_command(GuardedReq rq) {
     // forms while keeping every other non-object body invalid.
     tk::BodyReadResult body = read_body_result(req);
     if (body.status == tk::BodyReadStatus::TooLarge) {
-        return send_json(req, 413, make_response(false, cmd, vin, "request body too large"));
+        return send_json(req, tk::body_read_http_status(body.status),
+                         make_response(false, cmd, vin, "request body too large"));
     }
     if (body.status == tk::BodyReadStatus::NoMemory) {
-        return send_json(req, 503, make_response(false, cmd, vin, "out of memory"));
+        return send_json(req, tk::body_read_http_status(body.status),
+                         make_response(false, cmd, vin, "out of memory"));
     }
     if (body.status == tk::BodyReadStatus::ReceiveFailed) {
-        return send_json(req, 400, make_response(false, cmd, vin, "request body read failed"));
+        return send_json(req, tk::body_read_http_status(body.status),
+                         make_response(false, cmd, vin, "request body read failed"));
     }
 
     std::unique_ptr<char, decltype(&free)> body_owner(body.data, &free);
     tk::JsonOwner json;
     if (body.status == tk::BodyReadStatus::Ok) {
         const auto materialized = tk::json_materialize<cJSON>(
-            body.data, req->content_len, [](const char* text) { return cJSON_Parse(text); });
+            body.data, req->content_len, [](const char* text) { return cJSON_Parse(text); }, tk::kJsonMaxRequestValues);
         if (materialized.status == tk::JsonMaterializeStatus::Malformed) {
             return send_json(req, 400, make_response(false, cmd, vin, "invalid JSON"));
         }
@@ -211,6 +206,9 @@ esp_err_t handle_command(GuardedReq rq) {
             return send_json(req, 400,
                              make_response(false, cmd, vin, "JSON NUL escape not supported"));
         }
+        if (materialized.status == tk::JsonMaterializeStatus::TooManyValues) {
+            return send_json(req, 400, make_response(false, cmd, vin, "too many JSON values"));
+        }
         if (materialized.status == tk::JsonMaterializeStatus::NoMemory) {
             return send_json(req, 503, make_response(false, cmd, vin, "out of memory"));
         }
@@ -220,6 +218,9 @@ esp_err_t handle_command(GuardedReq rq) {
     // command or response allocation. Keeping both alive needlessly shrinks the largest contiguous
     // INTERNAL block at the most allocation-heavy point in this request.
     body_owner.reset();
+    if (tk::has_duplicate_json_keys(json.get())) {
+        return send_json(req, 400, make_response(false, cmd, vin, "duplicate JSON key"));
+    }
     tk::RestBodyShape body_shape = tk::RestBodyShape::Empty;
     if (body.status == tk::BodyReadStatus::Ok) {
         if (cJSON_IsObject(json.get())) {
@@ -263,14 +264,16 @@ esp_err_t handle_command(GuardedReq rq) {
     // All command arguments now live in fixed local arrays. Drop the input-scaled parse tree before
     // the BLE round-trip (up to ~20 s) and before any response/error-string allocation.
     json.reset();
+    rq.reply()->state.attempting(tk::RequestEffect::Command);
     bool ok = execute_vehicle_command(*g_vehicle, info->kind, ival, bval);
+    if (ok) rq.reply()->state.succeeded(); // before fallible/global error-text sampling
     // On failure, distinguish "the car rejected it" (we got an error reply, e.g.
     // "complete") from "the car was unreachable" (no reply / timed out). The former
     // carries the real Tesla reason; only the latter is an in-range problem. The text
     // selection is shared with the MCP tools/call result (logic/mcp.hpp) so the two
     // paths can never report the same outcome differently.
     std::string err = g_vehicle->last_command_error();
-    return send_command_result(req, ok, cmd, vin, err);
+    return send_command_result(rq, ok, cmd, vin, err);
 }
 
 // ─── GET /api/1/vehicles/{VIN}/vehicle_data ───────────────────────────────────
@@ -291,7 +294,7 @@ static bool emit_cached_vehicle_drive(tk::StatusJsonEmitter& e) {
 }
 
 esp_err_t handle_vehicle_data(GuardedReq rq) {
-    httpd_req_t* req = rq.req;
+    httpd_req_t* req = rq.req();
     char vin[64] = {0};
     if (!parse_vin_route(req->uri, "/vehicle_data", vin, sizeof(vin)))
         return send_json(req, 400, make_response(false, "vehicle_data", "?", "invalid URI"));
@@ -342,7 +345,7 @@ esp_err_t handle_vehicle_data(GuardedReq rq) {
 // ─── GET /api/1/vehicles/{VIN}/body_controller_state ─────────────────────────
 
 esp_err_t handle_body_controller(GuardedReq rq) {
-    httpd_req_t* req = rq.req;
+    httpd_req_t* req = rq.req();
     char vin[64] = {0};
     if (!parse_vin_route(req->uri, "/body_controller_state", vin, sizeof(vin)))
         return send_json(req, 400, make_response(false, "body_controller_state", "?", "invalid URI"));
@@ -373,7 +376,7 @@ esp_err_t handle_body_controller(GuardedReq rq) {
 // ─── GET /api/proxy/1/version ─────────────────────────────────────────────────
 
 esp_err_t handle_version(GuardedReq rq) {
-    httpd_req_t* req = rq.req;
+    httpd_req_t* req = rq.req();
     tk::JsonBuilder json;
     json.string(json.root(), "version", fw_version());
     json.string(json.root(), "platform", TK_PLATFORM);

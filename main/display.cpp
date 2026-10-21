@@ -524,8 +524,8 @@ static bool draw_portrait(const tk::display::Model& m, const tk::UiSnapshot& s, 
 // ─── render one frame from the presenter's Model (mirrors tools/display_sim.py) ────────
 // Returns true when it drew something animated (a search/pairing hero, or a scrolling
 // SSID) so the task keeps refreshing fast. `tick` is a monotonic frame counter;
-// `paired` = VehicleController::has_session(), sampled by the task (it hits NVS, so it's
-// not called every frame). All "what to show" decisions come from the pure, host-tested
+// `paired` is durable session presence OR usable VCSEC RAM, sampled by the task at ≤1 Hz
+// because an uncached presence probe can hit NVS. All "what to show" decisions come from the pure, host-tested
 // presenter (tk::display::compose) — this function only ASSEMBLES the snapshot and DRAWS,
 // dispatching to the landscape or portrait layout for the current BOOT-rotation.
 static bool render_frame(VehicleController& v, int tick, bool paired) {
@@ -627,7 +627,7 @@ static void display_task(void* arg) {
     bool btn_prev = true;                 // released (HIGH)
 
     int tick = 0;
-    bool paired = v.has_session();        // has_session() hits NVS — sample at ~1 Hz
+    bool paired = (v.has_session() || v.session_available());        // durable record or usable RAM — sample at ~1 Hz
     for (;;) {
       // Iteration-boundary containment (issue #204): render_frame() reads the cached UiSnapshot
       // and builds std::string SSID text that can throw bad_alloc under heap pressure. This is a
@@ -638,8 +638,8 @@ static void display_task(void* arg) {
         bool animating = render_frame(v, tick, paired);
         flush();
         ++tick;
-        if (animating) { if (tick % 8 == 0) paired = v.has_session(); }  // ~1 Hz
-        else           { paired = v.has_session(); }                     // 1 Hz slow tick
+        if (animating) { if (tick % 8 == 0) paired = (v.has_session() || v.session_available()); }  // ~1 Hz
+        else           { paired = (v.has_session() || v.session_available()); }                     // 1 Hz slow tick
 
         // Wait for the next frame (120 ms animating / 1000 ms static) while polling the
         // BOOT button every 40 ms so a tap is never missed — a HIGH→LOW edge = press.

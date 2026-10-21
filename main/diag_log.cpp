@@ -1,8 +1,19 @@
 #include "diag_log.hpp"
 #include "syslog.hpp"
+#include "logic/redact.hpp"
+
+#ifdef ESP_PLATFORM
+#include <sdkconfig.h>
+static_assert(CONFIG_LOG_VERSION == 1, "diagnostic capture requires combined V1 log callbacks");
+static_assert(CONFIG_LOG_TIMESTAMP_SOURCE_RTOS, "diagnostic credential guard requires RTOS log timestamps");
+#if defined(CONFIG_LOG_COLORS) && CONFIG_LOG_COLORS
+#error "diagnostic credential guard requires uncolored log records"
+#endif
+#endif
 
 #include <esp_log.h>
 #include <cstdio>
+#include <cstdarg>
 #include <cstdint>
 #include <cstring>
 #include <atomic>
@@ -29,26 +40,46 @@ static size_t            s_head    = 0;      // next write position
 static bool              s_wrapped = false;  // buffer has wrapped at least once
 static uint64_t          s_written = 0;      // monotonic byte sequence within one clear epoch
 static uint64_t          s_epoch   = 0;      // detects clear while a dump is in flight
-static SemaphoreHandle_t s_mtx     = nullptr;
-static vprintf_like_t    s_prev    = nullptr;
+static std::atomic<SemaphoreHandle_t> s_mtx{nullptr};
+static std::atomic<vprintf_like_t> s_prev{nullptr};
+static bool             s_hook_installed = false;  // single boot-owner initialization; sequential retries allowed
 static const char*       TAG       = "diag_log";
 // atomic (not volatile): written by the /diag HTTP handler, read by the capture hook on
 // whichever task logged the line. A cross-task scalar — atomic gives it a defined value.
 static std::atomic<bool> s_verbose{false};
 
 static void diag_append_(const char* data, size_t len) {
-    if (!s_mtx || len == 0) return;
-    tk::SemGuard g(s_mtx, pdMS_TO_TICKS(20));  // bounded: never stall the logging task
+    const auto mtx = s_mtx.load(std::memory_order_acquire);
+    if (!mtx || len == 0) return;
+    const size_t library_end = tk::diag_library_capture_content_end({data, len});
+    tk::SemGuard g(mtx, pdMS_TO_TICKS(20));  // bounded: never stall the logging task
     if (!g) return;
     for (size_t i = 0; i < len; i++) {
-        s_buf[s_head++] = data[i];
+        s_buf[s_head++] = tk::diag_capture_byte(data[i], i, library_end);
         ++s_written;
         if (s_head >= DIAG_CAP) { s_head = 0; s_wrapped = true; }
     }
 }
 
-// esp_log hook: capture the formatted line, then forward to the original sink so
-// the USB serial console keeps working unchanged. Must not call ESP_LOG itself.
+// Supply a fresh va_list to the existing Serial sink for a protected fixed replacement.
+static int diag_forward_fixed_(const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    const auto previous = s_prev.load(std::memory_order_acquire);
+    const int result = previous ? previous(fmt, ap) : vprintf(fmt, ap);
+    va_end(ap);
+    return result;
+}
+
+// Keep classifier scratch outside the callback's existing fixed-buffer stack frame.
+__attribute__((noinline))
+static bool diag_mqtt_uri_error_(const char* line, size_t len) {
+    return tk::diag_mqtt_uri_error({line, len});
+}
+
+// esp_log hook: capture the formatted line, then forward ordinary records to the original
+// Serial sink. Known credential-bearing MQTT parser errors are replaced before every sink.
+// Must not call ESP_LOG itself.
 static int diag_vprintf_(const char* fmt, va_list ap) {
     char line[256];
     va_list ap2;
@@ -57,6 +88,11 @@ static int diag_vprintf_(const char* fmt, va_list ap) {
     va_end(ap2);
     if (n > 0) {
         size_t len = (size_t)n < sizeof(line) ? (size_t)n : sizeof(line) - 1;
+        if (diag_mqtt_uri_error_(line, len)) {
+            diag_append_(tk::kDiagMqttUriErrorLine, sizeof(tk::kDiagMqttUriErrorLine) - 1);
+            syslog_send(tk::kDiagMqttUriErrorLine, sizeof(tk::kDiagMqttUriErrorLine) - 1);
+            return diag_forward_fixed_("%s", tk::kDiagMqttUriErrorLine);
+        }
         diag_append_(line, len);
         // Same capture point feeds the Syslog forwarder (syslog.cpp), so every line
         // that reaches the serial console / /diag also reaches the configured
@@ -65,22 +101,32 @@ static int diag_vprintf_(const char* fmt, va_list ap) {
         // this module's own "syslog:"-tagged lines to avoid a feedback loop.
         syslog_send(line, len);
     }
-    return s_prev ? s_prev(fmt, ap) : vprintf(fmt, ap);
+    const auto previous = s_prev.load(std::memory_order_acquire);
+    return previous ? previous(fmt, ap) : vprintf(fmt, ap);
 }
 
 void diag_log_init() {
-    if (s_mtx) return;
-    s_mtx = xSemaphoreCreateMutex();
-    if (!s_mtx) {
+    // The application calls this from its boot owner before MQTT/HTTP start. The credential
+    // guard must remain installed even if optional ring allocation fails; never chain to self
+    // when a sequential initialization retry attempts that allocation again.
+    if (!s_hook_installed) {
+        const auto previous = esp_log_set_vprintf(diag_vprintf_);
+        s_prev.store(previous, std::memory_order_release);
+        s_hook_installed = true;
+    }
+    if (s_mtx.load(std::memory_order_acquire)) return;
+    const auto mtx = xSemaphoreCreateMutex();
+    if (!mtx) {
         ESP_LOGE(TAG, "failed to allocate diagnostic-log mutex; capture disabled");
         return;
     }
-    s_prev = esp_log_set_vprintf(diag_vprintf_);
+    s_mtx.store(mtx, std::memory_order_release);
 }
 
 DiagDumpResult diag_log_dump_chunks(const std::function<bool(const char*, size_t)>& sink,
                                     DiagDumpStart start_mode) {
-    if (!s_mtx) return DiagDumpResult::SnapshotInvalidated;
+    const auto mtx = s_mtx.load(std::memory_order_acquire);
+    if (!mtx) return DiagDumpResult::SnapshotInvalidated;
     // Snapshot the logical spans, then copy each bounded piece under the mutex and invoke the sink
     // only AFTER releasing it.  The sink is HTTP/network I/O and may block or throw; doing either
     // while holding the shared log mutex stalls every producer and violates the firmware lock
@@ -93,7 +139,7 @@ DiagDumpResult diag_log_dump_chunks(const std::function<bool(const char*, size_t
     uint64_t snapshot_written = 0;
     uint64_t snapshot_epoch = 0;
     {
-        tk::SemGuard g(s_mtx);
+        tk::SemGuard g(mtx);
         if (!g) return DiagDumpResult::SnapshotInvalidated;
         head = s_head;
         wrapped = s_wrapped;
@@ -112,7 +158,7 @@ DiagDumpResult diag_log_dump_chunks(const std::function<bool(const char*, size_t
         for (size_t offset = 0; offset < len;) {
             const size_t n = (len - offset < sizeof(chunk)) ? len - offset : sizeof(chunk);
             {
-                tk::SemGuard g(s_mtx);
+                tk::SemGuard g(mtx);
                 if (!g) return DiagDumpResult::SnapshotInvalidated;
                 const uint64_t unread = absolute_start + offset;
                 if (s_epoch != snapshot_epoch || s_written < unread ||
@@ -153,8 +199,9 @@ DiagDumpResult diag_log_dump_chunks(const std::function<bool(const char*, size_t
 }
 
 void diag_log_clear() {
-    if (!s_mtx) return;
-    tk::SemGuard g(s_mtx);
+    const auto mtx = s_mtx.load(std::memory_order_acquire);
+    if (!mtx) return;
+    tk::SemGuard g(mtx);
     s_head    = 0;
     s_wrapped = false;
     s_written = 0;

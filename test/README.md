@@ -12,12 +12,59 @@ scripts/run-mock-tests.sh               # available local checks, reports missin
 scripts/run-mock-tests.sh --require-all # fail closed: CI/Stop prerequisites are mandatory
 ```
 
-Normal mode needs a C++17 compiler, using CMake when present or equivalent direct compilation.
+Normal mode needs C11 and C++17 compilers, using CMake when present or equivalent direct compilation.
 The separate real v6.2.0 tesla-ble/PSA harness requires C++20; pure firmware logic remains C++17.
 Strict mode requires Git, Python, Node, CMake, compiler and every gate file, with bounded subprocesses.
 Missing tooling is failure, not reduced coverage reported green. A failed check fails its binary:
 the pure-logic suite and the tesla-ble harness report every failed check before exiting 1, while the
 NVS, runtime-boundary, cJSON OOM and MQTT JSON binaries and the fuzz smoke stop at the first failure.
+
+The real NVS/config tests observe a synthetic serialization buffer through the passive save shim:
+maximal 473-byte payloads, complete 512-byte wipe on success/refusal/failure/exception, synchronous
+reentry and a bounded controlled thread collision. They preserve the original blob-before-mirrors
+fault matrix. No production buffer accessor or live NVS data is used; this does not simulate power
+loss, flash durability or prove runtime heap margins.
+
+`clock_runtime_tests` compiles the actual clock shell and date getters with passive RTOS/libc/storage
+doubles. It covers writer orderings, typed failures, authority-before-sampling, restore and checkpoint
+faults. Pure clock/window/parser/checkpoint decisions and key-date stamp-or-retire callbacks have
+registered logic ownership; the latter also runs through the real NVS adapter fault matrix. These
+checks do not emulate SDK timekeeping, flash durability, RTC behavior, NTP networking or hardware.
+
+`config_commit_tests` compiles the shipped request lease, raw-state/confirmation functions and
+setup portal, plus unmodified pinned SDK CRC/query fragments through an explicit passive type/I/O
+bridge. It exercises five occupied owners, raw NEW/PENDING/VALID/UNDEFINED, blank/CRC/query errors,
+refused/uncertain/confirmed marks, diagnostic throws, portal outer catches and partial replies.
+Locked-cJSON tests run actual HTTP handlers across matching/different WiFi submissions and preserve
+known image results in normal/degraded responses. The C and C++ objects both run under Linux
+sanitizers. The fixture is bound to the toolchain-file hash; a migration requires a fresh SDK review.
+These checks model SDK mark effects; they do not execute flash writes, the bootloader, RTOS or
+physical restart, and cannot prove runtime heap/stack or key preservation.
+
+`syslog_runtime_tests` compiles the shipped formatter and boot-replay bodies with passive socket,
+cache and application-description adapters. It checks BOOT INFO/CRASH ERROR, ordinary-message
+classification, default-argument behavior, live dismissal, no replay retry after an allocation
+exception, bounded packet formatting and socket/send errors. It opens no socket and does not
+establish UDP delivery or live-device behavior. The fast boundary selector also runs this adapter.
+
+`crash_runtime_xtensa_tests` and `crash_runtime_riscv_tests` compile actual `diag_crash.cpp`
+against passive SDK/partition/PSA facades. They cover each boot read failure/exception, hash API
+failure, foreign/short identity, absent/error partition lookup, wrong installed extent, allocation
+failure, request contention, header changes and erase success/error/partial effect. The same tests
+run in direct fallback, the fast boundary selector and Linux sanitizers. Facade ABI declarations
+are synthetic; only pinned compilation on all four targets establishes SDK layout compatibility.
+Boot ERROR records, full-hash fallback, suppressed ordinary/dismissed records and partial log
+failures run through the actual shell with a passive severity-aware sink.
+The live snapshot borrows immutable boot payload; actual shell tests check pointer ownership,
+no payload-copy allocation, retained metadata after erase and the separate export authority.
+Pure owned/view presenters must match. Generation suppression has deterministic before/after
+cases and a shell contract binding the final acquire load after view construction. This does
+not claim an executed erase precisely after view construction; the real header-read/erase
+interleaving remains covered separately. Status models, SDK queries and renderers can allocate.
+
+Locked-cJSON tests compile the actual crash HTTP bodies and F031 serializer/outer catch, exhaust
+post-erase JSON allocations and fail each header/read/chunk. They verify no second response, clean
+failed-stream terminator, automatic retry or false dismissal. No real crash dump or flash is used.
 
 For a narrow CMake iteration:
 
@@ -46,7 +93,7 @@ behavior claims. Mirrored C++/Python/JS presenters need parity checks, not merel
 | Area | Evidence |
 |---|---|
 | Decisions/state machines | `test_logic.cpp`: VIN/identity, units, link/sleep, active window/wake retry, automatic same-key enrollment cadence/admission, commands, OTA versions/intake, config/storage, watchdog, admission, asynchronous generations, presenters |
-| Real tesla-ble/PSA seam | `scripts/test-tesla-ble-harness.sh --require-all`: pinned library/patches, Nanopb and pinned Mbed TLS4/TF-PSA-Crypto; production frame/key helpers and V1 crypto vectors |
+| Real tesla-ble/PSA seam | `scripts/test-tesla-ble-harness.sh --require-all`: pinned library/patches, Nanopb and pinned Mbed TLS4/TF-PSA-Crypto; production frame/key helpers, compiled native CarServer response and identity-cleanup methods, and V1 crypto vectors |
 | Presenter mirrors | `check-display-sim-parity.sh`, `check-ble-row-parity.sh`: golden C++ decisions against simulator and shipped JavaScript |
 | Public protocol vectors | `tesla_protocol_vectors.test.mjs`: VIN, ECDH/HMAC/AES-GCM and patch contracts, public test keys only |
 | External JSON contract | Golden status output, command registry/bounds, MQTT registry/fields/presence and exact MCP IDs |
@@ -56,16 +103,87 @@ monotonic session counters, domain request-hash isolation and invalid-domain loo
 The crypto harness checks official client/session derivation, HMAC/tag, AES-GCM, response-counter
 AAD (different from request counter), tampered-tag refusal, PEM compatibility and invalid keys.
 Disabling the real PSA RNG must refuse handshake and payload construction without emitting a frame.
-Firmware key fingerprint uses a host mirror because the IDF function is not compiled on the host.
+Fingerprint derivation remains covered by a host mirror; the IDF crypto shell is not compiled on
+the host. The production text formatter is tested directly against the previous representation
+and the VIN-journal parser. Extracted actual HTTP adapters reject an empty journal before writes.
+The native NVS suite exercises actual config-save ordering, blob/mirror set/commit failures and a
+real vector-allocation failure after the length probe. Source pins cover every configuration
+read-modify-save refusal and fatal boot configuration validation. These do not simulate NVS durability.
 Presenter parity likewise proves decisions, not physical pixels.
 
+The native VCSEC harness compiles the production routing and response methods with the real
+patched Client, Peer and CommandRunner. It covers status/action/auth/wake admission, proactive
+HMAC-verified session repair, failed writes, stale attempts, passive wake progress and zero-inclusive
+GCM replay. A full auth → wake → Info auth → payload → authenticated response sequence checks
+retirement and ordinary-address restoration. The native RNG fault facade simulates a failed public
+RNG status; its normal path delegates to the real helper. This is offline evidence, not hardware or
+entropy-failure acceptance.
+
+The same native harness pins all 29 universal fault enum numbers and exercises independently sealed
+fault/AAD replies, foreign routing/UUID, bad tags, replay, delayed safe retry, uncertain writes and
+10-minute no-resend simulations. It also compiles the actual result callback, timeout, publication
+and FIFO invalidation methods against deterministic semaphore/link sinks. Controls cover typed
+failure delivery, stale generations, callback exceptions, missing semaphore notification, permanent
+rejection allocation failure and committed-success fallback. These are host execution checks, not
+physical ATT or live API/vehicle acceptance.
+
+Session-availability cases compile the actual cache, persistence, restore and link-reset methods.
+They cover save-false and throwing storage with and without older records, RAM-only command
+completion, current-save error recovery, domain isolation, identity gating/epoch changes, ordinary
+FIFO cancellation, authenticated repair and throwing link-loss callbacks. Ten simulated minutes of
+cache reads must add neither frames nor writes. Restore uses a deterministic clock facade; this
+does not prove physical NVS retention or correct persisted-session age conversion.
+
+Wake cases compile the actual wake method, generic VCSEC wrappers, clock helpers and result
+callback. The blocking-send handoff uses controlled early failures or the real native BLE driver
+with successful/false-after-submission writes. Controlled cache inputs pass through the production
+link-state model; they are not live telemetry. Checks cover early definite return, original uncertain
+reason retention despite shared-error changes, later Info confirmation, no TX-only reachability
+stamp and ten-minute no-resend controls. They do not establish physical wake or vehicle acceptance.
+
 ## Beyond the pure-logic binary
+
+Provisioning fixtures derive their wrapper and field keys from the actual straight-line
+`http_common.cpp` `make_response` producer and fail closed if its shape changes. LAN WiFi/VIN
+successes must read the nested boolean; refusals, misleading flat success and wrong-typed values
+never trigger a second request. Success output distinguishes accepted configuration from an
+immediate reboot and does not claim a changed VIN preserves pairing. These tests mock HTTP
+and perform no provisioning or NVS writes.
+
+The mock runner compiles the locked cJSON intake/OOM matrix when Python is available; strict
+mode requires it. A cold cache needs network access to the Espressif registry and archive host.
+Prepare it with `bash test/run-cjson-oom-tests.sh` before an offline run. Every run re-hashes the
+warm cache against the four lockfiles. The matrix checks the 64-value
+request boundary, unchanged allocation counts for valid input, zero parser allocations for a
+2 KiB over-budget array, generic/OTA default compatibility, decoded duplicate keys, canonical
+numeric strings and leak-free parser failpoints. The fuzz gate compares counted and uncounted
+syntax outcomes so the request budget cannot hide malformed/depth/NUL errors. Request-shell
+contracts and 12 comment-decoy mutations bind all three caps, terminal rejections, shared duplicate
+checks and integer readers to production adapters. These are host checks, not heap measurements
+on a device.
+
+API reply contracts bind the REST body/status helper, command502, unknown-tool code, all five
+configuration OTA409 guards, notification/exception policies and the MCP cache-only charge gate.
+Eleven comment-decoy mutations exercise those bindings. The real-cJSON state builder checks
+both available and unavailable charge snapshots; an unavailable snapshot omits all charge fields
+even if a producer accidentally leaves its telemetry flags set. Existing pure cache-policy tests
+cover the active-window age boundary and deliberate idle last-known data.
+
+The diagnostic adapter exercises actual formatted capture, RAM ring, chunk framing and fixed-buffer
+redaction with embedded CR/LF, forged prefixes, wrap and truncation. It checks that ordinary raw sinks receive the original bytes and known MQTT URI parser errors
+reach all three sinks only as a fixed replacement, including failed ring allocation and repeated
+initialization. The host log stub maps the early `vprintf` fallback to a named test facade;
+it does not depend on libc symbol interposition or disable fortified stdio or sanitizers.
+This is qualified V1-callback evidence; it does not prove closed
+WiFi-driver callback framing, a physical exported log or complete sanitation.
 
 | Gate | What it verifies |
 |---|---|
 | `test_runtime_boundaries.cpp` | Production glue with RTOS/NVS/log/ping stubs: post-unlock sinks, safe partial cleanup, durable-before-restart, task/admission handshakes, callback-generation quarantine, W5500 acquisition unwind |
+| `test_diagnostic_export_guidance.py` | Actual bug-form diagnostic description, owned export URL, manual/serial sanitation and nine negative wording mutations |
+| HTTP security contract and UI request tests | Actual POST gate ordering, bounded provenance headers, socket/live-mDNS ownership, diagnostic Host checks, redaction selectors, exact UI proof header, no CORS grant and both anti-framing headers; 16 source mutations must fail. IPv6 enablement is rejected; these checks do not establish live network/browser attack behavior. |
 | `test_runtime_boundary_contract.py` | Shipped CMake source closure and actual task/callback registration; contained or mechanically bounded C boundaries; fixed mailbox/completion ownership, no forbidden work under locks, production JSON/OTA/MQTT wiring and closed source/flag surface |
-| `run-cjson-oom-tests.sh` | Rehashed pinned cJSON; every allocation failure in real status/MCP producers and REST envelopes, parser and reply seam; sticky ownership, complete response or one 503, exact IDs, early input release, no leaks |
+| `run-cjson-oom-tests.sh` | Rehashed pinned cJSON; real producers/parser, every allocation failpoint, exact IDs, ownership and early input release. Effect-aware reply renderer and extracted real handlers/outer catch exercise degraded outcomes, clock-plus-refused-OTA, typed identity recovery, original restart admission and terminal transport failures. |
 | `run-mqtt-json-publish-tests.sh` | Every production discovery/state factory, full/minimal branches and all registry rows; build/print/publish faults cannot replace retained data and rearm discovery |
 | `scripts/check-nvs-contract.py` | Exact registered namespace/key/API/owner/retention/secrecy surface, session aliases and direct NVS calls; wrong-name/API/collision/missing-record mutations |
 | `scripts/repo-lint.sh` | Syntax/local links, workflow-policy and host-gate mutation canaries, logic ownership and protocol wiring |
@@ -89,6 +207,13 @@ real-browser evidence. Validator `--self-test` modes use representative mutation
 firmware compilation and signed-artifact checks remain independent.
 
 ## What's *not* covered (by design)
+
+The effect-reply gate compiles functions extracted from the shipped HTTP/MCP adapters and handlers,
+not rewritten models. Device/storage/vehicle/RTOS operations remain passive doubles. IDF faults are
+return codes with simulated partial bytes; generic renderer spies also throw after the terminal
+latch. A separately named shell injection throws after a real handler response to exercise the
+actual outer catch. These tests do not claim a C IDF function throws. Browser/CLI regressions keep
+received uncertainty visible and forbid automatic follow-up mutations on a degraded channel reply.
 
 Host stubs do not exercise actual esp_http_server, NimBLE, flash/NVS, device scheduling, OTA rollback
 or the car. Pinned cJSON tests use real emitters but deterministic transport/publish seams.

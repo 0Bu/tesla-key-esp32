@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Linux-only host sanitizer gate. It deliberately fails instead of skipping when the compiler,
-# sanitizer runtime, CMake target, or leak detector is unavailable: a green job must mean all three
+# sanitizer runtime, CMake target, or leak detector is unavailable: a green job must mean all four
 # detectors actually executed over every declared host boundary target.
 set -euo pipefail
 
@@ -57,6 +57,7 @@ trap 'rm -rf "$work"' EXIT
 
 flags=(-std=c++17 -O1 -g -fno-omit-frame-pointer -fno-sanitize-recover=all
        -fsanitize=address,undefined,leak)
+c_flags=(-std=c11 "${flags[@]:1}")
 asan_options="detect_leaks=1:halt_on_error=1:abort_on_error=1:strict_string_checks=1"
 ubsan_options="halt_on_error=1:print_stacktrace=1"
 lsan_options="exitcode=97"
@@ -109,11 +110,12 @@ fi
 cmake -S test -B "$work/build" -DCMAKE_BUILD_TYPE=Debug \
     -DCMAKE_CXX_COMPILER="$CXX" \
     -DCMAKE_CXX_FLAGS="${flags[*]}" \
+    -DCMAKE_C_FLAGS="${c_flags[*]}" \
     -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined,leak" >/dev/null
 cmake --build "$work/build" --parallel \
-    --target logic_tests nvs_storage_tests runtime_boundary_tests
+    --target logic_tests nvs_storage_tests runtime_boundary_tests clock_runtime_tests config_commit_tests syslog_runtime_tests crash_runtime_xtensa_tests crash_runtime_riscv_tests
 
-for target in logic_tests nvs_storage_tests runtime_boundary_tests; do
+for target in logic_tests nvs_storage_tests runtime_boundary_tests clock_runtime_tests config_commit_tests syslog_runtime_tests crash_runtime_xtensa_tests crash_runtime_riscv_tests; do
     binary="$work/build/$target"
     if [ ! -x "$binary" ]; then
         echo "sanitizer-gate: declared target did not produce an executable: $target" >&2
@@ -129,4 +131,4 @@ ASAN_OPTIONS="$asan_options" UBSAN_OPTIONS="$ubsan_options" \
     LSAN_OPTIONS="$lsan_options" "$work/fuzz_smoke" \
     --seed 0x5445534c414b4559 --iterations 20000
 
-echo "sanitizer-gate: PASS (logic, NVS, runtime boundaries, deterministic fuzz)"
+echo "sanitizer-gate: PASS (logic, NVS, runtime boundaries, clock/config shells, pinned SDK query, deterministic fuzz)"

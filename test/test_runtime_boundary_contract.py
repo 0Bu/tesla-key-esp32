@@ -248,7 +248,7 @@ EXPECTED_CALLBACKS = {
     "mqtt_event_handler",
     "on_mqtt_probe",
     "ping_probe_on_end",
-    "on_time_sync",
+    "sntp_sync_time",
     "handle_all",
     "diag_vprintf_",
     "app_main",
@@ -278,7 +278,7 @@ CONTAINED = {
     "eth_event_handler",
     "save_post",
     "mqtt_event_handler",
-    "on_time_sync",
+    "sntp_sync_time",
     "handle_all",
     "app_main",
 }
@@ -324,7 +324,8 @@ REVIEWED_ALLOWED_CALLS = {
     "on_mqtt_probe": {"xSemaphoreGive"},
     "ping_probe_on_end": {"esp_ping_get_profile", "complete", "xSemaphoreGive"},
     "diag_vprintf_": {
-        "va_copy", "vsnprintf", "va_end", "diag_append_", "syslog_send", "s_prev", "vprintf",
+        "va_copy", "vsnprintf", "va_end", "diag_append_", "syslog_send", "vprintf",
+        "diag_mqtt_uri_error_", "diag_forward_fixed_", "load", "previous",
     },
     "ble_link_event_cb_": {"static_cast", "enqueue_ble_link_event_"},
     "ble_rx_event_cb_": {"static_cast", "enqueue_ble_rx_event_"},
@@ -332,7 +333,9 @@ REVIEWED_ALLOWED_CALLS = {
 
 REVIEWED_DELEGATED_HELPERS = {
     "diag_vprintf_": {
-        "diag_append_": {"g", "pdMS_TO_TICKS"},  # SemGuard variable construction + C macro
+        "diag_mqtt_uri_error_": {"diag_mqtt_uri_error"},
+        "diag_forward_fixed_": {"va_start", "previous", "load", "vprintf", "va_end"},
+        "diag_append_": {"g", "pdMS_TO_TICKS", "diag_library_capture_content_end", "diag_capture_byte", "load"},
         "syslog_send": {"sv", "find", "memcpy", "load", "xQueueSend"},
     },
     "ble_link_event_cb_": {
@@ -575,6 +578,9 @@ def callback_inventory(text: str) -> set[str]:
     # source-level function call.
     if re.search(r'extern\s+"C"\s+void\s+app_main\s*\(', text):
         found.add("app_main")
+    # The documented IDF weak extension is a C callback boundary without registration.
+    if re.search(r'extern\s+"C"\s+void\s+sntp_sync_time\s*\(', text):
+        found.add("sntp_sync_time")
     return found
 
 
@@ -677,6 +683,22 @@ def require_catch_all(name: str, body: str) -> None:
     its exception handler, independent of the statement spelling.
     """
     code = scrub_cpp_preserving_layout(body)
+    if name == "handle_all":
+        # Only these fixed POD/scalar declarations and the noexcept continuation are outside
+        # the effect-aware catch chain. Arbitrary prefix/suffix work still fails closed.
+        prefix = r"\{\s*HttpGuardContext context\{req, \{\}\};\s*const GuardedReq rq\{&context\};\s*esp_err_t result = ESP_FAIL;"
+        suffix = r"run_effect_continuation\(rq\);\s*return result;\s*\}$"
+        if not re.match(prefix, code) or not re.search(suffix, code):
+            raise AssertionError("handle_all: only bounded noexcept outcome declarations/continuation may surround catch")
+        code = re.sub(prefix, "{", code, count=1)
+        code = re.sub(suffix, "}", code, count=1)
+    if name == "save_post":
+        prefix = r"\{\s*PortalSaveContext context\{\};\s*esp_err_t result = ESP_FAIL;"
+        suffix = r"portal_save_continue\(context\);\s*return result;\s*\}$"
+        if not re.match(prefix, code) or not re.search(suffix, code):
+            raise AssertionError("save_post: only noexcept context/continuation may surround catch")
+        code = re.sub(prefix, "{", code, count=1)
+        code = re.sub(suffix, "}", code, count=1)
     if len(code) < 2 or code[0] != "{" or code[-1] != "}":
         raise AssertionError(f"{name}: malformed registered C boundary body")
     end = len(code) - 1
@@ -855,8 +877,8 @@ def require_mcp_payload_seams(source: str, payloads: str) -> None:
 CJSON_SYMBOL = re.compile(r"\b(cJSON_[A-Za-z0-9_]+)\b")
 CJSON_CALL_COUNTS = {
     "http_api.cpp": {
-        "cJSON_GetObjectItemCaseSensitive": 2, "cJSON_IsBool": 2, "cJSON_IsNumber": 1,
-        "cJSON_IsObject": 1, "cJSON_IsString": 1, "cJSON_IsTrue": 2, "cJSON_Parse": 1,
+        "cJSON_GetObjectItemCaseSensitive": 2, "cJSON_IsBool": 2,
+        "cJSON_IsObject": 1, "cJSON_IsTrue": 2, "cJSON_Parse": 1,
     },
     "http_config.cpp": {
         "cJSON_GetObjectItemCaseSensitive": 2, "cJSON_IsNumber": 1,
@@ -868,10 +890,14 @@ CJSON_CALL_COUNTS = {
         "cJSON_CreateRaw": 1, "cJSON_CreateObject": 3, "cJSON_CreateString": 2,
         "cJSON_CreateStringReference": 2, "cJSON_Delete": 1, "cJSON_IsArray": 2,
     },
+    "http_effect_reply.hpp": {"cJSON_PrintUnformatted": 1},
     "json_http_reply.hpp": {"cJSON_PrintUnformatted": 1, "cJSON_free": 1},
+    "json_input_validation.hpp": {
+        "cJSON_IsArray": 1, "cJSON_IsNumber": 1, "cJSON_IsObject": 2, "cJSON_IsString": 1,
+    },
     "mcp_json_payloads.hpp": {
-        "cJSON_GetObjectItemCaseSensitive": 2, "cJSON_IsArray": 1, "cJSON_IsNull": 1,
-        "cJSON_IsNumber": 1, "cJSON_IsObject": 4, "cJSON_IsString": 2,
+        "cJSON_GetObjectItemCaseSensitive": 2, "cJSON_IsNull": 1,
+        "cJSON_IsNumber": 1, "cJSON_IsObject": 2, "cJSON_IsString": 2,
         "cJSON_PrintUnformatted": 1,
     },
     "mcp_server.cpp": {
@@ -1055,6 +1081,20 @@ def require_mqtt_factory_inventory(payloads: str, production: str, tests: str) -
     ):
         if token not in test_execution_code:
             raise AssertionError(f"MQTT payload OOM/success execution seam missing: {token!r}")
+
+
+def require_wifi_rollback_status_cache(main_source: str, producer: str) -> None:
+    boot = function_body_in(main_source, "app_main")
+    seed = "tk::cfg_init_wifi_rollback_status(cfg_blob.wifi_rolled_back);"
+    require_before("WiFi rollback cache after verified boot load", boot,
+                   "load_config_blob_verified(config_store, cfg_blob);", seed)
+    require_before("WiFi rollback cache before HTTP startup", boot,
+                   seed, "http_server_start(vehicle, config_store)")
+    if "in.wifi_rolled_back = tk::cfg_wifi_rolled_back();" not in producer:
+        raise AssertionError("/status must consume the current committed WiFi rollback cache")
+    for forbidden in ("tk::cfg_load(", "tk::cfg_load_state(", "tk::ConfigBlob "):
+        if forbidden in producer:
+            raise AssertionError("/status must not reload allocating configuration snapshots")
 
 
 def require_status_production_seams(producer: str, handler: str) -> None:
@@ -1495,7 +1535,7 @@ def require_diag_dump_completion_contract(handler: str, diag_header: str,
 
     dump = function_body_in(diag_source, "diag_log_dump_chunks")
     for token in (
-        "if (!s_mtx) return DiagDumpResult::SnapshotInvalidated;",
+        "if (!mtx) return DiagDumpResult::SnapshotInvalidated;",
         "if (!g) return DiagDumpResult::SnapshotInvalidated;",
         "s_epoch != snapshot_epoch",
         "return DiagDumpResult::SnapshotInvalidated;",
@@ -1568,6 +1608,48 @@ def require_diag_redaction_stream_contract(
     handler: str, redactor_header: str, diag_source: str, runtime_tests: str
 ) -> None:
     """Keep the redacted /diag tail fixed-buffer and non-throwing once chunks can leave."""
+    for token in (
+        'static_assert(CONFIG_LOG_VERSION == 1,',
+        'static_assert(CONFIG_LOG_TIMESTAMP_SOURCE_RTOS,',
+        '#if defined(CONFIG_LOG_COLORS) && CONFIG_LOG_COLORS',
+        'static std::atomic<SemaphoreHandle_t> s_mtx{nullptr};',
+        'static std::atomic<vprintf_like_t> s_prev{nullptr};',
+        's_prev.store(previous, std::memory_order_release);',
+        's_mtx.store(mtx, std::memory_order_release);',
+        'tk::diag_library_capture_content_end({data, len})',
+        'tk::diag_capture_byte(data[i], i, library_end)',
+    ):
+        if token not in diag_source:
+            raise AssertionError(f"qualified V1 diagnostic capture lost {token!r}")
+    for name, handle in (
+        ("diag_append_", "s_mtx"), ("diag_log_dump_chunks", "s_mtx"),
+        ("diag_log_clear", "s_mtx"), ("diag_vprintf_", "s_prev"),
+        ("diag_forward_fixed_", "s_prev"),
+    ):
+        body = scrub_cpp(function_body_in(diag_source, name))
+        if body.count(f"{handle}.load(std::memory_order_acquire)") != 1 or len(re.findall(rf"\b{handle}\b", body)) != 1:
+            raise AssertionError(f"{name}: load published handle once into a local snapshot")
+    append = function_body_in(diag_source, "diag_append_")
+    require_before("library record classification before ring lock", append,
+                   "tk::diag_library_capture_content_end", "tk::SemGuard")
+    if "if (diag_library_identifier_line(line)) return collapse();" not in redactor_header:
+        raise AssertionError("known library identifier export must collapse the complete line")
+    capture = function_body_in(diag_source, "diag_vprintf_")
+    for token in (
+        "if (diag_mqtt_uri_error_(line, len))",
+        "diag_append_(tk::kDiagMqttUriErrorLine, sizeof(tk::kDiagMqttUriErrorLine) - 1)",
+        "syslog_send(tk::kDiagMqttUriErrorLine, sizeof(tk::kDiagMqttUriErrorLine) - 1)",
+        'return diag_forward_fixed_("%s", tk::kDiagMqttUriErrorLine);',
+    ):
+        if token not in capture:
+            raise AssertionError(f"MQTT credential capture guard missing {token!r}")
+    require_before("MQTT protection before ordinary raw capture", capture,
+                   "diag_mqtt_uri_error_", "diag_append_(line, len)")
+    init = function_body_in(diag_source, "diag_log_init")
+    require_before("protect logs even when optional ring mutex fails", init,
+                   "esp_log_set_vprintf(diag_vprintf_)", "xSemaphoreCreateMutex()")
+    if "if (!s_hook_installed)" not in init or "s_hook_installed = true;" not in init:
+        raise AssertionError("diagnostic initialization can chain its hook to itself")
     marker = "// ?redact=1"
     start = handler.find(marker)
     if start < 0:
@@ -1698,111 +1780,52 @@ def require_operation_wrapper_contract(ota_source: str) -> None:
         raise AssertionError("HealthCommit guard does not acquire the shared owner into held_")
     if not destructor:
         raise AssertionError("HealthCommit guard does not owner-release exactly when held")
-    config_begin = re.search(
-        r"bool\s+ota_config_restart_begin\s*\(\s*\)\s*\{([^}]*)\}",
-        ota_source,
-        re.DOTALL,
-    )
-    if not config_begin or (
-        "s_operation_gate.try_begin(tk::OtaIdentityGateState::ConfigRestart)"
-        not in config_begin.group(1)
-    ):
-        raise AssertionError("ConfigRestart begin wrapper bypasses the shared CAS gate")
-
-    confirm_start = ota_source.find("void ota_confirm_pending_image")
-    confirm_end = ota_source.find("// Short per-target image suffix", confirm_start)
-    if confirm_start < 0 or confirm_end < 0:
-        raise AssertionError("OTA user-confirmation production body is missing")
-    confirm = ota_source[confirm_start:confirm_end]
-    require_before("user OTA confirmation owner", confirm,
-                   "OtaHealthCommitGuard commit_guard;",
-                   "esp_ota_mark_app_valid_cancel_rollback()")
-    require_before("user OTA confirmation admission", confirm,
-                   "if (!commit_guard)",
-                   "esp_ota_mark_app_valid_cancel_rollback()")
-    denied = re.search(
-        r"if\s*\(\s*!commit_guard\s*\)\s*\{(?P<body>.*?)\}",
-        confirm,
-        re.DOTALL,
-    )
-    if not denied or not re.search(r"\breturn\s*;", scrub_cpp(denied.group("body"))):
-        raise AssertionError("user OTA confirmation does not fail closed when owner admission fails")
-
-    ready_denied = re.search(
-        r"if\s*\(\s*!tk::runtime_admission_vehicle_ready\s*\(\s*\)\s*\)\s*"
-        r"\{(?P<body>.*?)\}",
-        confirm,
-        re.DOTALL,
-    )
-    if not ready_denied or not re.search(
-        r"\breturn\s*;", scrub_cpp(ready_denied.group("body"))
-    ):
-        raise AssertionError(
-            "user OTA confirmation does not fail closed outside RuntimeAdmission Ready"
-        )
-    if confirm.count("tk::runtime_admission_vehicle_ready()") != 1:
-        raise AssertionError("user OTA confirmation must re-check global Ready exactly once")
-    require_before("user OTA confirmation owner before Ready", confirm,
-                   "OtaHealthCommitGuard commit_guard;",
-                   "tk::runtime_admission_vehicle_ready()")
-    require_before("user OTA confirmation Ready before heap", confirm,
-                   "tk::runtime_admission_vehicle_ready()", "commit_largest")
-    require_before("user OTA confirmation Ready before mark-valid", confirm,
-                   "tk::runtime_admission_vehicle_ready()",
-                   "esp_ota_mark_app_valid_cancel_rollback()")
-    host_denied = re.search(
-        r"if\s*\(\s*!ble_host_synced\s*\(\s*\)\s*\)\s*"
-        r"\{(?P<body>.*?)\}", confirm, re.DOTALL,
-    )
-    if not host_denied or not re.search(
-        r"\breturn\s*;", scrub_cpp(host_denied.group("body"))
-    ):
-        raise AssertionError("user OTA confirmation does not fail closed while NimBLE is reset")
-    if confirm.count("ble_host_synced()") != 1:
-        raise AssertionError("user OTA confirmation must re-check current NimBLE health once")
-    require_before("user OTA confirmation Ready before BLE health", confirm,
-                   "tk::runtime_admission_vehicle_ready()", "ble_host_synced()")
-    require_before("user OTA confirmation BLE health before heap", confirm,
-                   "ble_host_synced()", "commit_largest")
-    require_before("user OTA confirmation BLE health before mark-valid", confirm,
-                   "ble_host_synced()", "esp_ota_mark_app_valid_cancel_rollback()")
-    reset_denied = re.search(
-        r"if\s*\(\s*ble_host_reset_count\s*\(\s*\)\s*!=\s*0\s*\)\s*"
-        r"\{(?P<body>.*?)\}", confirm, re.DOTALL,
-    )
-    if not reset_denied or not re.search(
-        r"\breturn\s*;", scrub_cpp(reset_denied.group("body"))
-    ):
-        raise AssertionError(
-            "user OTA confirmation does not fail closed after a NimBLE host reset"
-        )
-    if confirm.count("ble_host_reset_count()") != 1:
-        raise AssertionError("user OTA confirmation must re-check sticky NimBLE reset evidence once")
-    require_before("user OTA confirmation BLE sync before sticky reset evidence", confirm,
-                   "ble_host_synced()", "ble_host_reset_count()")
-    require_before("user OTA confirmation reset evidence before heap", confirm,
-                   "ble_host_reset_count()", "commit_largest")
-    require_before("user OTA confirmation reset evidence before mark-valid", confirm,
-                   "ble_host_reset_count()", "esp_ota_mark_app_valid_cancel_rollback()")
-    for token in (
+    code = scrub_cpp_preserving_layout(ota_source)
+    acquire = function_body_in(code, "try_begin")
+    if "held_ = s_operation_gate.try_begin(tk::OtaIdentityGateState::ConfigRestart);" not in acquire:
+        raise AssertionError("ConfigRestart guard bypasses shared CAS admission")
+    owns = function_body_in(code, "owns_gate")
+    if "return held_ && s_operation_gate.state() == tk::OtaIdentityGateState::ConfigRestart;" not in owns:
+        raise AssertionError("ConfigRestart ownership requires this guard and current gate")
+    cleanup = code[code.index("OtaConfigRestartGuard::~OtaConfigRestartGuard()"):
+                   code.index("bool OtaConfigRestartGuard::try_begin()")]
+    for token in ("noexcept", "if (held_)", "held_ = false;",
+                  "s_operation_gate.finish(tk::OtaIdentityGateState::ConfigRestart)"):
+        if token not in cleanup: raise AssertionError("ConfigRestart cleanup missing " + token)
+    if "ESP_LOG" in cleanup or "finish_operation" in cleanup:
+        raise AssertionError("noexcept ConfigRestart cleanup cannot perform diagnostics")
+    query = function_body_in(code, "ota_config_image_state")
+    for token in ("if (!owner.owns_gate()) return Result::WrongOwner;",
+                  "esp_ota_get_state_partition(running, &state) != ESP_OK",
+                  "case ESP_OTA_IMG_VALID: return Result::Valid;",
+                  "case ESP_OTA_IMG_UNDEFINED: return Result::Undefined;",
+                  "case ESP_OTA_IMG_NEW: return Result::New;",
+                  "case ESP_OTA_IMG_PENDING_VERIFY: return Result::Pending;",
+                  "default: return Result::Unsupported;", "catch (...) { return Result::Unknown; }"):
+        if token not in query: raise AssertionError("raw config image query missing " + token)
+    require_before("config query owner before SDK", query, "owner.owns_gate()", "esp_ota_get_running_partition()")
+    confirm = function_body_in(code, "ota_confirm_pending_image")
+    ordered = (
+        "if (!owner.owns_gate()) return Result::WrongOwner;",
+        "if (!tk::ota_reboot_confirms_pending_image(reboot_class)) return Result::WrongClass;",
+        "Result result = ota_config_image_state(owner);",
+        "if (result != Result::Pending) return result;",
+        "if (!tk::runtime_admission_vehicle_ready()) return Result::NotReady;",
+        "if (!ble_host_synced()) return Result::HostUnsynced;",
+        "if (ble_host_reset_count() != 0) return Result::HostReset;",
         "MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL",
-        "commit_largest < tk::kHeapCriticalBytes",
-    ):
-        if token not in confirm:
-            raise AssertionError(f"user OTA confirmation heap recheck missing {token!r}")
-    require_before("user OTA confirmation heap recheck", confirm,
-                   "commit_largest < tk::kHeapCriticalBytes",
-                   "esp_ota_mark_app_valid_cancel_rollback()")
-    heap_denied = re.search(
-        r"if\s*\(\s*commit_largest\s*<\s*tk::kHeapCriticalBytes\s*\)\s*"
-        r"\{(?P<body>.*?)\}",
-        confirm,
-        re.DOTALL,
+        "if (commit_largest < tk::kHeapCriticalBytes) return Result::CriticalHeap;",
+        "result = Result::MarkUnknown;",
+        "esp_ota_mark_app_valid_cancel_rollback()",
+        "result = Result::Confirmed;",
+        "ESP_LOGI",
     )
-    if not heap_denied or not re.search(
-        r"\breturn\s*;", scrub_cpp(heap_denied.group("body"))
-    ):
-        raise AssertionError("user OTA confirmation does not fail closed on critical heap")
+    for token in ordered:
+        if token not in confirm: raise AssertionError("borrowed config confirmation missing " + token)
+    for first, second in zip(ordered, ordered[1:]):
+        require_before("borrowed config confirmation ordering", confirm, first, second)
+    if "OtaHealthCommitGuard" in confirm or "catch (...)" not in confirm or "return result;" not in confirm:
+        raise AssertionError("borrowed confirmation must contain diagnostic throws without nested ownership")
 
     logic_tests = (ROOT / "test/test_logic.cpp").read_text(encoding="utf-8")
     runtime_tests = (ROOT / "test/test_runtime_boundaries.cpp").read_text(encoding="utf-8")
@@ -2738,13 +2761,13 @@ def require_ota_fetch_contract(ota_source: str, ota_logic: str,
 
 def require_coredump_stream_contract(status_source: str, runtime_tests: str) -> None:
     handler = function_body_in(status_source, "handle_coredump")
-    loop_start = handler.find("while (off < size)")
+    loop_start = handler.find("for (uint32_t offset = 0; offset < source.bytes;)")
     terminal = handler.find("httpd_resp_send_chunk(req, nullptr, 0)", loop_start)
     if loop_start < 0 or terminal < 0:
         raise AssertionError("coredump fixed-chunk stream/terminator is missing")
     loop = handler[loop_start:terminal]
-    read_at = loop.find("esp_partition_read(part, off, buf, n)")
-    send_at = loop.find("httpd_resp_send_chunk(req, buf, n)", read_at)
+    read_at = loop.find("esp_partition_read(source.partition, offset, buffer.bytes, bytes)")
+    send_at = loop.find("httpd_resp_send_chunk(req, buffer.bytes, bytes)", read_at)
     if read_at < 0 or send_at < 0 or read_at >= send_at:
         raise AssertionError("coredump flash read is not checked before sending its chunk")
     read_failure_region = scrub_cpp(loop[read_at:send_at])
@@ -2756,7 +2779,7 @@ def require_coredump_stream_contract(status_source: str, runtime_tests: str) -> 
     # require the one guard between read and send to test the read result itself and to own the
     # failure return.
     clean_loop = scrub_cpp_preserving_layout(loop)
-    if not re.search(r"\bconst\s+esp_err_t\s+read_err\s*=\s*esp_partition_read\(part,\s*off,\s*buf,\s*n\)\s*;",
+    if not re.search(r"\bconst\s+esp_err_t\s+read_err\s*=\s*esp_partition_read\(source\.partition,\s*offset,\s*buffer\.bytes,\s*bytes\)\s*;",
                      clean_loop[:send_at]):
         raise AssertionError("coredump flash read result is not kept in read_err")
     guard = re.search(r"\bif\s*\(", clean_loop[read_at:send_at])
@@ -2781,7 +2804,7 @@ def require_coredump_stream_contract(status_source: str, runtime_tests: str) -> 
     if handler.count("httpd_resp_send_chunk(req, nullptr, 0)") != 1:
         raise AssertionError("coredump stream must have exactly one success-only terminating chunk")
     require_before("coredump final data chunk before terminator", handler,
-                   "httpd_resp_send_chunk(req, buf, n)",
+                   "httpd_resp_send_chunk(req, buffer.bytes, bytes)",
                    "httpd_resp_send_chunk(req, nullptr, 0)")
 
     for token in (
@@ -3805,7 +3828,10 @@ def require_tesla_cpp_callback_contract(
             raise AssertionError(f"command result callback contains forbidden {forbidden!r}")
     for token in (
         "const auto& msg = result.error()->message();",
-        "std::memcpy(completion->error.data(), msg.data(), error_size);",
+        "std::memcpy(completion->error.data(), visible, error_size);",
+        "const char* visible = tk::execution_uncertain(completion->failure)",
+        "result.error()->severity(), result.error()->outcome()",
+        "completion->failure = tk::uncertain_command_failure();",
         "completion->callback_fault = true;",
         "xSemaphoreGive(completion->sem);",
     ):
@@ -3832,11 +3858,26 @@ def require_tesla_cpp_callback_contract(
         raise AssertionError("charging-amps verification races deferred public cache publication")
 
 
+def require_crash_snapshot_contract(crash_source: str) -> None:
+    body = scrub_cpp(function_body_in(crash_source, "diag_crash_info_live"))
+    borrow = "CrashInfoView info = crash_borrow(s_boot);"
+    final_load = "const uint32_t after = s_admission.load(std::memory_order_acquire);"
+    finish = "crash_finish_snapshot(info, {before, after, same_header(query.header, s_header),"
+    require_before("crash final generation after borrowed snapshot", body, borrow, final_load)
+    require_before("crash final generation passed to pure guard", body, final_load, finish)
+    if body.count(final_load) != 1 or body.count("crash_finish_snapshot(") != 1:
+        raise AssertionError("crash snapshot must finalize once with the actual final generation")
+    if "state(after) == Current, state(after) == Foreign," not in body or \
+       "state(after) == NoArtifact});" not in body:
+        raise AssertionError("crash snapshot final admission is not forwarded to the pure guard")
+
+
 def require_crash_dismiss_atomic_contract(crash_source: str) -> None:
+    require_crash_snapshot_contract(crash_source)
     for token in (
         "static std::atomic<bool> s_dismissed{false};",
         "s_dismissed.store(false, std::memory_order_release);",
-        "c.dismissed = s_dismissed.load(std::memory_order_acquire);",
+        "info.dismissed = s_dismissed.load(std::memory_order_acquire);",
         "s_dismissed.store(true, std::memory_order_release);",
     ):
         if token not in crash_source:
@@ -3844,9 +3885,27 @@ def require_crash_dismiss_atomic_contract(crash_source: str) -> None:
     code = scrub_cpp(crash_source)
     if "s_ci.dismissed =" in code or re.search(r"static\s+bool\s+s_dismissed", code):
         raise AssertionError("crash dismissal reintroduced a racy shared bool/string snapshot")
-    dismiss = function_body_in(crash_source, "diag_crash_dismiss")
-    require_before("crash evidence erase before atomic dismissal", dismiss,
-                   "esp_core_dump_image_erase();", "s_dismissed.store(true")
+    erase = function_body_in(crash_source, "diag_crash_erase")
+    require_before("crash erase ownership", erase,
+                   "if (!lease.held()) return CrashEraseResult::Busy;", "locate_partition()")
+    require_before("crash effect before SDK erase", erase,
+                   "reply.attempting(RequestEffect::CoredumpErase)", "esp_core_dump_image_erase()")
+    require_before("crash invalidation before SDK erase", erase,
+                   "invalidate(Quarantined)", "esp_core_dump_image_erase()")
+    guard = "if (esp_core_dump_image_erase() != ESP_OK)"
+    start = erase.find(guard)
+    if start < 0:
+        raise AssertionError("crash erase result is not checked")
+    condition, opening, closing = if_statement_at(scrub_cpp_preserving_layout(erase), start,
+                                                "crash erase result")
+    if "return CrashEraseResult::Unconfirmed;" not in erase[opening:closing]:
+        raise AssertionError("failed erase may publish dismissal")
+    if "s_dismissed.store(true" in erase[opening:closing]:
+        raise AssertionError("failed erase publishes dismissal")
+    require_before("crash erase success before atomic dismissal", erase[closing:],
+                   "invalidate(NoArtifact)", "s_dismissed.store(true")
+    if "esp_core_dump_image_erase" in function_body_in(crash_source, "capture_artifact"):
+        raise AssertionError("boot capture may erase crash evidence")
 
 
 def require_heap_restart_gate_contract(telemetry: str) -> None:
@@ -3925,7 +3984,7 @@ def require_http_route_dispatch(body: str) -> None:
     for route, handler in HTTP_ROUTE_DISPATCH.items():
         pattern = (
             rf"case\s+tk::HttpRoute::{re.escape(route)}\s*:\s*"
-            rf"return\s+{re.escape(handler)}\s*\(\s*\{{\s*req\s*\}}\s*\)\s*;"
+            rf"return\s+{re.escape(handler)}\s*\(\s*rq\s*\)\s*;"
         )
         if not re.search(pattern, body):
             raise AssertionError(f"HTTP route {route} no longer dispatches to {handler}")
@@ -4060,6 +4119,7 @@ def require_runtime_source_contracts() -> None:
             "Malformed": '"invalid JSON"',
             "TooDeep": '"JSON nesting too deep"',
             "UnsupportedNul": '"JSON NUL escape not supported"',
+            "TooManyValues": '"too many JSON values"',
             "NoMemory": '"out of memory"',
         },
     )
@@ -4074,6 +4134,7 @@ def require_runtime_source_contracts() -> None:
             "Malformed": "tk::kJsonRpcParseError",
             "TooDeep": "tk::kJsonRpcInvalidRequest",
             "UnsupportedNul": "tk::kJsonRpcInvalidRequest",
+            "TooManyValues": "tk::kJsonRpcInvalidRequest",
             "NoMemory": "send_oom_503_",
         },
     )
@@ -4104,6 +4165,7 @@ def require_runtime_source_contracts() -> None:
     require_status_production_seams(
         function_body("build_status_object"), function_body("handle_status")
     )
+    require_wifi_rollback_status_cache(SOURCES["main.cpp"], function_body("build_status_object"))
     require_vehicle_data_production_seams(function_body("handle_vehicle_data"))
     require_vehicle_climate_cache_seam(function_body("emit_cached_vehicle_climate"))
     require_vehicle_drive_cache_seam(function_body("emit_cached_vehicle_drive"))
@@ -4116,6 +4178,7 @@ def require_runtime_source_contracts() -> None:
     require_telemetry_poll_schedule(SOURCES["vehicle_telemetry.cpp"])
     require_drive_poll_builder(SOURCES["vehicle_telemetry.cpp"])
     require_unlocked_diagnostic_logging(SOURCES["heap_trend.cpp"], SOURCES["vehicle_telemetry.cpp"])
+    require_long_uptime_clocks(SOURCES["vehicle_telemetry.cpp"], SOURCES["heap_trend.cpp"])
     require_diag_dump_completion_contract(
         function_body("handle_diag"),
         (MAIN / "diag_log.hpp").read_text(encoding="utf-8"),
@@ -4230,6 +4293,7 @@ def require_runtime_source_contracts() -> None:
             "Malformed": "ConfigSubmissionStatus::MalformedJson",
             "TooDeep": "ConfigSubmissionStatus::JsonTooDeep",
             "UnsupportedNul": "ConfigSubmissionStatus::JsonUnsupportedNul",
+            "TooManyValues": "ConfigSubmissionStatus::JsonTooManyValues",
             "NoMemory": "ConfigSubmissionStatus::JsonNoMemory",
         },
     )
@@ -4838,6 +4902,16 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
 
     status_producer = function_body("build_status_object")
     status_handler = function_body("handle_status")
+    for boot, producer in (
+        (SOURCES["main.cpp"].replace("tk::cfg_init_wifi_rollback_status", "fixture_missing_init"),
+         status_producer),
+        (SOURCES["main.cpp"], status_producer.replace("tk::cfg_wifi_rolled_back()", "true")),
+        (SOURCES["main.cpp"], status_producer.replace("{", "{ tk::ConfigBlob cb;", 1)),
+    ):
+        require_mutation_rejected(
+            "WiFi rollback status cache wiring",
+            lambda boot=boot, producer=producer: require_wifi_rollback_status_cache(boot, producer),
+        )
     for token in ("tk::StatusJsonEmitter", "tk::status::emit_status", "return e.release();"):
         mutated_status = status_producer.replace(token, "fixture_status_bypass", 1)
         try:
@@ -5159,11 +5233,11 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
     route_dispatch = function_body("handle_all_dispatch")
     route_mutations = (
         route_dispatch.replace("tk::classify_http_route", "fixture_route_classifier", 1),
-        route_dispatch.replace("return handle_ota_update({req});", "return handle_status({req});", 1),
+        route_dispatch.replace("return handle_ota_update(rq);", "return handle_status(rq);", 1),
         route_dispatch.replace("case tk::HttpRoute::SetWifi:", "case tk::HttpRoute::Fixture:", 1),
         route_dispatch.replace(
             "case tk::HttpRoute::NotFound:       break;",
-            "case tk::HttpRoute::Fixture:        return handle_status({req});\n"
+            "case tk::HttpRoute::Fixture:        return handle_status(rq);\n"
             "        case tk::HttpRoute::NotFound:       break;",
             1,
         ),
@@ -5451,6 +5525,23 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
         pass
     else:
         raise AssertionError("wrapped /diag boundary-mode bypass passed unexpectedly")
+
+    for before, after in (
+        ('if (diag_mqtt_uri_error_(line, len))', 'if (false)'),
+        ('if (!s_hook_installed)', 'if (true)'),
+        ('return diag_forward_fixed_("%s", tk::kDiagMqttUriErrorLine);', 'return diag_forward_fixed_("%s", line);'),
+        ('static std::atomic<SemaphoreHandle_t> s_mtx{nullptr};', 'static SemaphoreHandle_t s_mtx{nullptr};'),
+        ('static std::atomic<vprintf_like_t> s_prev{nullptr};', 'static vprintf_like_t s_prev{nullptr};'),
+        ('static_assert(CONFIG_LOG_TIMESTAMP_SOURCE_RTOS,', 'static_assert(true,'),
+        ('#if defined(CONFIG_LOG_COLORS) && CONFIG_LOG_COLORS', '#if 0'),
+        ('static_assert(CONFIG_LOG_VERSION == 1,', 'static_assert(true,'),
+        ('tk::diag_library_capture_content_end({data, len})', '0'),
+        ('tk::diag_capture_byte(data[i], i, library_end)', 'data[i]'),
+    ):
+        if diag_source.count(before) != 1:
+            raise AssertionError("diagnostic capture canary anchor missing")
+        require_mutation_rejected("qualified capture guard removed", lambda: require_diag_redaction_stream_contract(
+            diag_handler, redactor_header, diag_source.replace(before, after, 1), runtime_tests))
 
     mutated_diag_source = diag_source.replace("std::memchr(chunk, '\\n', n)", "nullptr", 1)
     if mutated_diag_source == diag_source:
@@ -6003,8 +6094,8 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
     status_source = SOURCES["http_status.cpp"]
     runtime_tests = (ROOT / "test/test_runtime_boundaries.cpp").read_text(encoding="utf-8")
     read_fallthrough = status_source.replace(
-        "const esp_err_t read_err = esp_partition_read(part, off, buf, n);",
-        "const esp_err_t read_err = esp_partition_read(part, off, buf, n);\n"
+        "const esp_err_t read_err = esp_partition_read(source.partition, offset, buffer.bytes, bytes);",
+        "const esp_err_t read_err = esp_partition_read(source.partition, offset, buffer.bytes, bytes);\n"
         "        if (read_err != ESP_OK) break;",
         1,
     )
@@ -6024,13 +6115,13 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
     for label, old, new in (
         (
             "coredump failure return behind a nested condition",
-            "esp_err_to_name(read_err));\n            return ESP_FAIL;",
-            "esp_err_to_name(read_err));\n            if (off == 0) return ESP_FAIL;",
+            "if (read_err != ESP_OK) {\n            return ESP_FAIL;",
+            "if (read_err != ESP_OK) {\n            if (offset == 0) return ESP_FAIL;",
         ),
         (
             "coredump read result not kept in the guarded variable",
-            "const esp_err_t read_err = esp_partition_read(part, off, buf, n);",
-            "esp_partition_read(part, off, buf, n);\n        const esp_err_t read_err = ESP_OK;",
+            "const esp_err_t read_err = esp_partition_read(source.partition, offset, buffer.bytes, bytes);",
+            "esp_partition_read(source.partition, offset, buffer.bytes, bytes);\n        const esp_err_t read_err = ESP_OK;",
         ),
     ):
         mutated = status_source.replace(old, new, 1)
@@ -6539,109 +6630,40 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
         )
 
     for old, replacement, label in (
-        (
-            "return s_operation_gate.try_begin(tk::OtaIdentityGateState::FaultRestart);",
-            "return true;",
-            "FaultRestart begin",
-        ),
-        (
-            "finish_operation(tk::OtaIdentityGateState::FaultRestart);",
-            "",
-            "FaultRestart cancel",
-        ),
-        (
-            "finish_operation(tk::OtaIdentityGateState::HealthCommit);",
-            "",
-            "HealthCommit release",
-        ),
-        (
-            "s_operation_gate.try_begin(tk::OtaIdentityGateState::ConfigRestart);",
-            "true;",
-            "ConfigRestart begin",
-        ),
-        (
-            "OtaHealthCommitGuard commit_guard;\n    if (!commit_guard)",
-            "bool commit_guard = true;\n    if (!commit_guard)",
-            "user confirmation owner",
-        ),
-        (
-            "tk::runtime_admission_vehicle_ready()",
-            "true",
-            "user confirmation RuntimeAdmission Ready",
-        ),
-        (
-            "commit_largest < tk::kHeapCriticalBytes",
-            "commit_largest < 0",
-            "user confirmation heap recheck",
-        ),
+        ("crash_finish_snapshot(info, {before, after,", "crash_finish_snapshot(info, {before, before,", "stale final generation"),
+        ("const uint32_t after = s_admission.load(std::memory_order_acquire);", "const uint32_t after = before;", "missing final acquire"),
+        ("const uint32_t after = s_admission.load(std::memory_order_acquire);", "const uint32_t after = before; /* const uint32_t after = s_admission.load(std::memory_order_acquire); */", "comment decoy final acquire"),
+        ("crash_finish_snapshot(info, {before, after,", "/* crash_finish_snapshot(info, {before, after, */ ignored_snapshot(info, {before, after,", "comment decoy finalization"),
+        ("state(after) == Current, state(after) == Foreign,", "state(before) == Current, state(before) == Foreign,", "stale final authority"),
+    ):
+        mutated = crash_source.replace(old, replacement, 1)
+        if mutated == crash_source:
+            raise AssertionError(label + " mutation did not apply")
+        require_mutation_rejected(label, lambda mutated=mutated: require_crash_snapshot_contract(mutated))
+    load = "const uint32_t after = s_admission.load(std::memory_order_acquire);"
+    borrow = "CrashInfoView info = crash_borrow(s_boot);"
+    early = crash_source.replace(load, "", 1).replace(borrow, load + "\n    " + borrow, 1)
+    require_mutation_rejected("acquire before payload view", lambda: require_crash_snapshot_contract(early))
+
+    for old, replacement, label in (
+        ("return s_operation_gate.try_begin(tk::OtaIdentityGateState::FaultRestart);", "return true;", "FaultRestart begin"),
+        ("finish_operation(tk::OtaIdentityGateState::FaultRestart);", "", "FaultRestart cancel"),
+        ("finish_operation(tk::OtaIdentityGateState::HealthCommit);", "", "HealthCommit release"),
+        ("s_operation_gate.try_begin(tk::OtaIdentityGateState::ConfigRestart);", "true;", "ConfigRestart begin"),
+        ("if (!owner.owns_gate()) return Result::WrongOwner;", "", "config query actual owner"),
+        ("return held_ && s_operation_gate.state() == tk::OtaIdentityGateState::ConfigRestart;", "return true;", "guard identity"),
+        ("case ESP_OTA_IMG_NEW: return Result::New;", "case ESP_OTA_IMG_NEW: return Result::Pending;", "NEW raw state"),
+        ("if (result != Result::Pending) return result;", "", "only raw Pending may mark"),
+        ("if (!tk::runtime_admission_vehicle_ready()) return Result::NotReady;", "", "Ready refusal"),
+        ("if (!ble_host_synced()) return Result::HostUnsynced;", "", "NimBLE sync refusal"),
+        ("if (ble_host_reset_count() != 0) return Result::HostReset;", "", "NimBLE reset refusal"),
+        ("if (commit_largest < tk::kHeapCriticalBytes) return Result::CriticalHeap;", "", "heap refusal"),
+        ("result = Result::MarkUnknown;", "result = Result::Pending;", "uncertain SDK effect"),
+        ("result = Result::Confirmed;", "result = Result::Pending;", "confirmed result before logging"),
     ):
         mutated_ota = ota_source.replace(old, replacement, 1)
-        if mutated_ota == ota_source:
-            raise AssertionError(f"{label} wrapper mutation did not apply")
-        try:
-            require_operation_wrapper_contract(mutated_ota)
-        except AssertionError:
-            pass
-        else:
-            raise AssertionError(f"{label} wrapper bypass passed unexpectedly")
-
-    confirm_start = ota_source.find("void ota_confirm_pending_image")
-    confirm_end = ota_source.find("// Short per-target image suffix", confirm_start)
-    confirm = ota_source[confirm_start:confirm_end]
-    denied = re.search(
-        r"if\s*\(\s*!commit_guard\s*\)\s*\{(?P<body>.*?)\}",
-        confirm,
-        re.DOTALL,
-    )
-    if not denied or "return;" not in denied.group("body"):
-        raise AssertionError("user confirmation return mutation fixture is missing")
-    mutated_denied = denied.group(0).replace("return;", "", 1)
-    mutated_confirm = confirm[: denied.start()] + mutated_denied + confirm[denied.end() :]
-    mutated_ota = ota_source[:confirm_start] + mutated_confirm + ota_source[confirm_end:]
-    try:
-        require_operation_wrapper_contract(mutated_ota)
-    except AssertionError:
-        pass
-    else:
-        raise AssertionError("user confirmation fail-closed return mutation passed unexpectedly")
-
-    ready_denied = re.search(
-        r"if\s*\(\s*!tk::runtime_admission_vehicle_ready\s*\(\s*\)\s*\)\s*"
-        r"\{(?P<body>.*?)\}",
-        confirm,
-        re.DOTALL,
-    )
-    if not ready_denied or "return;" not in ready_denied.group("body"):
-        raise AssertionError("user confirmation RuntimeAdmission return fixture is missing")
-    mutated_ready_denied = ready_denied.group(0).replace("return;", "", 1)
-    mutated_confirm = (
-        confirm[: ready_denied.start()] + mutated_ready_denied + confirm[ready_denied.end() :]
-    )
-    mutated_ota = ota_source[:confirm_start] + mutated_confirm + ota_source[confirm_end:]
-    require_mutation_rejected(
-        "user confirmation RuntimeAdmission fail-closed return",
-        lambda: require_operation_wrapper_contract(mutated_ota),
-    )
-
-    heap_denied = re.search(
-        r"if\s*\(\s*commit_largest\s*<\s*tk::kHeapCriticalBytes\s*\)\s*"
-        r"\{(?P<body>.*?)\}",
-        confirm,
-        re.DOTALL,
-    )
-    if not heap_denied or "return;" not in heap_denied.group("body"):
-        raise AssertionError("user confirmation heap return mutation fixture is missing")
-    mutated_heap_denied = heap_denied.group(0).replace("return;", "", 1)
-    mutated_confirm = (
-        confirm[: heap_denied.start()] + mutated_heap_denied + confirm[heap_denied.end() :]
-    )
-    mutated_ota = ota_source[:confirm_start] + mutated_confirm + ota_source[confirm_end:]
-    try:
-        require_operation_wrapper_contract(mutated_ota)
-    except AssertionError:
-        pass
-    else:
-        raise AssertionError("user confirmation critical-heap return mutation passed unexpectedly")
+        if mutated_ota == ota_source: raise AssertionError(label + " mutation did not apply")
+        require_mutation_rejected(label, lambda: require_operation_wrapper_contract(mutated_ota))
 
     health_task = function_body("ota_health_gate_task")
     for old, replacement, label in (
@@ -7010,12 +7032,12 @@ def require_pairing_recovery_contract(pairing: str, commands: str, telemetry: st
     if "self->repair_notice_.store(true)" not in recovery_branch:
         raise AssertionError("recovery hint must remain visible to the user")
 
-    paired_branch = supervisor[supervisor.find("if (self->has_session() && !recovery_hint)"): ]
+    paired_branch = supervisor[supervisor.find("if ((self->has_session() || self->session_available()) && !recovery_hint)"): ]
     health = paired_branch.find("bool ok            = self->health_probe_();")
     clear_notice = paired_branch.find("self->repair_notice_.store(false);")
     if health < 0 or clear_notice < health:
         raise AssertionError("a stored session alone must not clear the recovery notice")
-    if "if (self->has_session() && !recovery_hint)" not in paired_branch[:clear_notice]:
+    if "if ((self->has_session() || self->session_available()) && !recovery_hint)" not in paired_branch[:clear_notice]:
         raise AssertionError("health confirmation must remain associated with a stored session")
 
     result_callback = function_body_in(commands, "make_result_cb_")
@@ -7036,7 +7058,9 @@ def require_pairing_recovery_contract(pairing: str, commands: str, telemetry: st
         if forbidden in scrubbed_fault_handler:
             raise AssertionError(f"signed message fault may not perform {forbidden!r}")
     for required in ("peer->reset();", "on_vehicle_message_(msg);",
-                     "command_runner_.notify_signed_message_fault(has_session_error,"):
+                     "command_runner_.notify_message_fault(decision, payload_rejection,",
+                     "if (authenticated && decision.repair_session)",
+                     "!response_matches_current_(msg)"):
         if required not in scrubbed_fault_handler:
             raise AssertionError(f"signed message fault handling lost {required!r}")
 
@@ -7075,13 +7099,30 @@ def require_pairing_recovery_contract(pairing: str, commands: str, telemetry: st
     for token in ("storage_->probe_blob(tk::nvs_contract::kSessionVcsec, snapshot.stored)",
                   "tk::SemGuard vehicle_guard(vehicle_mutex_, wait_ticks)",
                   "if (!vehicle_guard || !client_) return snapshot;",
-                  "if (!peer || !peer->is_private_key_initialized()) return snapshot;",
-                  "snapshot.runtime_readable = true;", "snapshot.runtime_ready = peer->is_valid()", "peer->get_epoch()",
-                  "i < 16", "epoch_bits |= epoch[i]", "peer->is_valid()",
-                  "peer->has_shared_secret() && epoch_bits != 0",
-                  "command_runner_.vcsec_session().is_authenticated()"):
+                  "runtime_session_observation_locked_(UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY)",
+                  "snapshot.runtime_readable = runtime.known;", "snapshot.runtime_ready = runtime.usable;"):
         if token not in snapshot:
             raise AssertionError(f"runtime session snapshot lost {token!r}")
+    runtime = function_body_in(telemetry, "runtime_session_observation_locked_")
+    for token in ("!peer->is_private_key_initialized()", "peer->get_epoch()", "epoch_bits |= epoch[i]",
+                  "peer->is_valid()", "peer->has_shared_secret()", "epoch_bits != 0",
+                  "command_runner_.vcsec_session()", "tracker.is_authenticated()", "tk::session_runtime_observation("):
+        if token not in runtime:
+            raise AssertionError(f"shared runtime predicate lost {token!r}")
+    for forbidden in ("storage_->", "ESP_LOG", "can_send_command(", "is_initialized(", "has_valid_epoch(",
+                      "send_vcsec", "xSemaphoreTake", "vTaskDelay"):
+        if forbidden in scrub_cpp(runtime):
+            raise AssertionError(f"shared runtime predicate may not perform {forbidden!r}")
+    for method in ("session_availability", "session_available"):
+        getter = scrub_cpp(function_body_in(telemetry, method))
+        for forbidden in ("storage_->", "client_->", "ESP_LOG", "send_", "xSemaphore", "vTaskDelay",
+                          "persist_session_", "runtime_session_observation_locked_"):
+            if forbidden in getter:
+                raise AssertionError(f"cache-only {method} may not perform {forbidden!r}")
+    loop = function_body_in(telemetry, "loop_task_fn_")
+    if not re.search(r"identity_ready && tk::session_can_operate\(identity_ready, self->has_session\(\),\s*"
+                     r"self->session_available\(\)\)", loop):
+        raise AssertionError("background eligibility must use the tested identity/stored/VCSEC RAM rule")
     locked = snapshot[snapshot.index("tk::SemGuard vehicle_guard"):]
     for forbidden in ("storage_->", "ESP_LOG", "can_send_command(", "is_initialized(",
                       "has_valid_epoch(", "send_vcsec", "xSemaphoreTake", "vTaskDelay"):
@@ -7121,11 +7162,20 @@ def self_test_pairing_recovery_canaries(pairing: str, commands: str,
         "tk::auto_enrollment_needed(session, pairing_recovery_hint_.load())",
         "tk::auto_enrollment_needed({true, false, true, false}, pairing_recovery_hint_.load())", 1))
     reject("RAM session ignored", pairing.replace(
-        "snapshot.runtime_ready = peer->is_valid()", "snapshot.runtime_ready = false && peer->is_valid()", 1))
+        "snapshot.runtime_ready = runtime.usable;", "snapshot.runtime_ready = false;", 1))
     reject("unknown runtime accepted", pairing.replace(
         "if (!vehicle_guard || !client_) return snapshot;", "if (!client_) return snapshot;", 1))
-    reject("runtime snapshot logs under lock", pairing.replace(
-        "snapshot.runtime_readable = true;", 'ESP_LOGW(TAG, "runtime"); snapshot.runtime_readable = true;', 1))
+    reject("runtime snapshot logs under lock", pairing, commands, telemetry.replace(
+        "return tk::session_runtime_observation(true,", 'ESP_LOGW(TAG, "runtime"); return tk::session_runtime_observation(true,', 1))
+    reject("background eligibility loses identity gate", pairing, commands, telemetry.replace(
+        "tk::session_can_operate(identity_ready,", "tk::session_can_operate(true,", 1))
+    reject("background storage probe loses short-circuit gate", pairing, commands, telemetry.replace(
+        "identity_ready && tk::session_can_operate(", "tk::session_can_operate(", 1))
+    reject("background eligibility ignores VCSEC RAM", pairing, commands, telemetry.replace(
+        "self->session_available());", "false);", 1))
+    reject("availability getter reads storage", pairing, commands, telemetry.replace(
+        "const auto runtime = session_availability().vcsec;",
+        "storage_->blob_exists(tk::nvs_contract::kSessionVcsec); const auto runtime = session_availability().vcsec;", 1))
     reject("sender can change identity", pairing.replace(
         "CommandOutcome outcome = send_vcsec_locked_(",
         "storage_->remove(tk::nvs_contract::kPrivateKey); CommandOutcome outcome = send_vcsec_locked_(", 1))
@@ -7161,11 +7211,590 @@ def self_test_pairing_recovery_canaries(pairing: str, commands: str,
            + telemetry[handler_end:])
 
 
+def require_wake_result_contract(commands: str, telemetry: str, pairing: str, ctrl_header: str) -> None:
+    wake = function_body_in(commands, "wake_up")
+    for token in ("CommandOutcome sent;", "sent = send_vcsec_outcome_(", "final_outcome = std::move(sent);",
+                  "if (!tk::wake_confirmation_required(sent.success, sent.failure))"):
+        if token not in wake:
+            raise AssertionError(f"wake lost call-owned result binding {token!r}")
+    if "last_error_" in scrub_cpp(wake) or wake.count("send_vcsec_outcome_(") != 1:
+        raise AssertionError("wake must retain one call-owned send outcome without shared error reads")
+    if "WakePolicy::NoWakeFail, capped_deadline_(deadline, 9000)" not in wake:
+        raise AssertionError("wake send must retain the original absolute deadline")
+    typed_sender = function_body_in(commands, "send_vcsec_outcome_")
+    if "deadline_in_(" in scrub_cpp(typed_sender):
+        raise AssertionError("typed send handoff must not renew an absolute deadline")
+    cap = scrub_cpp(function_body_in(ctrl_header, "capped_deadline_"))
+    if cap.count("xTaskGetTickCount()") != 1 or "tk::capped_command_deadline(" not in cap:
+        raise AssertionError("command deadline cap must delegate with one clock snapshot")
+    callback = function_body_in(commands, "make_result_cb_")
+    if "if (completion->success && response_expected)" not in callback:
+        raise AssertionError("TX-only result must not stamp response reachability")
+    sender = function_body_in(commands, "send_vcsec_locked_")
+    if "make_result_cb_(completion, generation, auth_fail_is_health_probe, !completes_on_transmit)" not in sender:
+        raise AssertionError("VCSEC sender must bind response evidence to its actual completion mode")
+    loop = function_body_in(telemetry, "loop_task_fn_")
+    for token in ("now_ticks - last_connect_ticks > pdMS_TO_TICKS(15000)",
+                  "now_ticks, pdMS_TO_TICKS(30000)"):
+        if token not in loop:
+            raise AssertionError(f"documented connection/rotation cadence lost {token!r}")
+    idle = function_body_in(pairing, "idle_until_next_health_poll_")
+    for token in ("kIdleMs = 30000", "w < kIdleMs / kStepMs", "vTaskDelay(pdMS_TO_TICKS(kStepMs))"):
+        if token not in idle:
+            raise AssertionError(f"documented health idle lost {token!r}")
+    health = function_body_in(pairing, "health_probe_")
+    if "WakePolicy::NoWakeFail" not in health:
+        raise AssertionError("documented health wake policy changed")
+
+
+def self_test_wake_result_contract(sources: dict[str, str]) -> None:
+    cases = (
+        ("TX-only reaches response branch", "commands", "completion->success && response_expected", "completion->success"),
+        ("sender loses actual completion mode", "commands", "auth_fail_is_health_probe, !completes_on_transmit", "auth_fail_is_health_probe, true"),
+        ("wake reads shared reason", "commands", "final_outcome = std::move(sent);", "final_outcome.error = last_error_;"),
+        ("wake bypasses send-outcome rule", "commands", "if (!tk::wake_confirmation_required(sent.success, sent.failure))", "if (false)"),
+        ("wake renews absolute deadline", "commands", "WakePolicy::NoWakeFail, capped_deadline_(deadline, 9000)", "WakePolicy::NoWakeFail, deadline_in_(9000)"),
+        ("cap adds a second clock", "ctrl_header", "tk::capped_command_deadline(deadline, xTaskGetTickCount(), pdMS_TO_TICKS(max_ms))", "tk::capped_command_deadline(deadline, xTaskGetTickCount() + xTaskGetTickCount(), pdMS_TO_TICKS(max_ms))"),
+        ("warm-up cadence drifts", "telemetry", "last_connect_ticks > pdMS_TO_TICKS(15000)", "last_connect_ticks > pdMS_TO_TICKS(1000)"),
+        ("health cadence drifts", "pairing", "kIdleMs = 30000", "kIdleMs = 1000"),
+    )
+    for label, key, old, new in cases:
+        if sources[key].count(old) != 1:
+            raise AssertionError(f"wake/cadence canary anchor missing or ambiguous: {label}")
+        mutated = {**sources, key: sources[key].replace(old, new, 1)}
+        require_mutation_rejected(label, lambda mutated=mutated: require_wake_result_contract(**mutated))
+
+
+def require_request_intake_contract(parts: dict[str, str]) -> None:
+    parts = {key: strip_cpp_comments(value) for key, value in parts.items()}
+    compact = lambda text: re.sub(r"\s+", "", text)
+    parse_call = ('tk::json_materialize<cJSON>(body.data,req->content_len,'
+                  '[](const char* text){return cJSON_Parse(text);},tk::kJsonMaxRequestValues);')
+    parse_call = compact(parse_call)
+    for key, function in (("api", "handle_command"), ("config", "parse_json_object_body_"),
+                          ("mcp", "mcp_handle_post")):
+        body = function_body_in(parts[key], function)
+        if compact(body).count(parse_call) != 1:
+            raise AssertionError(f"{key}: actual request materializer must receive the64value budget")
+        if "JsonMaterializeStatus::TooManyValues" not in body:
+            raise AssertionError(f"{key}: too-many-values rejection missing")
+    for key,function,rejection in (
+        ("api", "handle_command", 'if(materialized.status==tk::JsonMaterializeStatus::TooManyValues){return send_json(req,400,make_response(false,cmd,vin,"too many JSON values"));}'),
+        ("config", "parse_json_object_body_", 'if(materialized.status==tk::JsonMaterializeStatus::TooManyValues){return{tk::JsonOwner{},tk::ConfigSubmissionStatus::JsonTooManyValues};}'),
+    ):
+        if compact(rejection) not in compact(function_body_in(parts[key],function)):
+            raise AssertionError(f"{key}: value rejection must terminate before root consumption")
+    if "kJsonMaxRequestValues=64;" not in compact(parts["syntax"]):
+        raise AssertionError("request value limit must remain64")
+    if "kJsonMaxRequestValues" in parts["ota"]:
+        raise AssertionError("OTA must retain the generic unlimited value budget")
+    command = function_body_in(parts["api"], "handle_command")
+    rejection = '''if(tk::has_duplicate_json_keys(json.get())){return send_json(req,400,make_response(false,cmd,vin,"duplicate JSON key"));}'''
+    if compact(rejection) not in compact(command):
+        raise AssertionError("REST duplicate keys must terminate with400 before field consumption")
+    require_before("REST duplicate rejection before argument reads", command,
+                   "tk::has_duplicate_json_keys(json.get())", "json_int_arg(json.get()")
+    config = function_body_in(parts["config"], "parse_json_object_body_")
+    rejection = '''if(tk::has_duplicate_json_keys(json.get())){return{tk::JsonOwner{},tk::ConfigSubmissionStatus::DuplicateJsonKey};}'''
+    if compact(rejection) not in compact(config):
+        raise AssertionError("configuration duplicate rejection must return before a Ready tree")
+    require_before("configuration duplicate rejection before Ready", config,
+                   "tk::has_duplicate_json_keys(json.get())", "return {std::move(json),")
+    if 'using tk::has_duplicate_json_keys;' not in parts["mcp_payloads"]:
+        raise AssertionError("MCP must share the decoded duplicate-key implementation")
+    envelope = function_body_in(parts["mcp_payloads"], "inspect_request_envelope")
+    if "has_duplicate_json_keys(object)" not in envelope:
+        raise AssertionError("MCP request envelope lost duplicate rejection")
+    mcp = function_body_in(parts["mcp"], "mcp_handle_post")
+    rejection = '''if(materialized.status==tk::JsonMaterializeStatus::TooManyValues){return send_rpc_error_(req,{},tk::kJsonRpcInvalidRequest,"too many JSON values");}'''
+    if compact(rejection) not in compact(mcp):
+        raise AssertionError("MCP value budget must reject with untrusted/null-id Invalid Request")
+    require_before("MCP value rejection before envelope/notifications", mcp,
+                   "JsonMaterializeStatus::TooManyValues", "inspect_request_envelope")
+    rest_integer = function_body_in(parts["api"], "json_int_arg")
+    if compact('if(!tk::json_command_number(j,d)){problem="invalid argument";return false;}') not in compact(rest_integer):
+        raise AssertionError("REST integer adapter bypasses shared decimal input rejection")
+    require_before("REST parsed number before existing range decision", rest_integer,
+                   "tk::json_command_number(j, d)", "tk::strict_rest_int")
+    mcp_call = function_body_in(parts["mcp"], "handle_tools_call_")
+    if 'if(!tk::json_command_number(j,number)||!tk::mcp_integer_value(number,a.lo,a.hi,ival[i]))' not in compact(mcp_call):
+        raise AssertionError("MCP integer adapter bypasses shared decimal/range checks")
+    number = function_body_in(parts["shared"], "json_command_number")
+    if 'json_canonical_safe_integer(first, first + std::strlen(first), integer)' not in number:
+        raise AssertionError("shared numeric strings no longer use canonical decimal parsing")
+    if any('strtod(' in compact(text) for text in (rest_integer,mcp_call,number)):
+        raise AssertionError("command arguments restored permissive strtod string parsing")
+
+
+def self_test_request_intake_contract(parts: dict[str, str]) -> None:
+    variants = (
+        ("REST missing value cap", "api", "}, tk::kJsonMaxRequestValues)", "})"),
+        ("configuration missing value cap", "config", "}, tk::kJsonMaxRequestValues)", "})"),
+        ("MCP missing value cap", "mcp", "}, tk::kJsonMaxRequestValues)", "})"),
+        ("REST cap falls through", "api", 'return send_json(req, 400, make_response(false, cmd, vin, "too many JSON values"));', '(void)send_json(req, 400, make_response(false, cmd, vin, "too many JSON values"));'),
+        ("config cap falls through", "config", 'return {tk::JsonOwner{}, tk::ConfigSubmissionStatus::JsonTooManyValues};', '(void)tk::ConfigSubmissionStatus::JsonTooManyValues;'),
+        ("REST duplicate bypass", "api", "if (tk::has_duplicate_json_keys(json.get()))", "if (false)"),
+        ("config duplicate bypass", "config", "if (tk::has_duplicate_json_keys(json.get()))", "if (false)"),
+        ("MCP duplicate implementation fork", "mcp_payloads", "using tk::has_duplicate_json_keys;", ""),
+        ("MCP cap falls through", "mcp", 'return send_rpc_error_(req, {}, tk::kJsonRpcInvalidRequest, "too many JSON values");', '(void)send_rpc_error_(req, {}, tk::kJsonRpcInvalidRequest, "too many JSON values");'),
+        ("REST number parser bypass", "api", "!tk::json_command_number(j, d)", "false"),
+        ("MCP number parser bypass", "mcp", "!tk::json_command_number(j, number)", "false"),
+        ("OTA request cap added", "ota", "cJSON_ParseWithLengthOpts(", "tk::kJsonMaxRequestValues + cJSON_ParseWithLengthOpts("),
+    )
+    for label,key,before,after in variants:
+        if before not in parts[key]:
+            raise AssertionError(f"request intake mutation did not apply: {label}")
+        changed=dict(parts);changed[key]=parts[key].replace(before,after,1)+"\n// unchanged decoy: "+before+"\n"
+        require_mutation_rejected(label,lambda changed=changed:require_request_intake_contract(changed))
+
+
+def require_http_security_contract(parts: dict[str, str]) -> None:
+    # Ignore comments while preserving literal header/value tokens. A comment cannot restore a guard.
+    parts = {key: strip_cpp_comments(value) if key != "config" else value
+             for key, value in parts.items()}
+    server, status = parts["server"], parts["status"]
+    dispatch = function_body_in(server, "handle_all_dispatch")
+    gate = "tk::mutation_origin_required(POST, req->uri) && !browser_mutation_allowed(req)"
+    if gate not in dispatch or "return reject_cross_origin_mutation(req);" not in dispatch:
+        raise AssertionError("HTTP origin gate must use actual POST and reject before dispatch")
+    require_before("origin rejection before route classification", dispatch, gate, "tk::classify_http_route")
+    compact_dispatch = " ".join(dispatch.split())
+    if f"if ({gate}) {{ return reject_cross_origin_mutation(req); }}" not in compact_dispatch:
+        raise AssertionError("HTTP origin failure must return from its actual conditional branch")
+    header = function_body_in(server, "read_header_bounded")
+    if "if (len >= capacity) return false;" not in header:
+        raise AssertionError("oversized provenance header must fail closed")
+    browser = function_body_in(server, "browser_mutation_allowed")
+    for token in (
+        "const bool is_post = req->method == HTTP_POST;",
+        'read_header_bounded(req, "Origin", origin, sizeof(origin))',
+        'read_header_bounded(req, "Sec-Fetch-Site", fetch_site, sizeof(fetch_site))',
+        'read_header_bounded(req, "Host", host, sizeof(host))',
+        'httpd_req_get_hdr_value_len(req, "X-Requested-With") > 0',
+        "origin_allowed_for_owned_addresses(req, is_post, host, origin, fetch_site,",
+        "has_custom_header, device_ip)",
+    ):
+        if token not in browser:
+            raise AssertionError(f"browser origin wiring missing {token!r}")
+    origin = function_body_in(server, "origin_allowed_for_owned_addresses")
+    for token in ('read_header_bounded(req, "Referer", referer, sizeof(referer))',
+                  "const bool host_owned = owned_host_allowed(req, host, active_netif_ip);",
+                  "tk::mutation_request_allowed_for_owned_host(is_post, host_owned, host, origin,",
+                  "fetch_site, referer, has_custom_header"):
+        if token not in origin:
+            raise AssertionError(f"Referer/actual method delegation missing {token!r}")
+    owned = function_body_in(server, "owned_host_allowed")
+    for token in ("getsockname(fd,", "local.sin_family == AF_INET", "inet_ntop(AF_INET,",
+                  "const std::string_view device_ips[] = {active_netif_ip, socket_ip};",
+                  "char mdns_hostname[MDNS_NAME_BUF_LEN] = {};",
+                  "if (mdns_hostname_get(mdns_hostname) != ESP_OK) mdns_hostname[0] = '\\0';",
+                  "tk::device_host_allowed(host, device_ips, ip_count, mdns_hostname)",
+                  "return tk::device_host_allowed(host, device_ips, ip_count, mdns_hostname);"):
+        if token not in owned:
+            raise AssertionError(f"owned socket/live mDNS wiring missing {token!r}")
+    if '#if defined(CONFIG_LWIP_IPV6) && CONFIG_LWIP_IPV6\n#error ' not in server:
+        raise AssertionError("HTTP IPv4-only socket seam must reject IPv6 enablement at compile time")
+    if not re.search(r"(?m)^CONFIG_LWIP_IPV6=n$", parts["config"]):
+        raise AssertionError("IPv6 enabled without a reviewed HTTP owned-address policy")
+    if re.search(r"(?m)^CONFIG_LWIP_IPV6=y$", parts["config"]):
+        raise AssertionError("a target enables unsupported IPv6 owned-address checks")
+    diagnostic = function_body_in(server, "diagnostic_host_allowed")
+    for token in ('read_header_bounded(req, "Host", host, sizeof(host))',
+                  "active_ipv4(device_ip, sizeof(device_ip))",
+                  "return owned_host_allowed(req, host, device_ip);"):
+        if token not in diagnostic:
+            raise AssertionError(f"diagnostic Host binding missing {token!r}")
+    host_gate = "tk::http_route_requires_owned_host(verb, route) && !diagnostic_host_allowed(req)"
+    if host_gate not in dispatch or '"device-owned Host required"' not in dispatch:
+        raise AssertionError("diagnostic routes bypass owned-Host rejection")
+    require_before("diagnostic Host rejection before handlers", dispatch, host_gate, "switch (route)")
+    host_rejection = (f'if ({host_gate}) {{ httpd_resp_set_status(req, "403 Forbidden"); '
+                      'httpd_resp_set_type(req, "text/plain; charset=utf-8"); '
+                      'return httpd_resp_sendstr(req, "device-owned Host required"); }')
+    if host_rejection not in compact_dispatch:
+        raise AssertionError("diagnostic Host rejection must terminate with 403 before its handler")
+    status_handler = function_body_in(status, "handle_status")
+    if 'const bool redact = query_param_is(req, "redact", "1");' not in status_handler:
+        raise AssertionError("/status no longer passes the requested redact selector")
+    if "build_status_object(redact)" not in status_handler:
+        raise AssertionError("/status ignores the selected redaction")
+    if 'if (!query_param_is(req, "redact", "1"))' not in function_body_in(status, "handle_diag"):
+        raise AssertionError("/diag ignores the requested redact selector")
+    if parts["app"].count("{'X-Requested-With':'XMLHttpRequest'}") != 2:
+        raise AssertionError("both shipped JSON helpers must send X-Requested-With")
+    if re.search(r"Access-Control-Allow-Origin", parts["all_cpp"], re.IGNORECASE):
+        raise AssertionError("HTTP must not grant cross-origin response access")
+    index = function_body_in(status, "handle_index")
+    for header in ('"X-Frame-Options", "DENY"',
+                   '"Content-Security-Policy", "frame-ancestors \'none\'"'):
+        token = f"httpd_resp_set_hdr(req, {header}) != ESP_OK"
+        if token not in index:
+            raise AssertionError(f"UI anti-framing header must fail before send: {header}")
+        require_before("anti-framing header before HTML", index, token, "httpd_resp_send(req,")
+    frame_guard = ("if (httpd_resp_set_hdr(req, \"X-Frame-Options\", \"DENY\") != ESP_OK || "
+                   "httpd_resp_set_hdr(req, \"Content-Security-Policy\", \"frame-ancestors 'none'\") != ESP_OK) "
+                   "{ return ESP_FAIL; }")
+    if frame_guard not in " ".join(index.split()):
+        raise AssertionError("anti-framing header allocation failure must not send HTML")
+    if 'mdns_hostname_set(tk::kDeviceHostname)' not in parts["boot"]:
+        raise AssertionError("mDNS boot name bypasses the shared constant")
+    if len(re.findall(r"esp_netif_set_hostname\([^,]+, kDeviceHostname\)", parts["net"])) != 2:
+        raise AssertionError("both network transports must use the shared DHCP hostname")
+    if sum(x.count('"tesla-key-esp32"') for x in (parts["boot"], parts["net"], parts["origin"], parts["hostname"])) != 1:
+        raise AssertionError("device hostname must have one literal owner")
+
+
+def self_test_http_security_contract(parts: dict[str, str]) -> None:
+    variants = (
+        ("POST gate replaced with false", "server", "mutation_origin_required(POST,", "mutation_origin_required(false,"),
+        ("oversized header absent", "server", "if (len >= capacity) return false;", "if (len >= capacity) return true;"),
+        ("socket address omitted", "server", "{active_netif_ip, socket_ip}", "{active_netif_ip, \"\"}"),
+        ("status redaction disabled", "status", 'const bool redact = query_param_is(req, "redact", "1");', 'const bool redact = false;'),
+        ("diag redaction disabled", "status", 'if (!query_param_is(req, "redact", "1"))', 'if (true)'),
+        ("UI header removed", "app", "{'X-Requested-With':'XMLHttpRequest'}", "{}"),
+        ("wildcard CORS added", "all_cpp", "httpd_resp_set_type(req,", 'httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*"); httpd_resp_set_type(req,'),
+        ("diagnostic Host gate removed", "server", "!diagnostic_host_allowed(req)", "false"),
+        ("diagnostic rejection falls through", "server", 'return httpd_resp_sendstr(req, "device-owned Host required");', '(void)httpd_resp_sendstr(req, "device-owned Host required");'),
+        ("live mDNS name ignored", "server", "ip_count, mdns_hostname)", "ip_count)"),
+        ("checked Host bit replaced with true", "server", "is_post, host_owned, host, origin,", "is_post, true, host, origin,"),
+        ("IPv6 compile guard removed", "server", "#if defined(CONFIG_LWIP_IPV6) && CONFIG_LWIP_IPV6", "#if 0"),
+        ("IPv6 enabled", "config", "CONFIG_LWIP_IPV6=n", "CONFIG_LWIP_IPV6=y"),
+        ("frame options removed", "status", '"X-Frame-Options", "DENY"', '"X-Frame-Options", "SAMEORIGIN"'),
+        ("frame CSP removed", "status", '"Content-Security-Policy", "frame-ancestors \'none\'"', '"Content-Security-Policy", "default-src *"'),
+        ("hostname duplicated", "boot", "mdns_hostname_set(tk::kDeviceHostname)", 'mdns_hostname_set("tesla-key-esp32")'),
+    )
+    for label, key, before, after in variants:
+        mutated = dict(parts)
+        if before not in parts[key]:
+            raise AssertionError(f"HTTP security mutation did not apply: {label}")
+        mutated[key] = parts[key].replace(before, after, 1)
+        if key != "config":
+            mutated[key] += "\n// unchanged decoy token: " + before + "\n"
+        require_mutation_rejected(label, lambda mutated=mutated: require_http_security_contract(mutated))
+
+
+def require_api_reply_contract(parts: dict[str, str]) -> None:
+    parts = {key: re.sub(r"\[\[.*?\]\]", "", strip_cpp_comments(value))
+             for key, value in parts.items()}
+    compact = lambda text: re.sub(r"\s+", "", text)
+    command = function_body_in(parts["api"], "handle_command")
+    for state, reason in (("TooLarge", "request body too large"),
+                          ("NoMemory", "out of memory"),
+                          ("ReceiveFailed", "request body read failed")):
+        branch = (f'if(body.status==tk::BodyReadStatus::{state}){{'
+                  'return send_json(req,tk::body_read_http_status(body.status),'
+                  f'make_response(false,cmd,vin,"{reason}"));}}')
+        if compact(branch) not in compact(command):
+            raise AssertionError(f"REST body status must use actual tested policy: {state}")
+    sender = compact(function_body_in(parts["api"], "send_command_result"))
+    expected = ('return send_effect_json(rq,effective_ok?200:502,make_response(effective_ok,cmd,vin,'
+                'tk::command_result_text(effective_ok,err)));')
+    if compact(expected) not in sender:
+        raise AssertionError("REST command failure status/envelope drift")
+    call = compact(function_body_in(parts["mcp"], "handle_tools_call_"))
+    if compact('if(!info){request.reset();return send_rpc_error_(req,id,tk::kJsonRpcInvalidParams,"unknown tool");}') not in call:
+        raise AssertionError("unknown MCP tool must be a terminal InvalidParams reply")
+    for route, handler, name in (("SetTime", "handle_set_time", "set_time"),
+                                 ("SetMqtt", "handle_set_mqtt", "set_mqtt"),
+                                 ("SetSyslog", "handle_set_syslog", "set_syslog"),
+                                 ("SetWifi", "handle_set_wifi", "set_wifi"),
+                                 ("SetOta", "handle_set_ota", "set_ota")):
+        body = compact(function_body_in(parts["config"], handler))
+        branch = (f'if(tk::http_route_blocks_during_ota_update_409(tk::HttpRoute::{route})&&'
+                  'ota_is_updating()){return send_json(req,static_cast<int>(tk::HttpRouteOtaConflict::Reject409),'
+                  f'make_response(false,"{name}","",tk::kOtaUpdateInProgressReason.data()));}}')
+        if compact(branch) not in body:
+            raise AssertionError(f"{handler}: actual OTA409 policy/terminal guard drift")
+    state = function_body_in(parts["mcp"], "vehicle_state_result_")
+    state_c = compact(state)
+    if (compact('const bool charge_available = g_vehicle->get_charge_state(cs);') not in state_c or
+            compact('state.charge_available = charge_available;') not in state_c or
+            compact('if (charge_available) {') not in state_c or 'get_cached_charge' in state):
+        raise AssertionError("MCP charge availability bypasses the REST cache-only gate")
+    for forbidden in ("connect(", "wake(", "get_vehicle_status(", "poll_charge_state("):
+        if forbidden in state:
+            raise AssertionError("MCP cached-state read gained live work")
+    if compact('return send_json(req,200,json.release());') not in compact(function_body_in(parts["api"], "handle_body_controller")):
+        raise AssertionError("body-controller HTTP200 compatibility policy drift")
+    post = function_body_in(parts["mcp"], "mcp_handle_post")
+    notification = ('if(id_status==tk::mcp_json::RpcIdStatus::Missing){'
+                    'const bool is_notification=(method!=nullptr);msg.reset();'
+                    'return is_notification?send_accepted_(req):'
+                    'send_rpc_error_(req,{},tk::kJsonRpcInvalidRequest,"missing method");}')
+    if compact(notification) not in compact(post):
+        raise AssertionError("id-less method notification policy drift")
+    server = compact(function_body_in(parts["server"], "handle_all"))
+    exception = compact(function_body_in(parts["common"], "send_effect_exception"))
+    if (server.count('result=send_effect_exception(rq);') != 2 or
+            'httpd_resp_set_type(rq.req(),"text/plain")' not in exception or
+            'transport.set_status(503)' not in exception):
+        raise AssertionError("documented shared exception transport fallback drift")
+
+
+def self_test_api_reply_contract(parts: dict[str, str]) -> None:
+    variants = (
+        ("REST413mapping", "api", 'tk::body_read_http_status(body.status)', '400'),
+        ("RESTfailedcommand503", "api", 'effective_ok ? 200 : 502', 'effective_ok ? 200 : 503'),
+        ("MCPunknowntoolcode", "mcp", 'tk::kJsonRpcInvalidParams, "unknown tool"', 'tk::kJsonRpcMethodNotFound, "unknown tool"'),
+        ("MQTTOTAguardremoved", "config", 'tk::http_route_blocks_during_ota_update_409(tk::HttpRoute::SetMqtt)', 'false'),
+        ("WiFiOTAguardfallthrough", "config", 'return send_json(req, static_cast<int>(tk::HttpRouteOtaConflict::Reject409),\n                         make_response(false, "set_wifi", "", tk::kOtaUpdateInProgressReason.data()));', '(void)send_json(req, static_cast<int>(tk::HttpRouteOtaConflict::Reject409),\n                         make_response(false, "set_wifi", "", tk::kOtaUpdateInProgressReason.data()));'),
+        ("MCPcachedchargereadrestored", "mcp", 'g_vehicle->get_charge_state(cs)', 'g_vehicle->get_cached_charge().valid'),
+        ("MCPchargegateremoved", "mcp", 'if (charge_available) {', 'if (true) {'),
+        ("MCPchargeflagforged", "mcp", 'state.charge_available = charge_available;', 'state.charge_available = true;'),
+        ("bodycontrollerstatuschanged", "api", 'return send_json(req, 200, json.release());', 'return send_json(req, 503, json.release());'),
+        ("notificationdispatchpolicychanged", "mcp", 'const bool is_notification = (method != nullptr);', 'const bool is_notification = false;'),
+        ("exceptionjsonpromisechanged", "common", 'httpd_resp_set_type(rq.req(), "text/plain")', 'httpd_resp_set_type(rq.req(), "application/json")'),
+    )
+    for label, key, before, after in variants:
+        mutated = dict(parts)
+        if before not in mutated[key]:
+            raise AssertionError(f"API reply mutation did not apply: {label}")
+        mutated[key] = mutated[key].replace(before, after, 1) + "\n// unchanged decoy token: " + before + "\n"
+        require_mutation_rejected(label, lambda mutated=mutated: require_api_reply_contract(mutated))
+
+
+
+def require_config_integrity_contract(parts: dict[str, str]) -> None:
+    # These are call-site pins, complementary to the real config/NVS fault tests. Match executable
+    # bodies after comment removal; a retained comment cannot substitute for a refusing branch.
+    def body(key: str, name: str) -> str:
+        code = normalize_preprocessor_text(parts[key])
+        code = re.sub(r"\[\[gnu::noinline\]\]\s*|__attribute__\(\(noinline\)\)\s*", "", code)
+        return re.sub(r"\s+", " ", function_body_in(code, name)).strip()
+
+    routes = (
+        ("handle_set_vin", "current", "set_vin", ', vin.c_str()'),
+        ("handle_set_mqtt", "cfg", "set_mqtt", ''),
+        ("handle_set_syslog", "cfg", "set_syslog", ''),
+        ("apply_wifi_submission_", "cfg", "set_wifi", ''),
+        ("handle_set_ota", "cfg", "set_ota", ''),
+    )
+    effects = re.compile(r"\b(?:cfg_save|reset_for_new_vehicle|apply_mqtt_submission_|"
+                         r"apply_syslog_submission_|stage_wifi_change|ota_set_channel)\s*\(")
+    for name, variable, command, suffix in routes:
+        code = body("config", name)
+        condition = f'if (!tk::cfg_load_for_update(*g_config, {variable}))'
+        response = f'return send_config_unreadable_(req, "{command}"{suffix});'
+        guard = re.search(re.escape(condition) + r"\s*(?:\{\s*)?" + re.escape(response), code)
+        if not guard:
+            raise AssertionError(f"{name}: authoritative load must refuse before configuration effects")
+        effect = effects.search(code)
+        if not effect or guard.end() >= effect.start():
+            raise AssertionError(f"{name}: update guard no longer precedes its mutation/helper")
+    unreadable = body("config", "send_config_unreadable_")
+    if 'return send_json(req, 503, make_response(false, command, vin,' not in unreadable:
+        raise AssertionError("unreadable config must return503/resultfalse before a write")
+
+    portal = body("portal", "save_post_impl")
+    guard = re.search(r'if \(!tk::cfg_load_for_update\(\*g_cfg, cfg\)\) \{([^{}]*)\}', portal)
+    if not guard or not guard.group(1).strip().startswith('return portal_save_send(req, context,'):
+        raise AssertionError("setup save must terminate on unreadable configuration")
+    if 'return portal_save_send(req, context, "503 Service Unavailable", "text/html",' not in guard.group(1):
+        raise AssertionError("setup unreadable configuration must report503")
+    if any(token in guard.group(1) for token in ('cfg_save(', 'save_str(', 'esp_restart(')):
+        raise AssertionError("setup unreadable branch must not persist/restart")
+    effect = portal.find('tk::cfg_save(')
+    if effect < 0 or guard.end() >= effect:
+        raise AssertionError("setup authoritative load must precede its config save")
+
+    boot = body("boot", "load_config_blob_verified")
+    fatal = re.search(r'if \(cfg_blob_state == tk::ConfigLoadState::Error\) \{([^{}]*)\}', boot)
+    if not fatal or not fatal.group(1).strip().endswith('boot_fatal("configuration verification");'):
+        raise AssertionError("boot configuration read/decode errors must remain fatal")
+    if 'tk::cfg_load_state(config_store, cfg_blob)' not in boot or 'retry < 3' not in boot:
+        raise AssertionError("boot must retry the authoritative tri-state configuration load")
+
+
+def self_test_config_integrity_contract(parts: dict[str, str]) -> None:
+    changes = [
+        ("VINload", "config", 'cfg_load_for_update(*g_config, current)', 'cfg_load(*g_config, current)'),
+        ("MQTTload", "config", 'cfg_load_for_update(*g_config, cfg)) return send_config_unreadable_(req, "set_mqtt")', 'cfg_load(*g_config, cfg)) return send_config_unreadable_(req, "set_mqtt")'),
+        ("Syslogload", "config", 'cfg_load_for_update(*g_config, cfg)) return send_config_unreadable_(req, "set_syslog")', 'cfg_load(*g_config, cfg)) return send_config_unreadable_(req, "set_syslog")'),
+        ("WiFiload", "config", 'cfg_load_for_update(*g_config, cfg)) return send_config_unreadable_(req, "set_wifi")', 'cfg_load(*g_config, cfg)) return send_config_unreadable_(req, "set_wifi")'),
+        ("OTAload", "config", 'cfg_load_for_update(*g_config, cfg)) return send_config_unreadable_(req, "set_ota")', 'cfg_load(*g_config, cfg)) return send_config_unreadable_(req, "set_ota")'),
+        ("Portalload", "portal", 'cfg_load_for_update(*g_cfg, cfg)', 'cfg_load(*g_cfg, cfg)'),
+        ("MQTTfallthrough", "config", 'return send_config_unreadable_(req, "set_mqtt");', '(void)send_config_unreadable_(req, "set_mqtt");'),
+        ("Bootnotfatal", "boot", 'boot_fatal("configuration verification");', '(void)0;'),
+        ("Unreadable200", "config", 'return send_json(req, 503,\n                     make_response(false, command, vin,', 'return send_json(req, 200,\n                     make_response(false, command, vin,'),
+    ]
+    for label, key, before, after in changes:
+        changed = dict(parts)
+        if before not in changed[key]:
+            raise AssertionError(f"configuration integrity canary did not apply: {label}")
+        changed[key] = changed[key].replace(before, after, 1) + '\n// decoy: ' + before + '\n'
+        require_mutation_rejected(label, lambda changed=changed: require_config_integrity_contract(changed))
+
+
+
+def require_vin_marker_format_contract(parts: dict[str, str]) -> None:
+    config = normalize_preprocessor_text(parts["config"])
+    callback = re.sub(r"\s+", " ", function_body_in(config, "handle_set_vin"))
+    refusal = ('tk::make_vin_transition_marker(current.vin, previous_key_id); '
+               'if (marker.empty()) return false; '
+               'if (!g_config->save_str(tk::nvs_contract::kVinTransition, marker)) return false;')
+    if refusal not in callback:
+        raise AssertionError("VIN staging must refuse an empty marker before any journal/config write")
+    pairing = normalize_preprocessor_text(parts["pairing"])
+    pairing = re.sub(r'__attribute__\(\(noinline\)\)\s*', '', pairing)
+    formatter = re.sub(r"\s+", " ", function_body_in(pairing, "compute_key_fingerprint_"))
+    if ('const auto formatted = tk::key_fingerprint_text(sha, sizeof(sha)); '
+            'fp = formatted.data();') not in formatter:
+        raise AssertionError("IDF fingerprint output must delegate to the actual tested formatter")
+
+
+def self_test_vin_marker_format_contract(parts: dict[str, str]) -> None:
+    for label, key, before, after in (
+        ("emptyVINmarkerwritten", "config", 'if (marker.empty()) return false;', '(void)marker.empty();'),
+        ("fingerprintformatterbypassed", "pairing", 'tk::key_fingerprint_text(sha, sizeof(sha))', 'std::array<char, 12>{}'),
+    ):
+        changed = dict(parts)
+        if before not in changed[key]:
+            raise AssertionError(f"VIN format canary did not apply: {label}")
+        changed[key] = changed[key].replace(before, after, 1) + '\n// decoy: ' + before + '\n'
+        require_mutation_rejected(label, lambda changed=changed: require_vin_marker_format_contract(changed))
+
+
+def require_clock_integration_contract(parts: dict[str, str]) -> None:
+    def body(key: str, name: str) -> str:
+        code = re.sub(r"__attribute__\(\(noinline\)\)\s*", "", normalize_preprocessor_text(parts[key]))
+        return re.sub(r"\s+", " ", function_body_in(code, name))
+    startup = body("boot", "app_main")
+    require_before("clock before HTTP", startup, "initialize_clock_gate_();", "http_server_start(")
+    require_before("clock before SNTP", startup, "initialize_clock_gate_();", "esp_sntp_init();")
+    require_before("explicit IMMED", startup, "sntp_set_sync_mode(SNTP_SYNC_MODE_IMMED);", "esp_sntp_init();")
+    if "sntp_set_time_sync_notification_cb" in startup:
+        raise AssertionError("strong clock hook must not also register a notification writer")
+    for name in ("apply_browser_clock", "apply_browser_clock_sample"):
+        code = body("boot", name)
+        if any(token in code for token in ("save_str(", "checkpoint_ntp_time_(", ".store(true", "mark_clock_authoritative")):
+            raise AssertionError("browser estimate must not persist or establish authority")
+    rotation = body("pairing", "generate_key_locked_")
+    for token in ("tk::stamp_or_retire_key_date(", "tk::historical_date_valid(now, clock_plausibility_ceiling())",
+                  "storage_->save_str(tk::nvs_contract::kKeyCreated", "storage_->remove(tk::nvs_contract::kKeyCreated)"):
+        if token not in rotation:
+            raise AssertionError("key date must use the tested bounded stamp-or-retire path")
+    require_before("key authority before time", rotation, "clock_is_authoritative()", "time(nullptr)")
+    if 'return clock_synced_via_ntp();' not in body("boot", "clock_is_authoritative"):
+        raise AssertionError("only NTP establishes durable-date authority")
+
+
+def self_test_clock_integration_contract(parts: dict[str, str]) -> None:
+    variants = (
+        ("clockinitremoved", "boot", "    initialize_clock_gate_();", "    ;"),
+        ("smoothmodeenabled", "boot", "sntp_set_sync_mode(SNTP_SYNC_MODE_IMMED);", "sntp_set_sync_mode(SNTP_SYNC_MODE_SMOOTH);"),
+        ("keydatetemplatebypassed", "pairing", "tk::stamp_or_retire_key_date(", "unreviewed_stamp_or_retire("),
+        ("keydateboundsbypassed", "pairing", "tk::historical_date_valid(now, clock_plausibility_ceiling())", "true"),
+        ("browserauthorityrestored", "boot", "BrowserClockResult apply_browser_clock(double milliseconds) noexcept {",
+         "BrowserClockResult apply_browser_clock(double milliseconds) noexcept { s_ntp_synced.store(true);"),
+    )
+    for label, key, before, after in variants:
+        mutated = dict(parts)
+        if before not in mutated[key]: raise AssertionError("clock canary did not apply: " + label)
+        mutated[key] = mutated[key].replace(before, after, 1) + "\n// decoy: " + before + "\n"
+        require_mutation_rejected(label, lambda mutated=mutated: require_clock_integration_contract(mutated))
+
+
+def require_config_encode_lease_contract(parts: dict[str, str]) -> None:
+    blob = normalize_preprocessor_text(parts["blob"])
+    save = re.sub(r"\s+", " ", function_body_in(blob, "cfg_save"))
+    require_before("encode operation lease", save, "ConfigEncodeLease lease;", "if (!lease.held) return false;")
+    require_before("busy before encoder", save, "if (!lease.held) return false;", "config_blob_encode(")
+    if "auto& buf = s_encode_buffer;" not in save or "ConfigBlobBuffer buf" in save:
+        raise AssertionError("config serialization must use the private static buffer")
+    start = blob.index("struct ConfigEncodeLease")
+    opening = blob.index("{", start)
+    end = balanced_end(scrub_cpp_preserving_layout(blob), opening, "{", "}", "config encode lease")
+    lease = re.sub(r"\s+", " ", blob[start:end+1])
+    for token in ("std::atomic_flag s_encode_active = ATOMIC_FLAG_INIT;", "ConfigBlobBuffer s_encode_buffer{};"):
+        if token not in blob: raise AssertionError("config buffer/permit must remain private static owners")
+    for token in ("held(!s_encode_active.test_and_set(std::memory_order_acquire))", "if (!held) return;",
+                  "volatile uint8_t* bytes = s_encode_buffer.data();", "i < s_encode_buffer.size()", "bytes[i] = 0;"):
+        if token not in lease: raise AssertionError("config lease admission/full volatile wipe drift")
+    require_before("wipe before publication", lease, "bytes[i] = 0;", "s_encode_active.clear(std::memory_order_release);")
+    if any(token in lease for token in ("ESP_LOG", "save_", "xSemaphore", "vTaskDelay", "new ")):
+        raise AssertionError("config lease construction/destruction must not call out or wait")
+    wifi = re.sub(r"\s+", " ", function_body_in(re.sub(r"\[\[gnu::noinline\]\]\s*", "", normalize_preprocessor_text(parts["http"])), "apply_wifi_submission_"))
+    require_before("uniform legacy refusal before credential comparison", wifi,
+                   "if (!tk::config_service_targets_fit_old_writer(cfg))",
+                   "if (cfg.wifi_ssid == ssid && cfg.wifi_pass == pass)")
+    condition = 'if (!tk::config_service_targets_fit_old_writer(cfg)) { return send_json(req, 409, make_response(false, "set_wifi", "", "shorten existing service addresses to 64 bytes before changing WiFi")); }'
+    if condition not in wifi: raise AssertionError("legacy long targets must terminally refuse before a new WiFi trial")
+    require_before("legacy refusal before trial", wifi, condition, "tk::stage_wifi_change(cfg, ssid, pass);")
+
+
+def self_test_config_encode_lease_contract(parts: dict[str, str]) -> None:
+    variants = (
+        ("configbusyfallthrough", "blob", "if (!lease.held) return false;", "if (!lease.held) {}"),
+        ("configwipeomitted", "blob", "bytes[i] = 0;", "(void)bytes[i];"),
+        ("configwipenonvolatile", "blob", "volatile uint8_t* bytes", "uint8_t* bytes"),
+        ("configreleasebeforewipe", "blob", "for (size_t i = 0; i < s_encode_buffer.size(); ++i) bytes[i] = 0;\n        s_encode_active.clear(std::memory_order_release);", "s_encode_active.clear(std::memory_order_release);\n        for (size_t i = 0; i < s_encode_buffer.size(); ++i) bytes[i] = 0;"),
+        ("legacytrialguardbypassed", "http", "if (!tk::config_service_targets_fit_old_writer(cfg))", "if (false)"),
+    )
+    for label, key, before, after in variants:
+        mutated = dict(parts)
+        if before not in mutated[key]: raise AssertionError("config lease canary not applied: " + label)
+        mutated[key] = mutated[key].replace(before, after, 1) + "\n// decoy: " + before + "\n"
+        require_mutation_rejected(label, lambda mutated=mutated: require_config_encode_lease_contract(mutated))
+
+    # Move the actual branch across intervening ownership checks instead of assuming adjacency.
+    http = parts["http"]
+    legacy = re.search(r'    if \(!tk::config_service_targets_fit_old_writer\(cfg\)\) \{\n.*?\n    \}', http, re.S)
+    equality = re.search(r'    if \(cfg.wifi_ssid == ssid && cfg.wifi_pass == pass\) \{\n.*?\n    \}', http, re.S)
+    if not legacy or not equality or legacy.start() >= equality.start():
+        raise AssertionError("legacy ordering canary cannot locate actual production branches")
+    moved = http.replace(legacy.group(), "", 1)
+    moved = moved.replace(equality.group(), equality.group() + "\n\n" + legacy.group(), 1)
+    mutated = dict(parts)
+    mutated["http"] = moved + "\n// decoy: " + legacy.group() + "\n"
+    require_mutation_rejected("legacyrefusalaftercomparison", lambda: require_config_encode_lease_contract(mutated))
+
+
+def require_long_uptime_clocks(telemetry: str, trend: str) -> None:
+    """PKG-13: the tested long-lived clock must be the one the firmware actually uses."""
+    loop = scrub_cpp(function_body_in(telemetry, "loop_task_fn_"))
+    clock = "tk::uptime_seconds(static_cast<uint64_t>(esp_timer_get_time()))"
+    flat = " ".join(loop.split())
+    if f"const uint32_t now_s = {clock};" not in flat:
+        raise AssertionError("bootstrap seconds must come from the production 64-bit timer conversion")
+    calls = call_arguments(loop, "tk::heap_trend_record")
+    if len(calls) != 1 or calls[0][0].strip() != clock:
+        raise AssertionError("heap history must use the same long-lived timer conversion")
+    if "heap_wd, {largest, (uint32_t) pdTICKS_TO_MS(hb_now), ota_is_busy()}" not in loop:
+        raise AssertionError("long-lived clock changes must preserve the short heap-watchdog tick clock")
+    adoption = " ".join(scrub_cpp(function_body_in(trend, "adopt_or_reset")).split())
+    if "heap_persist_valid(persist()) && heap_carry_fits(persist().ring)" not in adoption:
+        raise AssertionError("retained history adoption must reject an overflowing carry")
+    record = " ".join(scrub_cpp(function_body_in(trend, "heap_trend_record")).split())
+    if "if (!heap_timeline_fits(monotonic_s, s_carry_s)) { persist().ring.reset(); s_carry_s = 0;" not in record:
+        raise AssertionError("a retained history sum overflow must start an empty timeline")
+
+
+def self_test_long_uptime_clocks() -> None:
+    telemetry, trend = SOURCES["vehicle_telemetry.cpp"], SOURCES["heap_trend.cpp"]
+    for label, old, new, in_telemetry in (
+        ("bootstrap tick rollover", "const uint32_t now_s = tk::uptime_seconds(static_cast<uint64_t>(esp_timer_get_time()));",
+         "const uint32_t now_s = now_ticks / configTICK_RATE_HZ;", True),
+        ("heap millisecond rollover", "tk::heap_trend_record(tk::uptime_seconds(static_cast<uint64_t>(esp_timer_get_time())),",
+         "tk::heap_trend_record((uint32_t) pdTICKS_TO_MS(hb_now) / 1000,", True),
+        ("unchecked retained carry", " && heap_carry_fits(persist().ring)", "", False),
+        ("unchecked retained sum", "if (!heap_timeline_fits(monotonic_s, s_carry_s))", "if (false)", False),
+    ):
+        source = telemetry if in_telemetry else trend
+        assert old in source, f"PKG-13 canary did not apply: {label}"
+        mutated = source.replace(old, new, 1) + "\n// decoy: " + old + "\n"
+        require_mutation_rejected(
+            f"PKG-13 {label}",
+            lambda changed=mutated, use_telemetry=in_telemetry: require_long_uptime_clocks(
+                changed if use_telemetry else telemetry, trend if use_telemetry else changed),
+        )
+
+
 def main() -> int:
     tasks = task_inventory(ALL_CODE)
     callbacks = callback_inventory(ALL_CODE)
     check_contract(tasks, callbacks)
     self_test_canaries(tasks, callbacks)
+    self_test_long_uptime_clocks()
     recovery_sources = {
         "pairing": SOURCES["vehicle_pairing.cpp"],
         "boot": SOURCES["vehicle_ctrl.cpp"],
@@ -7181,6 +7810,44 @@ def main() -> int:
     }
     require_pairing_recovery_contract(**pairing_sources)
     self_test_pairing_recovery_canaries(**pairing_sources)
+    wake_sources = {**pairing_sources, "ctrl_header": recovery_sources["ctrl_header"]}
+    require_wake_result_contract(**wake_sources)
+    self_test_wake_result_contract(wake_sources)
+    intake_parts = {
+        "api": SOURCES["http_api.cpp"], "config": SOURCES["http_config.cpp"],
+        "mcp": SOURCES["mcp_server.cpp"], "ota": SOURCES["ota_update.cpp"],
+        "mcp_payloads": (MAIN / "mcp_json_payloads.hpp").read_text(),
+        "syntax": (MAIN / "logic/json_syntax.hpp").read_text(),
+        "shared": (MAIN / "json_input_validation.hpp").read_text(),
+    }
+    reply_parts = {**intake_parts, "server": SOURCES["http_server.cpp"], "common": SOURCES["http_common.cpp"]}
+    require_api_reply_contract(reply_parts)
+    self_test_api_reply_contract(reply_parts)
+    require_request_intake_contract(intake_parts)
+    self_test_request_intake_contract(intake_parts)
+    http_parts = {
+        "server": SOURCES["http_server.cpp"], "status": SOURCES["http_status.cpp"],
+        "boot": SOURCES["main.cpp"], "net": SOURCES["net.cpp"],
+        "app": (MAIN / "www/app.js").read_text(),
+        "config": "\n".join(p.read_text() for p in sorted(ROOT.glob("sdkconfig.defaults*"))),
+        "all_cpp": "\n".join(SOURCES.values()),
+        "origin": (MAIN / "logic/http_origin.hpp").read_text(),
+        "hostname": (MAIN / "logic/device_hostname.hpp").read_text(),
+    }
+    require_http_security_contract(http_parts)
+    self_test_http_security_contract(http_parts)
+    config_parts = {"config": SOURCES["http_config.cpp"], "portal": SOURCES["provisioning.cpp"], "boot": SOURCES["main.cpp"]}
+    require_config_integrity_contract(config_parts)
+    self_test_config_integrity_contract(config_parts)
+    vin_parts = {"config": SOURCES["http_config.cpp"], "pairing": SOURCES["vehicle_pairing.cpp"]}
+    require_vin_marker_format_contract(vin_parts)
+    self_test_vin_marker_format_contract(vin_parts)
+    clock_parts = {"boot": SOURCES["main.cpp"], "pairing": SOURCES["vehicle_pairing.cpp"]}
+    require_clock_integration_contract(clock_parts)
+    self_test_clock_integration_contract(clock_parts)
+    encode_parts = {"blob": SOURCES["config_blob.cpp"], "http": SOURCES["http_config.cpp"]}
+    require_config_encode_lease_contract(encode_parts)
+    self_test_config_encode_lease_contract(encode_parts)
     print(f"OK runtime C-boundary inventory ({len(tasks)} tasks, {len(callbacks)} callbacks)")
     return 0
 

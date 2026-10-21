@@ -118,3 +118,11 @@ fi
     "$repo_root/test/test_cjson_oom.cpp" "$work/cJSON.o" -lm \
     -o "$work/test_cjson_oom"
 "$work/test_cjson_oom"
+
+# Compile the real effect-aware handler/outer-catch source through passive host adapters.
+python3 "$repo_root/test/generate_effect_reply_adapters.py" "$work/effect_reply_adapters.generated.hpp"
+"$cxx" -std=c++17 -Wall -Wextra -Werror ${sanitize_flags[@]+"${sanitize_flags[@]}"} \
+    -I"$repo_root/main" -I"$cjson_dir" -I"$work" \
+    "$repo_root/test/test_effect_reply_adapters.cpp" "$work/cJSON.o" -lm \
+    -o "$work/test_effect_reply_adapters"
+"$work/test_effect_reply_adapters"

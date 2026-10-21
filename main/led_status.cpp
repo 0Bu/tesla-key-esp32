@@ -151,10 +151,10 @@ void led_task(void* arg) {
             // and the panel can never disagree (link_state has one source). ui_snapshot() fills
             // the vehicle-owned fields under the cache lock; the LED supplies the transport (it
             // shows no SSID or RSSI, so `net` is all it needs) and paired (its own ≤1 Hz
-            // has_session() sample; hits NVS).
+            // durable-record or usable-RAM sample).
             snap = v.ui_snapshot();
             snap.net    = tk::net_kind();
-            snap.paired = v.has_session();
+            snap.paired = v.has_session() || v.session_available();
         }
 
         const tk::LedPattern p = tk::led_pattern(snap, alerts);

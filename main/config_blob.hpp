@@ -4,35 +4,10 @@
 
 class NvsStorageAdapter;
 
-// Load/save the credential + service settings as ONE atomic NVS entry.
-//
-// WHAT THIS REPLACES. Those values used to be independent per-key writes: the setup portal commits
-// `wifi_ssid`, `wifi_pass` and `vin` as three separate nvs_set_str + nvs_commit pairs. Checking
-// each return value (which the code does) reports a tear but cannot undo the writes that already
-// landed, and a power cut between two of them reports nothing at all — leaving, for instance, a new
-// SSID beside the old password, which is a device that can no longer join anything and can only be
-// fixed over USB.
-//
-// One CRC-checked blob written with a single nvs_set_blob is all-or-nothing across BOTH failure
-// modes. It also removes the write-ordering question the WiFi rollback would otherwise introduce:
-// the previous credentials live INSIDE the same blob as the ones they protect, so there is no
-// window in which the backup and the live values disagree.
-//
-// THE LEGACY FALLBACK IS NOT OPTIONAL. Devices already in the field have the per-key layout and no
-// blob. cfg_load() reads the blob first and falls back to the individual keys ONLY when the blob
-// entry is absent (ESP_ERR_NVS_NOT_FOUND); present blobs that suffer read, OOM, schema or CRC errors
-// fail closed as errors rather than falling back to stale legacy keys. Without the absent-blob
-// fallback, this change would strand every existing device's WiFi credentials and VIN on the first OTA.
-// The first successful save migrates a device to the blob; the legacy keys are deliberately left in
-// place rather than deleted, so a downgrade to an older build still finds its configuration.
-//
-// SCOPE. Only durable user configuration whose coherent transaction is owned by the
-// HTTP/provisioning task belongs in this blob. Other `tesla_cfg` records stay separate either
-// because another task owns them (`ble_mac`, `last_time`, `reboot_why`, `disp_rot`) or because they
-// are journals/runtime safety state with a different lifetime (`vin_txn`, `boot_fails`). In the
-// first case a whole-struct writer could revert another owner's field from a stale snapshot; in the
-// second, folding an in-flight transaction or boot latch into a config snapshot would erase its
-// recovery semantics.
+// Coherent credential/service snapshots in one versioned CRC-checked NVS entry. The blob commit
+// precedes best-effort per-key mirrors for old builds. Only proven blob absence enables legacy
+// loading; unreadable/corrupt blobs never fall back to those possibly stale mirrors. The registry
+// in logic/nvs_contract.hpp owns the separate runtime records and recovery journals.
 
 namespace tk {
 
@@ -66,9 +41,17 @@ bool cfg_load(NvsStorageAdapter& cfg, ConfigBlob& out);
 // whole update.
 bool cfg_load_for_update(NvsStorageAdapter& cfg, ConfigBlob& out);
 
-// Persist the whole configuration atomically. Returns false without publishing anything on a failed
-// write — the PREVIOUS blob is then still intact, which is the property the caller relies on when
-// it answers 500 and skips its reboot.
+// Encode under a nonblocking private-buffer lease, commit, then mirror legacy keys best-effort.
+// Busy/reentry refuses before writes; every owned exit wipes the buffer before release. False
+// means encoding/write/commit was not confirmed; a failed commit cannot establish which snapshot
+// is durable. A mirror failure after a confirmed blob commit still returns true.
 bool cfg_save(NvsStorageAdapter& cfg, const ConfigBlob& in);
+
+// Seed once from the verified boot configuration before starting services. Successful cfg_save()
+// commits keep this diagnostic current, including when a configuration restart is deferred.
+void cfg_init_wifi_rollback_status(bool rolled_back) noexcept;
+
+// Allocation-free snapshot for cyclic status consumers; never reads NVS.
+bool cfg_wifi_rolled_back() noexcept;
 
 }  // namespace tk

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "logic/health_gate.hpp"
+#include "logic/config_commit.hpp"
 #include "logic/ota_contract.hpp"
 
 #include <string>
@@ -121,20 +122,30 @@ private:
     bool held_ = false;
 };
 
-// Acquire the process-wide operation gate for a configuration-triggered reboot window
-// (/set_mqtt, /set_syslog, /set_wifi, and setup portal /save). Must be called after early
-// OTA confirmation, and holds the owner until esp_restart() so no OTA or identity
-// transaction can start during the delayed restart window.
-[[nodiscard]] bool ota_config_restart_begin();
+// A request owns this lease from before cfg_save through reply/catch/restart. Construction
+// does not acquire; an unsuccessful request releases on all exits. Confirmation borrows this
+// actual noncopyable owner rather than recursively acquiring HealthCommit.
+class OtaConfigRestartGuard {
+public:
+    OtaConfigRestartGuard() noexcept = default;
+    ~OtaConfigRestartGuard() noexcept;
+    OtaConfigRestartGuard(const OtaConfigRestartGuard&) = delete;
+    OtaConfigRestartGuard& operator=(const OtaConfigRestartGuard&) = delete;
+    OtaConfigRestartGuard(OtaConfigRestartGuard&&) = delete;
+    OtaConfigRestartGuard& operator=(OtaConfigRestartGuard&&) = delete;
+    [[nodiscard]] bool try_begin() noexcept;
+    bool owns_gate() const noexcept;
+private:
+    bool held_{};
+};
 
-// If the running image is still ESP_OTA_IMG_PENDING_VERIFY (a fresh OTA the ~90 s health gate in
-// main.cpp hasn't confirmed yet), mark it valid NOW so it can't be rolled back. Call this before
-// a SuccessfulUserConfigCommit reboot after /set_wifi, /set_mqtt or /set_syslog (the setup-portal
-// save also calls it but is always refused: the portal never reaches Ready admission). The
-// successful durable commit plus a healthy internal contiguous-heap sample proves the
-// image runs, so that intentional restart inside the health window normally must not look like a
-// failed boot and revert the update. Identity mutations (/set_vin and /gen_keys) never call this
-// path and remain Stable-only. If the shared owner is busy or heap is already critical,
-// confirmation fails closed and leaves rollback armed. No-op on a normal boot or an already-valid
-// image.
-void ota_confirm_pending_image(tk::OtaRebootClass reboot_class);
+// Query raw image state under this request's lease. VALID and UNDEFINED are distinct;
+// errors are unknown, never an inferred blank/Stable state. This does not confirm anything.
+tk::ConfigImageResult ota_config_image_state(const OtaConfigRestartGuard& owner) noexcept;
+
+// Only a raw PENDING_VERIFY image after a successful user configuration save may be
+// confirmed, subject to Ready, current NimBLE sync/reset and fresh INTERNAL-largest-block
+// checks. Setup, identity, recovery and WiFi no-ops never confirm a candidate. A failed SDK
+// mark is uncertain: the metadata erase/write may already have changed durable state.
+tk::ConfigImageResult ota_confirm_pending_image(
+    const OtaConfigRestartGuard& owner, tk::OtaRebootClass reboot_class) noexcept;

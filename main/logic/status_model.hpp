@@ -1,4 +1,5 @@
 #pragma once
+#include "coredump_image.hpp"
 
 #include <cstdint>
 #include <cstdio>
@@ -7,6 +8,7 @@
 #include <vector>
 
 #include "link_state.hpp"
+#include "session_availability.hpp"
 #include "vehicle_data.hpp"
 
 // Pure, hardware-free shaping of GET /status — the de-facto contract the web UI
@@ -55,7 +57,8 @@ struct Inputs {
     std::string key_fingerprint;
     long long   key_created{0};   // epoch s; emitted only above kEpochPlausibleFloor
     bool        paired{false};
-    long long   paired_at{0};     // epoch s; same plausibility rule
+    tk::SessionAvailability sessions;
+    long long   paired_at{0};     // stored session first observed at NTP time; epoch s, same floor
     bool        reauth{false};
 
     // WiFi (STA link). wifi_connected false ⇒ the wifi object stays empty.
@@ -165,6 +168,11 @@ struct Inputs {
     int                   crash_reason_code{0};
     bool                  crash_fault{false};
     bool                  crash_coredump{false};   // a dump for THIS build is downloadable now
+    bool crash_artifact_present{false}, crash_raw_available{false}, crash_query_error{false};
+    bool crash_foreign_dump{false}, crash_checksum_verified{false}, crash_summary_available{false};
+    bool crash_truncated{false}, crash_isr{false};
+    DumpIdentity crash_dump_identity{DumpIdentity::Unverified};
+    std::string crash_dump_elf_sha256;
     bool                  crash_corrupted{false};  // the unwinder flagged the backtrace unreliable
     std::string           crash_task;
     uint32_t              crash_pc{0};
@@ -208,6 +216,18 @@ inline void emit_status(const Inputs& in, E& e) {
     e.str("key_fingerprint", in.key_fingerprint.c_str());
     if (in.key_created > kEpochPlausibleFloor) e.num("key_created", (double)in.key_created);
     e.boolean("paired", in.paired);
+    e.boolean("session_available", in.sessions.vcsec.known && in.sessions.vcsec.usable);
+    e.obj_begin("sessions");
+    const auto emit_session = [&](const char* name, tk::SessionRuntimeState state) {
+        e.obj_begin(name);
+        e.boolean("runtime_known", state.known);
+        e.boolean("runtime_usable", state.known && state.usable);
+        e.str("persistence", tk::session_save_state_name(state.save));
+        e.obj_end();
+    };
+    emit_session("vcsec", in.sessions.vcsec);
+    emit_session("infotainment", in.sessions.infotainment);
+    e.obj_end();
     if (in.paired_at > kEpochPlausibleFloor) e.num("paired_at", (double)in.paired_at);
     e.boolean("reauth", in.reauth);
 
@@ -423,22 +443,29 @@ inline void emit_status(const Inputs& in, E& e) {
         e.num("reason_code", (double)in.crash_reason_code);
         e.boolean("fault",     in.crash_fault);
         e.boolean("coredump",  in.crash_coredump);
-        if (!in.crash_task.empty()) e.str("task", in.crash_task.c_str());
-        if (in.crash_pc != 0)       e.num("pc", (double)in.crash_pc);
-        if (!in.crash_backtrace.empty()) {
-            // Hex STRINGS, not numbers: a PC is an address, it is read and pasted as 0x…, and a
-            // JSON number would render it in decimal in every viewer that touches this payload.
-            e.arr_begin("backtrace");
-            for (uint32_t pc : in.crash_backtrace) {
-                char buf[16];
-                std::snprintf(buf, sizeof(buf), "0x%08x", (unsigned)pc);
-                e.str(nullptr, buf);
+        e.boolean("artifact_present", in.crash_artifact_present);
+        e.boolean("raw_available", in.crash_raw_available);
+        e.boolean("query_error", in.crash_query_error);
+        e.boolean("foreign_dump", in.crash_foreign_dump);
+        e.boolean("checksum_verified", in.crash_checksum_verified);
+        e.str("dump_identity", dump_identity_name(in.crash_dump_identity));
+        e.boolean("summary_available", in.crash_summary_available);
+        if (!in.crash_dump_elf_sha256.empty()) e.str("dump_elf_sha256", in.crash_dump_elf_sha256.c_str());
+        if (in.crash_summary_available) {
+            if (!in.crash_task.empty()) e.str("task", in.crash_task.c_str());
+            e.num("pc", static_cast<double>(in.crash_pc));
+            e.boolean("corrupted", in.crash_corrupted);
+            e.boolean("truncated", in.crash_truncated);
+            e.boolean("isr", in.crash_isr);
+            if (!in.crash_backtrace.empty()) {
+                e.arr_begin("backtrace");
+                for (uint32_t pc : in.crash_backtrace) {
+                    char buf[11];
+                    std::snprintf(buf, sizeof(buf), "0x%08x", static_cast<unsigned>(pc));
+                    e.str(nullptr, buf);
+                }
+                e.arr_end();
             }
-            e.arr_end();
-            // Emitted only alongside a backtrace, because that is the only thing it qualifies: it
-            // says the frames below are unreliable, and on its own it would look like a verdict
-            // about the crash itself.
-            if (in.crash_corrupted) e.boolean("corrupted", true);
         }
         if (!in.crash_elf_sha256.empty()) e.str("elf_sha256", in.crash_elf_sha256.c_str());
         e.obj_end();

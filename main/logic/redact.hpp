@@ -178,6 +178,73 @@ inline constexpr DiagRedaction kDiagRedactions[] = {
 inline constexpr std::size_t kDiagRedactionCount = sizeof(kDiagRedactions) / sizeof(kDiagRedactions[0]);
 inline constexpr std::size_t kRedactedLength = sizeof("<redacted>") - 1;
 
+inline constexpr char kDiagMqttUriErrorLine[] = "E mqtt_client: URI parse error <redacted>\n";
+
+// The three pinned esp-mqtt URI parser errors can include credentials. This raw-sink guard
+// accepts only their actual uncolored V1 header, not a marker embedded in another log's value.
+// Firmware compilation binds the V1/RTOS/no-color assumptions at the capture boundary.
+inline bool diag_mqtt_uri_error(std::string_view record) noexcept {
+    if (record.size() < 3 || record[0] != 'E' || record[1] != ' ' || record[2] != '(') return false;
+    std::size_t pos = 3;
+    while (pos < record.size() && record[pos] >= '0' && record[pos] <= '9') ++pos;
+    if (pos == 3 || pos + 2 > record.size() || record[pos] != ')' || record[pos + 1] != ' ') return false;
+    pos += 2;
+    constexpr std::string_view tag = "mqtt_client:";
+    if (record.size() - pos < tag.size() || record.compare(pos, tag.size(), tag) != 0) return false;
+    pos += tag.size();
+    while (pos < record.size() && record[pos] == ' ') ++pos;
+    constexpr std::string_view message = "Error parse uri (";
+    return record.size() - pos >= message.size() && record.compare(pos, message.size(), message) == 0;
+}
+
+// Identifier-bearing formats linked from pinned ESP-IDF/netif, esp-tls, esp-mqtt and WiFi.
+// Collapse these complete lines: SSIDs and URIs are arbitrary text, so a delimiter inside a
+// value cannot safely identify its end. This separate path does not enlarge the HTTP output
+// buffer's per-rule expansion allowance. It is not a sanitizer for arbitrary library output.
+struct DiagLibraryIdentifier {
+    const char* tag;
+    const char* message;
+};
+inline constexpr DiagLibraryIdentifier kDiagLibraryIdentifiers[] = {
+    {"esp_netif_handlers:", " ip: "},
+    {"esp_netif_lwip:", "DHCP server started on interface "},
+    {"esp-tls:", "couldn't get hostname for :"},
+    {"mqtt_client:", "Error parse uri ("},
+    {"wifi:", "connected with "},
+    {"wifi:", "Invalid AP("},
+    {"wifi:", "Using per-SSID MAC [idx:"},
+    {"wifi:", "addba response cb: bssid change from "},
+    {"wifi:", "failed to get bss for bssid="},
+    {"wifi:", "Extended Capabilities length:"},
+    {"wifi:", "pm start, type:"},
+    {"wifi:", "(hal)multipleBSSIDs, "},
+    {"wifi:", "(spr)SRG Partial BSSID Bitmap:"},
+};
+inline bool diag_library_identifier_line(std::string_view line) noexcept {
+    for (const auto& rule : kDiagLibraryIdentifiers) {
+        const auto tag = line.find(rule.tag);
+        if (tag != std::string_view::npos &&
+            line.find(rule.message, tag + std::char_traits<char>::length(rule.tag)) != std::string_view::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// A qualified V1 log callback contains the entire formatted record. Keep embedded value
+// newlines from becoming separate, markerless ring lines. The original callback buffer still
+// feeds private Serial/Syslog; only copied ring bytes change, with no additional storage.
+inline std::size_t diag_library_capture_content_end(std::string_view record) noexcept {
+    if (!diag_library_identifier_line(record)) return 0;
+    std::size_t end = record.size();
+    while (end != 0 && (record[end - 1] == '\r' || record[end - 1] == '\n')) --end;
+    return end;
+}
+
+inline char diag_capture_byte(char byte, std::size_t offset, std::size_t library_end) noexcept {
+    return offset < library_end && (byte == '\r' || byte == '\n') ? ' ' : byte;
+}
+
 // Fixed-output capacity sufficient for every rule to expand an empty matched value into the
 // replacement. The diagnostic route uses this at compile time for its stack buffer; no allocation
 // or capacity guess remains after the first response chunk has left the device.
@@ -285,6 +352,7 @@ inline FixedDiagRedaction redact_diag_line_fixed(std::string_view line,
         return {kRedactedLength + newline_size, true};
     };
 
+    if (diag_library_identifier_line(line)) return collapse();
     if (!out || line.size() > capacity) return collapse();
     if (!line.empty()) std::memcpy(out, line.data(), line.size());
 

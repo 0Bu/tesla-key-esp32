@@ -18,8 +18,8 @@
 //   • VehicleController::ui_snapshot() fills the vehicle-owned cache fields (link_state /
 //     ble_* / soc / charging) in ONE read under its cache lock — instead of a presenter
 //     calling five separate accessors across a frame and mixing state from different instants.
-//   • The caller (the display / LED task) fills `paired` from its own ≤1 Hz has_session()
-//     sample — that call hits NVS, so it must NOT run every frame — and the wifi_* fields
+//   • The caller (the display / LED task) fills the `paired` presentation input from its own ≤1 Hz durable-record
+//     or usable-RAM sample (public `paired` keeps its durable meaning), and the wifi_* fields
 //     from esp_wifi. Neither is the controller's concern.
 namespace tk {
 
@@ -33,7 +33,7 @@ struct UiSnapshot {
     int       soc            = 0;       // battery %, RAW (rounded, NOT yet clamped 0..100)
     bool      charging       = false;   // charging_state == "Charging"
 
-    // ── pairing (caller, sampled at ≤1 Hz — has_session() hits NVS) ──
+    // ── pairing presentation (caller, ≤1 Hz): durable presence OR usable VCSEC RAM ──
     bool      paired         = false;
 
     // ── network (caller, from tk::net_* at the seam) ──

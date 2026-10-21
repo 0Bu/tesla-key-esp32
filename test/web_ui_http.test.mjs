@@ -287,7 +287,7 @@ test("failed OTA check cannot turn an idle status into up-to-date", async () => 
   await context.otaCheck();
 
   assert.equal(context.otaBusy, false);
-  assert.match(element("otaStat").innerHTML, /check failed/);
+  assert.match(element("otaStat").innerHTML, /HTTP 503/);
   assert.doesNotMatch(element("otaStat").innerHTML, /up to date/);
 });
 
@@ -671,6 +671,14 @@ test("broker and syslog validation mirror the firmware whitespace set and byte l
     return err;
   };
   context.state = {};
+  for (const size of [63,64,65]) {
+    assert.equal(await check(() => context.editMqtt(), "h".repeat(size-5)+":1883"),
+      size<=64?"":"Broker too long (max 64 bytes)");
+    assert.equal(await check(() => context.editSyslog(), "h".repeat(size-4)+":514"),
+      size<=64?"":"Server too long (max 64 bytes)");
+  }
+  assert.equal(await check(() => context.editMqtt(), "ä".repeat(29)+":1883"), "");
+  assert.match(await check(() => context.editMqtt(), "ä".repeat(30)+":1883"), /max 64 bytes/);
   assert.match(await check(() => context.editMqtt(), "192.0.2.20:\t1883"), /spaces/);
   assert.match(await check(() => context.editSyslog(), "192.0.2.30\n:514"), /spaces/);
   // 60 two-byte characters: 60 UTF-16 units but 120+ bytes on the device
@@ -2423,4 +2431,141 @@ test("?pr=<N> on the page selects the PR preview for check and update, strictly"
     return { ok: true, status: 200, async json() { return { started: false }; } }; };
   await plain.context.otaCheck();
   assert.match(plainUrls[0], /^\/ota\/check\?ms=\d+$/);
+});
+
+
+test("usable RAM session renders normal vehicle state while durable paired remains false", () => {
+  const { context, element } = loadUi();
+  const report = Object.freeze({ paired: false, session_available: true, key_present: true,
+    vin: "TESTVIN0000000001", link: "awake", ble: { connected: true },
+    vehicle: { status: "Charging", soc: 55 } });
+  context.render(report);
+  assert.equal(report.paired, false, "presentation must not rewrite durable paired");
+  assert.match(element("hlabel").innerHTML, /Charging/);
+  assert.doesNotMatch(element("hsub").textContent, /pair|send.*key/i);
+  context.render({ paired: false, session_available: false, key_present: true,
+    vin: "TESTVIN0000000001", ble: { connected: true } });
+  assert.match(element("hlabel").innerHTML, /pair/i,
+    "unavailable RAM and no durable record keep automatic pairing presentation");
+});
+
+
+test("both JSON helpers send the origin-proof header on GET and POST while preserving caller headers", async () => {
+  const { context } = loadUi();
+  const requests = [];
+  context.fetch = async (url, options) => {
+    requests.push({ url, options });
+    return { ok: true, status: 200, async json() { return {}; } };
+  };
+  for (const helper of [context.requestJson, context.requestJsonResult]) {
+    await helper("/diag?clear=1");
+    const headers = { "Content-Type": "application/json" };
+    await helper("/set_time", { method: "POST", headers, body: "{}" });
+    assert.deepEqual(headers, { "Content-Type": "application/json" });
+  }
+  assert.equal(requests.length, 4);
+  for (const { options } of requests) {
+    assert.equal(options.headers["X-Requested-With"], "XMLHttpRequest");
+    if (options.method === "POST") assert.equal(options.headers["Content-Type"], "application/json");
+  }
+});
+
+
+test("degraded channel outcomes in either envelope never claim success or start a check", async () => {
+  for (const wrapped of [false,true]) for (const outcome of ['unknown','applied_recovery_pending','succeeded']) {
+    const {context,element}=loadUi(); const calls=[],messages=[];
+    context.otaChannel='release'; context.poll=()=>{};
+    context.toast=(message,kind)=>messages.push({message,kind});
+    const payload={result:outcome==='succeeded',outcome,reply_degraded:true,reason:'operation outcome unknown; reply degraded'};
+    context.fetch=async (url)=>{calls.push(url); return {ok:true,status:200,async json(){return wrapped?{response:payload}:payload;}};};
+    element('verLink').focus();
+    await context.selectChannel('dev');
+    assert.deepEqual(calls,['/set_ota']);
+    assert.equal(messages.at(-1).message,payload.reason);
+    assert.ok(messages.every(m=>!m.message.includes('Update channel set')));
+    assert.equal(context.otaChannelInFlight,false);
+    assert.equal(context.document.activeElement,element('verLink'));
+    assert.equal(context.fwFocusId,null);
+  }
+});
+
+test("uncertain OTA starts preserve their reason and never start polling or retrying", async () => {
+  for (const action of ['otaCheck','startOtaUpdate']) {
+    const {context,element}=loadUi(); const calls=[];
+    context.fetch=async (url)=>{ calls.push(url); return {ok:true,status:200,async json(){return {result:false,started:null,outcome:'unknown',reply_degraded:true,reason:'operation outcome unknown; reply degraded'};}}; };
+    await context[action]();
+    assert.equal(calls.length,1);
+    assert.match(calls[0],action==='otaCheck'?/^\/ota\/check/:/^\/ota\/update/);
+    assert.match(element('otaStat').innerHTML,/operation outcome unknown; reply degraded/);
+  }
+});
+
+test("degraded command outcomes are not rewritten as vehicle success or range failure", async () => {
+  for (const action of ['toggleCharge','wakeCar','genKey']) {
+    const {context}=loadUi(); const messages=[],calls=[];
+    context.state={vin:'TESTVIN0000000001',key_present:false}; context.poll=()=>{};
+    context.toast=(message,kind)=>messages.push({message,kind});
+    const payload={result:false,outcome:'unknown',reply_degraded:true,reason:'operation outcome unknown; reply degraded'};
+    context.fetch=async (url)=>{calls.push(url);return {ok:true,status:200,async json(){return action==='genKey'?payload:{response:payload};}};};
+    await context[action]();
+    assert.equal(calls.length,1);
+    assert.equal(messages.at(-1).message,payload.reason);
+    assert.equal(messages.at(-1).kind,'err');
+  }
+});
+
+
+test("boot sends its actual clock fallback through the common mutation header policy", async () => {
+  const { context } = loadUi();
+  const calls = [];
+  context.fetch = async (url, options) => {
+    calls.push({ url, options });
+    return { ok: true, status: 200, async json() { return { result: true }; } };
+  };
+  context.poll = () => {};
+  context.resumeOta = () => {};
+  context.boot();
+  await Promise.resolve();
+  assert.equal(calls.length, 1);
+  const { url, options } = calls[0];
+  assert.equal(url, "/set_time");
+  assert.equal(options.method, "POST");
+  assert.equal(options.headers["Content-Type"], "application/json");
+  assert.equal(options.headers["X-Requested-With"], "XMLHttpRequest");
+  const body = JSON.parse(options.body);
+  assert.deepEqual(Object.keys(body), ["ms"]);
+  assert.equal(typeof body.ms, "number");
+  assert.ok(Number.isFinite(body.ms) && body.ms > 0);
+});
+
+
+test("stored session date is labeled as first observation rather than pairing event", () => {
+  const { context, element } = loadUi();
+  context.render({paired: true, paired_at: 1800000000, ble: {connected: true}});
+  assert.match(element("vehSub").textContent, /Session first observed/);
+  assert.doesNotMatch(element("vehSub").textContent, /Paired [A-Za-z]+ \d/);
+});
+
+
+test("config saves preserve server firmware-verification reasons without retry", async () => {
+  for (const method of ["editMqtt", "editSyslog"]) for (const degraded of [false, true]) {
+    const { context } = loadUi();
+    const calls = [], messages = [];
+    const reason = "configuration saved for the next boot; firmware verification is uncertain";
+    context.state = { mqtt: { broker: "" }, syslog: { host: "" } };
+    context.askText = async () => method === "editMqtt" ? "192.0.2.50:1883" : "192.0.2.50:514";
+    context.toast = (message, kind) => messages.push({ message, kind });
+    context.poll = () => {};
+    context.fetch = async (url) => {
+      calls.push(url);
+      return { ok: true, status: 200, async json() {
+        return { response: { result: true, reason, firmware_verification: "mark_outcome_unknown",
+          ...(degraded ? { outcome: "succeeded", reply_degraded: true } : {}) } };
+      } };
+    };
+    await context[method]();
+    assert.equal(messages.at(-1).message, reason);
+    assert.equal(messages.at(-1).kind, "info");
+    assert.equal(calls.length, 1);
+  }
 });

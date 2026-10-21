@@ -119,71 +119,66 @@ OtaHealthCommitGuard::~OtaHealthCommitGuard() {
     if (held_) finish_operation(tk::OtaIdentityGateState::HealthCommit);
 }
 
-bool ota_config_restart_begin() {
-    return s_operation_gate.try_begin(tk::OtaIdentityGateState::ConfigRestart);
+OtaConfigRestartGuard::~OtaConfigRestartGuard() noexcept {
+    if (held_) {
+        held_ = false;
+        // No logging or other fallible diagnostics in noexcept cleanup.
+        (void)s_operation_gate.finish(tk::OtaIdentityGateState::ConfigRestart);
+    }
 }
 
-// Confirm a still-unverified OTA image before a successful network/logging commit reboot (the
-// setup-portal save also calls it, but is always refused: the portal never reaches Ready
-// admission) — see the header. Mirrors the mark-valid path in main.cpp's ota_health_gate_task,
-// but fires once the durable commit AND the post-admission heap sample prove the runtime
-// healthy. Identity mutations deliberately never reach this path. A qualifying restart inside
-// the health window must not trigger a rollback unless the image is already critically
-// heap-starved.
-void ota_confirm_pending_image(tk::OtaRebootClass reboot_class) {
-    if (!tk::ota_reboot_confirms_pending_image(reboot_class)) {
-        ESP_LOGE(TAG, "refusing OTA confirmation for non-user recovery reboot class %d",
-                 static_cast<int>(reboot_class));
-        return;
-    }
+bool OtaConfigRestartGuard::try_begin() noexcept {
+    if (held_) return owns_gate();
+    held_ = s_operation_gate.try_begin(tk::OtaIdentityGateState::ConfigRestart);
+    return held_;
+}
 
-    // The user commit is valid health evidence, but mark-valid is still the same irreversible
-    // operation as the timed health gate. Serialize it against a persisted FaultRestart window,
-    // OTA and identity work; if another owner won, leave PENDING_VERIFY armed so the imminent
-    // reboot fails closed into rollback instead of crossing that owner's shutdown transaction.
-    OtaHealthCommitGuard commit_guard;
-    if (!commit_guard) {
-        ESP_LOGW(TAG, "OTA image confirmation postponed by an active operation; rollback remains armed");
-        return;
+bool OtaConfigRestartGuard::owns_gate() const noexcept {
+    return held_ && s_operation_gate.state() == tk::OtaIdentityGateState::ConfigRestart;
+}
+
+tk::ConfigImageResult ota_config_image_state(const OtaConfigRestartGuard& owner) noexcept {
+    using Result = tk::ConfigImageResult;
+    if (!owner.owns_gate()) return Result::WrongOwner;
+    try {
+        const esp_partition_t* running = esp_ota_get_running_partition();
+        esp_ota_img_states_t state{};
+        if (!running || esp_ota_get_state_partition(running, &state) != ESP_OK)
+            return Result::Unknown;
+        switch (state) {
+            case ESP_OTA_IMG_VALID: return Result::Valid;
+            case ESP_OTA_IMG_UNDEFINED: return Result::Undefined;
+            case ESP_OTA_IMG_NEW: return Result::New;
+            case ESP_OTA_IMG_PENDING_VERIFY: return Result::Pending;
+            default: return Result::Unsupported;
+        }
+    } catch (...) { return Result::Unknown; }
+}
+
+tk::ConfigImageResult ota_confirm_pending_image(
+    const OtaConfigRestartGuard& owner, tk::OtaRebootClass reboot_class) noexcept {
+    using Result = tk::ConfigImageResult;
+    if (!owner.owns_gate()) return Result::WrongOwner;
+    if (!tk::ota_reboot_confirms_pending_image(reboot_class)) return Result::WrongClass;
+    Result result = ota_config_image_state(owner);
+    if (result != Result::Pending) return result;
+    try {
+        if (!tk::runtime_admission_vehicle_ready()) return Result::NotReady;
+        if (!ble_host_synced()) return Result::HostUnsynced;
+        if (ble_host_reset_count() != 0) return Result::HostReset;
+        const size_t commit_largest = heap_caps_get_largest_free_block(
+            MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
+        if (commit_largest < tk::kHeapCriticalBytes) return Result::CriticalHeap;
+        result = Result::MarkUnknown;
+        if (esp_ota_mark_app_valid_cancel_rollback() == ESP_OK) {
+            result = Result::Confirmed;
+            ESP_LOGI(TAG, "OTA image confirmed before user configuration restart");
+        }
+    } catch (...) {
+        // Preserve a successful mark even if its diagnostic throws. Otherwise retain the last
+        // known refusal/pending state or the uncertain SDK effect; never retry here.
     }
-    // A durable configuration write is not proof that the essential runtime started. In
-    // particular, recovery HTTP remains available in Safe Mode and during a partial boot. Check
-    // admission only after owning HealthCommit so Ready cannot race a FaultRestart/OTA owner; all
-    // non-Ready states leave the one automatic rollback armed.
-    if (!tk::runtime_admission_vehicle_ready()) {
-        ESP_LOGW(TAG, "OTA image confirmation refused: essential runtime is not ready; "
-                      "rollback remains armed");
-        return;
-    }
-    if (!ble_host_synced()) {
-        ESP_LOGW(TAG, "OTA image confirmation refused: NimBLE host is not synced; "
-                      "rollback remains armed");
-        return;
-    }
-    if (ble_host_reset_count() != 0) {
-        ESP_LOGW(TAG, "OTA image confirmation refused: NimBLE host reset since admission; "
-                      "rollback remains armed");
-        return;
-    }
-    // Re-sample only after winning the same exclusive owner as the timed health gate. A healthy
-    // sample taken before the CAS could become stale while FaultRestart persists its breadcrumb;
-    // crossing that window would permanently validate the image immediately before it reboots.
-    const size_t commit_largest = heap_caps_get_largest_free_block(
-        MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
-    if (commit_largest < tk::kHeapCriticalBytes) {
-        ESP_LOGW(TAG, "OTA image confirmation refused: internal largest block %u B < %u B; "
-                      "rollback remains armed",
-                 static_cast<unsigned>(commit_largest),
-                 static_cast<unsigned>(tk::kHeapCriticalBytes));
-        return;
-    }
-    const esp_partition_t* running = esp_ota_get_running_partition();
-    esp_ota_img_states_t st;
-    if (esp_ota_get_state_partition(running, &st) == ESP_OK &&
-        st == ESP_OTA_IMG_PENDING_VERIFY) {
-        if (esp_ota_mark_app_valid_cancel_rollback() == ESP_OK)
-            ESP_LOGI(TAG, "OTA image confirmed valid before a user-initiated reboot (rollback cancelled)");
-    }
+    return result;
 }
 
 // Short per-target image suffix so "esp32" appears only once in the OTA filename: esp32 ->

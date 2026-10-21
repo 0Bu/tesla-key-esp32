@@ -27,13 +27,18 @@
 // every which-field/when/what-value decision they render is host-tested here.
 
 #include "logic/vin.hpp"
+#include "logic/clock_policy.hpp"
+#include "logic/effect_reply.hpp"
+#include "logic/config_commit.hpp"
 #include "logic/ha_identity.hpp"
 #include "logic/units.hpp"
+#include "logic/uptime.hpp"
 #include "logic/link_state.hpp"
 #include "logic/target.hpp"
 #include "logic/mcp.hpp"
 #include "logic/command_registry.hpp"
 #include "logic/auto_enrollment.hpp"
+#include "logic/vcsec_response.hpp"
 #include "logic/status_model.hpp"
 #include "logic/command_result.hpp"
 #include "logic/ui_state.hpp"
@@ -66,6 +71,8 @@
 #include "logic/charge_control.hpp"
 #include "logic/reset_reason.hpp"
 #include "logic/crashinfo.hpp"
+#include "logic/coredump_image.hpp"
+#include "coredump_fixture.hpp"
 #include "logic/bootlog.hpp"
 #include "logic/boot_guard.hpp"
 #include "logic/heap_history.hpp"
@@ -80,6 +87,7 @@
 #include "logic/captive.hpp"
 #include "logic/setup_portal.hpp"
 #include "logic/config_store.hpp"
+#include "logic/service_target_limits.hpp"
 #include "logic/wifi_credentials.hpp"
 #include "logic/key_rotation.hpp"
 #include "logic/nvs_string_load.hpp"
@@ -88,6 +96,9 @@
 #include "logic/ble_dispatcher.hpp"
 #include "logic/session_state.hpp"
 #include "logic/command_runner.hpp"
+#include "logic/command_fault.hpp"
+#include "logic/command_deadline.hpp"
+#include "logic/session_availability.hpp"
 
 #include <algorithm>
 #include <array>
@@ -158,6 +169,99 @@ static void test_wifi_credentials() {
     CHECK(tk::wifi_credentials_error("raw", std::string(64, 'z')) == E::RawPskNotHex);
     std::string nul_ssid("a\0b", 3);
     CHECK(tk::wifi_credentials_error(nul_ssid, "12345678") == E::EmbeddedNul);
+}
+
+static void test_clock_policy() {
+    const int64_t ceiling = tk::clock_ceiling_seconds("Oct 20 2026");
+    CHECK(ceiling == 2082758400LL); // 2036-01-01 UTC; calendar oracle independent of implementation
+    CHECK(tk::clock_jan1_seconds(1970) == 0);
+    CHECK(tk::clock_jan1_seconds(2023) == 1672531200LL);
+    CHECK(tk::clock_ceiling_seconds("") == 1988150400LL);
+    CHECK(tk::clock_ceiling_seconds("invalid abcd") == 1988150400LL);
+    CHECK(tk::clock_ceiling_seconds("Jan 01 2022") == 1988150400LL);
+    CHECK(tk::clock_ceiling_seconds("Jan 01 2027") == 2114380800LL);
+    CHECK(tk::clock_should_restore(0));
+    CHECK(tk::clock_should_restore(1699999999));
+    CHECK(!tk::clock_should_restore(1700000000));
+    CHECK(!tk::clock_should_restore(1900000000)); // preserve a plausible warm clock over old cache
+
+    int64_t seconds = 42;
+    CHECK(tk::clock_parse_checkpoint("1700000000", ceiling, seconds) && seconds == 1700000000);
+    CHECK(tk::clock_parse_checkpoint("2082758399", ceiling, seconds) && seconds == ceiling - 1);
+    for (const char* invalid : {"", "0", "-1", "+1800000000", " 1800000000", "1800000000 ",
+                               "01800000000", "1800000000junk", "1.8e9", "1699999999",
+                               "2082758400", "18446744073709551615", "18446744073709551616",
+                               "9223372036854775808"}) {
+        seconds = 42;
+        CHECK(!tk::clock_parse_checkpoint(invalid, ceiling, seconds));
+        CHECK(seconds == 42);
+    }
+    CHECK(tk::clock_parse_date("1600000001", ceiling, seconds) && seconds == 1600000001);
+    CHECK(!tk::clock_parse_date("1600000000", ceiling, seconds));
+    CHECK(tk::clock_parse_date("1699999999", ceiling, seconds)); // historical floor stays distinct
+    CHECK(!tk::clock_parse_date("2082758400", ceiling, seconds));
+    CHECK(!tk::clock_parse_date("1800000000?", ceiling, seconds));
+
+    tk::ClockSample sample{42, 17};
+    CHECK(tk::browser_clock_sample(1700000000000.0, ceiling, sample));
+    CHECK(sample.seconds == 1700000000 && sample.microseconds == 0);
+    CHECK(tk::browser_clock_sample(1800000000123.75, ceiling, sample));
+    CHECK(sample.seconds == 1800000000 && sample.microseconds == 123000);
+    CHECK(tk::browser_clock_sample(2082758399999.0, ceiling, sample));
+    CHECK(sample.seconds == ceiling - 1 && sample.microseconds == 999000);
+    for (double invalid : {-1.0, 0.0, 1699999999999.0, 2082758400000.0,
+                           std::numeric_limits<double>::infinity(),
+                           -std::numeric_limits<double>::infinity(),
+                           std::numeric_limits<double>::quiet_NaN()}) {
+        sample = {42, 17};
+        CHECK(!tk::browser_clock_sample(invalid, ceiling, sample));
+        CHECK(sample.seconds == 42 && sample.microseconds == 17);
+    }
+    CHECK(!tk::browser_clock_sample(1800000000000.0, INT64_MAX, sample));
+    CHECK(tk::clock_parse_query_ms("1800000000123", ceiling, sample));
+    CHECK(sample.seconds == 1800000000 && sample.microseconds == 123000);
+    for (const char* invalid : {"", "0", "01800000000123", "+1800000000123", "1.8e12",
+                               "1800000000123.0", "1800000000123x", "2082758400000",
+                               "1699999999999", "18446744073709551616"})
+        CHECK(!tk::clock_parse_query_ms(invalid, ceiling, sample));
+
+    CHECK(!tk::clock_sample_valid({1800000000, -1}, ceiling));
+    CHECK(!tk::clock_sample_valid({1800000000, 1000000}, ceiling));
+    CHECK(tk::clock_advance_sample({1800000000, 999999}, 1, ceiling, sample));
+    CHECK(sample.seconds == 1800000001 && sample.microseconds == 0);
+    CHECK(tk::clock_advance_sample({1800000000, 123456}, 2000789, ceiling, sample));
+    CHECK(sample.seconds == 1800000002 && sample.microseconds == 124245);
+    CHECK(!tk::clock_advance_sample({ceiling-1, 999999}, 1, ceiling, sample));
+    CHECK(!tk::clock_advance_sample({ceiling-1, 0}, 1000000, ceiling, sample));
+    CHECK(!tk::clock_advance_sample({1800000000, 0}, -1, ceiling, sample));
+    CHECK(!tk::clock_advance_sample({1800000000, 0}, INT64_MAX, ceiling, sample));
+    // Cross-check unit carry at every millisecond boundary rather than only a model happy path.
+    for (int32_t ms = 0; ms < 1000; ++ms) {
+        CHECK(tk::clock_advance_sample({1800000000, ms * 1000}, 1000001 - ms * 1000,
+                                       ceiling, sample));
+        CHECK(sample.seconds == 1800000001 && sample.microseconds == 1);
+    }
+
+    using P = tk::ClockCheckpointPolicy;
+    for (uint64_t start : {uint64_t(0), uint64_t(1000), UINT64_MAX - 1000}) {
+        P policy;
+        CHECK(policy.due(start));
+        policy.note_attempt(start);
+        policy.note_result(false, start);
+        CHECK(!policy.due(start + P::kAttemptIntervalUs - 1));
+        CHECK(policy.due(start + P::kAttemptIntervalUs));
+        const uint64_t stored_at = start + P::kAttemptIntervalUs;
+        policy.note_attempt(stored_at);
+        policy.note_result(true, stored_at);
+        CHECK(!policy.due(stored_at + P::kSuccessIntervalUs - 1));
+        CHECK(policy.due(stored_at + P::kSuccessIntervalUs));
+        const auto next = stored_at + P::kSuccessIntervalUs;
+        policy.note_attempt(next);
+        policy.note_result(false, next);
+        CHECK(policy.last_success_us == stored_at);
+        CHECK(!policy.due(next + P::kAttemptIntervalUs - 1));
+        CHECK(policy.due(next + P::kAttemptIntervalUs));
+    }
 }
 
 static void test_vin_transition() {
@@ -294,6 +398,42 @@ static void test_vin_transition() {
 }
 
 static void test_key_rotation() {
+    for (bool allowed : {false, true}) for (int stamp_fault : {0, 1, 2})
+    for (int retire_fault : {0, 1, 2}) {
+        std::string order;
+        const auto result = tk::stamp_or_retire_key_date(allowed,
+            [&] { order += 'S'; if (stamp_fault == 2) throw 1; return stamp_fault == 0; },
+            [&] { order += 'R'; if (retire_fault == 2) throw 1; return retire_fault == 0; });
+        const bool stamped = allowed && stamp_fault == 0;
+        CHECK(order == (stamped ? "S" : allowed ? "SR" : "R"));
+        CHECK(result == (stamped ? tk::KeyCreatedDateResult::Stamped
+                           : retire_fault == 0 ? tk::KeyCreatedDateResult::Retired
+                                               : tk::KeyCreatedDateResult::Untrusted));
+    }
+    // Pin the old printf spelling for every byte value at each prefix position, and couple the
+    // actual formatter to the VIN-journal validator/decoder. Tail digest bytes are not identity.
+    for (size_t position = 0; position < 4; ++position) {
+        for (unsigned byte = 0; byte < 256; ++byte) {
+            uint8_t digest[20] = {0x01, 0x23, 0x45, 0x67};
+            digest[position] = static_cast<uint8_t>(byte);
+            digest[19] = 0xa5;
+            const auto text = tk::key_fingerprint_text(digest, sizeof(digest));
+            char previous[16];
+            std::snprintf(previous, sizeof(previous), "%02X:%02X:%02X:%02X",
+                static_cast<unsigned>(digest[0]), static_cast<unsigned>(digest[1]),
+                static_cast<unsigned>(digest[2]), static_cast<unsigned>(digest[3]));
+            CHECK(std::strcmp(text.data(), previous) == 0);
+            CHECK(text[11] == '\0' && tk::vin_transition_key_id_valid(text.data()));
+            const std::string encoded = tk::make_vin_transition_marker("synthetic", text.data());
+            tk::VinTransitionMarker marker;
+            CHECK(!encoded.empty() && tk::parse_vin_transition_marker(encoded, marker));
+            CHECK(marker.previous_key_id == previous && marker.previous_vin == "synthetic");
+        }
+    }
+    const uint8_t short_digest[3] = {0x01, 0x23, 0x45};
+    CHECK(tk::key_fingerprint_text(nullptr, 20)[0] == '\0');
+    CHECK(tk::key_fingerprint_text(short_digest, sizeof(short_digest))[0] == '\0');
+
     using A = tk::AutomaticKeyAction;
     using B = tk::KeyRotationBootState;
     using G = tk::KeyGenerationPreflight;
@@ -630,6 +770,16 @@ static void test_syslog_policy() {
     CHECK(tk::syslog_severity_for_line(nullptr, 0) == 6);
     CHECK(sev("\033[") == 6);                    // truncated escape, no terminator
     CHECK(sev("\033[0;31m") == 6);               // escape only, nothing after it
+
+    // Replay identity comes from the firmware caller, never a string prefix.
+    for (const char* line : {"BOOT version=1", "CRASH task=worker", "E (1) ordinary", ""}) {
+        CHECK(tk::syslog_pri_for_record(tk::SyslogRecord::Boot, line, std::strlen(line)) == 14);
+        CHECK(tk::syslog_pri_for_record(tk::SyslogRecord::Crash, line, std::strlen(line)) == 11);
+        CHECK(tk::syslog_pri_for_record(tk::SyslogRecord::Ordinary, line, std::strlen(line)) == pri(line));
+    }
+    CHECK(pri("CRASH task=worker") == 14);
+    CHECK(tk::syslog_pri_for_record(tk::SyslogRecord::Ordinary, "W (1) warning", 13) == 12);
+    CHECK(tk::syslog_pri_for_record(tk::SyslogRecord::Crash, nullptr, 0) == 11);
 }
 
 // ─── BLE connect-failure classification + rate limit ─────────────────────────────
@@ -2029,6 +2179,16 @@ static void test_status_model() {
         "key_fingerprint=\"AB:CD:EF:01\"\n"
         "key_created=1750000000\n"
         "paired=true\n"
+        "session_available=false\n"
+        "sessions{\n"
+        "sessions.vcsec{\n"
+        "sessions.vcsec.runtime_known=false\n"
+        "sessions.vcsec.runtime_usable=false\n"
+        "sessions.vcsec.persistence=\"unknown\"\n"
+        "sessions.infotainment{\n"
+        "sessions.infotainment.runtime_known=false\n"
+        "sessions.infotainment.runtime_usable=false\n"
+        "sessions.infotainment.persistence=\"unknown\"\n"
         "paired_at=1750500000\n"
         "reauth=false\n"
         "wifi{\n"
@@ -2161,6 +2321,16 @@ static void test_status_model() {
         "key_present=true\n"
         "key_fingerprint=\"AB:CD:EF:01\"\n"
         "paired=true\n"
+        "session_available=false\n"
+        "sessions{\n"
+        "sessions.vcsec{\n"
+        "sessions.vcsec.runtime_known=false\n"
+        "sessions.vcsec.runtime_usable=false\n"
+        "sessions.vcsec.persistence=\"unknown\"\n"
+        "sessions.infotainment{\n"
+        "sessions.infotainment.runtime_known=false\n"
+        "sessions.infotainment.runtime_usable=false\n"
+        "sessions.infotainment.persistence=\"unknown\"\n"
         "reauth=false\n"
         "wifi{\n"
         "wifi.ssid=\"HomeNet\"\n"
@@ -2226,6 +2396,16 @@ static void test_status_model() {
         "key_present=true\n"
         "key_fingerprint=\"AB:CD:EF:01\"\n"
         "paired=true\n"
+        "session_available=false\n"
+        "sessions{\n"
+        "sessions.vcsec{\n"
+        "sessions.vcsec.runtime_known=false\n"
+        "sessions.vcsec.runtime_usable=false\n"
+        "sessions.vcsec.persistence=\"unknown\"\n"
+        "sessions.infotainment{\n"
+        "sessions.infotainment.runtime_known=false\n"
+        "sessions.infotainment.runtime_usable=false\n"
+        "sessions.infotainment.persistence=\"unknown\"\n"
         "reauth=false\n"
         "wifi{\n"
         "wifi.ssid=\"Garage\"\n"
@@ -2289,6 +2469,16 @@ static void test_status_model() {
         "key_present=false\n"
         "key_fingerprint=\"\"\n"
         "paired=false\n"
+        "session_available=false\n"
+        "sessions{\n"
+        "sessions.vcsec{\n"
+        "sessions.vcsec.runtime_known=false\n"
+        "sessions.vcsec.runtime_usable=false\n"
+        "sessions.vcsec.persistence=\"unknown\"\n"
+        "sessions.infotainment{\n"
+        "sessions.infotainment.runtime_known=false\n"
+        "sessions.infotainment.runtime_usable=false\n"
+        "sessions.infotainment.persistence=\"unknown\"\n"
         "reauth=false\n"
         "wifi{\n"
         "mqtt{\n"
@@ -2341,6 +2531,16 @@ static void test_status_model() {
         "key_present=true\n"
         "key_fingerprint=\"AB:CD:EF:01\"\n"
         "paired=true\n"
+        "session_available=false\n"
+        "sessions{\n"
+        "sessions.vcsec{\n"
+        "sessions.vcsec.runtime_known=false\n"
+        "sessions.vcsec.runtime_usable=false\n"
+        "sessions.vcsec.persistence=\"unknown\"\n"
+        "sessions.infotainment{\n"
+        "sessions.infotainment.runtime_known=false\n"
+        "sessions.infotainment.runtime_usable=false\n"
+        "sessions.infotainment.persistence=\"unknown\"\n"
         "reauth=false\n"
         "wifi{\n"
         "wifi.ssid=\"HomeNet\"\n"
@@ -2411,6 +2611,17 @@ static void test_status_model() {
     CollectEmitter e_ota_none;
     tk::status::emit_status(ota_none, e_ota_none);
     CHECK(e_ota_none.out.find("ota{") == std::string::npos);
+    // RAM usability is independent of durable presence and confirms no NVS write.
+    tk::status::Inputs ram_only;
+    ram_only.paired = false;
+    ram_only.sessions.vcsec = {true, true, tk::SessionSaveState::Error};
+    ram_only.sessions.infotainment = {true, true, tk::SessionSaveState::Confirmed};
+    CollectEmitter runtime_status;
+    tk::status::emit_status(ram_only, runtime_status);
+    CHECK(runtime_status.out.find("paired=false\nsession_available=true\n") != std::string::npos);
+    CHECK(runtime_status.out.find("sessions.vcsec.persistence=\"error\"") != std::string::npos);
+    CHECK(runtime_status.out.find("sessions.infotainment.persistence=\"confirmed\"") != std::string::npos);
+
 }
 
 // ─── GET /api/1/vehicles/{VIN}/vehicle_data charge_state contract ─────────────
@@ -3487,7 +3698,9 @@ static void test_config_request_gate() {
              ConfigSubmissionStatus::MalformedJson, ConfigSubmissionStatus::JsonTooDeep,
              ConfigSubmissionStatus::JsonUnsupportedNul, ConfigSubmissionStatus::JsonNoMemory,
              ConfigSubmissionStatus::ObjectRequired,
-             ConfigSubmissionStatus::StringFieldRequired}) {
+             ConfigSubmissionStatus::StringFieldRequired,
+             ConfigSubmissionStatus::JsonTooManyValues,
+             ConfigSubmissionStatus::DuplicateJsonKey}) {
         CHECK(run({status, {}}) == 77);
         CHECK(s.normalize == 0 && s.load == 0 && s.validate == 0 && s.probe == 0);
         CHECK(s.save == 0 && s.commit == 0 && s.respond == 1);
@@ -4571,13 +4784,15 @@ static void test_ble_row() {
 static void test_reset_reason() {
     // The numeric values mirror ESP-IDF's esp_reset_reason_t; diag_crash.cpp static_asserts that
     // mapping against the real enum, so here we pin only the spelling and the classification.
-    CHECK(std::string(tk::reset_reason_slug((int)tk::ResetCode::PowerOn))  == "power_on");
-    CHECK(std::string(tk::reset_reason_slug((int)tk::ResetCode::Sw))       == "sw");
-    CHECK(std::string(tk::reset_reason_slug((int)tk::ResetCode::Panic))    == "panic");
-    CHECK(std::string(tk::reset_reason_slug((int)tk::ResetCode::TaskWdt)) == "task_wdt");
-    CHECK(std::string(tk::reset_reason_slug((int)tk::ResetCode::Brownout)) == "brownout");
-    // An unknown code must not fall through to a plausible-looking neighbour.
-    CHECK(std::string(tk::reset_reason_slug(9999)) == "unknown");
+    const char* expected[] = {"unknown", "power_on", "ext", "sw", "panic", "int_wdt",
+        "task_wdt", "wdt", "deepsleep", "brownout", "sdio", "usb", "jtag", "efuse",
+        "pwr_glitch", "cpu_lockup"};
+    for (int code = 0; code < 16; ++code)
+        CHECK(std::string(tk::reset_reason_slug(code)) == expected[code]);
+    for (int code : {-2147483647 - 1, -1, 16, 9999, 2147483647}) {
+        CHECK(std::string(tk::reset_reason_slug(code)) == "unknown");
+        CHECK(!tk::reset_is_fault(code));
+    }
 
     // The fault set drives BOTH the crash report and the safe-mode counter, so its boundaries are
     // the load-bearing part. SW is NOT a fault: every successfully persisted rebooting
@@ -4619,26 +4834,30 @@ static void test_crashinfo() {
     dismissed.dismissed = true;
     CHECK(!tk::crash_is_notable(dismissed));
 
-    // A dismissal must survive an erase that found NO coredump partition — the state of every
-    // OTA-upgraded device, since a partition table is not part of an OTA image. Confirmed live:
-    // before this, POST /crash/dismiss answered 500 with ESP_ERR_NOT_FOUND on such a board, so a
-    // fault-reset banner could never be acknowledged.
-    CHECK(tk::crash_erase_permits_dismiss(0));                     // ESP_OK — dump erased
-    CHECK(tk::crash_erase_permits_dismiss(tk::kEspErrNotFound));   // no partition — nothing to erase
-    // Every OTHER error still blocks: a dump may still be downloadable, and marking the report
-    // dismissed would assert the opposite.
-    CHECK(!tk::crash_erase_permits_dismiss(0x103));                // ESP_ERR_INVALID_STATE
-    CHECK(!tk::crash_erase_permits_dismiss(0x102));                // ESP_ERR_INVALID_ARG
-    CHECK(!tk::crash_erase_permits_dismiss(-1));
-
-    // crash_has_summary is DERIVED, so it can never claim a summary the fields do not carry —
-    // which would render an empty "task= pc=0x0" block reading like a crash with no information.
+    CHECK(tk::crash_erase_permits_dismiss(tk::CrashEraseResult::Absent));
+    CHECK(tk::crash_erase_permits_dismiss(tk::CrashEraseResult::Erased));
+    CHECK(!tk::crash_erase_permits_dismiss(tk::CrashEraseResult::Busy));
+    CHECK(!tk::crash_erase_permits_dismiss(tk::CrashEraseResult::Unconfirmed));
     CHECK(!tk::crash_has_summary(panic));
     panic.task = "vehicle_loop";
+    CHECK(!tk::crash_has_summary(panic)); // fields cannot manufacture verification
+    panic.summary_available = true;
     CHECK(tk::crash_has_summary(panic));
+    tk::CrashInfo zero;
+    zero.summary_available = true; zero.corrupted = true; zero.truncated = true; zero.isr = true;
+    CHECK(tk::crash_has_summary(zero));
+    const auto zero_text = tk::build_crash_text(zero);
+    CHECK(zero_text.find("pc=0x00000000") != std::string::npos);
+    CHECK(zero_text.find("corrupted") != std::string::npos);
+    CHECK(zero_text.find("truncated") != std::string::npos && zero_text.find("isr=yes") != std::string::npos);
+    tk::CrashInfo uncertain;
+    uncertain.query_error = true;
+    CHECK(tk::crash_is_notable(uncertain));
+    uncertain.query_error = false; uncertain.artifact_present = true;
+    CHECK(tk::crash_is_notable(uncertain));
 
-    // ── coredump_is_foreign: destructive, so it fires only on PROOF ─────────────────────────
-    // The erase it gates destroys the only artifact a panic left, so "unknown" must read as ours.
+    // Foreign identity detection never authorizes erasing crash evidence.
+    // Unknown hashes remain Unverified; a meaningful differing prefix establishes Foreign.
     CHECK(!tk::coredump_is_foreign("", ""));
     CHECK(!tk::coredump_is_foreign("abcdef1234", ""));
     CHECK(!tk::coredump_is_foreign("", "abcdef1234"));
@@ -4652,6 +4871,7 @@ static void test_crashinfo() {
     // The text bundle names the crash without inventing anything.
     tk::CrashInfo full;
     tk::crash_set_reset(full, (int)tk::ResetCode::TaskWdt);
+    full.summary_available = true;
     full.task = "mqtt_pub"; full.pc = 0x400d1234;
     full.backtrace = {0x400d1234, 0x400d5678};
     full.elf_sha256 = "deadbeef1";
@@ -4660,6 +4880,52 @@ static void test_crashinfo() {
     CHECK(txt.find("mqtt_pub")  != std::string::npos);
     CHECK(txt.find("400d1234")  != std::string::npos);
     CHECK(txt.find("deadbeef1") != std::string::npos);
+
+    // Borrowed metadata has the same presentation and points only to its immutable owner.
+    full.coredump = full.raw_available = full.artifact_present = full.checksum_verified = true;
+    full.dump_identity = tk::DumpIdentity::VerifiedCurrent;
+    full.dump_elf_sha256.assign(64, 'b');
+    const auto view = tk::crash_borrow(full);
+    CHECK(view.task.data() == full.task.data());
+    CHECK(view.elf_sha256.data() == full.elf_sha256.data());
+    CHECK(view.dump_elf_sha256.data() == full.dump_elf_sha256.data());
+    CHECK(view.backtrace.begin() == full.backtrace.data());
+    CHECK(tk::build_crash_text(full) == tk::build_crash_text(view));
+    std::vector<std::string> owned_lines, view_lines;
+    CHECK(tk::build_crash_log_lines(full, owned_lines) ==
+          tk::build_crash_log_lines(view, view_lines));
+    CHECK(owned_lines == view_lines);
+    CHECK(tk::CrashTraceView{}.begin() == tk::CrashTraceView{}.end());
+    CHECK(tk::CrashTraceView(nullptr, 4).size() == 0);
+
+    auto stable = view;
+    tk::crash_finish_snapshot(stable, {8, 8, true, false, true, true, false, false});
+    CHECK(stable.coredump && stable.summary_available && stable.backtrace.size() == 2);
+    for (const tk::CrashSnapshotState rejected : {
+        tk::CrashSnapshotState{8, 16, true, false, true, true, false, false},
+        tk::CrashSnapshotState{8, 8, false, false, true, true, false, false},
+        tk::CrashSnapshotState{8, 8, true, true, true, true, false, false},
+        tk::CrashSnapshotState{8, 8, true, false, false, true, false, false},
+        tk::CrashSnapshotState{8, 8, true, false, true, false, false, false}}) {
+        auto revoked = view;
+        tk::crash_finish_snapshot(revoked, rejected);
+        CHECK(!revoked.coredump && !revoked.summary_available && revoked.task.empty());
+        CHECK(revoked.backtrace.size() == 0 && revoked.pc == 0);
+        CHECK(!revoked.corrupted && !revoked.truncated && !revoked.isr);
+        if (rejected.before != rejected.after) CHECK(!revoked.raw_available);
+        CHECK(revoked.elf_sha256 == full.elf_sha256); // running build remains useful
+        CHECK(full.task == "mqtt_pub" && full.backtrace.size() == 2); // owner never cleared
+    }
+    auto absent = view;
+    tk::crash_finish_snapshot(absent, {8, 16, true, false, false, false, false, true});
+    CHECK(!absent.artifact_present && !absent.raw_available && !absent.checksum_verified);
+    CHECK(absent.dump_elf_sha256.empty() && absent.dump_identity == tk::DumpIdentity::Unverified);
+    auto foreign = view;
+    foreign.foreign_dump = true; foreign.dump_identity = tk::DumpIdentity::Foreign;
+    tk::crash_finish_snapshot(foreign, {8, 8, true, false, true, false, true, false});
+    CHECK(!foreign.coredump && !foreign.summary_available && foreign.foreign_dump);
+    CHECK(foreign.checksum_verified && foreign.dump_elf_sha256 == full.dump_elf_sha256);
+
 }
 
 static void test_bootlog() {
@@ -4685,6 +4951,7 @@ static void test_bootlog() {
 
     tk::CrashInfo crash;
     tk::crash_set_reset(crash, (int)tk::ResetCode::Panic);
+    crash.summary_available = true;
     crash.task = "vehicle_loop"; crash.pc = 0x400d1234;
     crash.backtrace.assign(32, 0x400d1234);   // deliberately deeper than any sane stack
     crash.elf_sha256 = "deadbeef1";
@@ -4699,6 +4966,22 @@ static void test_bootlog() {
         CHECK(l.size() <= tk::kBootlogLineMax);
         CHECK(l.find('\n') == std::string::npos);
     }
+    crash.task.assign(100, 'x'); crash.elf_sha256.assign(100, 'a');
+    crash.dump_elf_sha256.assign(100, 'b');
+    crash.artifact_present = crash.raw_available = crash.query_error = true;
+    crash.corrupted = crash.truncated = crash.isr = true;
+    for (auto identity : {tk::DumpIdentity::Unverified, tk::DumpIdentity::Foreign,
+                          tk::DumpIdentity::VerifiedCurrent}) {
+        crash.dump_identity = identity; out.clear();
+        CHECK(tk::build_crash_log_lines(crash, out) == 3);
+        for (const auto& line : out) CHECK(line.size() <= tk::kBootlogLineMax);
+    }
+    crash.task.clear(); crash.pc = 0; crash.backtrace.clear(); out.clear();
+    CHECK(tk::build_crash_log_lines(crash, out) == 2);
+    CHECK(out[1].find("task=? pc=0x00000000") != std::string::npos);
+    CHECK(out[1].find("corrupted=yes") != std::string::npos);
+    CHECK(out[1].find("truncated=yes") != std::string::npos && out[1].find("isr=yes") != std::string::npos);
+
 }
 
 // ─── Boot-loop safe mode ──────────────────────────────────────────────────────
@@ -5234,6 +5517,36 @@ static void test_mqtt_uri() {
 
 // ─── Browser-origin gate for mutating HTTP requests (logic/http_origin.hpp) ────────────────────
 static void test_http_origin() {
+    const std::string_view owned_ips[] = {"192.0.2.10", "192.0.2.11"};
+    CHECK(tk::device_host_allowed("Tesla-Key-Esp32-2.Local:80", owned_ips, 2, "tesla-key-esp32-2"));
+    CHECK(tk::device_host_allowed("tesla-key-esp32-2", owned_ips, 2, "tesla-key-esp32-2"));
+    CHECK(tk::device_host_allowed(tk::kDeviceHostname, owned_ips, 2, "tesla-key-esp32-2"));
+    CHECK(!tk::device_host_allowed("tesla-key-esp32.local", owned_ips, 2, "tesla-key-esp32-2"));
+    CHECK(!tk::device_host_allowed("tesla-key-esp32-2.local.evil", owned_ips, 2, "tesla-key-esp32-2"));
+    CHECK(!tk::device_host_allowed("tesla-key-esp32.local", owned_ips, 2, ""));
+    CHECK(tk::device_host_allowed("192.0.2.11", owned_ips, 2, ""));
+    CHECK(!tk::device_host_allowed("192.0.2.12", owned_ips, 2, ""));
+    CHECK(tk::mutation_request_allowed(false, "tesla-key-esp32-2.local",
+        "http://tesla-key-esp32-2.local", "", "", false, owned_ips, 2, "tesla-key-esp32-2"));
+    CHECK(!tk::mutation_request_allowed(false, "tesla-key-esp32.local",
+        "http://tesla-key-esp32.local", "", "", false, owned_ips, 2, "tesla-key-esp32-2"));
+    CHECK(tk::mutation_request_allowed(true, "foreign.example", "", "", "", false,
+                                      owned_ips, 2, "tesla-key-esp32-2"));
+    CHECK(tk::mutation_origin_required(false, "/coredump?clear=1#x"));
+    CHECK(tk::mutation_origin_required(false, "/diag?verbose=1#clear=0"));
+    CHECK(!tk::mutation_origin_required(false, "/diag?clear=0#clear=1"));
+    CHECK(!tk::mutation_origin_required(false, "/diag?x=1#x&clear=1"));
+    CHECK(!tk::mutation_origin_required(false, "/diag?clear=1%23x"));
+    for (const auto& entry : tk::kFixedHttpRoutes) {
+        const bool diagnostic = entry.route == tk::HttpRoute::Status || entry.route == tk::HttpRoute::Diag ||
+            entry.route == tk::HttpRoute::Heap || entry.route == tk::HttpRoute::Coredump ||
+            entry.route == tk::HttpRoute::OtaStatus || entry.route == tk::HttpRoute::OtaChangelog;
+        CHECK(tk::http_route_requires_owned_host(entry.verb, entry.route) ==
+              (entry.verb == tk::HttpVerb::Get && diagnostic));
+    }
+    CHECK(!tk::http_route_requires_owned_host(tk::HttpVerb::Get, tk::HttpRoute::VehicleData));
+    CHECK(!tk::http_route_requires_owned_host(tk::HttpVerb::Get, tk::HttpRoute::BodyController));
+    CHECK(!tk::http_route_requires_owned_host(tk::HttpVerb::Post, tk::HttpRoute::Command));
     // evcc/curl do not send browser-origin metadata and retain the documented trusted-LAN API.
     CHECK(tk::mutation_origin_allowed("", "", "", ""));
     CHECK(tk::mutation_origin_allowed("tesla-key-esp32.local", "", "none", ""));
@@ -5861,6 +6174,78 @@ static void test_redact() {
     CHECK(tk::redact_or("MySSID", false) == "MySSID");
     CHECK(tk::redact_or("MySSID", true)  == tk::kRedacted);
 
+    // Actual pinned library formats, with synthetic identifiers only. Their whole line must
+    // disappear even when an SSID/URI contains a quote, delimiter or a fake diagnostic tail.
+    static_assert(noexcept(tk::diag_mqtt_uri_error({})));
+    for (const char* record : {
+            "E (0) mqtt_client: Error parse uri (1) = mqtt://example:secret@broker.invalid",
+            "E (4294967295) mqtt_client:Error parse uri (non-hexadecimal data after %) = mqtt://example:%ZZ@broker.invalid",
+            "E (3) mqtt_client: Error parse uri (1) = mqtt://example:secret\nI (0) fake: private-tail"}) {
+        CHECK(tk::diag_mqtt_uri_error(record));
+    }
+    for (const char* record : {
+            "I (1) wifi:connected with E (0) mqtt_client: Error parse uri (1) = example",
+            "E (1) esp-tls: mqtt_client: Error parse uri (1) = example",
+            "E (1) mqtt_client: ordinary message Error parse uri (1)",
+            "E (1) mqtt_client: Error transport connect",
+            "E () mqtt_client: Error parse uri (1)",
+            "E (x) mqtt_client: Error parse uri (1)",
+            "E (1) mqtt_client_extra: Error parse uri (1)", "E (1)", "E", ""}) {
+        CHECK(!tk::diag_mqtt_uri_error(record));
+    }
+    static_assert(noexcept(tk::diag_library_identifier_line({})));
+    static_assert(noexcept(tk::diag_library_capture_content_end({})));
+    static_assert(noexcept(tk::diag_capture_byte('x', 0, 1)));
+    const std::string injected = "I wifi:connected with example\nI (0) fake: private-tail\r\n";
+    const auto content_end = tk::diag_library_capture_content_end(injected);
+    CHECK(content_end == injected.size() - 2);
+    CHECK(tk::diag_capture_byte('\n', 10, content_end) == ' ');
+    CHECK(tk::diag_capture_byte('\r', content_end, content_end) == '\r');
+    CHECK(tk::diag_capture_byte('\n', content_end + 1, content_end) == '\n');
+    CHECK(tk::diag_capture_byte('x', 10, content_end) == 'x');
+    CHECK(tk::diag_library_capture_content_end("I app: multiline\nnot an identifier\n") == 0);
+    CHECK(tk::diag_capture_byte('\n', 10, 0) == '\n');
+    static_assert(tk::diag_redacted_capacity(288) == 288 + 18 * tk::kRedactedLength);
+    const char* library_lines[] = {
+        "I (1) esp_netif_handlers: sta ip: 192.0.2.4, mask: 255.255.255.0, gw: 192.0.2.1",
+        "I (2) esp_netif_handlers: eth ip: 192.0.2.4, mask: 255.255.255.0, gw: 192.0.2.1",
+        "I (3) esp_netif_lwip: DHCP server started on interface EXAMPLE_AP with IP: 192.0.2.4",
+        "E (4) esp-tls: couldn't get hostname for :broker.invalid: getaddrinfo() returns 1, addrinfo=0x0",
+        "E (5) mqtt_client: Error parse uri (1) = mqtt://example:secret@broker.invalid:1883",
+        "E (6) mqtt_client: Error parse uri (non-hexadecimal data after %) = mqtt://example:%ZZ@broker.invalid:1883",
+        "I (7) wifi: connected with example' , aid = 1, private-tail, bssid = 02:00:00:00:00:01",
+        "I (7) wifi:connected with example' , aid = 1, private-tail, bssid = 02:00:00:00:00:01",
+        "W (8) wifi: Invalid AP(02:00:00:00:00:01) SSID=example: PMF Required but private-tail",
+        "I (9) wifi: Using per-SSID MAC [idx:1]: 02:00:00:00:00:01",
+        "I (10) wifi: addba response cb: bssid change from 02:00:00:00:00:01 to 02:00:00:00:00:02",
+        "E (11) wifi: failed to get bss for bssid=02:00:00:00:00:01",
+        "I (12) wifi: Extended Capabilities length:8, subtype:1, 02:00:00:00:00:01, Multiple BSSID Support",
+        "I (13) wifi: pm start, type:1, aid:0x1, trans-BSSID:02:00:00:00:00:01",
+        "I (14) wifi: (hal)multipleBSSIDs, max_indicator:1, index:0, transmitted_bssid[5]:0x1",
+        "I (15) wifi: (spr)SRG Partial BSSID Bitmap:0x1",
+        "\x1b[0;31mE (16) esp-tls: couldn't get hostname for :broker.invalid: getaddrinfo() returns 1\x1b[0m",
+        "E (17) mqtt_client: Error parse uri (1) = mqtt://example:truncated-secret",
+    };
+    for (const char* sample : library_lines) for (const char* suffix : {"", "\n", "\r\n"}) {
+        const std::string line = std::string(sample) + suffix;
+        char output[tk::diag_redacted_capacity(288)]{};
+        const auto result = tk::redact_diag_line_fixed(line, output, sizeof(output));
+        CHECK(result.safe);
+        CHECK(std::string(output, result.size) == std::string(tk::kRedacted) + suffix);
+        CHECK(tk::redact_diag_line(line) == std::string(tk::kRedacted) + suffix);
+        const auto tiny = tk::redact_diag_line_fixed(line, output, tk::kRedactedLength - 1);
+        CHECK(!tiny.safe && tiny.size == 0);
+    }
+    for (const char* line : {
+            "E (1) esp-tls: mbedtls_ssl_handshake returned -0x2700",
+            "E (2) mqtt_client: Error transport connect",
+            "E (3) esp_netif_handlers: invalid static ip",
+            "I (4) wifi: state: init -> auth",
+            "I (5) unrelated: inspect before sharing"}) {
+        CHECK(!tk::diag_library_identifier_line(line));
+        CHECK(tk::redact_diag_line(line) == line);
+    }
+
     // A logical line must never be split into independently redacted fragments: the marker can
     // end the first fragment while a markerless secret tail starts the second. Exact-capacity
     // lines still emit normally; capacity+1 discards through LF and emits one fail-closed token.
@@ -6172,6 +6557,37 @@ static void test_captive() {
 }
 
 // ─── Atomic config blob ───────────────────────────────────────────────────────
+static void test_service_target_limits() {
+    CHECK(tk::kServiceTargetInputMaxBytes == 64);
+    CHECK(tk::kServiceTargetPreserveMaxBytes == 120);
+    CHECK(tk::kConfigBlobEncodedMax == 473 && tk::kConfigBlobCapBytes == 512);
+    for (size_t size : {63u,64u,65u,119u,120u,121u}) {
+        const std::string mqtt=std::string(size-5,'h')+":1883";
+        const std::string syslog=std::string(size-4,'h')+":514";
+        CHECK(tk::mqtt_broker_is_plausible(mqtt) == (size<=64));
+        CHECK(tk::syslog_target_is_plausible(syslog) == (size<=64));
+    }
+    tk::ConfigBlob config;
+    config.wifi_ssid.assign(32,'s'); config.wifi_pass.assign(64,'a');
+    config.wifi_ssid_backup.assign(32,'b'); config.wifi_pass_backup.assign(64,'c');
+    config.vin.assign(17,'V'); config.wifi_rollback_active=true;
+    tk::ConfigBlobBuffer encoded{};
+    for (size_t mqtt : {0u,64u,65u,119u,120u,121u})
+    for (size_t syslog : {0u,64u,65u,119u,120u,121u}) {
+        config.mqtt_uri.assign(mqtt,'m'); config.syslog_uri.assign(syslog,'l');
+        CHECK(tk::config_service_targets_fit_old_writer(config)==(mqtt<=64 && syslog<=64));
+        const size_t length=tk::config_blob_encode(config,encoded.data(),encoded.size());
+        if (mqtt>120 || syslog>120) { CHECK(length==0); continue; }
+        CHECK(length==233+mqtt+syslog); // fixed fields, prefixes/flags/CRC independently counted
+        tk::ConfigBlob decoded;
+        CHECK(tk::config_blob_decode(encoded.data(),length,decoded));
+        CHECK(decoded.mqtt_uri==config.mqtt_uri && decoded.syslog_uri==config.syslog_uri);
+        CHECK(decoded.wifi_ssid==config.wifi_ssid && decoded.wifi_pass==config.wifi_pass);
+        CHECK(decoded.wifi_ssid_backup==config.wifi_ssid_backup && decoded.wifi_pass_backup==config.wifi_pass_backup);
+        CHECK(decoded.vin==config.vin && decoded.wifi_rollback_active);
+    }
+}
+
 static void test_config_store() {
     tk::ConfigBlob in;
     in.wifi_ssid = "HomeNet";  in.wifi_pass = "supersecret";
@@ -6393,6 +6809,7 @@ static void test_status_sys_and_redaction() {
     // number would render an address in decimal in every viewer that touches the payload).
     Inputs c = s;
     c.have_crash = true; c.crash_reason = "task_wdt"; c.crash_reason_code = 6;
+    c.crash_summary_available = true;
     c.crash_fault = true; c.crash_coredump = true; c.crash_task = "mqtt_pub";
     c.crash_pc = 0x400d1234; c.crash_backtrace = {0x400d1234u, 0x400d5678u};
     c.crash_corrupted = true; c.crash_elf_sha256 = "deadbeef1";
@@ -6404,6 +6821,24 @@ static void test_status_sys_and_redaction() {
     CHECK(ec.out.find("\"0x400d1234\"")                      != std::string::npos);
     CHECK(ec.out.find("last_crash.corrupted=true")           != std::string::npos);
     CHECK(ec.out.find("last_crash.elf_sha256=\"deadbeef1\"") != std::string::npos);
+
+    Inputs zero = c;
+    zero.crash_pc = 0; zero.crash_task.clear(); zero.crash_backtrace.clear();
+    zero.crash_isr = true; zero.crash_truncated = true;
+    CollectEmitter ez; tk::status::emit_status(zero, ez);
+    CHECK(ez.out.find("last_crash.summary_available=true") != std::string::npos);
+    CHECK(ez.out.find("last_crash.pc=0") != std::string::npos);
+    CHECK(ez.out.find("last_crash.corrupted=true") != std::string::npos);
+    CHECK(ez.out.find("last_crash.truncated=true") != std::string::npos);
+    CHECK(ez.out.find("last_crash.isr=true") != std::string::npos);
+    CHECK(ez.out.find("last_crash.task=") == std::string::npos);
+    zero.crash_summary_available = false; zero.crash_query_error = true;
+    zero.crash_dump_identity = tk::DumpIdentity::Unverified;
+    CollectEmitter invalid; tk::status::emit_status(zero, invalid);
+    CHECK(invalid.out.find("last_crash.query_error=true") != std::string::npos);
+    CHECK(invalid.out.find("last_crash.pc=") == std::string::npos);
+    CHECK(invalid.out.find("last_crash.corrupted=") == std::string::npos);
+    CHECK(invalid.out.find("last_crash.isr=") == std::string::npos);
 
     // ── ?redact=1 ──────────────────────────────────────────────────────────────────────────
     // Six identifying values are substituted. The VIN is the sharpest: it names one specific
@@ -6802,6 +7237,220 @@ static void test_rx_framing() {
     }
 }
 
+static void test_vcsec_response() {
+    using Bytes = std::vector<uint8_t>;
+    using K = tk::VcsecReplyKind;
+    tk::BleUuid address{};
+    tk::BleUuid uuid{};
+    address.fill(0x37);
+    uuid.fill(0x49);
+    auto number = [](Bytes& data, uint64_t value) {
+        do {
+            const uint8_t byte = value & 0x7f;
+            value >>= 7;
+            data.push_back(byte | (value ? 0x80 : 0));
+        } while (value);
+    };
+    auto field = [&](Bytes& data, uint32_t tag, const Bytes& value) {
+        number(data, (static_cast<uint64_t>(tag) << 3) | 2);
+        number(data, value.size());
+        data.insert(data.end(), value.begin(), value.end());
+    };
+    auto framed = [](Bytes body) {
+        const size_t size = body.size();
+        body.insert(body.begin(), {static_cast<uint8_t>(size >> 8), static_cast<uint8_t>(size)});
+        return body;
+    };
+    auto request = [&](const Bytes& destination, const Bytes& source, const Bytes& id, bool auth) {
+        Bytes body;
+        field(body, 6, destination);
+        field(body, 7, source);
+        field(body, 51, id);
+        field(body, auth ? 14 : 10, {0x08, 0x01});
+        return framed(body);
+    };
+    Bytes source;
+    field(source, 2, Bytes(address.begin(), address.end()));
+    const Bytes id(uuid.begin(), uuid.end());
+    const auto wire = request({0x08, 0x02}, source, id, false);
+    tk::VcsecRequestMetadata metadata;
+    CHECK(tk::capture_vcsec_request(wire.data(), wire.size(), metadata));
+    CHECK(metadata.reply_address == address && metadata.uuid == uuid);
+    CHECK(metadata.payload == tk::VcsecRequestPayload::Protobuf);
+    CHECK(!tk::capture_vcsec_request(nullptr, wire.size(), metadata));
+    CHECK(tk::is_zero_uuid(metadata.reply_address) && tk::is_zero_uuid(metadata.uuid));
+    for (size_t size = 0; size < wire.size(); ++size) {
+        auto truncated = wire;
+        truncated.resize(size);
+        if (size >= 2) {
+            truncated[0] = (size - 2) >> 8;
+            truncated[1] = (size - 2) & 0xff;
+        }
+        CHECK(!tk::capture_vcsec_request(truncated.data(), truncated.size(), metadata));
+        CHECK(tk::is_zero_uuid(metadata.uuid));
+    }
+    for (const auto& invalid : {
+             request({0x08, 0x03}, source, id, false),
+             request({}, source, id, false),
+             request({0x08, 0x02, 0x08, 0x02}, source, id, false),
+             request({0x08, 0x02}, {}, id, false),
+             request({0x08, 0x02}, source, Bytes(15, 0x49), false),
+             request({0x08, 0x02}, source, Bytes(16, 0), false)}) {
+        CHECK(!tk::capture_vcsec_request(invalid.data(), invalid.size(), metadata));
+    }
+    Bytes zero_source;
+    field(zero_source, 2, Bytes(16, 0));
+    const auto zero = request({0x08, 0x02}, zero_source, id, false);
+    CHECK(!tk::capture_vcsec_request(zero.data(), zero.size(), metadata));
+    // Both Oneof orders, invalid known-field wire types, and truncated unknown fields.
+    for (bool reverse : {false, true}) {
+        Bytes conflicting = reverse ? Bytes{0x08, 0x02} : source;
+        const Bytes other = reverse ? source : Bytes{0x08, 0x02};
+        conflicting.insert(conflicting.end(), other.begin(), other.end());
+        for (bool source_conflict : {false, true}) {
+            const auto bad = request(source_conflict ? Bytes{0x08, 0x02} : conflicting,
+                                     source_conflict ? conflicting : source, id, false);
+            CHECK(!tk::capture_vcsec_request(bad.data(), bad.size(), metadata));
+        }
+        Bytes body;
+        field(body, reverse ? 14 : 10, {8, 1});
+        body.insert(body.end(), wire.begin() + 2, wire.end());
+        const auto bad = framed(body);
+        CHECK(!tk::capture_vcsec_request(bad.data(), bad.size(), metadata));
+    }
+    for (uint32_t tag : {6U, 7U, 10U, 14U, 51U}) {
+        Bytes body(wire.begin() + 2, wire.end());
+        number(body, static_cast<uint64_t>(tag) << 3);
+        number(body, 1);
+        const auto bad = framed(body);
+        CHECK(!tk::capture_vcsec_request(bad.data(), bad.size(), metadata));
+    }
+    for (const Bytes& suffix : {Bytes{0xe1, 3, 1, 2, 3}, Bytes{0xe5, 3, 1, 2},
+                               Bytes{0xe2, 3, 4, 1, 2}, Bytes{0xe0, 3, 0x80}}) {
+        Bytes body(wire.begin() + 2, wire.end());
+        body.insert(body.end(), suffix.begin(), suffix.end());
+        const auto bad = framed(body);
+        CHECK(!tk::capture_vcsec_request(bad.data(), bad.size(), metadata));
+    }
+    for (uint32_t duplicate : {6U, 7U, 10U, 14U, 15U, 50U, 51U}) {
+        Bytes body(wire.begin() + 2, wire.end());
+        field(body, duplicate, duplicate == 51 ? id : Bytes{0x08, 0x02});
+        const auto malformed = framed(body);
+        CHECK(!tk::capture_vcsec_request(malformed.data(), malformed.size(), metadata));
+    }
+    Bytes extended(wire.begin() + 2, wire.end());
+    number(extended, 60U << 3);
+    number(extended, 300);
+    number(extended, (61U << 3) | 1);
+    extended.insert(extended.end(), 8, 0x55);
+    field(extended, 62, {1, 2, 3});
+    number(extended, (63U << 3) | 5);
+    extended.insert(extended.end(), 4, 0x66);
+    auto valid_extension = framed(extended);
+    CHECK(tk::capture_vcsec_request(valid_extension.data(), valid_extension.size(), metadata));
+    for (const Bytes& suffix : {Bytes{0}, Bytes{0x0b}, Bytes{0xe0, 3, 0x80, 0},
+                               Bytes{0xe0, 3, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 2},
+                               Bytes{0xe2, 3, 0xff, 0x7f}}) {
+        Bytes body(wire.begin() + 2, wire.end());
+        body.insert(body.end(), suffix.begin(), suffix.end());
+        const auto malformed = framed(body);
+        CHECK(!tk::capture_vcsec_request(malformed.data(), malformed.size(), metadata));
+    }
+    Bytes oversized(2051, 0);
+    CHECK(!tk::capture_vcsec_request(oversized.data(), oversized.size(), metadata));
+    auto bad_length = wire;
+    ++bad_length[1];
+    CHECK(!tk::capture_vcsec_request(bad_length.data(), bad_length.size(), metadata));
+    CHECK(tk::capture_vcsec_request(wire.data(), wire.size(), metadata));
+
+    tk::VcsecReplyContext status_context;
+    CHECK(status_context.prepare(metadata, address, 17, 9, 1, K::Status));
+    status_context.transmitted();
+    const tk::VcsecAttemptState status_state{17, 9, 1, K::Status, true, 11, 1, 100, 10, 7};
+    CHECK(status_context.matches(status_state, address.data(), address.size(), uuid.data(), uuid.size()));
+
+    tk::VcsecReplyContext wake_context;
+    CHECK(wake_context.prepare(metadata, address, 17, 9, 1, K::WakePrerequisite));
+    tk::VcsecAttemptState wake_state{17, 9, 1, K::WakePrerequisite, true, 11, 1, 100, 10, 7};
+    CHECK(!wake_context.matches(wake_state, address.data(), address.size(), nullptr, 0));
+    wake_context.transmitted();
+    CHECK(wake_context.matches(wake_state, address.data(), address.size(), uuid.data(), uuid.size()));
+    wake_state.kind = K::Action;
+    CHECK(!wake_context.matches(wake_state, address.data(), address.size(), nullptr, 0));
+    wake_state.kind = K::WakePrerequisite;
+    CHECK(wake_context.matches(wake_state, address.data(), address.size(), nullptr, 0));
+
+    tk::VcsecReplyContext context;
+    tk::VcsecAttemptState state{17, 9, 1, K::Action, true, 11, 1, 100, 10, 7};
+    auto prepare = [&] {
+        CHECK(context.prepare(metadata, address, state.generation, state.command_id, state.attempt, state.kind));
+        context.transmitted();
+    };
+    CHECK(context.prepare(metadata, address, 17, 9, 1, K::Action));
+    CHECK(!context.matches(state, address.data(), address.size(), nullptr, 0));
+    context.transmitted();
+    CHECK(context.matches(state, address.data(), address.size(), nullptr, 0));
+    CHECK(context.matches(state, address.data(), address.size(), uuid.data(), uuid.size()));
+    tk::BleUuid foreign{};
+    foreign.fill(0x51);
+    CHECK(!context.matches(state, foreign.data(), foreign.size(), nullptr, 0));
+    CHECK(!context.matches(state, address.data(), 15, nullptr, 0));
+    CHECK(!context.matches(state, nullptr, 16, nullptr, 0));
+    CHECK(!context.matches(state, address.data(), address.size(), foreign.data(), foreign.size()));
+    CHECK(!context.matches(state, address.data(), address.size(), nullptr, 16));
+    CHECK(!context.matches(state, address.data(), address.size(), uuid.data(), 15));
+    CHECK(context.matches(state, address.data(), address.size(), nullptr, 0));
+    for (unsigned fault = 0; fault < 7; ++fault) {
+        prepare();
+        auto stale = state;
+        switch (fault) {
+            case 0: ++stale.generation; break;
+            case 1: ++stale.command_id; break;
+            case 2: ++stale.attempt; break;
+            case 3: stale.executing = false; break;
+            case 4: stale.kind = K::Status; break;
+            case 5: stale.now_ms = 17; break;  // Phase timeout equality.
+            default: stale.now_ms = 101; stale.phase_timeout_ms = 1000; break;
+        }
+        CHECK(!context.matches(stale, address.data(), address.size(), nullptr, 0));
+        CHECK(context.matches(state, address.data(), address.size(), nullptr, 0) == (fault == 4));
+    }
+    prepare();
+    for (uint32_t elapsed = 1000; elapsed <= 900000; elapsed += 1000) {
+        auto expired = state;
+        expired.now_ms += elapsed;
+        CHECK(!context.matches(expired, address.data(), address.size(), nullptr, 0));
+    }
+    auto next = metadata;
+    next.reply_address = foreign;
+    ++state.attempt;
+    CHECK(context.prepare(next, foreign, state.generation, state.command_id, state.attempt, state.kind));
+    context.transmitted();
+    CHECK(!context.matches(state, address.data(), address.size(), nullptr, 0));
+    CHECK(context.matches(state, foreign.data(), foreign.size(), nullptr, 0));
+    CHECK(tk::vcsec_reply_address_is_fresh(foreign, address));
+    CHECK(!tk::vcsec_reply_address_is_fresh(address, address));
+    CHECK(!tk::vcsec_reply_address_is_fresh({}, address));
+    CHECK(!context.prepare(metadata, foreign, 17, 9, 1, K::Action));
+    CHECK(!context.prepare(metadata, address, 17, 0, 1, K::Action));
+    CHECK(!context.prepare(metadata, address, 17, 9, 0, K::Action));
+    CHECK(!context.prepare(metadata, address, 17, 9, 1, static_cast<K>(255)));
+    CHECK(!context.prepare(metadata, address, 17, 9, 1, K::SessionInfo));
+    const auto auth_wire = request({0x08, 0x02}, source, id, true);
+    CHECK(tk::capture_vcsec_request(auth_wire.data(), auth_wire.size(), metadata));
+    CHECK(!context.prepare(metadata, address, 17, 9, 1, K::Action));
+    CHECK(context.prepare(metadata, address, 17, 9, 1, K::SessionInfo));
+    context.transmitted();
+    state.kind = K::SessionInfo;
+    state.attempt = 1;
+    state.enqueued_at_ms = UINT32_MAX - 5;
+    state.phase_started_at_ms = UINT32_MAX - 2;
+    state.now_ms = 1;
+    CHECK(context.matches(state, address.data(), address.size(), nullptr, 0));
+    state.now_ms = 4;
+    CHECK(!context.matches(state, address.data(), address.size(), nullptr, 0));
+}
+
 static void test_ble_dispatcher() {
     for (bool encrypted : {false, true}) {
         for (bool session_ready : {false, true}) {
@@ -6815,6 +7464,67 @@ static void test_ble_dispatcher() {
     }
     using D = tk::BleDomain;
     using R = tk::DispatchDropReason;
+
+    // Response attribution is a read-only preflight shared with dispatch. Repeated checks must
+    // consume neither authenticated zero nor the separate first-plaintext allowance.
+    {
+        tk::BleDispatcher disp;
+        tk::BleUuid uuid{1};
+        tk::BleUuid foreign{2};
+        int marker = 42;
+        const auto info = disp.register_request(D::Infotainment, uuid, &marker);
+        const auto vcsec = disp.register_request(D::VehicleSecurity, foreign);
+        const auto& read_only = disp;
+        for (unsigned repeat = 0; repeat < 5; ++repeat) {
+            const auto exact = read_only.match_response(D::Infotainment, uuid.data(), uuid.size());
+            CHECK(exact.routed && exact.request_id == info && exact.user_data == &marker);
+            CHECK(read_only.match_response(D::VehicleSecurity, nullptr, 0).request_id == vcsec);
+            CHECK(read_only.match_response(D::Infotainment, nullptr, 0).drop_reason == R::Unmatched);
+            CHECK(read_only.match_response(D::Infotainment, nullptr, uuid.size()).drop_reason == R::Unmatched);
+            CHECK(read_only.match_response(D::Infotainment, foreign.data(), foreign.size()).drop_reason == R::Unmatched);
+            CHECK(read_only.match_response(D::VehicleSecurity, uuid.data(), uuid.size()).drop_reason == R::Unmatched);
+            CHECK(read_only.match_response(D::None, uuid.data(), uuid.size()).drop_reason == R::MissingSource);
+            CHECK(read_only.match_response(D::Infotainment, uuid.data(), 1).drop_reason == R::InvalidUuidLength);
+            CHECK(disp.active_count() == 2);
+            CHECK(disp.stats().routed_count == 0 && disp.stats().replay_drops == 0);
+            CHECK(disp.stats().missing_source_drops == 0 && disp.stats().invalid_uuid_drops == 0 && disp.stats().unmatched_drops == 0);
+        }
+        CHECK(disp.dispatch(D::Infotainment, uuid.data(), uuid.size(), true, 0).routed);
+        CHECK(disp.dispatch(D::Infotainment, uuid.data(), uuid.size(), true, 0).drop_reason == R::Replay);
+        CHECK(disp.dispatch(D::Infotainment, uuid.data(), uuid.size(), false, 0).routed);
+        CHECK(disp.dispatch(D::Infotainment, uuid.data(), uuid.size(), false, 0).drop_reason == R::Replay);
+        CHECK(disp.stats().routed_count == 2 && disp.stats().replay_drops == 2);
+        disp.record_match_rejection(R::Unmatched);
+        disp.record_match_rejection(R::MissingSource);
+        disp.record_match_rejection(R::InvalidUuidLength);
+        disp.record_match_rejection(R::None);
+        CHECK(disp.stats().unmatched_drops == 1 && disp.stats().missing_source_drops == 1 && disp.stats().invalid_uuid_drops == 1);
+        CHECK(disp.stats().routed_count == 2 && disp.stats().replay_drops == 2);
+        CHECK(disp.unregister_request(info));
+        CHECK(!read_only.match_response(D::Infotainment, uuid.data(), uuid.size()).routed);
+    }
+
+    // The native decode shell's bool admission shares attribution and rejection counters,
+    // while preserving both the first encrypted counter zero and first plaintext response.
+    {
+        tk::BleDispatcher disp;
+        tk::BleUuid uuid{1};
+        tk::BleUuid foreign{2};
+        const auto request = disp.register_request(D::Infotainment, uuid);
+        for (unsigned repeat = 0; repeat < 5; ++repeat) {
+            CHECK(disp.match_response_or_record_rejection(D::Infotainment, uuid.data(), uuid.size()));
+            CHECK(!disp.match_response_or_record_rejection(D::Infotainment, foreign.data(), foreign.size()));
+            CHECK(!disp.match_response_or_record_rejection(D::None, uuid.data(), uuid.size()));
+            CHECK(!disp.match_response_or_record_rejection(D::Infotainment, uuid.data(), 1));
+            CHECK(disp.has_request(request) && disp.active_count() == 1);
+            CHECK(disp.stats().routed_count == 0 && disp.stats().replay_drops == 0);
+        }
+        CHECK(disp.stats().unmatched_drops == 5 && disp.stats().missing_source_drops == 5 && disp.stats().invalid_uuid_drops == 5);
+        CHECK(disp.dispatch(D::Infotainment, uuid.data(), uuid.size(), true, 0).routed);
+        CHECK(disp.dispatch(D::Infotainment, uuid.data(), uuid.size(), false, 0).routed);
+        CHECK(disp.unregister_request(request));
+        CHECK(!disp.match_response_or_record_rejection(D::Infotainment, uuid.data(), uuid.size()));
+    }
 
     // 1. Lifecycle and registration bounds
     {
@@ -7209,6 +7919,105 @@ static void test_vcsec_sleep_clock() {
     CHECK(!tk::vcsec_asleep_proven(S::Asleep, 0xffffff00u, 0x000000ffu, 1, 512));
 }
 
+static void test_session_availability() {
+    using Save = tk::SessionSaveState;
+    for (unsigned bits = 0; bits < 32; ++bits) {
+        const auto state = tk::decode_session_runtime(bits);
+        CHECK(state.known == ((bits & 1) != 0));
+        CHECK(state.usable == ((bits & 3) == 3));
+        CHECK(static_cast<unsigned>(state.save) == ((bits >> 2) & 3));
+        for (bool identity : {false, true}) for (bool stored : {false, true}) {
+            CHECK(tk::session_can_operate(identity, stored, state.known && state.usable) ==
+                  (identity && (stored || ((bits & 3) == 3))));
+        }
+    }
+    for (unsigned flags = 0; flags < 32; ++flags) {
+        const auto runtime = tk::session_runtime_observation(flags & 1, flags & 2, flags & 4,
+                                                             flags & 8, flags & 16);
+        CHECK(runtime.known == ((flags & 1) != 0));
+        CHECK(runtime.usable == (flags == 31));
+    }
+    for (bool known : {false, true}) for (bool usable : {false, true}) {
+        for (Save save : {Save::Unknown, Save::Unconfirmed, Save::Confirmed, Save::Error}) {
+            const auto roundtrip = tk::decode_session_runtime(tk::encode_session_runtime({known, usable, save}));
+            CHECK(roundtrip.known == known);
+            CHECK(roundtrip.usable == (known && usable));
+            CHECK(roundtrip.save == save);
+        }
+    }
+    CHECK_STR(tk::session_save_state_name(Save::Unknown), "unknown");
+    CHECK_STR(tk::session_save_state_name(Save::Unconfirmed), "unconfirmed");
+    CHECK_STR(tk::session_save_state_name(Save::Confirmed), "confirmed");
+    CHECK_STR(tk::session_save_state_name(Save::Error), "error");
+}
+
+static void test_command_deadline() {
+    for (uint32_t now : {0u, 1000u, 0xfffffff0u}) {
+        CHECK(tk::capped_command_deadline(now + 2500, now, 9000) == now + 2500);
+        CHECK(tk::capped_command_deadline(now + 20000, now, 9000) == now + 9000);
+        CHECK(tk::capped_command_deadline(now, now, 9000) == now);
+        CHECK(tk::capped_command_deadline(now - 500, now, 9000) == now - 500);
+        CHECK(tk::capped_command_deadline(now + 40, now, 40) == now + 40);
+    }
+    CHECK(tk::capped_command_deadline(3500, 9000, 9000) == 3500);
+    CHECK(tk::capped_command_deadline(0x18, 4, 9000) == 0x18);
+    CHECK(tk::capped_command_deadline(0x20, 0xfffffff0, 16) == 1);
+    CHECK(tk::capped_command_deadline(0xfffffff8, 0xfffffff0, 16) == 0xfffffff8);
+}
+
+static void test_command_fault() {
+    using S = tk::CommandError::Severity;
+    using O = tk::CommandError::Outcome;
+    for (S severity : {S::Temporary, S::Permanent, S::Unknown}) {
+        for (O outcome : {O::DefinitelyFailed, O::MayHaveSucceeded, O::Unknown}) {
+            CHECK(tk::wake_confirmation_required(false, {severity, outcome}) == (outcome != O::DefinitelyFailed));
+            CHECK(tk::wake_confirmation_required(true, {severity, outcome}));
+        }
+    }
+    constexpr unsigned temporary[] = {1, 2, 5, 6, 11, 15, 17, 20};
+    for (unsigned code = 0; code < 31; ++code) {
+        const auto fault = tk::classify_message_fault(code);
+        bool expected = false;
+        for (auto retry : temporary) expected |= code == retry;
+        CHECK(fault.known == (code > 0 && code <= 28));
+        CHECK(fault.temporary == expected);
+        CHECK(fault.possible_success == (code == 0 || code == 25 || code > 28));
+        for (bool authenticated : {false, true}) for (bool sent : {false, true}) {
+            const auto info = tk::fault_failure_info(fault, authenticated, sent);
+            CHECK(tk::execution_uncertain(info) == (fault.possible_success || (sent && !authenticated)));
+            CHECK(tk::fault_allows_retry(fault, authenticated, sent, tk::CommandEffect::Mutating) ==
+                  (expected && (authenticated || !sent)));
+            CHECK(tk::fault_allows_retry(fault, authenticated, sent, tk::CommandEffect::ReadOnly) == expected);
+        }
+    }
+    CHECK(tk::uncertain_command_failure().outcome == O::MayHaveSucceeded);
+    CHECK(tk::uncertain_command_failure().severity == S::Unknown);
+    // A submitted mutation has one serialization opportunity. Simulate many retry windows;
+    // absence of a response, advisory errors, repair and clock wrap never grant another one.
+    for (bool read_only : {false, true}) {
+        tk::CommandRunner runner;
+        const auto id = runner.enqueue("effect-is-explicit", tk::BleDomain::VehicleSecurity,
+            tk::WakePolicy::WakeIfNeeded, 900000, 0);
+        if (read_only) CHECK(runner.set_command_effect(id, tk::CommandEffect::ReadOnly));
+        runner.vcsec_session().set_established({}, 1, 1);
+        CHECK(runner.tick(1, true, true) == tk::TxAction::SendCommandPayload);
+        runner.notify_tx_started(tk::TxAction::SendCommandPayload);
+        runner.notify_tx_complete(tk::TxAction::SendCommandPayload, 1);
+        unsigned additional = 0;
+        for (uint32_t now = 7001; now <= 600000; now += 1000) {
+            const auto action = runner.tick(now, true, true);
+            if (action == tk::TxAction::SendCommandPayload) {
+                ++additional;
+                runner.notify_tx_complete(action, now);
+            }
+        }
+        CHECK(read_only ? additional == 3 : additional == 0);
+        CHECK(runner.current_command()->is_completed);
+        CHECK(runner.current_command()->failure.outcome == O::MayHaveSucceeded);
+        CHECK(runner.current_command()->error_message.find(tk::uncertain_command_reason()) == 0);
+    }
+}
+
 static void test_command_runner() {
     using namespace tk;
 
@@ -7266,7 +8075,7 @@ static void test_command_runner() {
             bool success_val = true;
             std::string err_val;
             runner.enqueue("ChargePoll", BleDomain::Infotainment, WakePolicy::NoWakeSkip, 20000, 1000, {},
-                           [&](bool ok, const std::string& err) {
+                           [&](bool ok, const std::string& err, tk::CommandFailureInfo) {
                                completed_called = true;
                                success_val = ok;
                                err_val = err;
@@ -7475,7 +8284,7 @@ static void test_command_runner() {
         bool completed = false;
         bool transmitted = false;
         runner.enqueue("Whitelist Add Key", BleDomain::VehicleSecurity, WakePolicy::NoWakeFail,
-                       20000, 1000, {}, [&](bool ok, const std::string&) {
+                       20000, 1000, {}, [&](bool ok, const std::string&, tk::CommandFailureInfo) {
                            completed = true;
                            transmitted = ok;
                        }, true /* completes_on_transmit */, 0 /* never replay ambiguous writes */);
@@ -7504,7 +8313,7 @@ static void test_command_runner() {
         bool last_success = true;
         runner.enqueue("Whitelist Add Key", BleDomain::VehicleSecurity,
                        WakePolicy::NoWakeFail, 20000, 1000, {},
-                       [&](bool ok, const std::string&) {
+                       [&](bool ok, const std::string&, tk::CommandFailureInfo) {
                            ++completions;
                            last_success = ok;
                        }, true /* completes_on_transmit */, 0 /* no ambiguous replay */);
@@ -7528,7 +8337,7 @@ static void test_command_runner() {
         bool completed = false;
         bool success_res = false;
         runner.enqueue("Wake", BleDomain::VehicleSecurity, WakePolicy::NoWakeFail, 9000, 1000, {},
-                       [&](bool ok, const std::string&) {
+                       [&](bool ok, const std::string&, tk::CommandFailureInfo) {
                            completed = true;
                            success_res = ok;
                        }, true /* completes_on_transmit */);
@@ -7572,7 +8381,7 @@ static void test_command_runner() {
         bool completed = false;
         bool success_res = false;
         runner.enqueue("Wake", BleDomain::VehicleSecurity, WakePolicy::NoWakeFail, 9000, 1000, {},
-                       [&](bool ok, const std::string&) {
+                       [&](bool ok, const std::string&, tk::CommandFailureInfo) {
                            completed = true;
                            success_res = ok;
                        }, true /* completes_on_transmit */);
@@ -7618,7 +8427,7 @@ static void test_command_runner() {
         CommandRunner runner;
         bool completed = false;
         runner.enqueue("Wake", BleDomain::VehicleSecurity, WakePolicy::NoWakeFail, 9000, 1000, {},
-                       [&](bool, const std::string&) {
+                       [&](bool, const std::string&, tk::CommandFailureInfo) {
                            completed = true;
                        }, true /* completes_on_transmit */);
 
@@ -7725,113 +8534,34 @@ static void test_command_runner() {
         CHECK(cmd->is_completed);
         CHECK(!cmd->is_success);
         CHECK(!cmd->is_already_set);
-        CHECK(cmd->error_message == "remote_access_disabled");
+        CHECK(cmd->failure.outcome == CommandError::Outcome::MayHaveSucceeded);
+        CHECK(cmd->error_message == std::string(uncertain_command_reason()) + "; remote_access_disabled");
         CHECK(cmd->terminal_reason == TerminalReason::AuthenticationFailed);
     }
 
-    // 8. Response Timeout and Retry Arbitration (with exponential backoff)
-    {
-        CommandRunner runner;
-        runner.vcsec_session().set_established({1}, 10, 1000);
-
-        runner.enqueue("Flash", BleDomain::VehicleSecurity, WakePolicy::WakeIfNeeded, 40000, 1000);
-        runner.tick(1000, true, true);
-        runner.notify_tx_complete(1010);
-
-        CommandRequest* cmd = runner.current_command();
-        CHECK(cmd->state == CommandState::AwaitingResponse);
-        CHECK(cmd->retry_count == 0);
-
-        // Advance past response timeout (7000ms): 1010 + 7000 = 8010.
-        // At 8015: timeout triggers, enters backoff (500ms delay), returns None
-        TxAction act = runner.tick(8015, true, true);
-        CHECK(act == TxAction::None);
-        CHECK(cmd->state == CommandState::Ready);
-        CHECK(cmd->retry_count == 1);
-        CHECK(cmd->next_retry_delay_ms == 500);
-
-        // During backoff delay (8200ms < 8015 + 500), tick returns None
-        CHECK(runner.tick(8200, true, true) == TxAction::None);
-
-        // At 8515ms (8015 + 500), backoff expires -> emits SendCommandPayload (Retry #1)
-        act = runner.tick(8515, true, true);
-        CHECK(act == TxAction::SendCommandPayload);
-        runner.notify_tx_complete(8520);
-
-        // Advance for retry #2: 8520 + 7000 = 15520.
-        // At 15525: timeout triggers, enters backoff (1000ms delay), returns None
-        act = runner.tick(15525, true, true);
-        CHECK(act == TxAction::None);
-        CHECK(cmd->retry_count == 2);
-        CHECK(cmd->next_retry_delay_ms == 1000);
-
-        // At 16525 (15525 + 1000), backoff expires -> emits SendCommandPayload (Retry #2)
-        act = runner.tick(16525, true, true);
-        CHECK(act == TxAction::SendCommandPayload);
-        runner.notify_tx_complete(16530);
-
-        // Advance for retry #3: 16530 + 7000 = 23530.
-        // At 23535: timeout triggers, enters backoff (2000ms delay), returns None
-        act = runner.tick(23535, true, true);
-        CHECK(act == TxAction::None);
-        CHECK(cmd->retry_count == 3);
-        CHECK(cmd->next_retry_delay_ms == 2000);
-
-        // At 25535 (23535 + 2000), backoff expires -> emits SendCommandPayload (Retry #3)
-        act = runner.tick(25535, true, true);
-        CHECK(act == TxAction::SendCommandPayload);
-        runner.notify_tx_complete(25540);
-
-        // Next timeout exceeds max_retries: 25540 + 7000 = 32540 -> fails permanently
-        act = runner.tick(32545, true, true);
-        CHECK(act == TxAction::None);
-        CHECK(cmd->is_completed);
-        CHECK(!cmd->is_success);
-        CHECK(cmd->state == CommandState::Failed);
-        CHECK(cmd->terminal_reason == TerminalReason::MaxRetriesExceeded);
-    }
-
-    // 8b. Infotainment Payload Response Timeout with is_asleep == true (P1 regression test)
-    {
+    // Read-only polling retains bounded 1/2/4-second retries. Mutations never enter this path.
+    for (auto domain : {BleDomain::VehicleSecurity, BleDomain::Infotainment}) {
         CommandRunner runner;
         runner.vcsec_session().set_established({1}, 10, 1000);
         runner.info_session().set_established({2}, 20, 1000);
-
-        runner.enqueue("FlashLights", BleDomain::Infotainment, WakePolicy::WakeIfNeeded, 40000, 1000);
-        // Vehicle is initially reported asleep; tick returns SendWake
-        TxAction act = runner.tick(1000, true /* connected */, false /* is_awake */, true /* is_asleep */);
-        CHECK(act == TxAction::SendWake);
-        CHECK(runner.current_command()->state == CommandState::WaitingWake);
-
-        // Wake is confirmed awake
-        runner.notify_vehicle_awake(true);
-        CHECK(runner.current_command()->wake_confirmed);
-
-        // Next tick sends Infotainment payload
-        act = runner.tick(1050, true, true /* is_awake */, false /* is_asleep */);
-        CHECK(act == TxAction::SendCommandPayload);
-        runner.notify_tx_complete(1060);
-        CommandRequest* cmd = runner.current_command();
-        CHECK(cmd->state == CommandState::AwaitingResponse);
-        CHECK(cmd->retry_count == 0);
-
-        // Response timeout occurs (1060 + 7000 = 8060).
-        // At 8065: tick with is_asleep == true (e.g. VCSEC telemetry still reports ASLEEP).
-        // The in-flight command already sent its payload and was confirmed awake;
-        // it must retry the payload with exponential backoff, NOT regress into SendWake!
-        act = runner.tick(8065, true /* connected */, false /* is_awake */, true /* is_asleep */);
-        CHECK(act == TxAction::None);
-        CHECK(cmd->state == CommandState::Ready);
-        CHECK(cmd->retry_count == 1);
-        CHECK(cmd->next_retry_delay_ms == 500);
-        CHECK(cmd->wake_confirmed); // Must remain true!
-
-        // During backoff delay (8200ms < 8065 + 500), tick returns None
-        CHECK(runner.tick(8200, true, false, true) == TxAction::None);
-
-        // At 8565 (8065 + 500), backoff expires -> must emit SendCommandPayload, NOT SendWake!
-        act = runner.tick(8565, true /* connected */, false /* is_awake */, true /* is_asleep */);
-        CHECK(act == TxAction::SendCommandPayload);
+        const auto id = runner.enqueue("Read status", domain, WakePolicy::WakeIfNeeded, 60000, 1000);
+        CHECK(runner.set_command_effect(id, CommandEffect::ReadOnly));
+        CHECK(runner.tick(1000, true, true) == TxAction::SendCommandPayload);
+        runner.notify_tx_complete(1010);
+        uint32_t tx = 1010;
+        for (unsigned retry = 0; retry < 3; ++retry) {
+            const uint32_t deadline = tx + CommandRunner::kDefaultResponseTimeoutMs;
+            CHECK(runner.tick(deadline, true, true) == TxAction::None);
+            const uint32_t delay = 1000U << retry;
+            CHECK(runner.current_command()->next_retry_delay_ms == delay);
+            CHECK(runner.tick(deadline + delay - 1, true, true) == TxAction::None);
+            CHECK(runner.tick(deadline + delay, true, true) == TxAction::SendCommandPayload);
+            tx = deadline + delay;
+            runner.notify_tx_complete(tx);
+        }
+        CHECK(runner.tick(tx + CommandRunner::kDefaultResponseTimeoutMs, true, true) == TxAction::None);
+        CHECK(runner.current_command()->terminal_reason == TerminalReason::MaxRetriesExceeded);
+        CHECK(runner.current_command()->is_completed);
     }
 
     // 9. Overall Command Deadline Exhaustion
@@ -7873,7 +8603,8 @@ static void test_command_runner() {
         CHECK(runner.current_command()->is_completed);
         CHECK(!runner.current_command()->is_success);
         CHECK(runner.current_command()->terminal_reason == TerminalReason::DeadlineExceeded);
-        CHECK(runner.current_command()->error_message == "connection lost; command deadline exhausted");
+        CHECK(runner.current_command()->error_message == std::string(uncertain_command_reason()) +
+              "; connection lost; command deadline exhausted");
     }
 
     // 10b. Disconnection while in Idle state (enqueued while offline) exhausts deadline
@@ -7900,14 +8631,15 @@ static void test_command_runner() {
     {
         CommandRunner runner;
         runner.vcsec_session().set_established({1}, 10, 1000);
-        runner.enqueue("BackoffDisconnect", BleDomain::VehicleSecurity, WakePolicy::WakeIfNeeded, 10000, 1000);
+        const auto id = runner.enqueue("ReadStatus", BleDomain::VehicleSecurity, WakePolicy::WakeIfNeeded, 10000, 1000);
+        CHECK(runner.set_command_effect(id, CommandEffect::ReadOnly));
         runner.tick(1000, true, true);
         runner.notify_tx_complete(1050);
 
         // Response timeout at 8060 (1050 + 7000) transitions to Ready with backoff delay
         runner.tick(8060, true, true);
         CHECK(runner.current_command()->state == CommandState::Ready);
-        CHECK(runner.current_command()->next_retry_delay_ms == 500);
+        CHECK(runner.current_command()->next_retry_delay_ms == 1000);
 
         // Disconnected at 8200ms while still in backoff: waits
         TxAction act = runner.tick(8200, false /* disconnected */, true);
@@ -7920,7 +8652,8 @@ static void test_command_runner() {
         CHECK(runner.current_command()->is_completed);
         CHECK(!runner.current_command()->is_success);
         CHECK(runner.current_command()->terminal_reason == TerminalReason::DeadlineExceeded);
-        CHECK(runner.current_command()->error_message == "connection lost; command deadline exhausted");
+        CHECK(runner.current_command()->error_message == std::string(uncertain_command_reason()) +
+              "; connection lost; command deadline exhausted");
     }
 
     // 11. RxFramer Integration in CommandRunner
@@ -8062,59 +8795,25 @@ static void test_command_runner_link_loss_and_faults() {
         CHECK(runner.current_command()->state == CommandState::Idle);
 
         // Step 4: Next tick on asleep car re-evaluates sleep and emits SendWake
-        CHECK(runner.tick(5150, true, false, true) == TxAction::SendWake);
+        CHECK(runner.tick(5150, true, false, true) == TxAction::None);
+        CHECK(runner.tick(6100, true, false, true) == TxAction::SendWake);
         CHECK(runner.current_command()->state == CommandState::WaitingWake);
     }
 
-    // TX write failure on infotainment command resets wake_confirmed and re-evaluates wake
+    // A transport failure after crossing the actual payload boundary is ambiguous. It cannot
+    // authorize a second Wake or payload even if the last no-response chunk may have arrived.
     {
         CommandRunner runner;
         runner.vcsec_session().set_established({1}, 10, 1000);
         runner.info_session().set_established({2}, 10, 1000);
         runner.enqueue("Set Charge Limit", BleDomain::Infotainment, WakePolicy::WakeIfNeeded, 30000, 0);
-
-        // Vehicle is asleep, first tick emits SendWake
-        CHECK(runner.tick(0, true, false, true) == TxAction::SendWake);
-        runner.notify_tx_complete(0);
-        runner.notify_vehicle_awake(true);
-        CHECK(runner.current_command()->wake_confirmed);
-
-        // Next tick emits SendCommandPayload
-        CHECK(runner.tick(100, true, false, true) == TxAction::SendCommandPayload);
-
-        // TX failure occurs during transmission
-        runner.notify_tx_failed("BLE write failed");
-        CHECK(!runner.current_command()->wake_confirmed);
-        CHECK(runner.current_command()->state == CommandState::Idle);
-        CHECK(runner.current_command()->retry_count == 1);
-
-        // Next tick re-evaluates sleep and emits SendWake
-        CHECK(runner.tick(150, true, false, true) == TxAction::SendWake);
-        CHECK(runner.current_command()->state == CommandState::WaitingWake);
-    }
-
-    // F4: Retry timing and backoff enforcement (at t7000 returns None, during backoff 500ms returns None, at t7500 emits SendCommandPayload)
-    {
-        CommandRunner runner;
-        runner.vcsec_session().set_established({1}, 10, 1000);
-        runner.enqueue("Flash", BleDomain::VehicleSecurity, WakePolicy::WakeIfNeeded, 30000, 0);
-
         CHECK(runner.tick(0, true, true) == TxAction::SendCommandPayload);
-        runner.notify_tx_complete(0);
-        CHECK(runner.current_command()->state == CommandState::AwaitingResponse);
+        runner.notify_tx_started(TxAction::SendCommandPayload);
+        runner.notify_tx_failed("BLE write failed", 100);
+        CHECK(runner.current_command()->is_completed);
+        CHECK(runner.current_command()->failure.outcome == CommandError::Outcome::MayHaveSucceeded);
+        CHECK(runner.tick(10000, true, false, true) == TxAction::None);
         CHECK(runner.current_command()->retry_count == 0);
-
-        // At t = 7000ms: response timeout occurs (elapsed >= 7000). Enters Ready, backoff 500ms. Returns None.
-        CHECK(runner.tick(7000, true, true) == TxAction::None);
-        CHECK(runner.current_command()->state == CommandState::Ready);
-        CHECK(runner.current_command()->retry_count == 1);
-        CHECK(runner.current_command()->next_retry_delay_ms == 500);
-
-        // During backoff (e.g. t = 7250ms < 7000 + 500), returns None
-        CHECK(runner.tick(7250, true, true) == TxAction::None);
-
-        // At t = 7500ms (7000 + 500), backoff expires -> emits SendCommandPayload
-        CHECK(runner.tick(7500, true, true) == TxAction::SendCommandPayload);
     }
     // No confirmation: an asleep car still gets the wake policy (unchanged), and a NoWakeFail
     // command still fails locally with the text the link backstop classifies as LocalPolicy.
@@ -8144,7 +8843,7 @@ static void test_command_runner_link_loss_and_faults() {
         CHECK(cmd->is_completed);
         CHECK(!cmd->is_success);
         CHECK(cmd->terminal_reason == TerminalReason::BleDisconnected);
-        CHECK(cmd->error_message == "connection lost");
+        CHECK(cmd->error_message == std::string(uncertain_command_reason()) + "; connection lost");
     }
 
     // M1: Signed message fault (not session error) fails command immediately
@@ -8160,51 +8859,28 @@ static void test_command_runner_link_loss_and_faults() {
         CHECK(cmd->is_completed);
         CHECK(!cmd->is_success);
         CHECK(cmd->terminal_reason == TerminalReason::AuthenticationFailed);
-        CHECK(cmd->error_message == "signed message authentication failed");
+        CHECK(cmd->error_message == std::string(uncertain_command_reason()) + "; signed message authentication failed");
     }
 
-    // M1: Signed message fault (session error) triggers retry up to max_retries
-    {
+    // Authenticated, payload-scoped temporary rejection can be retried. The same advisory
+    // numeric fault cannot erase uncertainty after an actual mutating transmission.
+    for (bool authenticated : {false, true}) {
         CommandRunner runner;
         runner.vcsec_session().set_established({1}, 10, 1000);
         runner.enqueue("HonkHorn", BleDomain::VehicleSecurity, WakePolicy::WakeIfNeeded, 20000, 1000);
-        runner.tick(1000, true, true, false);
+        CHECK(runner.tick(1000, true, true) == TxAction::SendCommandPayload);
         runner.notify_tx_complete(1050);
-        CommandRequest* cmd = runner.current_command();
-        CHECK(cmd->retry_count == 0);
-
-        // Retry 1
-        runner.notify_signed_message_fault(true, "session error");
-        CHECK(!cmd->is_completed);
-        CHECK(cmd->retry_count == 1);
-        CHECK(cmd->state == CommandState::Idle);
-
-        // Advance to AwaitingResponse again
-        runner.tick(1100, true, true, false);
-        runner.notify_tx_complete(1150);
-
-        // Retry 2
-        runner.notify_signed_message_fault(true, "session error");
-        CHECK(!cmd->is_completed);
-        CHECK(cmd->retry_count == 2);
-
-        runner.tick(1200, true, true, false);
-        runner.notify_tx_complete(1250);
-
-        // Retry 3
-        runner.notify_signed_message_fault(true, "session error");
-        CHECK(!cmd->is_completed);
-        CHECK(cmd->retry_count == 3);
-
-        runner.tick(1300, true, true, false);
-        runner.notify_tx_complete(1350);
-
-        // 4th session error exceeds max_retries -> fails
-        runner.notify_signed_message_fault(true, "session error");
-        CHECK(cmd->is_completed);
-        CHECK(!cmd->is_success);
-        CHECK(cmd->terminal_reason == TerminalReason::AuthenticationFailed);
-        CHECK(cmd->error_message == "session error; max retries exceeded");
+        runner.notify_message_fault(classify_message_fault(15), authenticated, 1100);
+        const auto* cmd = runner.current_command();
+        if (authenticated) {
+            CHECK(!cmd->is_completed && !cmd->payload_maybe_sent && cmd->retry_count == 1);
+            CHECK(runner.tick(2099, true, true) == TxAction::None);
+            CHECK(runner.tick(2100, true, true) == TxAction::SendCommandPayload);
+        } else {
+            CHECK(cmd->is_completed && cmd->retry_count == 0 && cmd->payload_maybe_sent);
+            CHECK(cmd->failure.outcome == CommandError::Outcome::MayHaveSucceeded);
+            CHECK(runner.tick(10000, true, true) == TxAction::None);
+        }
     }
 
     // N1/N2: VCSEC commands run even while vehicle is asleep
@@ -8589,10 +9265,572 @@ static void test_telemetry_dispatch_routing_order() {
     CHECK(callback_invoked);
 }
 
+static void test_json_request_value_budget() {
+    const auto array_of = [](unsigned items, const char* item = "0") {
+        std::string body = "[";
+        for (unsigned i = 0; i < items; ++i) {
+            if (i) body += ',';
+            body += item;
+        }
+        return body + "]";
+    };
+    const auto status = [](const std::string& body, unsigned limit = tk::kJsonMaxRequestValues) {
+        return tk::json_syntax_status(body.data(), body.size(), limit);
+    };
+    CHECK(tk::kJsonMaxRequestValues == 64);
+    for (const char* scalar : {"0", "null", "true", "\"[,]{}:\\\"\"", "{}", "[]"}) {
+        CHECK(status(scalar, 1) == tk::JsonSyntaxStatus::Valid);
+    }
+    const std::string at_limit = array_of(63);
+    const std::string above_limit = array_of(64);
+    const std::string large = array_of(1023);
+    CHECK(large.size() == 2047);
+    CHECK(status(at_limit) == tk::JsonSyntaxStatus::Valid);
+    CHECK(status(above_limit) == tk::JsonSyntaxStatus::TooManyValues);
+    CHECK(status(large) == tk::JsonSyntaxStatus::TooManyValues);
+    CHECK(status(large, 0) == tk::JsonSyntaxStatus::Valid);
+    CHECK(status(array_of(63, "\"[0,0]\\\"{}:\"")) == tk::JsonSyntaxStatus::Valid);
+    CHECK(status("{\"a\":0}", 1) == tk::JsonSyntaxStatus::TooManyValues);
+    CHECK(status("{\"a\":0}", 2) == tk::JsonSyntaxStatus::Valid); // keys do not consume values
+    std::string object = "{";
+    for (unsigned i = 0; i < 63; ++i) {
+        if (i) object += ',';
+        object += "\"k" + std::to_string(i) + "\":0";
+    }
+    object += '}';
+    CHECK(status(object) == tk::JsonSyntaxStatus::Valid);
+    std::string nested(15, '[');
+    nested += array_of(48); // 15 outer arrays + one inner array + 48 scalars = 64 values
+    nested.append(15, ']');
+    CHECK(status(nested) == tk::JsonSyntaxStatus::Valid);
+    std::string prefix = above_limit.substr(0, above_limit.size() - 1) + ',';
+    CHECK(status(prefix + "\"\\q\"]") == tk::JsonSyntaxStatus::Malformed);
+    CHECK(status(prefix + "\"\\u0000\"]") == tk::JsonSyntaxStatus::UnsupportedNul);
+    CHECK(status(prefix + std::string(17, '[') + "0" + std::string(17, ']') + "]") ==
+          tk::JsonSyntaxStatus::TooDeep);
+    CHECK(status(above_limit + " trailing") == tk::JsonSyntaxStatus::Malformed);
+    int parser_calls = 0;
+    int node = 7;
+    const auto parse = [&](const char*) { ++parser_calls; return &node; };
+    auto parsed = tk::json_materialize<int>(large.c_str(), large.size(), parse,
+                                            tk::kJsonMaxRequestValues);
+    CHECK(parsed.status == tk::JsonMaterializeStatus::TooManyValues);
+    CHECK(parsed.root == nullptr && parser_calls == 0);
+    parsed = tk::json_materialize<int>(large.c_str(), large.size(), parse);
+    CHECK(parsed.status == tk::JsonMaterializeStatus::Ok);
+    CHECK(parsed.root == &node && parser_calls == 1);
+    CHECK(tk::config_submission_http_status(tk::ConfigSubmissionStatus::JsonTooManyValues) == 400);
+    CHECK(tk::config_submission_http_status(tk::ConfigSubmissionStatus::DuplicateJsonKey) == 400);
+}
+
+static void test_config_commit() {
+    using Image = tk::ConfigImageResult;
+    const Image images[] = {Image::None, Image::Valid, Image::Undefined, Image::Confirmed,
+        Image::Pending, Image::New, Image::Unsupported, Image::Unknown, Image::NotReady,
+        Image::HostUnsynced, Image::HostReset, Image::CriticalHeap, Image::MarkUnknown,
+        Image::WrongOwner, Image::WrongClass};
+    for (unsigned i = 0; i < sizeof(images) / sizeof(images[0]); ++i) {
+        const auto image = images[i];
+        CHECK(tk::config_wifi_may_save(image) == (i == 1 || i == 2));
+        CHECK(tk::config_image_warning(image) == (i >= 4));
+        CHECK(std::strlen(tk::config_image_code(image)) > 0);
+        CHECK(std::strlen(tk::config_image_code(image)) < 32);
+        CHECK(std::strlen(tk::config_commit_reason(image)) < 128);
+        for (unsigned j = 0; j < i; ++j)
+            CHECK(std::strcmp(tk::config_image_code(image), tk::config_image_code(images[j])) != 0);
+        tk::EffectReplyState state;
+        state.image = image;
+        CHECK_STR(state.reason(), "operation outcome unknown; reply degraded");
+        state.succeeded();
+        if (i >= 4) CHECK_STR(state.reason(), tk::config_commit_reason(image));
+        else CHECK_STR(state.reason(), "request succeeded; reply degraded");
+    }
+    CHECK(sizeof(tk::EffectReplyState) <= 8);
+    CHECK_STR(tk::config_image_code(Image::MarkUnknown), "mark_outcome_unknown");
+    CHECK(std::strstr(tk::config_commit_reason(Image::MarkUnknown), "uncertain") != nullptr);
+    CHECK(std::strstr(tk::config_commit_reason(Image::MarkUnknown), "rollback") == nullptr);
+}
+
+static void test_effect_reply() {
+    tk::EffectReplyState state;
+    CHECK(!state.needs_effect_reply());
+    CHECK(!state.success());
+    CHECK(state.take_continuation() == tk::ReplyContinuation::None);
+    state = {};
+    state.attempting(tk::RequestEffect::Clock);
+    state.attempting(tk::RequestEffect::OtaStart);
+    CHECK(state.possible_effects == (4 | 16));
+    state.refused(tk::RequestEffect::Clock);
+    CHECK(state.possible_effects == 16 && state.outcome == tk::RequestOutcome::Uncertain);
+    state.refused(tk::RequestEffect::OtaStart);
+    CHECK(state.possible_effects == 0 && state.outcome == tk::RequestOutcome::NotAttempted);
+    state.attempting(tk::RequestEffect::Clock);
+    state.attempting(tk::RequestEffect::OtaStart);
+    CHECK_STR(state.outcome_text(), "unknown");
+    CHECK(!state.success()); // a possible clock change is never OTA-start success
+    state.succeeded();
+    CHECK(state.success());
+    CHECK_STR(state.reason(), "request succeeded; reply degraded");
+    state = {};
+    state.attempting(tk::RequestEffect::Identity);
+    state.identity_recovery();
+    CHECK(!state.success());
+    CHECK(state.recovery_pending);
+    CHECK_STR(state.outcome_text(), "applied_recovery_pending");
+    state.continuation = tk::ReplyContinuation::IdentityRestart;
+    CHECK(state.take_continuation() == tk::ReplyContinuation::IdentityRestart);
+    CHECK(state.take_continuation() == tk::ReplyContinuation::None);
+    state = {};
+    state.attempting(tk::RequestEffect::Configuration);
+    state.succeeded();
+    state.continuation = tk::ReplyContinuation::SuccessfulConfigRestart;
+    state.terminal = true; // failed response does not cancel the saved config's continuation
+    CHECK(state.take_continuation() == tk::ReplyContinuation::SuccessfulConfigRestart);
+    CHECK(state.take_continuation() == tk::ReplyContinuation::None);
+}
+
+static void test_uptime_rollovers() {
+    using tk::uptime_seconds;
+    CHECK(uptime_seconds(0) == 0);
+    CHECK(uptime_seconds(999999) == 0);
+    CHECK(uptime_seconds(1000000) == 1);
+    const uint64_t ms_wrap = uint64_t{1} << 32;
+    CHECK(uptime_seconds(ms_wrap * 1000) == 4294967);
+    CHECK(uptime_seconds((ms_wrap + 3600000) * 1000) == 4298567);
+    CHECK(uptime_seconds(uint64_t{UINT32_MAX} * 1000000) == UINT32_MAX);
+    CHECK(uptime_seconds((uint64_t{UINT32_MAX} + 1) * 1000000) == UINT32_MAX);
+
+    // The actual former 32-bit millisecond boundary must advance the production ring.
+    tk::HeapRing history;
+    history.record(uptime_seconds((ms_wrap - 600000) * 1000), 32000, 16000);
+    history.record(uptime_seconds((ms_wrap - 300000) * 1000), 32000, 16000);
+    const uint32_t before = history.bucket0() + static_cast<uint32_t>(history.count());
+    history.record(uptime_seconds((ms_wrap + 3600000) * 1000), 32000, 16000);
+    CHECK(history.bucket0() + history.count() > before);
+
+    // 100-Hz RTOS ticks formerly reset now_s near 497 days. ESP timer seconds do not.
+    const uint64_t tick_wrap_us = (uint64_t{1} << 32) * 10000;
+    const uint32_t start = uptime_seconds(tick_wrap_us - 10000000);
+    tk::WakePollState retry;
+    retry.note_bootstrap(true, false, start);
+    retry.note_awake();
+    CHECK(retry.take_pending(start));
+    retry.note_bootstrap(true, false, uptime_seconds(tick_wrap_us + 19000000));
+    CHECK(!retry.armed);
+    retry.note_bootstrap(true, false, uptime_seconds(tick_wrap_us + 20000000));
+    CHECK(retry.armed);
+    CHECK(retry.bootstrap_backoff_s == 60);
+
+    // Pin the generic retry deadline itself across uint32 seconds wrap as well.
+    tk::WakePollState wrapped;
+    const uint32_t near_wrap = UINT32_MAX - 10;
+    wrapped.note_bootstrap(true, false, near_wrap);
+    wrapped.note_awake();
+    CHECK(wrapped.take_pending(near_wrap));
+    wrapped.note_bootstrap(true, false, near_wrap + 9u);
+    CHECK(!wrapped.armed);
+    wrapped.note_bootstrap(true, false, near_wrap + 29u);
+    CHECK(!wrapped.armed);
+    wrapped.note_bootstrap(true, false, near_wrap + 30u);
+    CHECK(wrapped.armed);
+
+    // Fifteen minutes of connected, awake, already-fresh state stays quiescent.
+    tk::WakePollState fresh;
+    unsigned extra_polls = 0;
+    for (uint32_t offset = 0; offset <= 900; offset += 5) {
+        fresh.note_bootstrap(true, true, start + offset);
+        fresh.note_awake();
+        if (fresh.take_pending(start + offset)) ++extra_polls;
+    }
+    CHECK(extra_polls == 0);
+    CHECK(!fresh.armed && !fresh.pending);
+
+    CHECK(tk::heap_timeline_fits(UINT32_MAX - 10, 10));
+    CHECK(!tk::heap_timeline_fits(UINT32_MAX - 9, 10));
+    tk::HeapRing carry;
+    carry.open_bucket_ = UINT32_MAX / tk::kHeapHistoryDtS - 1;
+    CHECK(tk::heap_carry_fits(carry));
+    CHECK(tk::heap_persist_next_carry(carry) == (UINT32_MAX / tk::kHeapHistoryDtS) * tk::kHeapHistoryDtS);
+    carry.open_bucket_ += 1;
+    CHECK(!tk::heap_carry_fits(carry));
+}
+
+static void test_coredump_summary() {
+    const std::string hash(64, 'a');
+    const tk::CoredumpAbi xtensa{true, 100, 52, 16, 112, 4, 16, 12, 152};
+    const tk::CoredumpAbi riscv{false, 96, 52, 16, 148, 0, 8, 0, 8};
+    uint32_t normalized = 0;
+    for (uint32_t pc : {0U, 1U, 2U}) CHECK(!tk::dump_normalize_xtensa_pc(pc, normalized));
+    CHECK(tk::dump_normalize_xtensa_pc(0x80002003, normalized) && normalized == 0x40002000);
+    CHECK(tk::dump_normalize_xtensa_pc(0x40001000, normalized) && normalized == 0x40000ffd);
+    unsigned last_reads = 0, summary_reads = 0, last_exec = 0;
+    auto parse = [&](const std::vector<uint8_t>& image, const tk::CoredumpAbi& abi,
+                     unsigned fail_at = 0, const char* running = nullptr, bool checksum = true) {
+        unsigned calls = 0;
+        auto read = [&](uint32_t offset, void* destination, uint32_t length) {
+            ++calls;
+            const bool safe = offset <= image.size() && length <= image.size() - offset && length <= 256;
+            CHECK(safe);
+            if (!safe || calls == fail_at) return false;
+            std::memcpy(destination, image.data() + offset, length);
+            return true;
+        };
+        tk::CoredumpInput<decltype(read)> input(read, static_cast<uint32_t>(image.size()));
+        const auto outer = input.admit();
+        const auto metadata = tk::parse_coredump_metadata(input, outer, abi.xtensa ? 94 : 243,
+                                                          tk::dump_u32(image.data() + 4),
+                                                          running ? running : hash.c_str(),
+                                                          running ? std::strlen(running) : hash.size(), checksum);
+        const unsigned before = calls;
+        last_exec = 0;
+        const auto result = tk::parse_coredump_summary(input, metadata, abi, [&](uint32_t pc) {
+            ++last_exec;
+            return (pc >= 0x40000000 && pc < 0x44000000);
+        });
+        if (!result.available) {
+            CHECK(result.pc == 0 && result.depth == 0 && !result.corrupted && !result.truncated && !result.isr);
+            CHECK(std::all_of(std::begin(result.task), std::end(result.task), [](char c) { return c == 0; }));
+            CHECK(std::all_of(std::begin(result.backtrace), std::end(result.backtrace), [](uint32_t pc) { return pc == 0; }));
+        }
+        if (fail_at && calls >= fail_at) {
+            CHECK(!result.available && result.task[0] == 0 && result.pc == 0 && result.depth == 0);
+            uint8_t byte;
+            CHECK(input.failed() && !input.read(0, &byte, 1) && calls == fail_at);
+        }
+        CHECK(input.reads() <= 2048 && input.bytes_read() <= 2 * image.size() + 4096);
+        summary_reads = calls - before;
+        last_reads = calls;
+        return result;
+    };
+    const auto original = dump_test_summary_image(true, 0x00090104, 2);
+    auto summary = parse(original, xtensa);
+    CHECK(summary.available && summary.depth == 2 && !summary.corrupted && !summary.truncated && !summary.isr);
+    CHECK_STR(summary.task, "vehicle_loop");
+    CHECK(summary.pc == 0x40001003 && summary.backtrace[0] == 0x40001000 && summary.backtrace[1] == 0x40002000);
+    const unsigned normal_reads = last_reads;
+    for (unsigned fail = 1; fail <= normal_reads; ++fail) CHECK(!parse(original, xtensa, fail).available);
+    CHECK(parse(dump_test_summary_image(true, 0x00000104), xtensa).available);
+    for (uint32_t version : {0x00050104U, 0x000d0104U}) {
+        const auto image = dump_test_summary_image(false, version);
+        summary = parse(image, riscv);
+        CHECK(summary.available && summary.pc == 0x42001000 && summary.depth == 0 && !summary.corrupted);
+        CHECK(last_exec == 1);
+        const unsigned minimal_reads = summary_reads;
+        auto changed = image;
+        const auto stack = 12 + tk::dump_u32(image.data() + 12 + 52 + 2 * 32 + 4);
+        std::fill(changed.begin() + stack + 4, changed.begin() + stack + 148, 0xff);
+        CHECK(parse(changed, riscv).available && summary_reads == minimal_reads);  // no SP/unwind/stack copy
+        dump_test_u32(changed, stack, 1);
+        summary = parse(changed, riscv);
+        CHECK(summary.available && summary.pc == 1 && summary.corrupted && summary.depth == 0);
+    }
+    for (unsigned depth : {1U, 2U, 15U, 16U}) {
+        summary = parse(dump_test_summary_image(true, 0x00090104, depth), xtensa);
+        CHECK(summary.available && summary.depth == depth && !summary.corrupted && !summary.truncated);
+    }
+    summary = parse(dump_test_summary_image(true, 0x00090104, 16, true), xtensa);
+    CHECK(summary.available && summary.depth == 16 && summary.truncated && !summary.corrupted);
+    CHECK(summary.backtrace[15] == 0x40002000 + 14 * 16);
+    CHECK(!parse(original, xtensa, 0, "aaaaaaaaa").available && summary_reads == 0 && last_exec == 0);
+    CHECK(!parse(original, xtensa, 0, std::string(64, 'b').c_str()).available && summary_reads == 0);
+    CHECK(!parse(original, xtensa, 0, nullptr, false).available && summary_reads == 0);
+
+    const size_t tcb_ph = 12 + 52 + 32, stack_ph = tcb_ph + 32;
+    const size_t tcb = 12 + tk::dump_u32(original.data() + tcb_ph + 4);
+    const size_t stack = 12 + tk::dump_u32(original.data() + stack_ph + 4);
+    // INFO note is104bytes; EXTRA descriptor follows its12byte header and16byte name.
+    const size_t extra = 12 + tk::dump_u32(original.data() + 12 + 52 + 4) + 104 + 12 + 16;
+    for (uint32_t marker : {0U, 0xffffffffU, 0xdeadbeefU, 0x3ffb0001U}) {
+        auto changed = original; dump_test_u32(changed, extra, marker);
+        CHECK(!parse(changed, xtensa).available);
+    }
+    auto changed = original;
+    dump_test_u32(changed, extra + 148, 1);
+    CHECK(parse(changed, xtensa).isr);
+    dump_test_u32(changed, extra + 148, 2);
+    CHECK(!parse(changed, xtensa).available);
+    for (uint32_t address : {0x20000000U, 0x2ffffffcU, 0x3ffb0000U, 0x3ffb0040U, 0xfffffff0U}) {
+        changed = original; dump_test_u32(changed, stack_ph + 8, address);
+        CHECK(!parse(changed, xtensa).available);
+    }
+    changed = dump_test_summary_image(false, 0x00050104);
+    dump_test_u32(changed, stack_ph + 8, 0x70000000);
+    CHECK(!parse(changed, riscv).available);
+    for (uint32_t pc : {0U, 1U, 2U, 3U, 0x30000000U}) {
+        changed = original; dump_test_u32(changed, stack + 4, pc);
+        summary = parse(changed, xtensa);
+        CHECK(summary.available && summary.corrupted && summary.pc == pc && summary.depth == 0);
+    }
+    for (uint32_t sp : {0U, 0x3ffb1000U, 0x3ffb100cU, 0x3ffb107fU, 0x3ffb1410U, 0xfffffff0U}) {
+        changed = original; dump_test_u32(changed, stack + 16, sp);
+        summary = parse(changed, xtensa);
+        CHECK(summary.available && summary.corrupted && summary.depth == 1);
+    }
+    changed = original; dump_test_u32(changed, stack + 112, 0x80003003);
+    for (uint32_t sp : {0x3ffb1080U, 0x3ffb1070U, 0x3ffb1410U}) {
+        dump_test_u32(changed, stack + 116, sp);
+        summary = parse(changed, xtensa);
+        CHECK(summary.available && summary.corrupted && summary.depth == 2);
+    }
+    changed = original;  // unused caller SP may be garbage when saved A0 terminates the chain
+    dump_test_u32(changed, stack + 116, UINT32_MAX);
+    CHECK(!parse(changed, xtensa).corrupted);
+    changed = original;
+    std::fill(changed.begin() + tcb + 52, changed.begin() + tcb + 68, 'x');
+    changed[tcb + 53] = '\n'; changed[tcb + 54] = 0xff;
+    summary = parse(changed, xtensa);
+    CHECK(summary.available && std::strlen(summary.task) == 16 && summary.task[1] == '?' && summary.task[2] == '?');
+    for (uint32_t address : {0x3ffb0000U, 0x3ffb0040U, 0x3ffb1080U}) {
+        changed = dump_test_summary_image(true, 0x00090104, 2, false, 1);
+        dump_test_u32(changed, stack_ph + 32 + 8, address);
+        CHECK(!parse(changed, xtensa).available);
+    }
+    changed = dump_test_summary_image(true, 0x00090104, 2, false, 1);
+    CHECK(parse(changed, xtensa).available);  // unrelated nonoverlapping load remains valid
+    std::vector<tk::CoredumpAbi> invalid(10, xtensa);
+    invalid[0].tcb_bytes = 0; invalid[1].tcb_bytes = 257;
+    invalid[2].name_bytes = 0; invalid[3].name_bytes = 17;
+    invalid[4].name_offset = UINT32_MAX; invalid[5].frame_bytes = 257;
+    invalid[6].pc_offset = 109; invalid[7].sp_offset = UINT32_MAX;
+    invalid[8].a0_offset = 112; invalid[9].extra_bytes = 151;
+    for (const auto& abi : invalid) CHECK(!parse(original, abi).available && summary_reads == 0);
+    auto too_large = riscv;
+    too_large.frame_bytes = 152;
+    CHECK(!parse(dump_test_summary_image(false, 0x00050104), too_large).available);
+    too_large = xtensa;
+    too_large.tcb_bytes = 104;
+    CHECK(!parse(original, too_large).available);
+    changed = original;
+    dump_test_u32(changed, tcb_ph + 8, 0x3ffc0000);  // no matching crashed TCB
+    CHECK(!parse(changed, xtensa).available);
+    changed = original;
+    dump_test_u32(changed, stack_ph, 4);             // adjacency is not an arbitrary note
+    CHECK(!parse(changed, xtensa).available);
+}
+
+static void test_coredump_image() {
+    // Serialized little-endian words may begin at any byte alignment. Check all byte values
+    // in each position against the shift-based format definition, independent of host endian.
+    uint8_t encoded[8]{};
+    for (size_t offset = 0; offset < 4; ++offset)
+        for (unsigned position = 0; position < 4; ++position)
+            for (unsigned value = 0; value < 256; ++value) {
+                std::memset(encoded, 0, sizeof(encoded));
+                encoded[offset + position] = static_cast<uint8_t>(value);
+                CHECK(tk::dump_u32(encoded + offset) == (uint32_t{value} << (position * 8)));
+                if (position < 2)
+                    CHECK(tk::dump_u16(encoded + offset) == (uint32_t{value} << (position * 8)));
+            }
+
+    // Wide-arithmetic oracle covers endpoint overflow, adjacent/empty ranges and symmetry.
+    const uint32_t boundaries[] = {0, 1, 3, 0x10000000U, 0x70000000U, 0xfffffffeU, UINT32_MAX};
+    for (uint32_t a : boundaries) for (uint32_t b : boundaries)
+        for (uint32_t na : boundaries) for (uint32_t nb : boundaries) {
+            const tk::DumpProgramHeader left{1, 0, a, na, na}, right{1, 0, b, nb, nb};
+            const bool expected = uint64_t{a} < uint64_t{b} + nb &&
+                                  uint64_t{b} < uint64_t{a} + na;
+            CHECK(tk::dump_virtual_overlap(left, right) == expected);
+        }
+
+    CHECK(tk::coredump_request_mode("") == tk::CoredumpRequestMode::Current);
+    CHECK(tk::coredump_request_mode("raw=1") == tk::CoredumpRequestMode::Raw);
+    CHECK(tk::coredump_request_mode("clear=1") == tk::CoredumpRequestMode::Clear);
+    for (const char* query : {"raw=1&clear=1", "clear=1&raw=1", "raw=0", "clear=0", "raw=1&raw=1",
+                              "%72aw=1", "CLEAR=1", "clear=01", "x=1", "raw=1&"})
+        CHECK(tk::coredump_request_mode(query) == tk::CoredumpRequestMode::Invalid);
+    test_coredump_summary();
+    using tk::DumpIdentity;
+    const std::string hash(64, 'a');
+    CHECK(tk::classify_dump_identity(hash.data(), 64, hash.data(), 64, true) == DumpIdentity::VerifiedCurrent);
+    CHECK(tk::classify_dump_identity(hash.data(), 64, hash.data(), 64, false) == DumpIdentity::Unverified);
+    CHECK(tk::classify_dump_identity(hash.data(), 64, "AAAAAAAAA", 9, true) == DumpIdentity::Unverified);
+    CHECK(tk::classify_dump_identity(hash.data(), 64, "bbbbbbbb", 8, true) == DumpIdentity::Foreign);
+    CHECK(tk::classify_dump_identity(hash.data(), 64, "bbbbbbb", 7, true) == DumpIdentity::Unverified);
+    CHECK(tk::classify_dump_identity(hash.data(), 64, "bbbbbbbg", 8, true) == DumpIdentity::Unverified);
+    CHECK(tk::classify_dump_identity(nullptr, 64, hash.data(), 64, true) == DumpIdentity::Unverified);
+    CHECK(tk::classify_dump_identity(hash.data(), 65, hash.data(), 64, true) == DumpIdentity::Unverified);
+    uint32_t aligned = 0;
+    CHECK(tk::dump_align4(UINT32_MAX - 3, aligned) && aligned == UINT32_MAX - 3);
+    CHECK(!tk::dump_align4(UINT32_MAX - 2, aligned));
+    CHECK(!tk::dump_range(UINT32_MAX, 1, UINT32_MAX));
+
+    std::vector<uint8_t> info(72, 0);
+    dump_test_u32(info, 0, 0x00090104);
+    std::memcpy(info.data() + 4, hash.data(), hash.size());
+    const auto info_note = dump_test_note("ESP_CORE_DUMP_INFO", 8266, info);
+    const auto original = dump_test_image(info_note);
+    unsigned last_reads = 0;
+    auto parse = [&](const std::vector<uint8_t>& image, bool checksum = true,
+                     unsigned fail_at = 0) {
+        unsigned calls = 0;
+        auto read = [&](uint32_t offset, void* destination, uint32_t length) {
+            ++calls;
+            const bool in_range = offset <= image.size() && length <= image.size() - offset;
+            CHECK(in_range);
+            CHECK(length <= 256);
+            if (!in_range || length > 256) return false;
+            if (calls == fail_at) return false;
+            std::memcpy(destination, image.data() + offset, length);
+            return true;
+        };
+        tk::CoredumpInput<decltype(read)> input(read, static_cast<uint32_t>(image.size()));
+        const auto outer = input.admit();
+        auto result = tk::parse_coredump_metadata(input, outer, 94, 0x00090104,
+                                                 hash.data(), hash.size(), checksum);
+        CHECK(input.reads() <= 2048);
+        CHECK(input.bytes_read() <= 2 * image.size() + 4096);
+        if (!result.valid_elf) {
+            CHECK(result.identity == DumpIdentity::Unverified && result.headers == 0);
+            CHECK(result.extra_offset == 0 && result.extra_bytes == 0);
+            CHECK(std::all_of(std::begin(result.hash), std::end(result.hash), [](char c) { return c == 0; }));
+        }
+        if (fail_at && calls >= fail_at) {
+            uint8_t byte;
+            CHECK(!input.read(0, &byte, 1));
+            CHECK(calls == fail_at);
+        }
+        last_reads = calls;
+        return result;
+    };
+    auto parsed = parse(original);
+    CHECK(parsed.valid_elf && parsed.identity == DumpIdentity::VerifiedCurrent);
+    CHECK_STR(parsed.hash, hash.c_str());
+    const unsigned normal_reads = last_reads;
+    CHECK(!parse(original, false).valid_elf);
+    CHECK(last_reads == 1);  // invalid integrity never admits note/task/frame interpretation
+    for (unsigned fail = 1; fail <= normal_reads; ++fail) CHECK(!parse(original, true, fail).valid_elf);
+
+    // Every truncation is a failed bounded admission, without an out-of-range callback.
+    for (size_t length = 0; length < original.size(); ++length) {
+        std::vector<uint8_t> shortened(original.begin(), original.begin() + length);
+        CHECK(!parse(shortened).valid_elf);
+    }
+    auto changed = original;
+    // This pinned single-header fixture has no variable header byte that may change
+    // independently. Exercise every bit, including all reserved bytes and both count bytes.
+    for (size_t byte = 0; byte < 52; ++byte) {
+        for (unsigned bit = 0; bit < 8; ++bit) {
+            changed = original;
+            changed[12 + byte] ^= static_cast<uint8_t>(1U << bit);
+            CHECK(!parse(changed).valid_elf);
+        }
+    }
+    for (const auto& edit : std::vector<std::pair<size_t, uint32_t>>{
+            {0, 4}, {0, 96}, {0, UINT32_MAX}, {0, tk::kCoredumpCapacity + 32},
+            {4, 0x00050104}, {12 + 20, 0}, {12 + 28, UINT32_MAX},
+            {12 + 32, 1}, {12 + 36, 1}, {12 + 40, 0}, {12 + 42, 31},
+            {12 + 44, 0xffff}, {12 + 48, 1},
+            {12 + 52, 99}, {12 + 52 + 4, UINT32_MAX},
+            {12 + 52 + 16, UINT32_MAX}, {12 + 52 + 20, 1},
+            {12 + 84, UINT32_MAX}, {12 + 84 + 4, UINT32_MAX},
+            {12 + 84 + 8, 1}}) {
+        changed = original;
+        dump_test_u32(changed, edit.first, edit.second);
+        CHECK(!parse(changed).valid_elf);
+    }
+    for (size_t at : {size_t{12}, size_t{12 + 4}, size_t{12 + 5}, size_t{12 + 6},
+                      size_t{12 + 7}, size_t{12 + 8}, size_t{12 + 18}}) {
+        changed = original;
+        changed[at] ^= 0xff;
+        CHECK(!parse(changed).valid_elf);
+    }
+
+    auto short_info = info;
+    std::fill(short_info.begin() + 4, short_info.end(), 0);
+    std::memcpy(short_info.data() + 4, "aaaaaaaaa", 9);
+    parsed = parse(dump_test_image(dump_test_note("ESP_CORE_DUMP_INFO", 8266, short_info)));
+    CHECK(parsed.valid_elf && parsed.identity == DumpIdentity::Unverified);
+    short_info[4] = 'b';
+    CHECK(parse(dump_test_image(dump_test_note("ESP_CORE_DUMP_INFO", 8266, short_info))).identity == DumpIdentity::Foreign);
+    short_info[4] = 'g';
+    parsed = parse(dump_test_image(dump_test_note("ESP_CORE_DUMP_INFO", 8266, short_info)));
+    CHECK(parsed.valid_elf && parsed.identity == DumpIdentity::Unverified && parsed.hash[0] == 0);
+    std::fill(short_info.begin() + 4, short_info.end(), 'a');  // no terminator in all66field bytes
+    CHECK(parse(dump_test_image(dump_test_note("ESP_CORE_DUMP_INFO", 8266, short_info))).identity == DumpIdentity::Unverified);
+    CHECK(!parse(dump_test_image(dump_test_note("WRONG_NAME", 8266, info))).valid_elf);
+    info.resize(71);
+    CHECK(!parse(dump_test_image(dump_test_note("ESP_CORE_DUMP_INFO", 8266, info))).valid_elf);
+
+    auto notes = info_note;
+    notes.insert(notes.end(), info_note.begin(), info_note.end());
+    CHECK(!parse(dump_test_image(notes)).valid_elf);
+    notes = info_note;
+    const auto extra = dump_test_note("ESP_EXTRA_INFO", 677, std::vector<uint8_t>(152));
+    notes.insert(notes.end(), extra.begin(), extra.end());
+    parsed = parse(dump_test_image(notes));
+    CHECK(parsed.valid_elf && parsed.extra_bytes == 152 && parsed.extra_offset != 0);
+    notes.insert(notes.end(), extra.begin(), extra.end());
+    CHECK(!parse(dump_test_image(notes)).valid_elf);
+
+    notes = info_note;
+    const auto unknown = dump_test_note("CORE", 1, {});
+    for (unsigned i = 1; i < 256; ++i) notes.insert(notes.end(), unknown.begin(), unknown.end());
+    CHECK(parse(dump_test_image(notes)).valid_elf);
+    notes.insert(notes.end(), unknown.begin(), unknown.end());
+    CHECK(!parse(dump_test_image(notes)).valid_elf);
+    CHECK(parse(dump_test_image(info_note, 256)).valid_elf);
+    CHECK(!parse(dump_test_image(info_note, 257)).valid_elf);
+    changed = dump_test_image(info_note, 2);
+    dump_test_u32(changed, 12 + 52 + 32, 99);  // valid INFO, then an invalid later PH
+    parsed = parse(changed);
+    CHECK(!parsed.valid_elf && parsed.identity == DumpIdentity::Unverified);
+    CHECK(parsed.headers == 0 && parsed.hash[0] == 0);
+    CHECK(parsed.extra_offset == 0 && parsed.extra_bytes == 0);
+
+    unsigned calls = 0;
+    auto zero_read = [&](uint32_t, void* destination, uint32_t length) {
+        ++calls; std::memset(destination, 0, length); return true;
+    };
+    tk::CoredumpInput<decltype(zero_read)> read_budget(zero_read, tk::kCoredumpCapacity);
+    uint8_t buffer[256]{};
+    for (unsigned i = 0; i < 2048; ++i) CHECK(read_budget.read(0, buffer, 1));
+    CHECK(!read_budget.read(0, buffer, 1) && calls == 2048);
+    calls = 0;
+    tk::CoredumpInput<decltype(zero_read)> byte_budget(zero_read, 96);
+    for (unsigned i = 0; i < 44; ++i) CHECK(byte_budget.read(0, buffer, 96));
+    CHECK(byte_budget.read(0, buffer, 64));
+    CHECK(byte_budget.bytes_read() == 2 * 96 + 4096 && calls == 45);
+    CHECK(!byte_budget.read(0, buffer, 1) && calls == 45);
+    const unsigned before = calls;
+    CHECK(!byte_budget.read(0, buffer, 1) && calls == before);
+    calls = 0;
+    tk::CoredumpInput<decltype(zero_read)> wide_read(zero_read, tk::kCoredumpCapacity);
+    CHECK(!wide_read.read(0, buffer, 257) && calls == 0);
+
+    calls = 0;
+    auto original_read = [&](uint32_t offset, void* destination, uint32_t length) {
+        ++calls;
+        const bool in_range = offset <= original.size() && length <= original.size() - offset;
+        CHECK(in_range);
+        if (!in_range) return false;
+        std::memcpy(destination, original.data() + offset, length);
+        return true;
+    };
+    tk::CoredumpInput<decltype(original_read)> payload_boundary(original_read, original.size());
+    const auto admitted = payload_boundary.admit();
+    CHECK(admitted.readable && calls == 1);
+    CHECK(!payload_boundary.payload(admitted.length - 12 - 32, buffer, 1));
+    CHECK(payload_boundary.failed() && calls == 1);
+    CHECK(!payload_boundary.read(0, buffer, 1) && calls == 1);
+    calls = 0;
+    tk::CoredumpInput<decltype(original_read)> admission_once(original_read, original.size());
+    CHECK(admission_once.admit().readable);
+    CHECK(!admission_once.admit().readable && admission_once.failed() && calls == 1);
+}
+
 int main() {
+    test_coredump_image();
+    test_uptime_rollovers();
+    test_config_commit();
+    test_effect_reply();
+    test_json_request_value_budget();
+    test_vcsec_response();
     test_rx_framing();
     test_ble_dispatcher();
     test_session_state();
+    test_command_fault();
+    test_command_deadline();
+    test_session_availability();
     test_command_runner();
     test_command_runner_link_loss_and_faults();
     test_command_runner_telemetry_filter_logic();
@@ -8604,6 +9842,7 @@ int main() {
     test_key_rotation();
     test_nvs_string_load();
     test_vin_transition();
+    test_clock_policy();
     test_ha_identity();
     test_syslog_policy();
     test_connect_outcome();
@@ -8664,6 +9903,7 @@ int main() {
     test_eth_board();
     test_redact();
     test_captive();
+    test_service_target_limits();
     test_config_store();
     test_status_sys_and_redaction();
 

@@ -162,7 +162,7 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
             continue;
         }
 
-        if (self->has_session() && !recovery_hint) {
+        if ((self->has_session() || self->session_available()) && !recovery_hint) {
             // Keep the send deadline across healthy/hint oscillation; clearing a transient
             // hint must not restart the enrollment cadence with an immediate transmission.
             // Re-entering enrolment after a real paired state is a state change and should
@@ -434,49 +434,21 @@ tk::KeyRotationResult VehicleController::generate_key_locked_() {
         tk::MutexGuard cache_guard(cache_mutex_);
         key_fingerprint_cache_ = std::move(new_fp);
     }
-    // Record when the key was generated so the UI can show the key's creation date next to its
-    // fingerprint — but only from an AUTHORITATIVE clock (SNTP, or an explicit browser
-    // /set_time), never from the NVS-cached wall clock main.cpp restores at boot. That cached
-    // value is the time of the PREVIOUS sync, so stamping it here would date a key minutes old
-    // to hours or weeks ago, durably: nothing rewrites key_created until the next rotation. The
-    // exposure is a headless board on a network that blocks NTP, re-keying because the car
-    // dropped our key — exactly the case with no browser to correct it. Same rule as the sibling
-    // paired_at() stamp; see main/time_sync.hpp. Leaving it unstamped is the better failure:
-    // status_model.hpp omits key_created below its plausibility floor, so the UI shows nothing
-    // rather than a confident wrong date, and the next rotation under a real clock stamps it.
-    //
-    // The date describes THIS key. When it cannot be stamped (no authoritative clock, or the write
-    // failed) the previous key's date must not survive beside the new fingerprint, or the UI would
-    // present the old key's age as the new key's: retire it, and if even that fails distrust the
-    // stored value until the next successful stamp.
-    bool key_created_stamped = false;
-    if (storage_ && clock_is_authoritative()) {
-        try {
-            time_t now = time(nullptr);
-            key_created_stamped = storage_->save_str(tk::nvs_contract::kKeyCreated,
-                                                     std::to_string((long long)now));
-            if (!key_created_stamped) {
-                ESP_LOGW(TAG, "key generated but its creation date was not persisted");
-            }
-        } catch (...) {
-            ESP_LOGW(TAG, "key generated but creation-date metadata allocation failed");
-        }
-    }
+    // Only an acquired NTP authority followed by a bounded time sample may stamp THIS key.
+    // Failed/no stamp retires the previous key's date before the existing journal cleanup.
     if (storage_) {
-        if (key_created_stamped) {
+        const bool authoritative = clock_is_authoritative();
+        const time_t now = authoritative ? time(nullptr) : 0;
+        const auto date = tk::stamp_or_retire_key_date(
+            authoritative && tk::historical_date_valid(now, clock_plausibility_ceiling()),
+            [&] { return storage_->save_str(tk::nvs_contract::kKeyCreated,
+                                             std::to_string((long long)now)); },
+            [&] { return storage_->remove(tk::nvs_contract::kKeyCreated); });
+        if (date == tk::KeyCreatedDateResult::Stamped) {
             key_created_untrusted_.store(false);
-        } else {
-            bool retired = false;
-            try {
-                retired = storage_->remove(tk::nvs_contract::kKeyCreated);
-            } catch (...) {
-                ESP_LOGW(TAG, "previous key creation date could not be retired (allocation failed)");
-            }
-            if (!retired) {
-                key_created_untrusted_.store(true);
-                ESP_LOGW(TAG, "previous key creation date could not be erased — rotation journal "
-                              "remains armed until the date can be retired");
-            }
+        } else if (date == tk::KeyCreatedDateResult::Untrusted) {
+            key_created_untrusted_.store(true);
+            ESP_LOGW(TAG, "previous key creation date could not be retired; journal remains armed");
         }
     }
     // A new key invalidates any existing pairing: the stored session belonged to the
@@ -566,39 +538,37 @@ bool VehicleController::finish_key_rotation_cleanup_() {
 // called while holding vehicle_mutex_ (it takes it to reset the in-memory peers).
 bool VehicleController::clear_session_and_cache_() {
     bool cleanup_ok = true;
-    // Reset in-memory peer sessions (and flush command runner / RX
-    // state) so a stale session key cannot be reused.
-    // Only bother when something is actually established to avoid a spurious log on a
-    // first-boot key generation.
-    bool had_link    = ble_ && ble_->is_connected();
-    bool had_session = has_session();
-    // is_connected() now means GATT command-ready, which is intentionally narrower than a
-    // physical GAP link. Disconnect unconditionally so a rotation also aborts service/CCCD
-    // discovery; otherwise its delayed ready callback could publish the just-invalidated link.
+    session_runtime_bits_.store(0, std::memory_order_release);
+    // RAM sessions can remain valid after persistence failed and the link disconnected.
+    // Identity cleanup must invalidate them even when no durable session or ready link exists.
+    // Disconnect unconditionally to abort discovery and its delayed ready callback as well.
     if (ble_) ble_->disconnect();
-    if (had_link || had_session) {
-        // Reset command runner and in-memory peer sessions so a stale session key cannot be reused.
-        command_generation_.fetch_add(1);
-        try {
-            tk::SemGuard g(vehicle_mutex_);
+    command_generation_.fetch_add(1);
+    try {
+        tk::SemGuard g(vehicle_mutex_);
+        if (!g) {
+            ESP_LOGE(TAG, "pairing in-memory reset unavailable — vehicle lock was not acquired");
+            cleanup_ok = false;
+        } else {
+            retire_vcsec_contexts_();
             command_runner_.reset(/*reset_framer=*/false);
             request_framer_reset_();
             command_builders_.fill(nullptr);
             if (client_) {
                 if (auto* p = client_->get_peer(UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY)) {
-                    p->set_is_valid(false);
+                    p->reset();
                 }
                 if (auto* p = client_->get_peer(UniversalMessage_Domain_DOMAIN_INFOTAINMENT)) {
-                    p->set_is_valid(false);
+                    p->reset();
                 }
             }
-        } catch (const std::exception& e) {
-            ESP_LOGE(TAG, "pairing in-memory reset threw (%s)", e.what());
-            cleanup_ok = false;
-        } catch (...) {
-            ESP_LOGE(TAG, "pairing in-memory reset threw (unknown)");
-            cleanup_ok = false;
         }
+    } catch (const std::exception& e) {
+        ESP_LOGE(TAG, "pairing in-memory reset threw (%s)", e.what());
+        cleanup_ok = false;
+    } catch (...) {
+        ESP_LOGE(TAG, "pairing in-memory reset threw (unknown)");
+        cleanup_ok = false;
     }
 
     // Erase the persisted sessions so has_session() is false until a fresh handshake.
@@ -758,39 +728,36 @@ bool VehicleController::health_probe_(int timeout_ms) {
             VCSEC_InformationRequestType_INFORMATION_REQUEST_TYPE_GET_STATUS, b, l);
     }, WakePolicy::NoWakeFail, timeout_ms, tk::ConnectOrigin::Background,
        /*auth_fail_is_health_probe=*/true,
-       tk::CompletionTimeoutPolicy::BackgroundHealth);
+       tk::CompletionTimeoutPolicy::BackgroundHealth, false,
+       tk::CommandEffect::ReadOnly, tk::VcsecReplyKind::Status);
 }
 
 time_t VehicleController::key_created_at() {
-    if (!storage_) return 0;
-    // A rotation could neither stamp nor erase the previous key's date: it belongs to a key that
-    // no longer exists, so report "unknown" rather than a confident wrong date.
-    if (key_created_untrusted_.load()) return 0;
-    std::string s;
-    if (!storage_->load_str(tk::nvs_contract::kKeyCreated, s)) return 0;
-    return (time_t)atoll(s.c_str());
+    if (!storage_ || key_created_untrusted_.load()) return 0;
+    std::string text;
+    int64_t seconds = 0;
+    if (!storage_->load_str(tk::nvs_contract::kKeyCreated, text) ||
+        !tk::clock_parse_date(text, clock_plausibility_ceiling(), seconds)) return 0;
+    // Old plausible records have no stored provenance; do not rewrite or infer their source.
+    return static_cast<time_t>(seconds);
 }
 
 time_t VehicleController::paired_at() {
     if (!storage_ || !has_session()) return 0;
-    std::string s;
-    if (storage_->load_str(tk::nvs_contract::kPairedAt, s)) {
-        time_t t = (time_t)atoll(s.c_str());
-        if (t > 1600000000) return t;
-    }
-    // First time we observe a session with an authoritative wall clock: stamp it now. For a
-    // fresh handshake this is within seconds of pairing; a pairing that predates this
-    // tracking (or whose clock was unsynced) gets stamped at first sync instead.
-    // Do NOT stamp when the clock is merely restored from NVS (historical shutdown time).
-    time_t now = time(nullptr);
-    if (clock_is_authoritative() && now > 1600000000) {
-        if (!storage_->save_str(tk::nvs_contract::kPairedAt,
-                                std::to_string((long long)now))) {
-            ESP_LOGW(TAG, "pairing date not persisted — the UI will re-stamp it on the next sync");
-        }
-        return now;
-    }
-    return 0;
+    std::string text;
+    int64_t seconds = 0;
+    if (storage_->load_str(tk::nvs_contract::kPairedAt, text) &&
+        tk::clock_parse_date(text, clock_plausibility_ceiling(), seconds))
+        return static_cast<time_t>(seconds);
+    // First status observation of a stored session at NTP time, not the Tesla pairing event.
+    // Acquire authority BEFORE sampling time: the reverse ordering could persist a browser
+    // sample taken just before the first NTP commit. Storage is outside the clock gate.
+    if (!clock_is_authoritative()) return 0;
+    const time_t now = time(nullptr);
+    if (!tk::historical_date_valid(now, clock_plausibility_ceiling())) return 0;
+    if (!storage_->save_str(tk::nvs_contract::kPairedAt, std::to_string((long long)now)))
+        ESP_LOGW(TAG, "session first-observed date not confirmed; a later status may retry");
+    return now;
 }
 
 bool VehicleController::has_key() {
@@ -846,10 +813,8 @@ __attribute__((noinline)) std::string VehicleController::compute_key_fingerprint
                 if (psa_hash_compute(PSA_ALG_SHA_1, pub, publen, sha, sizeof(sha), &shalen) ==
                         PSA_SUCCESS &&
                     shalen == sizeof(sha)) {
-                    char buf[16];
-                    snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X",
-                             sha[0], sha[1], sha[2], sha[3]);
-                    fp = buf;
+                    const auto formatted = tk::key_fingerprint_text(sha, sizeof(sha));
+                    fp = formatted.data();
                 }
             }
         }
@@ -897,16 +862,9 @@ tk::AutoEnrollmentSession VehicleController::enrollment_session_snapshot_(TickTy
     // unknown, never confirmed absence. No library validators that can log under this lock.
     tk::SemGuard vehicle_guard(vehicle_mutex_, wait_ticks);
     if (!vehicle_guard || !client_) return snapshot;
-    auto* peer = client_->get_peer(UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY);
-    if (!peer || !peer->is_private_key_initialized()) return snapshot;
-    snapshot.runtime_readable = true;
-    const auto* epoch = peer->get_epoch();
-    uint8_t epoch_bits = 0;
-    if (epoch) {
-        for (size_t i = 0; i < 16; ++i) epoch_bits |= epoch[i];
-    }
-    snapshot.runtime_ready = peer->is_valid() && peer->has_shared_secret() && epoch_bits != 0 &&
-        command_runner_.vcsec_session().is_authenticated();
+    const auto runtime = runtime_session_observation_locked_(UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY);
+    snapshot.runtime_readable = runtime.known;
+    snapshot.runtime_ready = runtime.usable;
     return snapshot;
 }
 

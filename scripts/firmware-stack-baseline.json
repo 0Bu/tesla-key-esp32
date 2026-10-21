@@ -15,10 +15,14 @@
         "CMakeFiles/__idf_main.dir/board.cpp.su": {},
         "CMakeFiles/__idf_main.dir/command_exec.cpp.su": {},
         "CMakeFiles/__idf_main.dir/config_blob.cpp.su": {
-          "/COMPONENT_MAIN_DIR/config_blob.cpp :: bool tk::cfg_save(NvsStorageAdapter&, const ConfigBlob&)": 416,
           "/COMPONENT_MAIN_DIR/logic/config_store.hpp :: bool tk::config_blob_decode(const uint8_t*, size_t, ConfigBlob&)": 256
         },
-        "CMakeFiles/__idf_main.dir/diag_crash.cpp.su": {},
+        "CMakeFiles/__idf_main.dir/diag_crash.cpp.su": {
+          "/COMPONENT_MAIN_DIR/coredump_hash.hpp :: bool tk::verify_coredump_checksum(Input&, const CoredumpHeader&) [with Input = CoredumpInput<PartitionReader>]": 448,
+          "/COMPONENT_MAIN_DIR/diag_crash.cpp :: void tk::capture_artifact(BootCrashInfo&, const char*)": 384,
+          "/COMPONENT_MAIN_DIR/diag_crash.cpp :: void tk::diag_crash_capture()": 272,
+          "/COMPONENT_MAIN_DIR/logic/coredump_image.hpp :: bool tk::fill_coredump_metadata(Input&, const CoredumpHeader&, uint16_t, uint32_t, const char*, size_t, bool, CoredumpMetadata&) [with Input = CoredumpInput<PartitionReader>]": 304
+        },
         "CMakeFiles/__idf_main.dir/diag_log.cpp.su": {
           "/COMPONENT_MAIN_DIR/diag_log.cpp :: DiagDumpResult diag_log_dump_chunks(const std::function<bool(const char*, unsigned int)>&, DiagDumpStart)": 336,
           "/COMPONENT_MAIN_DIR/diag_log.cpp :: int diag_vprintf_(const char*, va_list)": 320
@@ -31,11 +35,8 @@
         },
         "CMakeFiles/__idf_main.dir/http_common.cpp.su": {},
         "CMakeFiles/__idf_main.dir/http_config.cpp.su": {
-          "/COMPONENT_MAIN_DIR/http_config.cpp :: esp_err_t handle_set_mqtt(GuardedReq)": 288,
           "/COMPONENT_MAIN_DIR/http_config.cpp :: esp_err_t handle_set_ota(GuardedReq)": 320,
-          "/COMPONENT_MAIN_DIR/http_config.cpp :: esp_err_t handle_set_syslog(GuardedReq)": 288,
           "/COMPONENT_MAIN_DIR/http_config.cpp :: esp_err_t handle_set_vin(GuardedReq)": 592,
-          "/COMPONENT_MAIN_DIR/http_config.cpp :: esp_err_t handle_set_wifi(GuardedReq)": 320,
           "/COMPONENT_MAIN_DIR/http_config.cpp :: tk::MqttProbeResult mqtt_probe_broker(const std::string&)": 288
         },
         "CMakeFiles/__idf_main.dir/http_ota.cpp.su": {
@@ -44,7 +45,7 @@
         "CMakeFiles/__idf_main.dir/http_server.cpp.su": {
           "/COMPONENT_MAIN_DIR/http_server.cpp :: bool browser_mutation_allowed(httpd_req_t*)": 432,
           "/COMPONENT_MAIN_DIR/http_server.cpp :: bool origin_allowed_for_owned_addresses(httpd_req_t*, bool, const char*, const char*, const char*, bool, const char*)": 368,
-          "/COMPONENT_MAIN_DIR/http_server.cpp :: esp_err_t handle_all_dispatch(httpd_req_t*)": 336
+          "/COMPONENT_MAIN_DIR/http_server.cpp :: esp_err_t handle_all_dispatch(GuardedReq)": 336
         },
         "CMakeFiles/__idf_main.dir/http_status.cpp.su": {
           "/COMPONENT_MAIN_DIR/http_status.cpp :: cJSON* build_status_object(bool)": 1600,
@@ -77,17 +78,17 @@
         },
         "CMakeFiles/__idf_main.dir/provisioning.cpp.su": {
           "/COMPONENT_MAIN_DIR/provisioning.cpp :: SetupPortal portal_open(NvsStorageAdapter&, bool)": 544,
-          "/COMPONENT_MAIN_DIR/provisioning.cpp :: esp_err_t save_post_impl(httpd_req_t*)": 1472,
+          "/COMPONENT_MAIN_DIR/provisioning.cpp :: esp_err_t save_post_impl(httpd_req_t*, PortalSaveContext&)": 1472,
           "/COMPONENT_MAIN_DIR/provisioning.cpp :: void dns_task(void*)": 896
         },
         "CMakeFiles/__idf_main.dir/runtime_admission.cpp.su": {},
         "CMakeFiles/__idf_main.dir/safe_mode.cpp.su": {},
         "CMakeFiles/__idf_main.dir/stack_watch.cpp.su": {},
         "CMakeFiles/__idf_main.dir/syslog.cpp.su": {
-          "/COMPONENT_MAIN_DIR/syslog.cpp :: SendResult syslog_sendto(const sockaddr_in&, const char*, size_t, int*)": 352,
           "/COMPONENT_MAIN_DIR/syslog.cpp :: bool syslog_start_impl(NvsStorageAdapter&)": 352,
           "/COMPONENT_MAIN_DIR/syslog.cpp :: void syslog_send(const char*, size_t)": 304,
-          "/COMPONENT_MAIN_DIR/syslog.cpp :: void syslog_task(void*)": 480
+          "/COMPONENT_MAIN_DIR/syslog.cpp :: void syslog_task(void*)": 480,
+          "/COMPONENT_MAIN_DIR/syslog.cpp :: SendResult syslog_sendto(const sockaddr_in&, const char*, size_t, int*, tk::SyslogRecord)": 352
         },
         "CMakeFiles/__idf_main.dir/vehicle_commands.cpp.su": {
           "/COMPONENT_MAIN_DIR/vehicle_commands.cpp :: bool VehicleController::set_charging_amps(int, int)": 480
@@ -123,10 +124,14 @@
         "CMakeFiles/__idf_main.dir/board.cpp.su": {},
         "CMakeFiles/__idf_main.dir/command_exec.cpp.su": {},
         "CMakeFiles/__idf_main.dir/config_blob.cpp.su": {
-          "/COMPONENT_MAIN_DIR/config_blob.cpp :: bool tk::cfg_save(NvsStorageAdapter&, const ConfigBlob&)": 416,
           "/COMPONENT_MAIN_DIR/logic/config_store.hpp :: bool tk::config_blob_decode(const uint8_t*, size_t, ConfigBlob&)": 256
         },
-        "CMakeFiles/__idf_main.dir/diag_crash.cpp.su": {},
+        "CMakeFiles/__idf_main.dir/diag_crash.cpp.su": {
+          "/COMPONENT_MAIN_DIR/coredump_hash.hpp :: bool tk::verify_coredump_checksum(Input&, const CoredumpHeader&) [with Input = CoredumpInput<PartitionReader>]": 432,
+          "/COMPONENT_MAIN_DIR/diag_crash.cpp :: void tk::capture_artifact(BootCrashInfo&, const char*)": 384,
+          "/COMPONENT_MAIN_DIR/diag_crash.cpp :: void tk::diag_crash_capture()": 272,
+          "/COMPONENT_MAIN_DIR/logic/coredump_image.hpp :: bool tk::fill_coredump_metadata(Input&, const CoredumpHeader&, uint16_t, uint32_t, const char*, size_t, bool, CoredumpMetadata&) [with Input = CoredumpInput<PartitionReader>]": 304
+        },
         "CMakeFiles/__idf_main.dir/diag_log.cpp.su": {
           "/COMPONENT_MAIN_DIR/diag_log.cpp :: DiagDumpResult diag_log_dump_chunks(const std::function<bool(const char*, unsigned int)>&, DiagDumpStart)": 336,
           "/COMPONENT_MAIN_DIR/diag_log.cpp :: int diag_vprintf_(const char*, va_list)": 320
@@ -139,11 +144,8 @@
         },
         "CMakeFiles/__idf_main.dir/http_common.cpp.su": {},
         "CMakeFiles/__idf_main.dir/http_config.cpp.su": {
-          "/COMPONENT_MAIN_DIR/http_config.cpp :: esp_err_t handle_set_mqtt(GuardedReq)": 288,
           "/COMPONENT_MAIN_DIR/http_config.cpp :: esp_err_t handle_set_ota(GuardedReq)": 320,
-          "/COMPONENT_MAIN_DIR/http_config.cpp :: esp_err_t handle_set_syslog(GuardedReq)": 288,
           "/COMPONENT_MAIN_DIR/http_config.cpp :: esp_err_t handle_set_vin(GuardedReq)": 592,
-          "/COMPONENT_MAIN_DIR/http_config.cpp :: esp_err_t handle_set_wifi(GuardedReq)": 320,
           "/COMPONENT_MAIN_DIR/http_config.cpp :: tk::MqttProbeResult mqtt_probe_broker(const std::string&)": 288
         },
         "CMakeFiles/__idf_main.dir/http_ota.cpp.su": {
@@ -152,7 +154,7 @@
         "CMakeFiles/__idf_main.dir/http_server.cpp.su": {
           "/COMPONENT_MAIN_DIR/http_server.cpp :: bool browser_mutation_allowed(httpd_req_t*)": 432,
           "/COMPONENT_MAIN_DIR/http_server.cpp :: bool origin_allowed_for_owned_addresses(httpd_req_t*, bool, const char*, const char*, const char*, bool, const char*)": 368,
-          "/COMPONENT_MAIN_DIR/http_server.cpp :: esp_err_t handle_all_dispatch(httpd_req_t*)": 336
+          "/COMPONENT_MAIN_DIR/http_server.cpp :: esp_err_t handle_all_dispatch(GuardedReq)": 336
         },
         "CMakeFiles/__idf_main.dir/http_status.cpp.su": {
           "/COMPONENT_MAIN_DIR/http_status.cpp :: cJSON* build_status_object(bool)": 1600,
@@ -186,17 +188,17 @@
         },
         "CMakeFiles/__idf_main.dir/provisioning.cpp.su": {
           "/COMPONENT_MAIN_DIR/provisioning.cpp :: SetupPortal portal_open(NvsStorageAdapter&, bool)": 544,
-          "/COMPONENT_MAIN_DIR/provisioning.cpp :: esp_err_t save_post_impl(httpd_req_t*)": 1472,
+          "/COMPONENT_MAIN_DIR/provisioning.cpp :: esp_err_t save_post_impl(httpd_req_t*, PortalSaveContext&)": 1472,
           "/COMPONENT_MAIN_DIR/provisioning.cpp :: void dns_task(void*)": 896
         },
         "CMakeFiles/__idf_main.dir/runtime_admission.cpp.su": {},
         "CMakeFiles/__idf_main.dir/safe_mode.cpp.su": {},
         "CMakeFiles/__idf_main.dir/stack_watch.cpp.su": {},
         "CMakeFiles/__idf_main.dir/syslog.cpp.su": {
-          "/COMPONENT_MAIN_DIR/syslog.cpp :: SendResult syslog_sendto(const sockaddr_in&, const char*, size_t, int*)": 352,
           "/COMPONENT_MAIN_DIR/syslog.cpp :: bool syslog_start_impl(NvsStorageAdapter&)": 352,
           "/COMPONENT_MAIN_DIR/syslog.cpp :: void syslog_send(const char*, size_t)": 304,
-          "/COMPONENT_MAIN_DIR/syslog.cpp :: void syslog_task(void*)": 480
+          "/COMPONENT_MAIN_DIR/syslog.cpp :: void syslog_task(void*)": 480,
+          "/COMPONENT_MAIN_DIR/syslog.cpp :: SendResult syslog_sendto(const sockaddr_in&, const char*, size_t, int*, tk::SyslogRecord)": 352
         },
         "CMakeFiles/__idf_main.dir/vehicle_commands.cpp.su": {
           "/COMPONENT_MAIN_DIR/vehicle_commands.cpp :: bool VehicleController::set_charging_amps(int, int)": 480
@@ -231,10 +233,13 @@
         },
         "CMakeFiles/__idf_main.dir/board.cpp.su": {},
         "CMakeFiles/__idf_main.dir/command_exec.cpp.su": {},
-        "CMakeFiles/__idf_main.dir/config_blob.cpp.su": {
-          "/COMPONENT_MAIN_DIR/config_blob.cpp :: bool tk::cfg_save(NvsStorageAdapter&, const ConfigBlob&)": 400
+        "CMakeFiles/__idf_main.dir/config_blob.cpp.su": {},
+        "CMakeFiles/__idf_main.dir/diag_crash.cpp.su": {
+          "/COMPONENT_MAIN_DIR/coredump_hash.hpp :: bool tk::verify_coredump_checksum(Input&, const CoredumpHeader&) [with Input = CoredumpInput<PartitionReader>]": 560,
+          "/COMPONENT_MAIN_DIR/diag_crash.cpp :: void tk::capture_artifact(BootCrashInfo&, const char*)": 352,
+          "/COMPONENT_MAIN_DIR/diag_crash.cpp :: void tk::diag_crash_capture()": 256,
+          "/COMPONENT_MAIN_DIR/logic/coredump_image.hpp :: bool tk::fill_coredump_metadata(Input&, const CoredumpHeader&, uint16_t, uint32_t, const char*, size_t, bool, CoredumpMetadata&) [with Input = CoredumpInput<PartitionReader>]": 304
         },
-        "CMakeFiles/__idf_main.dir/diag_crash.cpp.su": {},
         "CMakeFiles/__idf_main.dir/diag_log.cpp.su": {
           "/COMPONENT_MAIN_DIR/diag_log.cpp :: DiagDumpResult diag_log_dump_chunks(const std::function<bool(const char*, unsigned int)>&, DiagDumpStart)": 336,
           "/COMPONENT_MAIN_DIR/diag_log.cpp :: int diag_vprintf_(const char*, va_list)": 272
@@ -247,11 +252,8 @@
         },
         "CMakeFiles/__idf_main.dir/http_common.cpp.su": {},
         "CMakeFiles/__idf_main.dir/http_config.cpp.su": {
-          "/COMPONENT_MAIN_DIR/http_config.cpp :: esp_err_t handle_set_mqtt(GuardedReq)": 272,
           "/COMPONENT_MAIN_DIR/http_config.cpp :: esp_err_t handle_set_ota(GuardedReq)": 256,
-          "/COMPONENT_MAIN_DIR/http_config.cpp :: esp_err_t handle_set_syslog(GuardedReq)": 272,
           "/COMPONENT_MAIN_DIR/http_config.cpp :: esp_err_t handle_set_vin(GuardedReq)": 576,
-          "/COMPONENT_MAIN_DIR/http_config.cpp :: esp_err_t handle_set_wifi(GuardedReq)": 272,
           "/COMPONENT_MAIN_DIR/http_config.cpp :: tk::MqttProbeResult mqtt_probe_broker(const std::string&)": 272
         },
         "CMakeFiles/__idf_main.dir/http_ota.cpp.su": {
@@ -260,7 +262,7 @@
         "CMakeFiles/__idf_main.dir/http_server.cpp.su": {
           "/COMPONENT_MAIN_DIR/http_server.cpp :: bool browser_mutation_allowed(httpd_req_t*)": 400,
           "/COMPONENT_MAIN_DIR/http_server.cpp :: bool origin_allowed_for_owned_addresses(httpd_req_t*, bool, const char*, const char*, const char*, bool, const char*)": 320,
-          "/COMPONENT_MAIN_DIR/http_server.cpp :: esp_err_t handle_all_dispatch(httpd_req_t*)": 304
+          "/COMPONENT_MAIN_DIR/http_server.cpp :: esp_err_t handle_all_dispatch(GuardedReq)": 304
         },
         "CMakeFiles/__idf_main.dir/http_status.cpp.su": {
           "/COMPONENT_MAIN_DIR/http_status.cpp :: cJSON* build_status_object(bool)": 1584,
@@ -291,17 +293,17 @@
         },
         "CMakeFiles/__idf_main.dir/provisioning.cpp.su": {
           "/COMPONENT_MAIN_DIR/provisioning.cpp :: SetupPortal portal_open(NvsStorageAdapter&, bool)": 528,
-          "/COMPONENT_MAIN_DIR/provisioning.cpp :: esp_err_t save_post_impl(httpd_req_t*)": 1376,
+          "/COMPONENT_MAIN_DIR/provisioning.cpp :: esp_err_t save_post_impl(httpd_req_t*, PortalSaveContext&)": 1376,
           "/COMPONENT_MAIN_DIR/provisioning.cpp :: void dns_task(void*)": 880
         },
         "CMakeFiles/__idf_main.dir/runtime_admission.cpp.su": {},
         "CMakeFiles/__idf_main.dir/safe_mode.cpp.su": {},
         "CMakeFiles/__idf_main.dir/stack_watch.cpp.su": {},
         "CMakeFiles/__idf_main.dir/syslog.cpp.su": {
-          "/COMPONENT_MAIN_DIR/syslog.cpp :: SendResult syslog_sendto(const sockaddr_in&, const char*, size_t, int*)": 352,
           "/COMPONENT_MAIN_DIR/syslog.cpp :: bool syslog_start_impl(NvsStorageAdapter&)": 320,
           "/COMPONENT_MAIN_DIR/syslog.cpp :: void syslog_send(const char*, size_t)": 288,
-          "/COMPONENT_MAIN_DIR/syslog.cpp :: void syslog_task(void*)": 464
+          "/COMPONENT_MAIN_DIR/syslog.cpp :: void syslog_task(void*)": 464,
+          "/COMPONENT_MAIN_DIR/syslog.cpp :: SendResult syslog_sendto(const sockaddr_in&, const char*, size_t, int*, tk::SyslogRecord)": 352
         },
         "CMakeFiles/__idf_main.dir/vehicle_commands.cpp.su": {
           "/COMPONENT_MAIN_DIR/vehicle_commands.cpp :: bool VehicleController::set_charging_amps(int, int)": 480
@@ -335,10 +337,13 @@
         },
         "CMakeFiles/__idf_main.dir/board.cpp.su": {},
         "CMakeFiles/__idf_main.dir/command_exec.cpp.su": {},
-        "CMakeFiles/__idf_main.dir/config_blob.cpp.su": {
-          "/COMPONENT_MAIN_DIR/config_blob.cpp :: bool tk::cfg_save(NvsStorageAdapter&, const ConfigBlob&)": 400
+        "CMakeFiles/__idf_main.dir/config_blob.cpp.su": {},
+        "CMakeFiles/__idf_main.dir/diag_crash.cpp.su": {
+          "/COMPONENT_MAIN_DIR/coredump_hash.hpp :: bool tk::verify_coredump_checksum(Input&, const CoredumpHeader&) [with Input = CoredumpInput<PartitionReader>]": 560,
+          "/COMPONENT_MAIN_DIR/diag_crash.cpp :: void tk::capture_artifact(BootCrashInfo&, const char*)": 352,
+          "/COMPONENT_MAIN_DIR/diag_crash.cpp :: void tk::diag_crash_capture()": 256,
+          "/COMPONENT_MAIN_DIR/logic/coredump_image.hpp :: bool tk::fill_coredump_metadata(Input&, const CoredumpHeader&, uint16_t, uint32_t, const char*, size_t, bool, CoredumpMetadata&) [with Input = CoredumpInput<PartitionReader>]": 304
         },
-        "CMakeFiles/__idf_main.dir/diag_crash.cpp.su": {},
         "CMakeFiles/__idf_main.dir/diag_log.cpp.su": {
           "/COMPONENT_MAIN_DIR/diag_log.cpp :: DiagDumpResult diag_log_dump_chunks(const std::function<bool(const char*, unsigned int)>&, DiagDumpStart)": 336,
           "/COMPONENT_MAIN_DIR/diag_log.cpp :: int diag_vprintf_(const char*, va_list)": 272
@@ -351,11 +356,8 @@
         },
         "CMakeFiles/__idf_main.dir/http_common.cpp.su": {},
         "CMakeFiles/__idf_main.dir/http_config.cpp.su": {
-          "/COMPONENT_MAIN_DIR/http_config.cpp :: esp_err_t handle_set_mqtt(GuardedReq)": 272,
           "/COMPONENT_MAIN_DIR/http_config.cpp :: esp_err_t handle_set_ota(GuardedReq)": 304,
-          "/COMPONENT_MAIN_DIR/http_config.cpp :: esp_err_t handle_set_syslog(GuardedReq)": 272,
           "/COMPONENT_MAIN_DIR/http_config.cpp :: esp_err_t handle_set_vin(GuardedReq)": 576,
-          "/COMPONENT_MAIN_DIR/http_config.cpp :: esp_err_t handle_set_wifi(GuardedReq)": 320,
           "/COMPONENT_MAIN_DIR/http_config.cpp :: tk::MqttProbeResult mqtt_probe_broker(const std::string&)": 272
         },
         "CMakeFiles/__idf_main.dir/http_ota.cpp.su": {
@@ -364,7 +366,7 @@
         "CMakeFiles/__idf_main.dir/http_server.cpp.su": {
           "/COMPONENT_MAIN_DIR/http_server.cpp :: bool browser_mutation_allowed(httpd_req_t*)": 400,
           "/COMPONENT_MAIN_DIR/http_server.cpp :: bool origin_allowed_for_owned_addresses(httpd_req_t*, bool, const char*, const char*, const char*, bool, const char*)": 352,
-          "/COMPONENT_MAIN_DIR/http_server.cpp :: esp_err_t handle_all_dispatch(httpd_req_t*)": 320
+          "/COMPONENT_MAIN_DIR/http_server.cpp :: esp_err_t handle_all_dispatch(GuardedReq)": 320
         },
         "CMakeFiles/__idf_main.dir/http_status.cpp.su": {
           "/COMPONENT_MAIN_DIR/http_status.cpp :: cJSON* build_status_object(bool)": 1584,
@@ -396,17 +398,17 @@
         },
         "CMakeFiles/__idf_main.dir/provisioning.cpp.su": {
           "/COMPONENT_MAIN_DIR/provisioning.cpp :: SetupPortal portal_open(NvsStorageAdapter&, bool)": 528,
-          "/COMPONENT_MAIN_DIR/provisioning.cpp :: esp_err_t save_post_impl(httpd_req_t*)": 1456,
+          "/COMPONENT_MAIN_DIR/provisioning.cpp :: esp_err_t save_post_impl(httpd_req_t*, PortalSaveContext&)": 1456,
           "/COMPONENT_MAIN_DIR/provisioning.cpp :: void dns_task(void*)": 880
         },
         "CMakeFiles/__idf_main.dir/runtime_admission.cpp.su": {},
         "CMakeFiles/__idf_main.dir/safe_mode.cpp.su": {},
         "CMakeFiles/__idf_main.dir/stack_watch.cpp.su": {},
         "CMakeFiles/__idf_main.dir/syslog.cpp.su": {
-          "/COMPONENT_MAIN_DIR/syslog.cpp :: SendResult syslog_sendto(const sockaddr_in&, const char*, size_t, int*)": 352,
           "/COMPONENT_MAIN_DIR/syslog.cpp :: bool syslog_start_impl(NvsStorageAdapter&)": 320,
           "/COMPONENT_MAIN_DIR/syslog.cpp :: void syslog_send(const char*, size_t)": 288,
-          "/COMPONENT_MAIN_DIR/syslog.cpp :: void syslog_task(void*)": 464
+          "/COMPONENT_MAIN_DIR/syslog.cpp :: void syslog_task(void*)": 464,
+          "/COMPONENT_MAIN_DIR/syslog.cpp :: SendResult syslog_sendto(const sockaddr_in&, const char*, size_t, int*, tk::SyslogRecord)": 352
         },
         "CMakeFiles/__idf_main.dir/vehicle_commands.cpp.su": {
           "/COMPONENT_MAIN_DIR/vehicle_commands.cpp :: bool VehicleController::set_charging_amps(int, int)": 480

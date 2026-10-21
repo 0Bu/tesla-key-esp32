@@ -202,6 +202,7 @@ tk::mqtt::DevicePayload device_full_input() {
     in.ble_connected = true;
     in.has_ble_rssi = true; in.ble_rssi = -72;
     in.paired = true;
+    in.session_available = true;
     in.boot_time = "2026-01-02T03:04:05+00:00";
     in.free_heap = 100000;
     in.version = "0.0.0-test";
@@ -633,7 +634,7 @@ void test_exact_payload_branches() {
     check_exact_retained(build_empty_full, "{}");
     check_exact_retained(
         build_device_full,
-        "{\"wifi_rssi\":-61,\"ble_connected\":true,\"ble_rssi\":-72,\"paired\":true,"
+        "{\"wifi_rssi\":-61,\"ble_connected\":true,\"ble_rssi\":-72,\"paired\":true,\"session_available\":true,"
         "\"boot_time\":\"2026-01-02T03:04:05+00:00\",\"free_heap\":100000,"
         "\"version\":\"0.0.0-test\",\"largest_block\":50000,\"min_free_heap\":40000,"
         "\"reset_reason\":\"power_on\",\"reset_reason_code\":1,\"crash_dump\":true,"
@@ -642,7 +643,7 @@ void test_exact_payload_branches() {
         "\"auto_pair_stack_min_free_bytes\":6000,\"mqtt_stack_min_free_bytes\":7000}");
     check_exact_retained(
         build_device_minimal,
-        "{\"ble_connected\":false,\"paired\":false,\"free_heap\":1,\"version\":\"v\","
+        "{\"ble_connected\":false,\"paired\":false,\"session_available\":false,\"free_heap\":1,\"version\":\"v\","
         "\"largest_block\":2,\"min_free_heap\":3,\"reset_reason\":\"unknown\","
         "\"reset_reason_code\":0,\"crash_dump\":false,\"safe_mode\":true,"
         "\"wifi_reconnects\":4,\"mqtt_reconnects\":5}");

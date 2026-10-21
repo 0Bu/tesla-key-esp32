@@ -7,12 +7,43 @@
 
 #include <esp_log.h>
 
+#include <atomic>
 #include <vector>
 #include <utility>
 
 static const char* TAG = "config_blob";
 
 namespace tk {
+
+namespace {
+ConfigBlobBuffer s_encode_buffer{};
+std::atomic_flag s_encode_active = ATOMIC_FLAG_INIT;
+
+// Whole cfg_save operation ownership, not a leaf lock: no waiting, allocation or callout in
+// acquisition/release. A busy/reentrant caller touches no bytes and performs no NVS/log work.
+struct ConfigEncodeLease {
+    bool held;
+    ConfigEncodeLease() noexcept : held(!s_encode_active.test_and_set(std::memory_order_acquire)) {}
+    ~ConfigEncodeLease() {
+        if (!held) return;
+        volatile uint8_t* bytes = s_encode_buffer.data();
+        for (size_t i = 0; i < s_encode_buffer.size(); ++i) bytes[i] = 0;
+        s_encode_active.clear(std::memory_order_release);
+    }
+    ConfigEncodeLease(const ConfigEncodeLease&) = delete;
+    ConfigEncodeLease& operator=(const ConfigEncodeLease&) = delete;
+};
+} // namespace
+
+static std::atomic<bool> s_wifi_rolled_back{false};
+
+void cfg_init_wifi_rollback_status(bool rolled_back) noexcept {
+    s_wifi_rolled_back.store(rolled_back, std::memory_order_relaxed);
+}
+
+bool cfg_wifi_rolled_back() noexcept {
+    return s_wifi_rolled_back.load(std::memory_order_relaxed);
+}
 
 static bool load_legacy(NvsStorageAdapter& cfg, ConfigBlob& out) {
     // Legacy per-key layout: a fresh device, or one that has not saved anything since upgrading to
@@ -83,7 +114,9 @@ bool cfg_load_for_update(NvsStorageAdapter& cfg, ConfigBlob& out) {
 }
 
 bool cfg_save(NvsStorageAdapter& cfg, const ConfigBlob& in) {
-    ConfigBlobBuffer buf{};
+    ConfigEncodeLease lease;
+    if (!lease.held) return false;
+    auto& buf = s_encode_buffer;
     const size_t n = config_blob_encode(in, buf.data(), buf.size());
     if (n == 0) {
         // Encoding refuses rather than truncates when a field is over its bound, so this means the
@@ -93,9 +126,12 @@ bool cfg_save(NvsStorageAdapter& cfg, const ConfigBlob& in) {
         return false;
     }
     if (!cfg.save_blob(kConfigBlobKey, buf.data(), n)) {
-        ESP_LOGE(TAG, "config blob write failed — the PREVIOUS configuration is intact");
+        ESP_LOGE(TAG, "config blob write/commit was not confirmed");
         return false;
     }
+
+    // Publish only durable state, before fallible legacy mirroring or HTTP reply/restart work.
+    s_wifi_rolled_back.store(in.wifi_rolled_back, std::memory_order_relaxed);
 
     // Mirror into the legacy keys so a DOWNGRADE to a build that predates the blob still finds its
     // configuration. Best-effort by design and deliberately after the blob: the blob is the source

@@ -117,6 +117,23 @@ inline constexpr HttpRoute classify_http_route(HttpVerb verb,
     return HttpRoute::NotFound;
 }
 
+// Diagnostic GETs expose device state without the evcc compatibility contract. Bind their Host
+// to an owned name/address even when browser provenance headers are absent.
+inline constexpr bool http_route_requires_owned_host(HttpVerb verb, HttpRoute route) noexcept {
+    if (verb != HttpVerb::Get) return false;
+    switch (route) {
+        case HttpRoute::Status:
+        case HttpRoute::Diag:
+        case HttpRoute::Heap:
+        case HttpRoute::Coredump:
+        case HttpRoute::OtaStatus:
+        case HttpRoute::OtaChangelog:
+            return true;
+        default:
+            return false;
+    }
+}
+
 // Routes that can scan, connect, pair, mutate vehicle identity or issue a signed command are
 // unavailable until the whole essential runtime is Ready.  MCP POST is intentionally classified
 // as one unit: method parsing inside a wildcard endpoint must never become an admission bypass.
@@ -161,7 +178,7 @@ enum class HttpRouteOtaConflict {
     Reject503 = 503,
 };
 
-// Routes that conflict with an active OTA update. The six runtime/config mutation routes
+// Routes that conflict with an active OTA update. The five runtime/config mutation routes
 // return 409 Conflict ("an OTA update is in progress"); the two identity mutations return
 // 503 Service Unavailable ("... blocked during OTA verification/update") via OtaIdentityMutationGuard;
 // that gate is held by an update check as well, the 409 guard only by an active download/flash.

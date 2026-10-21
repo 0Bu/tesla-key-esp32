@@ -62,13 +62,9 @@ bool VehicleController::ensure_connected_until_(uint32_t deadline, tk::ConnectOr
         // measurement and the rate-limit rule. Use only adverts from THIS attempt here; the
         // public target_connectable() intentionally retains 90 s of history for a stable UI
         // and would otherwise mislabel a car that has just driven away.
-        // target_connectable_since() copies each advert name into a std::string (tesla-ble's
-        // matches_vin overload), so it ALLOCATES and can throw — and this path runs when the
-        // radio is unhappy, which correlates with the heap being unhappy. Letting that escape
-        // would lose the line explaining the failure to the very condition it is reporting on,
-        // and would abort the enclosing command besides. -1 is the scanner's own "not known"
-        // value (what it returns when it can't take the scan mutex either), so the fallback
-        // classifies conservatively: warn, rate-limited, no false at-BLE-limit alarm.
+        // target_connectable_since() snapshots fixed advert metadata and compares the cached
+        // target name without allocating. Retain exception containment at this diagnostic seam;
+        // -1 also represents an unavailable scan snapshot and avoids a false BLE-limit alarm.
         int connectable = -1;
         try {
             connectable = ble_->target_connectable_since(attempt_start_us);
@@ -124,12 +120,15 @@ void VehicleController::set_last_command_error(const std::string& err) {
 }
 
 void VehicleController::publish_command_outcome_(const CommandOutcome& outcome) {
-    if (!result_mutex_) {
-        last_error_ = outcome.success ? std::string{} : outcome.error;
-        return;
+    std::string error = outcome.success ? std::string{} : outcome.error;
+    if (!outcome.success && tk::execution_uncertain(outcome.failure) &&
+        error.find(tk::uncertain_command_reason()) != 0) {
+        error.insert(0, "; ");
+        error.insert(0, tk::uncertain_command_reason());
     }
+    if (!result_mutex_) { last_error_.swap(error); return; }
     tk::SemGuard g(result_mutex_);
-    last_error_ = outcome.success ? std::string{} : outcome.error;
+    last_error_.swap(error);  // No allocation or destruction under the result leaf lock.
 }
 
 std::shared_ptr<VehicleController::CommandCompletion>
@@ -152,6 +151,7 @@ void VehicleController::invalidate_and_flush_(uint32_t generation) {
     {
         tk::SemGuard g(vehicle_mutex_);
         try {
+            retire_vcsec_contexts_();
             command_runner_.clear();
             command_builders_.fill(nullptr);
             request_framer_reset_();
@@ -208,6 +208,7 @@ VehicleController::CommandOutcome VehicleController::await_completion_(
         tk::completion_ok_note(completion_timeout_);
         out.completed = completion->completed;
         out.success   = completion->success;
+        out.failure   = completion->failure;
         out.error     = completion->error.data();
         if (!out.error.empty()) ESP_LOGW(TAG, "command failed: %s", out.error.c_str());
         if (completion->drop_link) {
@@ -220,6 +221,15 @@ VehicleController::CommandOutcome VehicleController::await_completion_(
         return out;
     }
 
+    // Copy only POD under Vehicle lock before invalidation discards queue evidence.
+    out.failure = tk::uncertain_command_failure();
+    {
+        tk::SemGuard g(vehicle_mutex_, pdMS_TO_TICKS(50));
+        if (g && command_generation_.load() == generation)
+            out.failure = command_runner_.pending_failure_info(completion->command_id);
+    }
+    if (tk::execution_uncertain(out.failure)) out.error = tk::uncertain_command_reason();
+    else out.error = "command completion deadline exhausted";
     note_completion_timeout_(name, timeout_policy);
     invalidate_and_flush_(generation);
     return out;
@@ -227,16 +237,21 @@ VehicleController::CommandOutcome VehicleController::await_completion_(
 
 VehicleController::ResultCb VehicleController::make_result_cb_(
         const std::shared_ptr<CommandCompletion>& completion,
-        uint32_t generation, bool auth_fail_is_health_probe) {
-    return [this, completion, generation, auth_fail_is_health_probe](tk::OperationResult result) {
+        uint32_t generation, bool auth_fail_is_health_probe, bool response_expected) {
+    return [this, completion, generation, auth_fail_is_health_probe, response_expected](tk::OperationResult result) {
       // A timeout flush synchronously invokes queued callbacks. Generation is deliberately
       // checked before any state mutation, so such callbacks cannot complete a later request.
       if (command_generation_.load() != generation) return;
       try {
         completion->completed = true;
         completion->success = result.compatible_success();
-        if (completion->success) {
-            // Any successful command breaks a consecutive-error streak. Only the supervisor's
+        completion->failure = result.error()
+            ? tk::CommandFailureInfo{result.error()->severity(), result.error()->outcome()}
+            : tk::CommandFailureInfo{};
+        if (completion->success && response_expected) {
+            // A successful response breaks a consecutive-error streak. A TX-only completion
+            // proves only local submission, so it cannot stamp reachability or reset that streak.
+            // Only the supervisor's
             // successful health response clears the volatile recovery hint itself.
             auth_fail_streak_ = 0;
             cmd_fail_streak_.store(0);  // link is answering cleanly → reset the desync backstop
@@ -247,8 +262,10 @@ VehicleController::ResultCb VehicleController::make_result_cb_(
         }
         if (result.is_failure() && result.error()) {
             const auto& msg = result.error()->message();
-            const size_t error_size = std::min(msg.size(), completion->error.size() - 1);
-            std::memcpy(completion->error.data(), msg.data(), error_size);
+            const char* visible = tk::execution_uncertain(completion->failure)
+                ? tk::uncertain_command_reason() : msg.c_str();
+            const size_t error_size = std::min(std::strlen(visible), completion->error.size() - 1);
+            std::memcpy(completion->error.data(), visible, error_size);
             completion->error[error_size] = '\0';
             // Soft-desync backstop: when the link is churning (buffer-recovery storm) or
             // timing out, drop the link after kCmdFailDropStreak consecutive transport faults.
@@ -296,6 +313,11 @@ VehicleController::ResultCb VehicleController::make_result_cb_(
           completion->completed = true;
           completion->success = false;
           completion->callback_fault = true;
+          completion->failure = tk::uncertain_command_failure();
+          const char* reason = tk::uncertain_command_reason();
+          const size_t size = std::min(std::strlen(reason), completion->error.size() - 1);
+          std::memcpy(completion->error.data(), reason, size);
+          completion->error[size] = '\0';
       }
       if (command_generation_.load() == generation && completion->sem) {
           xSemaphoreGive(completion->sem);
@@ -309,20 +331,31 @@ bool VehicleController::send_vcsec_(const std::string& name, Builder builder,
                                      WakePolicy wp, int timeout_ms,
                                      tk::ConnectOrigin origin, bool auth_fail_is_health_probe,
                                      tk::CompletionTimeoutPolicy timeout_policy,
-                                     bool completes_on_transmit) {
+                                     bool completes_on_transmit, tk::CommandEffect effect,
+                                     tk::VcsecReplyKind kind) {
+    const uint32_t deadline = timeout_ms > 0
+        ? deadline_in_(static_cast<uint32_t>(timeout_ms)) : xTaskGetTickCount();
+    return send_vcsec_outcome_(name, std::move(builder), wp, deadline, origin,
+        auth_fail_is_health_probe, timeout_policy, completes_on_transmit, effect, kind).success;
+}
+
+VehicleController::CommandOutcome VehicleController::send_vcsec_outcome_(
+        const std::string& name, Builder builder, WakePolicy wp, uint32_t deadline,
+        tk::ConnectOrigin origin, bool auth_fail_is_health_probe,
+        tk::CompletionTimeoutPolicy timeout_policy, bool completes_on_transmit,
+        tk::CommandEffect effect, tk::VcsecReplyKind kind) {
     const bool foreground = origin == tk::ConnectOrigin::Foreground;
     CommandOutcome out;
-    if (timeout_ms <= 0) {
+    if (remaining_ms_(deadline) <= 0) {
         out.error = "command deadline exhausted";
         if (foreground) publish_command_outcome_(out);
-        return false;
+        return out;
     }
-    const uint32_t deadline = deadline_in_(static_cast<uint32_t>(timeout_ms));
     tk::SemGuard cmd_guard(command_mutex_, ticks_until_(deadline));
     if (!cmd_guard) {
         out.error = "command deadline exhausted waiting for another request";
         if (foreground) publish_command_outcome_(out);
-        return false;
+        return out;
     }
     tk::InFlightGuard inflight(cmd_in_flight_);
     // Real commands open the active window so loop_task resumes polling; the background
@@ -331,16 +364,17 @@ bool VehicleController::send_vcsec_(const std::string& name, Builder builder,
     if (foreground) last_cmd_ticks_.store(xTaskGetTickCount());
     out = send_vcsec_locked_(name, std::move(builder), wp, deadline,
                              origin, auth_fail_is_health_probe, timeout_policy,
-                             completes_on_transmit);
+                             completes_on_transmit, 3, effect, kind);
     if (foreground) publish_command_outcome_(out);
-    return out.success;
+    return out;
 }
 
 VehicleController::CommandOutcome VehicleController::send_vcsec_locked_(
         const std::string& name, Builder builder, WakePolicy wp,
         uint32_t deadline, tk::ConnectOrigin origin, bool auth_fail_is_health_probe,
         tk::CompletionTimeoutPolicy timeout_policy,
-        bool completes_on_transmit, uint32_t max_retries) {
+        bool completes_on_transmit, uint32_t max_retries,
+        tk::CommandEffect effect, tk::VcsecReplyKind kind) {
     CommandOutcome out;
     if (!command_identity_ready_()) {
         out.error = "runtime key is not verified; reboot or regenerate required";
@@ -372,20 +406,21 @@ VehicleController::CommandOutcome VehicleController::send_vcsec_locked_(
         const uint32_t now_ms = static_cast<uint32_t>(pdTICKS_TO_MS(xTaskGetTickCount()));
         const uint32_t timeout_ms = remaining_ms_(deadline);
 
-        auto cb = make_result_cb_(completion, generation, auth_fail_is_health_probe);
-        auto on_done = [cb](bool success, const std::string& err) {
+        auto cb = make_result_cb_(completion, generation, auth_fail_is_health_probe, !completes_on_transmit);
+        auto on_done = [cb](bool success, const std::string& err, tk::CommandFailureInfo info) {
             if (success) {
                 cb(tk::OperationResult::success());
             } else {
                 cb(tk::OperationResult::failure(
                     std::make_unique<tk::CommandError>(
-                        err, tk::CommandError::Severity::Temporary,
-                        tk::CommandError::Outcome::DefinitelyFailed)));
+                        err, info.severity, info.outcome)));
             }
         };
         cmd_id = command_runner_.enqueue(
             name, tk::BleDomain::VehicleSecurity, wp, timeout_ms, now_ms, {}, std::move(on_done),
-            completes_on_transmit, max_retries);
+            completes_on_transmit, max_retries, kind);
+        completion->command_id = cmd_id;
+        command_runner_.set_command_effect(cmd_id, effect);
         if (cmd_id == 0) {
             out.error = "command queue full";
             return out;
@@ -440,7 +475,7 @@ bool VehicleController::send_infotainment_(const std::string& name, Builder buil
 
 VehicleController::CommandOutcome VehicleController::send_infotainment_locked_(
         const std::string& name, Builder builder, uint32_t deadline,
-        WakePolicy wp) {
+        WakePolicy wp, tk::CommandEffect effect) {
     CommandOutcome out;
     if (!command_identity_ready_()) {
         out.error = "runtime key is not verified; reboot or regenerate required";
@@ -474,18 +509,19 @@ VehicleController::CommandOutcome VehicleController::send_infotainment_locked_(
         const uint32_t timeout_ms = remaining_ms_(deadline);
 
         auto cb = make_result_cb_(completion, generation);
-        auto on_done = [cb](bool success, const std::string& err) {
+        auto on_done = [cb](bool success, const std::string& err, tk::CommandFailureInfo info) {
             if (success) {
                 cb(tk::OperationResult::success());
             } else {
                 cb(tk::OperationResult::failure(
                     std::make_unique<tk::CommandError>(
-                        err, tk::CommandError::Severity::Temporary,
-                        tk::CommandError::Outcome::DefinitelyFailed)));
+                        err, info.severity, info.outcome)));
             }
         };
         cmd_id = command_runner_.enqueue(
             name, tk::BleDomain::Infotainment, wp, timeout_ms, now_ms, {}, std::move(on_done));
+        completion->command_id = cmd_id;
+        command_runner_.set_command_effect(cmd_id, effect);
         if (cmd_id == 0) {
             out.error = "command queue full";
             return out;
@@ -540,17 +576,22 @@ bool VehicleController::wake_up(int timeout_ms) {
         return true;  // fresh infotainment data (<60 s) ⇒ awake
     }
 
-    // Fire the wake. The car wakes on the first message; Tesla acks a wake with an
-    // authenticated-but-empty response that carries no commandStatus to complete on,
-    // so we ignore send_vcsec_'s result and confirm out-of-band below. Sending it also opens the active window
-    // (last_cmd_ticks_), so loop_task starts refreshing the charge cache as soon as the car is up.
-    int wake_budget_ms = remaining_ms_(deadline);
-    if (wake_budget_ms > 9000) wake_budget_ms = 9000;
-    if (wake_budget_ms > 0) {
-        (void)send_vcsec_("Wake", [](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
+    // Keep the send result owned by this call. A definite pre-transmission failure returns
+    // immediately; possible submission still allows telemetry confirmation within the same
+    // deadline, without another wake frame. Local TX completion alone does not prove Awake.
+    CommandOutcome sent;
+    if (remaining_ms_(deadline) > 0) {
+        sent = send_vcsec_outcome_("Wake", [](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
             return c->build_vcsec_action_message(VCSEC_RKEAction_E_RKE_ACTION_WAKE_VEHICLE, b, l);
-        }, WakePolicy::NoWakeFail, wake_budget_ms, tk::ConnectOrigin::Foreground, false,
-           tk::CompletionTimeoutPolicy::ForegroundWarn, true /* completes_on_transmit */);
+        }, WakePolicy::NoWakeFail, capped_deadline_(deadline, 9000), tk::ConnectOrigin::Foreground, false,
+           tk::CompletionTimeoutPolicy::ForegroundWarn, true /* completes_on_transmit */,
+           tk::CommandEffect::Mutating, tk::VcsecReplyKind::Action);
+    } else {
+        sent.error = "command deadline exhausted";
+    }
+    if (!tk::wake_confirmation_required(sent.success, sent.failure)) {
+        publish_command_outcome_(sent);
+        return false;
     }
 
     // Confirm the infotainment actually woke by waiting for live charge telemetry: loop_task
@@ -570,7 +611,14 @@ bool VehicleController::wake_up(int timeout_ms) {
             return true;
         }
     }
-    final_outcome.error = "wake confirmation timed out";
+    if (!sent.success) {
+        // Preserve the call's original uncertain failure; another request may have changed
+        // the shared public error while this caller waited for telemetry.
+        final_outcome = std::move(sent);
+    } else {
+        final_outcome.failure = tk::uncertain_command_failure();
+        final_outcome.error = "wake confirmation timed out";
+    }
     publish_command_outcome_(final_outcome);
     return false;
 }
@@ -648,7 +696,7 @@ bool VehicleController::set_charging_amps(int amps, int timeout_ms) {
                 return c->build_car_server_get_vehicle_data_message(
                     b, l, CarServer_GetVehicleData_getChargeState_tag);
             },
-            deadline, WakePolicy::WakeIfNeeded);
+            deadline, WakePolicy::WakeIfNeeded, tk::CommandEffect::ReadOnly);
         bool poll_ok = poll_outcome.success;
 
         const ChargingAmpsFeedback feedback_after = charging_amps_feedback_snapshot_();
@@ -701,6 +749,7 @@ bool VehicleController::set_charging_amps(int amps, int timeout_ms) {
                  "charging amps not verified: %s", poll_outcome.error.c_str());
     }
     outcome.completed = poll_outcome.completed;
+    outcome.failure = tk::uncertain_command_failure();
     outcome.success = false;
     outcome.error = reason;
     publish_command_outcome_(outcome);

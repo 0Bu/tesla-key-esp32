@@ -245,6 +245,7 @@ struct DevicePayload {
     bool has_ble_rssi{};
     double ble_rssi{};
     bool paired{};
+    bool session_available{};
     const char* boot_time{};
     double free_heap{};
     const char* version{};
@@ -274,6 +275,7 @@ inline JsonOwner build_device_payload(const DevicePayload& in) noexcept {
     json.boolean(root, "ble_connected", in.ble_connected);
     if (in.has_ble_rssi) json.number(root, "ble_rssi", in.ble_rssi);
     json.boolean(root, "paired", in.paired);
+    json.boolean(root, "session_available", in.session_available);
     if (present(in.boot_time)) json.string(root, "boot_time", in.boot_time);
     json.number(root, "free_heap", in.free_heap);
     json.string(root, "version", in.version);

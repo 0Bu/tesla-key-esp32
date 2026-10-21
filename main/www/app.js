@@ -69,6 +69,19 @@ function timedRequest(send,url,options,timeoutMs){
 }
 function requestJsonWithTimeout(url,options,timeoutMs){ return timedRequest(requestJson,url,options,timeoutMs); }
 function requestJsonResultWithTimeout(url,options,timeoutMs){ return timedRequest(requestJsonResult,url,options,timeoutMs); }
+// Preserve the device's request-local outcome without inventing physical completion or retrying.
+function degradedReply(j){
+  var o=j&&j.response?j.response:j;
+  return o&&o.reply_degraded===true?o:null;
+}
+function showDegradedReply(j,key){
+  var o=degradedReply(j);
+  if(!o) return false;
+  toast(o.reason||'Operation outcome unknown; refresh status before another attempt',
+        o.outcome==='succeeded'?'info':'err',key);
+  poll();
+  return true;
+}
 function commandResponse(j){
   var o=j&&j.response;
   if(!o||typeof o.result!=='boolean'||typeof o.reason!=='string') throw new Error('invalid command response');
@@ -443,7 +456,7 @@ function lastChips(s){
 }
 function render(s){
   state=s;
-  var linked=!!(s.ble&&s.ble.connected), paired=!!s.paired;
+  var linked=!!(s.ble&&s.ble.connected), paired=!!s.paired||!!s.session_available;
   var hasVin=s.vin&&s.vin!=='UNKNOWN', configured=hasVin&&s.key_present;
   var v=s.vehicle, charging=v&&/charg/i.test(v.status||'');
   var safe=!!(s.sys&&s.sys.safe_mode);
@@ -575,7 +588,7 @@ function render(s){
 
   // setup tiles ----------------------------------------------------
   $("vehVal").innerHTML=hasVin?esc(s.vin):'<span class="ph">Not set</span>';
-  var pairedTxt=s.paired_at?('Paired '+new Date(s.paired_at*1000).toLocaleDateString(undefined,{year:'numeric',month:'short',day:'numeric'})):'Paired with the vehicle';
+  var pairedTxt=s.paired_at?('Session first observed '+new Date(s.paired_at*1000).toLocaleDateString(undefined,{year:'numeric',month:'short',day:'numeric'})):'Paired with the vehicle';
   setSub("vehSub", paired?pairedTxt:(hasVin?'Not paired yet':'Add the VIN to begin'), '');
   var vinTx=hasVin?'Change VIN':'Add VIN';
   var vb=$("vinBtn"); if(vb){ vb.setAttribute('aria-label',vinTx); vb.setAttribute('title',vinTx); }
@@ -586,7 +599,8 @@ function render(s){
   // scans for reasons with no deadline, and keying the label off that flag while the countdown
   // came from the phase is what used to make the two disagree.
   var ble=s.ble||{};
-  var d=bleRowFromStatus(s);
+  // Presenter input may use usable RAM; the public durable paired field stays unchanged.
+  var d=bleRowFromStatus(Object.assign({},s,{paired:paired}));
   if(d.row==='listing'){
     // No VIN: the device never connects/enrols (pairing is gated off), it only discovers.
     // List every nearby Tesla with its signal.
@@ -741,6 +755,7 @@ function toggleCharge(){
   return requestJsonResult('/api/1/vehicles/'+encodeURIComponent(vin)+'/command/'+cmd,{method:'POST'})
     .then(function(res){
       var j=res.json;
+      if(showDegradedReply(j,'charge')) return;
       if(j && j.response && typeof j.response.result === 'boolean'){
         if(j.response.result){ toast(isCharging?'Charging stopped':'Charging started', 'ok', 'charge'); return; }
         var f=chargeFailMsg((j.response.reason)||'', isCharging);
@@ -984,6 +999,7 @@ function editVin(){
     toast('Saving VIN…', 'load', 'vin');
     return requestJsonResult('/set_vin',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({vin:v})})
       .then(function(res){
+        if(showDegradedReply(res.json,'config')) return;
         var o=res.json&&res.json.response;
         if(o && typeof o.result === 'boolean' && typeof o.reason === 'string'){
           if(!o.result){ toast(o.reason||'Failed to save VIN', 'err', 'vin'); return; }
@@ -1007,7 +1023,7 @@ function editMqtt(){
       var v=(x||'').trim();
       if(!v) return null;
       if(/[ \t\r\n]/.test(v)) return 'Invalid broker — spaces not allowed';
-      if(utf8Len(v)>120) return 'Broker too long (max 120 bytes)';
+      if(utf8Len(v)>64) return 'Broker too long (max 64 bytes)';
       var auth=v, scheme=auth.indexOf('://');
       if(scheme>=0) auth=auth.slice(scheme+3);
       var colon=auth.lastIndexOf(':');
@@ -1028,11 +1044,12 @@ function editMqtt(){
     toast(v?'Saving MQTT broker…':'Disabling MQTT…', 'load', 'mqtt');
     return requestJsonResult('/set_mqtt',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({broker:v})})
       .then(function(res){
+        if(showDegradedReply(res.json,'config')) return;
         var o=res.json&&res.json.response;
         if(o && typeof o.result === 'boolean' && typeof o.reason === 'string'){
           if(!o.result){ toast(o.reason||'Failed to save MQTT broker', 'err', 'mqtt'); return; }
           if(/no reboot|unchanged|already/i.test(o.reason||'')){ toast(v?'MQTT broker unchanged':'MQTT already disabled', 'info', 'mqtt'); return; }
-          toast('Saved · rebooting', 'ok', 'mqtt');
+          toast(o.reason||'Saved · rebooting', 'info', 'mqtt');
           return;
         }
         var msg=(!res.ok && res.status)?('Failed to save MQTT broker (HTTP '+res.status+')'):'Failed to save MQTT broker — no change was confirmed';
@@ -1051,7 +1068,7 @@ function editSyslog(){
       var v=(x||'').trim();
       if(!v) return null;
       if(/[ \t\r\n]/.test(v)) return 'Invalid server — spaces not allowed';
-      if(utf8Len(v)>120) return 'Server too long (max 120 bytes)';
+      if(utf8Len(v)>64) return 'Server too long (max 64 bytes)';
       if(/^[a-zA-Z]+:\/\//.test(v)) return 'Invalid server — no scheme allowed';
       var colon=v.lastIndexOf(':');
       if(colon>=0){
@@ -1072,11 +1089,12 @@ function editSyslog(){
     toast(v?'Saving Syslog server…':'Disabling Syslog…', 'load', 'syslog');
     return requestJsonResult('/set_syslog',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({server:v})})
       .then(function(res){
+        if(showDegradedReply(res.json,'config')) return;
         var o=res.json&&res.json.response;
         if(o && typeof o.result === 'boolean' && typeof o.reason === 'string'){
           if(!o.result){ toast(o.reason||'Failed to save Syslog server', 'err', 'syslog'); return; }
           if(/no reboot|unchanged|already/i.test(o.reason||'')){ toast(v?'Syslog server unchanged':'Syslog already disabled', 'info', 'syslog'); return; }
-          toast('Saved · rebooting', 'ok', 'syslog');
+          toast(o.reason||'Saved · rebooting', 'info', 'syslog');
           return;
         }
         var msg=(!res.ok && res.status)?('Failed to save Syslog server (HTTP '+res.status+')'):'Failed to save Syslog server — no change was confirmed';
@@ -1098,6 +1116,7 @@ function wakeCar(){
   return requestJsonResult('/api/1/vehicles/'+encodeURIComponent(vin)+'/command/wake_up',{method:'POST'})
     .then(function(res){
       var j=res.json;
+      if(showDegradedReply(j,'wake')){ wakeStop(); return; }
       if(j && j.response && typeof j.response.result === 'boolean'){
         if(j.response.result){
           toast('Wake sent · waiting for the car…', 'load', 'wake');
@@ -1132,6 +1151,7 @@ function genKey(){
     return requestJsonResult('/gen_keys' + query, {method: 'POST'})
       .then(function(res){
         var j = res.json;
+        if(showDegradedReply(j,'key')) return;
         if(!res.ok){
           var msg = (j && j.reason) ? j.reason : ('HTTP ' + res.status);
           toast(msg, 'err', 'key');
@@ -1261,6 +1281,10 @@ function setChannel(chan){
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ channel: chan })
   }, OTA_HTTP_TIMEOUT_MS).then(function(res){
+    if(degradedReply(res.json)){
+      otaChannelInFlight=false; otaChannelTarget=null; otaChannel=prevChan;
+      renderChanMenu(); showDegradedReply(res.json,'channel'); fwRefocus(); return;
+    }
     if(!res.ok){
       var rj = res.json && res.json.response;
       var err = new Error('HTTP ' + res.status);
@@ -1500,7 +1524,7 @@ function otaCheck(){
   return requestJsonWithTimeout(checkUrl,{},OTA_HTTP_TIMEOUT_MS).then(function(j){
     if(!j||j.started!==true) throw new Error((j&&j.reason)||'check did not start');
     return otaCheckPoll();
-  }).catch(function(){ otaFail('check failed'); });
+  }).catch(function(err){ otaFail((err && err.message) || 'check failed'); });
 }
 function otaCheckPoll(){
   clearTimeout(otaTimer);
@@ -1534,7 +1558,7 @@ function otaCheckPoll(){
       toast('Firmware is up to date', 'ok', 'ota');
       otaInline('<span>up to date</span>'); otaInlineClear(3500);
     }
-  }).catch(function(){ otaFail('check failed'); });
+  }).catch(function(err){ otaFail((err && err.message) || 'check failed'); });
 }
 function otaPoll(){
   clearTimeout(otaTimer);
@@ -1689,7 +1713,7 @@ if(typeof window!=='undefined'){
 
 /* ---------- boot ---------- */
 function boot(){
-  fetch('/set_time',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ms:Date.now()})}).catch(function(){});
+  requestJson('/set_time',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ms:Date.now()})}).catch(function(){});
   poll(); setInterval(poll,4000);
   setInterval(function(){ if(feedOk) paintCd(); },1000);
   resumeOta();

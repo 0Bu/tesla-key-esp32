@@ -35,8 +35,10 @@ log, commit, upload, publicly attach or casually inspect them.
 
 ### NVS retention
 
-`main/logic/nvs_contract.hpp` owns the exact namespace/key/API/retention/secrecy inventory.
-The storage adapter rejects unknown records, wrong APIs, collisions and names over 15 bytes.
+`main/logic/nvs_contract.hpp` owns the exact namespace/key/API/retention inventory and records
+which entries contain secrets. The secret flag is classification metadata; it does not encrypt or
+redact stored values. The storage adapter rejects unknown records, wrong APIs, collisions and names
+over 15 bytes.
 
 | Namespace / logical key (stored key where different) | Owner | Retention |
 |---|---|---|
@@ -71,12 +73,24 @@ with backoff, the boot does not continue while the AP is up, and a power cycle r
 First-time setup, stored credentials that fail validation, and a credential rollback that could not
 be saved keep it open until the form is saved. mDNS advertises version, not VIN.
 
-Browser mutations require a device-owned Host (name or current lease IP), matching Origin and no
-cross-site fetch. This includes POST and legacy mutating GETs for update check, diagnostic verbosity/
-clear and coredump clear. Query keys are case-insensitive; values stay exact. Headerless POST clients remain compatible. Mutating GETs need matching Origin/Referer or allowed
-fetch-site provenance, or a custom header such as X-Requested-With; otherwise they return 403.
-POST aliases exist for ota/check, diag and coredump. The open provisioning AP has its separate
-physical-range boundary. This is CSRF/rebinding protection, not authentication.
+Browser mutations require a device-owned Host, matching Origin when present, and no cross-site
+fetch. Owned names are the shared DHCP boot name and the current mDNS name (bare or `.local`),
+including a conflict rename; owned IPv4 addresses are the active lease and the connection-local
+socket address. A failed mDNS lookup grants no mDNS alias. Router-added DNS suffixes are not trusted.
+The socket policy is IPv4-only; compilation rejects IPv6 enablement until it has a reviewed policy.
+This includes POST and legacy mutating GETs for update check, diagnostic verbosity/clear and coredump
+clear. Query keys are case-insensitive; values stay exact, and literal fragments end the query.
+Headerless POST clients remain compatible. Mutating GETs need matching Origin/Referer or allowed
+fetch-site provenance, or the specific `X-Requested-With` header; otherwise they return 403.
+POST aliases exist for ota/check, diag and coredump.
+
+Diagnostic GETs `/status`, `/diag`, `/heap`, `/coredump`, `/ota/status` and `/ota/changelog` require
+a device-owned Host before gathering or sending state, including redacted exports. The evcc version,
+vehicle-data and body-controller routes retain their existing compatibility behavior. `GET /mcp`
+returns a fixed 405 with no diagnostic data. The static UI at `/` and `/index.html` sends
+`X-Frame-Options: DENY` and `Content-Security-Policy: frame-ancestors 'none'`; embedding it in an iframe
+is unsupported. These headers do not restrict the page's scripts/styles. The open provisioning AP
+has its separate physical-range boundary. This is CSRF/rebinding protection, not authentication.
 
 An access-control reverse proxy must send the device IP or `.local` name as upstream Host and
 remove or rewrite Origin to match. Browser saves through a router-expanded FQDN can return 403.
@@ -88,7 +102,9 @@ that actually grants a lease.
 ## Syslog and diagnostic export
 
 Syslog sends unredacted console logs over cleartext, unauthenticated UDP. VIN, SSID and MACs may
-appear; use trusted collectors. `/status?redact=1` and `/diag?redact=1` redact known identifiers,
+appear; keep raw logs private and use trusted collectors. Known MQTT URI parse-error records
+are replaced before Serial, RAM and Syslog, including when the optional RAM-ring mutex fails.
+This narrow guard does not sanitize arbitrary library or fragmented driver output. `/status?redact=1` and `/diag?redact=1` redact known identifiers,
 but retain the physical board MAC. Inspect before sharing. Overlong/truncated logical log lines
 fail closed; do not join partial generations.
 
@@ -132,8 +148,26 @@ This pipeline pin is not a second device trust anchor.
 
 A separately authorized key setup uses a dedicated offline RSA-3072 key, exponent 65537,
 unencrypted PKCS#1/PKCS#8 PEM. Do not generate production keys in CI or reuse a GPG key.
-`espsecure.py generate_signing_key --version 2 --scheme rsa3072 <private-path>` is the relevant tool;
-validate with a disposable payload on the trusted machine. Protect at least two offline backups.
+Run **one** of the following alternatives in a private offline directory outside the repository.
+Do not overwrite an existing signing key; `umask 077` restricts newly created files to owner access.
+
+With esptool v5 or later, use the current `espsecure` command and hyphenated subcommand:
+
+```bash
+umask 077
+espsecure generate-signing-key --version 2 --scheme rsa3072 ota_signing_key.pem
+```
+
+Alternatively, generate the same key type with [OpenSSL](https://docs.openssl.org/3.6/man1/openssl-genpkey/):
+
+```bash
+umask 077
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 \
+  -pkeyopt rsa_keygen_pubexp:65537 -out ota_signing_key.pem
+```
+
+OpenSSL writes unencrypted PKCS#8 PEM, which `espsecure` accepts directly.
+Validate with a disposable payload on the trusted machine. Protect at least two offline backups.
 Loss requires fleet USB recovery; compromise defeats signed OTA. Never pass the real key through
 agent tools, logs, repository files or tests. Tests use throwaway keys only.
 
