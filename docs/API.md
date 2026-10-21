@@ -25,8 +25,15 @@ POST /api/1/vehicles/{VIN}/command/{command}   Content-Type: application/json
 | `auto_conditioning_start` / `auto_conditioning_stop` | — |
 | `set_scheduled_charging` | `{"enable": true, "start_minutes": 1380}` (0–1439 minutes after local midnight; 1380 = 23:00) |
 
-- **evcc boolean bodies:** `charge_start` also accepts the JSON scalar `true` and `charge_stop`
-  `false` (evcc's generic setter); mismatched booleans and all other non-object bodies are `400`.
+- **evcc boolean bodies:** `charge_start` and `wake_up` also accept the JSON scalar `true`, and
+  `charge_stop` accepts `false` (evcc's generic setter); mismatched booleans and all other
+  non-object bodies are `400`.
+- **`wake_up` waits for the car:** an already awake car returns at once. Otherwise the call returns
+  once live infotainment telemetry confirms it is awake, or answers `502` "wake
+  confirmation timed out" after about 20 s. The single HTTP task serves other requests only
+  afterwards. evcc's tesla-ble template gives setters evcc's fixed 10 s HTTP timeout (its
+  `timeout` setting applies only to reads), so evcc may log a timeout for a wake that still
+  completes.
 - **Validation:** supplied integers must be integral and in range, else `400` — nothing is silently
   clamped. Absent REST fields default to percent=80, enable=false, start_minutes=0 and sentry on=false;
   supplied fields are still validated. MCP has its own required-argument rules.

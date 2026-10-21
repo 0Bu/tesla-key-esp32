@@ -220,20 +220,40 @@ print(f"FAIL|{name} failed/timed out (HTTP {code}): {raw}")
   esac
 }
 
+# evcc's own setter requests (evcc-io/evcc 5a85a46, templates/definition/vehicle/tesla-ble.yaml).
+# chargeEnable and wakeup have no `body:` line, so evcc's HTTP plugin posts the setter value as a
+# JSON scalar; maxcurrent posts an object. The live run and the self-test call these same helpers.
+evcc_wake_up()      { cmd "wake_up" "wake_up" 'true'; }
+evcc_charge_start() { cmd "charge_start" "charge_start" 'true' soft; }
+evcc_charge_stop()  { cmd "charge_stop" "charge_stop" 'false' soft; }
+evcc_max_current()  { cmd "set_charging_amps($1)" "set_charging_amps" "{\"charging_amps\": $1}"; }
+
 self_test() {
   local ESC_BASE="http://127.0.0.1" ESC_VIN="TESTVIN" TIMEOUT=5
   local mock_code="" mock_body=""
+  st_dir="$(mktemp -d)" || exit 1
+  if [ -z "$st_dir" ] || [ ! -d "$st_dir" ]; then
+    echo "self_test FAILED: could not create a temporary directory" >&2
+    exit 1
+  fi
+  trap 'rm -rf "$st_dir"' EXIT
 
   kex() {
     echo "10|$mock_code|$mock_body"
   }
 
+  # expect_fail MODE NAME [BRANCH]: the case must count a failure; with BRANCH, the failure
+  # message must also contain that text, so a case cannot pass through the wrong branch.
   expect_fail() {
-    local test_mode="$1" test_name="$2"
+    local test_mode="$1" test_name="$2" want="${3:-}"
     local prev_fail=$fail
-    cmd "$test_name" "dummy" "{}" "$test_mode" >/dev/null 2>&1 || true
+    cmd "$test_name" "dummy" "{}" "$test_mode" >"$st_dir/out" 2>&1 || true
     if [ "$fail" -le "$prev_fail" ]; then
       echo "self_test FAILED: expected failure for $test_name ($test_mode), but fail count did not increase" >&2
+      exit 1
+    fi
+    if [ -n "$want" ] && ! grep -qF -- "$want" "$st_dir/out"; then
+      echo "self_test FAILED: $test_name ($test_mode) failed outside the expected branch \"$want\"" >&2
       exit 1
     fi
   }
@@ -262,13 +282,13 @@ self_test() {
   mock_code="503"; mock_body='{"error":"out of memory"}'
   expect_fail "soft" "soft HTTP 503 out of memory"
 
-  # 3. HTTP 502, vehicle service not ready -> must fail
+  # 3. HTTP 502, vehicle service not ready -> must fail as a proxy/reachability error
   mock_code="502"; mock_body='{"result":false,"reason":"vehicle service not ready"}'
-  expect_fail "soft" "soft HTTP 502 vehicle service not ready"
+  expect_fail "soft" "soft HTTP 502 vehicle service not ready" "proxy or reachability error"
 
-  # 4. HTTP 502, locally generated vehicle asleep -> must fail
+  # 4. HTTP 502, locally generated vehicle asleep -> must fail as a proxy/reachability error
   mock_code="502"; mock_body='{"result":false,"reason":"vehicle asleep"}'
-  expect_fail "soft" "soft HTTP 502 vehicle asleep"
+  expect_fail "soft" "soft HTTP 502 vehicle asleep" "proxy or reachability error"
 
   # 5. Soft mode with harmless vehicle-side rejection -> passes (softened)
   mock_code="502"; mock_body='{"result":false,"reason":"already_closed"}'
@@ -288,22 +308,22 @@ self_test() {
 
   # Actual local producer reasons from vehicle_commands.cpp / http_api.cpp -> must fail!
   mock_code="502"; mock_body='{"response":{"result":false,"reason":"command queue full"}}'
-  expect_fail "soft" "soft HTTP 502 command queue full"
+  expect_fail "soft" "soft HTTP 502 command queue full" "proxy or reachability error"
 
   mock_code="502"; mock_body='{"response":{"result":false,"reason":"command enqueue failed"}}'
-  expect_fail "soft" "soft HTTP 502 command enqueue failed"
+  expect_fail "soft" "soft HTTP 502 command enqueue failed" "proxy or reachability error"
 
   mock_code="502"; mock_body='{"response":{"result":false,"reason":"command completion unavailable"}}'
-  expect_fail "soft" "soft HTTP 502 command completion unavailable"
+  expect_fail "soft" "soft HTTP 502 command completion unavailable" "proxy or reachability error"
 
   mock_code="502"; mock_body='{"response":{"result":false,"reason":"command deadline exhausted"}}'
-  expect_fail "soft" "soft HTTP 502 command deadline exhausted"
+  expect_fail "soft" "soft HTTP 502 command deadline exhausted" "proxy or reachability error"
 
   mock_code="502"; mock_body='{"response":{"result":false,"reason":"command deadline exhausted waiting for another request"}}'
-  expect_fail "soft" "soft HTTP 502 command deadline exhausted waiting for request"
+  expect_fail "soft" "soft HTTP 502 command deadline exhausted waiting for request" "proxy or reachability error"
 
   mock_code="502"; mock_body='{"response":{"result":false,"reason":"runtime key is not verified; reboot or regenerate required"}}'
-  expect_fail "soft" "soft HTTP 502 runtime key not verified"
+  expect_fail "soft" "soft HTTP 502 runtime key not verified" "proxy or reachability error"
 
   # Malformed JSON in soft, reject, and strict modes -> must fail!
   mock_code="502"; mock_body='{"response":{"result":false'
@@ -317,7 +337,7 @@ self_test() {
 
   # Unknown failure outcome in soft mode -> must fail!
   mock_code="502"; mock_body='{"result":false,"reason":"mystery failure"}'
-  expect_fail "soft" "soft HTTP 502 unknown failure reason"
+  expect_fail "soft" "soft HTTP 502 unknown failure reason" "unverified failure outcome"
 
   mock_code="502"; mock_body='{"response":{"result":false,"reason":null}}'
   expect_fail "soft" "soft HTTP 502 null reason"
@@ -386,10 +406,10 @@ self_test() {
   expect_fail "reject" "reject HTTP 503"
 
   mock_code="502"; mock_body='{"result":false,"reason":"not reachable"}'
-  expect_fail "reject" "reject HTTP 502 not reachable"
+  expect_fail "reject" "reject HTTP 502 not reachable" "car unreachable"
 
   mock_code="502"; mock_body='{"result":false,"reason":"vehicle asleep"}'
-  expect_fail "reject" "reject HTTP 502 vehicle asleep"
+  expect_fail "reject" "reject HTTP 502 vehicle asleep" "car unreachable"
 
   # 8. Success execution (HTTP 200 with result:true) in default mode -> passes
   mock_code="200"; mock_body='{"result":true}'
@@ -407,6 +427,53 @@ self_test() {
 
   mock_code="500"; mock_body='{"result":true}'
   expect_fail "" "strict HTTP 500 result:true"
+
+  # evcc request replay: run cmd's real request snippet against a recording nc and assert the
+  # bytes evcc's requests share with it: request line, Content-Length and body. (The script's own
+  # Content-Type header is not part of that claim: evcc's template sends none, and the firmware
+  # ignores it.) The fake nc answers with LF-only lines so the response split works with GNU and
+  # BSD sed alike.
+  mkdir -p "$st_dir/bin"
+  printf '#!/bin/sh\ncat > "$E2E_REC"\nprintf "HTTP/1.1 200 OK\\n\\n{\\"response\\":{\\"result\\":true,\\"reason\\":\\"\\"}}"\n' \
+    > "$st_dir/bin/nc"
+  printf '#!/bin/sh\necho 1000\n' > "$st_dir/bin/date"
+  chmod +x "$st_dir/bin/nc" "$st_dir/bin/date"
+  kex() { PATH="$st_dir/bin:$PATH" E2E_REC="$st_dir/request" sh -c "$1"; }
+
+  # expect_request SUFFIX BODY HELPER [ARG]: the live helper must send exactly evcc's request.
+  expect_request() {
+    local suf="$1" body="$2" prev_pass=$pass
+    shift 2
+    rm -f "$st_dir/request"
+    "$@" >"$st_dir/out" 2>&1 || true
+    if [ "$pass" -ne $((prev_pass + 1)) ]; then
+      echo "self_test FAILED: evcc $suf replay did not pass: $(cat "$st_dir/out")" >&2
+      exit 1
+    fi
+    python3 - "$st_dir/request" "$suf" "$body" <<'PY' || exit 1
+import sys
+
+raw = open(sys.argv[1], "rb").read()
+suf, body = sys.argv[2], sys.argv[3].encode()
+head, sep, payload = raw.partition(b"\r\n\r\n")
+lines = head.split(b"\r\n")
+errors = []
+if lines[0] != f"POST /api/1/vehicles/TESTVIN/command/{suf} HTTP/1.1".encode():
+    errors.append(f"request line {lines[0]!r}")
+if f"Content-Length: {len(body)}".encode() not in lines:
+    errors.append(f"Content-Length does not match {len(body)} body bytes")
+if not sep or payload != body:
+    errors.append(f"body {payload!r} != {body!r}")
+if errors:
+    print(f"self_test FAILED: evcc {suf} request: " + "; ".join(errors), file=sys.stderr)
+    sys.exit(1)
+PY
+  }
+
+  expect_request "wake_up" 'true' evcc_wake_up
+  expect_request "charge_start" 'true' evcc_charge_start
+  expect_request "charge_stop" 'false' evcc_charge_stop
+  expect_request "set_charging_amps" '{"charging_amps": 16}' evcc_max_current 16
 
   echo "e2e_evcc self-test: PASS"
   return 0
@@ -581,10 +648,10 @@ if [ "$RUN_COMMANDS" = 1 ]; then
   CUR_LIM=$(echo "$SAMPLE"   | sed -n 's/.*"charge_limit_soc":\([0-9]*\).*/\1/p')
   echo "  baseline: charge_amps=${CUR_AMPS:-?}  charge_limit_soc=${CUR_LIM:-?}"
 
-  cmd "wake_up" "wake_up"
+  evcc_wake_up
 
   # set_charging_amps: set to current value (no real change), proves the BLE write path
-  cmd "set_charging_amps(${CUR_AMPS:-6})" "set_charging_amps" "{\"charging_amps\":${CUR_AMPS:-6}}"
+  evcc_max_current "${CUR_AMPS:-6}"
 
   # set_charge_limit: a real change (CUR-10) then restore to CUR. Re-asserting the
   # *same* value is a no-op the car rejects when Complete, so we change-and-restore.
@@ -601,8 +668,8 @@ if [ "$RUN_COMMANDS" = 1 ]; then
   cmd "door_unlock" "door_unlock" "" reject
 
   if [ "$ALLOW_CHARGE_TOGGLE" = 1 ]; then
-    cmd "charge_start" "charge_start" "" soft
-    cmd "charge_stop"  "charge_stop"  "" soft
+    evcc_charge_start
+    evcc_charge_stop
   else
     echo "  SKIP  charge_start/charge_stop (set ALLOW_CHARGE_TOGGLE=1 to test; physically toggles charging)"
   fi
