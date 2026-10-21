@@ -7,12 +7,23 @@
 
 #include <esp_log.h>
 
+#include <atomic>
 #include <vector>
 #include <utility>
 
 static const char* TAG = "config_blob";
 
 namespace tk {
+
+static std::atomic<bool> s_wifi_rolled_back{false};
+
+void cfg_init_wifi_rollback_status(bool rolled_back) noexcept {
+    s_wifi_rolled_back.store(rolled_back, std::memory_order_relaxed);
+}
+
+bool cfg_wifi_rolled_back() noexcept {
+    return s_wifi_rolled_back.load(std::memory_order_relaxed);
+}
 
 static bool load_legacy(NvsStorageAdapter& cfg, ConfigBlob& out) {
     // Legacy per-key layout: a fresh device, or one that has not saved anything since upgrading to
@@ -96,6 +107,10 @@ bool cfg_save(NvsStorageAdapter& cfg, const ConfigBlob& in) {
         ESP_LOGE(TAG, "config blob write failed — the PREVIOUS configuration is intact");
         return false;
     }
+
+    // Publish only durable state, before fallible legacy mirroring or HTTP reply/restart work.
+    // A successful WiFi save can defer its reboot while an OTA check owns the operation gate.
+    s_wifi_rolled_back.store(in.wifi_rolled_back, std::memory_order_relaxed);
 
     // Mirror into the legacy keys so a DOWNGRADE to a build that predates the blob still finds its
     // configuration. Best-effort by design and deliberately after the blob: the blob is the source

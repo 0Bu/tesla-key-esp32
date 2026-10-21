@@ -114,21 +114,9 @@ static cJSON* build_status_object(bool redact) {
     // why its presence — not a false-valued object — is the signal).
     in.eth_link = (tk::net_kind() == tk::NetLink::Eth);
     if (in.eth_link) tk::net_eth_phy(&in.eth_speed_mbps, &in.eth_full_duplex);
-    // Read from the CONFIG, not from any live state: the marker outlives the reboot the rollback
-    // performed, which is the whole reason it is persisted rather than kept in RAM.
-    //
-    // Read ONCE per boot, not per request. The marker cannot change while this image runs — both
-    // writers (main.cpp's rollback, POST /set_wifi) reboot immediately after saving — while
-    // /status is the web UI's 4 s poll, so a read here is an NVS blob read plus its std::vector on
-    // a request path, forever, for a value that is fixed at boot. This device's binding limit is
-    // the largest CONTIGUOUS free block and the rule in AGENTS.md is not to allocate on a request
-    // path without needing to.
-    static const bool s_rolled_back = [] {
-        tk::ConfigBlob cb;
-        tk::cfg_load(*g_config, cb);
-        return cb.wifi_rolled_back;
-    }();
-    in.wifi_rolled_back = s_rolled_back;
+    // Boot seeds this cache from verified configuration; committed saves refresh it even when
+    // an active OTA check defers the WiFi restart. Polling never reads or allocates an NVS blob.
+    in.wifi_rolled_back = tk::cfg_wifi_rolled_back();
     in.ota_channel = tk::ota_channel_name(ota_get_channel());
 
     in.mqtt_configured = mqtt_ha_configured();

@@ -2,6 +2,7 @@
 #include "config_blob.hpp"
 #include "logic/key_rotation.hpp"
 #include "logic/vin_transition.hpp"
+#include "logic/wifi_rollback.hpp"
 
 #include <algorithm>
 #include <array>
@@ -944,6 +945,60 @@ static void test_nvs_blob_load() {
     }
 }
 
+static void test_wifi_rollback_status_cache(NvsStorageAdapter& storage) {
+    tk::ConfigBlob cfg;
+    cfg.wifi_ssid = "MyWiFi";
+    cfg.wifi_pass = "test-pass";
+    cfg.wifi_rolled_back = true;
+
+    // A rollback survives boot. Polling the initialized diagnostic must not touch NVS.
+    tk::cfg_init_wifi_rollback_status(cfg.wifi_rolled_back);
+    clear_call_log();
+    for (int poll = 0; poll < 100; ++poll) CHECK(tk::cfg_wifi_rolled_back());
+    CHECK(nvs_call_log.empty());
+
+    // An unrelated configuration commit retains the verdict.
+    cfg.syslog_uri = "192.0.2.1:514";
+    CHECK(tk::cfg_save(storage, cfg));
+    CHECK(tk::cfg_wifi_rolled_back());
+
+    // Reproduce a changed WiFi save while its restart is deferred: no reboot occurs here.
+    tk::stage_wifi_change(cfg, std::string("NewWiFi"), std::string("test-pass-2"));
+    CHECK(!cfg.wifi_rolled_back);
+    next_set_blob_error = ESP_FAIL;
+    CHECK(!tk::cfg_save(storage, cfg));
+    CHECK(tk::cfg_wifi_rolled_back());
+    next_commit_error = ESP_FAIL;
+    CHECK(!tk::cfg_save(storage, cfg));
+    CHECK(tk::cfg_wifi_rolled_back());
+
+    tk::ConfigBlob oversized = cfg;
+    oversized.wifi_ssid.assign(33, 'x');
+    clear_call_log();
+    CHECK(!tk::cfg_save(storage, oversized));
+    CHECK(tk::cfg_wifi_rolled_back());
+    CHECK(nvs_call_log.empty());
+
+    // The blob is authoritative even when its best-effort legacy mirror fails.
+    next_set_str_error = ESP_FAIL;
+    CHECK(tk::cfg_save(storage, cfg));
+    clear_call_log();
+    for (int poll = 0; poll < 100; ++poll) CHECK(!tk::cfg_wifi_rolled_back());
+    CHECK(nvs_call_log.empty());
+
+    // Later rollback/retry cycles publish both true and false, without rebooting or latching.
+    for (int cycle = 0; cycle < 3; ++cycle) {
+        cfg.wifi_rolled_back = true;
+        CHECK(tk::cfg_save(storage, cfg));
+        CHECK(tk::cfg_wifi_rolled_back());
+        tk::stage_wifi_change(cfg, std::string("RetryWiFi"), std::string("test-pass-3"));
+        CHECK(tk::cfg_save(storage, cfg));
+        CHECK(!tk::cfg_wifi_rolled_back());
+    }
+    tk::cfg_init_wifi_rollback_status(false);
+    CHECK(!tk::cfg_wifi_rolled_back());
+}
+
 int main() {
     using S = tk::NvsStringLoadState;
     using C = tk::ConfigLoadState;
@@ -980,6 +1035,7 @@ int main() {
     test_session_presence_cache();
     test_string_read_write_paths(storage);
     test_raw_blob_write_paths(storage);
+    test_wifi_rollback_status_cache(storage);
     test_remove_paths(storage, tesla_storage);
     test_vin_transition_cleanup_ordering(storage, tesla_storage);
     test_key_rotation_date_cleanup_ordering(tesla_storage);

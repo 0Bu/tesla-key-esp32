@@ -1057,6 +1057,20 @@ def require_mqtt_factory_inventory(payloads: str, production: str, tests: str) -
             raise AssertionError(f"MQTT payload OOM/success execution seam missing: {token!r}")
 
 
+def require_wifi_rollback_status_cache(main_source: str, producer: str) -> None:
+    boot = function_body_in(main_source, "app_main")
+    seed = "tk::cfg_init_wifi_rollback_status(cfg_blob.wifi_rolled_back);"
+    require_before("WiFi rollback cache after verified boot load", boot,
+                   "load_config_blob_verified(config_store, cfg_blob);", seed)
+    require_before("WiFi rollback cache before HTTP startup", boot,
+                   seed, "http_server_start(vehicle, config_store)")
+    if "in.wifi_rolled_back = tk::cfg_wifi_rolled_back();" not in producer:
+        raise AssertionError("/status must consume the current committed WiFi rollback cache")
+    for forbidden in ("tk::cfg_load(", "tk::cfg_load_state(", "tk::ConfigBlob "):
+        if forbidden in producer:
+            raise AssertionError("/status must not reload allocating configuration snapshots")
+
+
 def require_status_production_seams(producer: str, handler: str) -> None:
     for token in ("tk::StatusJsonEmitter", "tk::status::emit_status", "return e.release();"):
         if token not in producer:
@@ -4105,6 +4119,7 @@ def require_runtime_source_contracts() -> None:
     require_status_production_seams(
         function_body("build_status_object"), function_body("handle_status")
     )
+    require_wifi_rollback_status_cache(SOURCES["main.cpp"], function_body("build_status_object"))
     require_vehicle_data_production_seams(function_body("handle_vehicle_data"))
     require_vehicle_climate_cache_seam(function_body("emit_cached_vehicle_climate"))
     require_vehicle_drive_cache_seam(function_body("emit_cached_vehicle_drive"))
@@ -4839,6 +4854,16 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
 
     status_producer = function_body("build_status_object")
     status_handler = function_body("handle_status")
+    for boot, producer in (
+        (SOURCES["main.cpp"].replace("tk::cfg_init_wifi_rollback_status", "fixture_missing_init"),
+         status_producer),
+        (SOURCES["main.cpp"], status_producer.replace("tk::cfg_wifi_rolled_back()", "true")),
+        (SOURCES["main.cpp"], status_producer.replace("{", "{ tk::ConfigBlob cb;", 1)),
+    ):
+        require_mutation_rejected(
+            "WiFi rollback status cache wiring",
+            lambda boot=boot, producer=producer: require_wifi_rollback_status_cache(boot, producer),
+        )
     for token in ("tk::StatusJsonEmitter", "tk::status::emit_status", "return e.release();"):
         mutated_status = status_producer.replace(token, "fixture_status_bypass", 1)
         try:

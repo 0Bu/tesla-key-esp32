@@ -378,6 +378,7 @@ extern "C" void app_main() {
     } else {
         load_config_blob_verified(config_store, cfg_blob);
     }
+    tk::cfg_init_wifi_rollback_status(cfg_blob.wifi_rolled_back);
 
     if (cfg_blob.has_ota) {
         ota_set_channel(tk::ota_channel_from_int(cfg_blob.ota_channel));
