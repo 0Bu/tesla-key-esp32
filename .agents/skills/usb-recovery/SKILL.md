@@ -502,7 +502,8 @@ sleep 2
 curl -fsS "http://$DEVICE_IP/ota/status" | jq .
 ```
 
-- `version` / `platform` should read the just-flashed release (not the old `1.4.0` floor).
+- `version` / `platform` should read the just-flashed release (not the `version.txt` floor that an
+  unstamped local build reports).
 - `paired:true` reports the firmware's VCSEC-session presence result. It does not prove private-key
   or other configuration preservation, complete NVS integrity, or a successful vehicle handshake.
   The prescribed app/otadata write ranges do not overlap NVS; assess this status field only as
