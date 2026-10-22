@@ -301,8 +301,9 @@ describes the failure symptom; use the table below to investigate before retryin
 
 ## See also
 
-- [`$ship`](../ship/SKILL.md) — cut a release and put it on the board (this skill verifies the
-  channel that leaves behind).
+- [`$ship`](../ship/SKILL.md) — merge an authorized PR, follow its main build and deliver the
+  signed image to one board; it never cuts a release. This skill verifies the stable Release that
+  only a separately authorized manual `release: true` dispatch publishes.
 - [`$usb-recovery`](../usb-recovery/SKILL.md) — no-build USB reflash of the published signed image
   + otadata erase, the recovery a "signature bad" device needs.
 - [`docs/SECURITY.md`](../../../docs/SECURITY.md) — signing key lifecycle, TOFU trust anchor, and

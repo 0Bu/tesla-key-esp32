@@ -245,8 +245,8 @@ DELIVERY=usb
 
 `nvs@0x9000` is untouched → pairing/key/VIN/WiFi survive. Download-mode gotcha: a
 board with no auto-reset needs BOOT held through the probe and both esptool calls, and the input
-`NO_AUTO_RESET=1`, which adds `--before no-reset --after no-reset` to each call as in
-`$usb-recovery`; the chip then stays in download mode, so release BOOT and replug the board before
+`NO_AUTO_RESET=1`, which adds `--before no-reset --after no-reset` to each call, as
+`$usb-recovery`'s no-auto-reset write block does; the chip then stays in download mode, so release BOOT and replug the board before
 step 5. Port selection: see the **flash-esp32** skill — same host mechanics.
 
 ### Explicitly selected OTA delivery
@@ -310,9 +310,11 @@ DELIVERY=ota
 
 The device requires exact manifest/image version identity, selected channel/PR eligibility and a
 valid RSA signature. Eligibility includes the documented same-core preview/Dev and return-to-Release
-exceptions in `docs/ARCHITECTURE.md`. Rollback stays armed until the image has both run 90 s and PROVEN a link
-(`logic/health_gate.hpp`) — so a flashed image that never reaches the LAN is not committed, and
-after 600 s it is left pending for the next reboot to roll back.
+exceptions in `docs/ARCHITECTURE.md`. Rollback stays armed until the image has run 90 s with
+admitted runtime, a healthy NimBLE host, a proven network lease and an INTERNAL largest block
+≥4 KiB (`logic/health_gate.hpp`; [Architecture](../../../docs/ARCHITECTURE.md) owns the rule) — so
+a flashed image that never reaches the LAN is not committed, and after 600 s it is left pending
+for the next reboot to roll back.
 
 ## 5. Verify — the loop is closed only when the device says so
 
