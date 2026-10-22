@@ -244,9 +244,9 @@ if ! esptool --chip "$TARGET" -p "$PORT" --before no-reset --after hard-reset \
 fi
 ```
 
-- **Bonus:** the CI image carries the **CI-stamped version** (derived by `scripts/next-version.sh`),
-  whereas a local build reports only the `version.txt` **floor** — so the signed artifact makes
-  the reported version match the release/manifest.
+- **Bonus:** the CI image carries the **CI-stamped version** (chosen by
+  `scripts/select-release-version.sh`), whereas a local build reports only the `version.txt`
+  **floor** — so the signed artifact makes the reported version match the release/manifest.
 - **Never flash `tesla-key-esp32<sfx>-<ver>-merged.bin`** to preserve NVS — the merged image is a
   single full-flash blob spanning `0x0` and **wipes `nvs@0x9000`** (forces a full re-pair).
 - After flashing, confirm the live device with the global `$tesla-key-e2e-evcc` skill.
