@@ -42,8 +42,11 @@ drives the real flow with stubbed `git`/`gh` and pins every refusal below.
 - **Readiness is about one commit.** Merge-readiness stamping, `READY FOR MERGE` and `--auto-merge` all require
   green CI on the PR head, local `HEAD` equal to that head, a clean working tree, the PR reporting
   `MERGEABLE`, and an unchanged head immediately before the body edit. Any mismatch stops the run
-  before any merge-readiness record is stamped. Phase 3 pre-push records instead attest the
-  independently reviewed local fix commit before it has green remote CI.
+  before any merge-readiness record is stamped. `pr-policy / current-head-records` validates the
+  records this workflow stamps, so a failure of that check alone counts as "records pending", not
+  as red CI; after stamping, `READY FOR MERGE` and `--auto-merge` also require a new run of that
+  check to pass on the unchanged head. Phase 3 pre-push records instead attest the independently
+  reviewed local fix commit before it has green remote CI.
 - **Relevance matches the merge hook.** The gates a PR needs come from the same GitHub-side
   changed-file list and the same shared predicates (`gate_feature_docs_relevant`,
   `gate_vehicle_command_relevant`, `gate_is_renovate_maintenance`) as
@@ -65,7 +68,7 @@ flowchart TD
     P2 -->|Failure| P3[Phase 2: Log Triage & Local Repro]
     P3 --> P4[Phase 3: Operator commits fix, attested pre-push records, push]
     P4 --> P1
-    P2 -->|All Green| P5[Phase 4: Independent reviews for the exact head]
+    P2 -->|Green except current-head-records| P5[Phase 4: Independent reviews for the exact head]
     P5 --> P6{Findings?}
     P6 -->|P1/P2 Safety/Crypto| StopFail[Stop: Escalate P1/P2 Finding]
     P6 -->|Minor / Doc / Lint| P4
@@ -138,7 +141,8 @@ treated as fixable; the script stops and points at `gh pr checks`.
 
 ## Phase 4: Independent Reviews for the Exact Head
 
-Once CI is green for the current commit, complete the reviews that produce the gate records:
+Once every check except `pr-policy / current-head-records` is green for the current commit (that
+check validates the records this workflow stamps), complete the reviews that produce the gate records:
 
 - `$skill-audit` — `./tools/agent-config/selftest.sh` supports it but does not replace it.
 - `$pr-hygiene` — English content and no private identifiers in commits, PR text and touched docs.
@@ -161,8 +165,9 @@ scripts/ci-heal.sh --pr <numeric-pr> \
   --attest pr-hygiene="<evidence>"    # plus feature-docs / vehicle-command-audit when relevant
 ```
 
-With green CI, `MERGEABLE`, local `HEAD` equal to the PR head and every needed gate attested,
-ci-heal stamps the records and prints the exact, single canonical squash merge command:
+With every other check green, `MERGEABLE`, local `HEAD` equal to the PR head and every needed gate
+attested, ci-heal stamps the records, waits until a new `current-head-records` run passes on the
+same head, and only then prints the exact, single canonical squash merge command:
 
 ```bash
 gh --repo github.com/0Bu/tesla-key-esp32 pr merge <PR> --match-head-commit <FULL_40_HEX_HEAD_SHA> --squash

@@ -38,6 +38,7 @@ for gate_fn in gate_feature_docs_relevant gate_vehicle_command_relevant \
 done
 
 REPO_SLUG="0Bu/tesla-key-esp32"
+RECORDS_CHECK="current-head-records"
 ALL_GATES="skill-audit project-review pr-hygiene feature-docs vehicle-command-audit"
 
 usage() {
@@ -167,6 +168,16 @@ fetch_failed_runs() {
     .statusCheckRollup[]?
     | select(.conclusion == "FAILURE" or .conclusion == "TIMED_OUT" or .conclusion == "STARTUP_FAILURE")
     | "\(.name) | \(.status) | \(.conclusion) | \(.detailsUrl // "")"
+  '
+}
+
+# Prints one `<detailsUrl>|<status>|<conclusion>` line per run of the pr-policy records check.
+records_check_runs() {
+  local pr="$1"
+  gh pr view "$pr" --json statusCheckRollup -q '
+    .statusCheckRollup[]?
+    | select(.name == "current-head-records")
+    | "\(.detailsUrl // "")|\(.status // "")|\(.conclusion // "")"
   '
 }
 
@@ -455,10 +466,44 @@ wait_for_remote_head() {
 
 is_sha() { [[ "$1" =~ ^[0-9a-f]{40}$ ]]; }
 
+# Succeeds only when at least one check failed and every failed check is the records check.
+only_records_check_failing() {
+  local line seen=0
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    [ "${line%% | *}" = "$RECORDS_CHECK" ] || return 1
+    seen=1
+  done <<< "$1"
+  [ "$seen" -eq 1 ]
+}
+
+# Waits for a run of the records check that did not exist before stamping (its URL is not in $2)
+# and returns 0 only when that run succeeded. Stamping edits the PR body, which re-runs pr-policy.
+wait_for_records_check() {
+  local pr="$1" before="$2" tries=0 rows url status conclusion
+  while [ "$tries" -lt 36 ]; do
+    rows="$(records_check_runs "$pr" 2>/dev/null || true)"
+    while IFS='|' read -r url status conclusion; do
+      [ -n "$url" ] || continue
+      if [ -n "$before" ] && printf '%s\n' "$before" | grep -Fxq -- "$url"; then
+        continue
+      fi
+      case "$conclusion" in
+        SUCCESS) return 0 ;;
+        "") ;;
+        *) return 1 ;;
+      esac
+    done <<< "$rows"
+    sleep_seconds 10
+    tries=$((tries + 1))
+  done
+  return 2
+}
+
 # ─── main flow ────────────────────────────────────────────────────────────────────────────────
 run_heal() {
   local iteration=1 head_sha local_sha branch pr_ref failed_info duration start_time
-  local green=0 gates rc g
+  local green=0 records_pending=0 gates rc g
   start_time="$(date +%s)"
   root_cause_detected="None"
   files_changed_count=0
@@ -488,10 +533,20 @@ run_heal() {
       break
     fi
 
+    # The records check validates the gate records this run stamps, so it stays red until they
+    # exist. Alone it is "records pending", not a CI failure; it is re-checked after stamping.
+    failed_info="$(fetch_failed_runs "$target_pr" || true)"
+    if only_records_check_failing "$failed_info"; then
+      echo "ci-heal: every check except $RECORDS_CHECK is green for $head_sha; that check waits"
+      echo "ci-heal: for the gate records and must pass again after stamping."
+      green=1
+      records_pending=1
+      break
+    fi
+
     echo "ci-heal: CI checks FAILED or are not green on PR #$target_pr."
     print_failed_job_logs "$target_pr"
 
-    failed_info="$(fetch_failed_runs "$target_pr" || true)"
     if [ -z "$failed_info" ]; then
       echo "ci-heal: no failed check could be identified (pending, cancelled or API error)." >&2
       echo "ci-heal: not treating this as a fixable failure — inspect 'gh pr checks $target_pr'." >&2
@@ -598,7 +653,12 @@ run_heal() {
   echo "ci-heal: gates required for $final_head: ${gate_list[*]:-none (maintenance PR)}"
 
   if [ "$dry_run" -eq 1 ]; then
-    echo "ci-heal: [dry-run] CI is green and the PR is mergeable; no gate was stamped and nothing was merged."
+    if [ "$records_pending" -eq 1 ]; then
+      echo "ci-heal: [dry-run] CI is green except $RECORDS_CHECK (records pending) and the PR is mergeable."
+    else
+      echo "ci-heal: [dry-run] CI is green and the PR is mergeable."
+    fi
+    echo "ci-heal: [dry-run] No gate was stamped and nothing was merged."
     duration=$(( $(date +%s) - start_time ))
     evaluate_and_optimize "$target_pr" "SUCCESS" "$iteration" "$max_retries" "$duration" "$root_cause_detected" "$files_changed_count" "$lines_changed_count"
     return 0
@@ -617,7 +677,24 @@ run_heal() {
       echo "ci-heal: PR head moved before stamping; nothing was stamped. Re-run." >&2
       return 1
     fi
+    local records_before
+    records_before="$(records_check_runs "$target_pr" 2>/dev/null | cut -d'|' -f1 || true)"
     stamp_attested_gates "$target_pr" "$final_head" "${gate_list[@]}"
+    # The body edit re-runs pr-policy. Readiness needs that new records-check run to pass.
+    rc=0
+    wait_for_records_check "$target_pr" "$records_before" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      echo "ci-heal: $RECORDS_CHECK did not pass for $final_head after stamping; not ready." >&2
+      echo "ci-heal: inspect 'gh pr checks $target_pr'." >&2
+      return 1
+    fi
+    if [ "$(get_pr_head_sha "$target_pr")" != "$final_head" ]; then
+      echo "ci-heal: PR head moved while $RECORDS_CHECK ran; not ready. Re-run." >&2
+      return 1
+    fi
+  elif [ "$records_pending" -eq 1 ]; then
+    echo "ci-heal: $RECORDS_CHECK failed although this PR needs no gate records; inspect it." >&2
+    return 1
   fi
 
   local canonical_cmd
@@ -723,6 +800,7 @@ self_test() {
     STUB_SEQ="green"; STUB_FAILED=""; STUB_REPRO=ok; STUB_DIRTY=0; STUB_ANCESTOR=0
     STUB_MERGEABLE=MERGEABLE; STUB_FILES="docs/notes.md"; STUB_FILES_FAIL=0
     STUB_HEAD_MOVE_AFTER=0; STUB_HEAD_COUNTER="$T/head-counter"; echo 0 > "$STUB_HEAD_COUNTER"
+    STUB_RECORDS_AFTER=SUCCESS
     git_local_head()     { printf '%s' "$STUB_LOCAL"; }
     git_current_branch() { printf '%s' "$STUB_BRANCH"; }
     git_tree_dirty()     { [ "$STUB_DIRTY" = 1 ]; }
@@ -749,6 +827,16 @@ self_test() {
     fetch_failed_runs()       { printf '%s' "$STUB_FAILED"; }
     run_local_verifications() { echo "verify $1" >> "$LOG_VERIFY"; [ "$STUB_REPRO" != fail ]; }
     gate_pr_changed_files()   { [ "$STUB_FILES_FAIL" != 1 ] && printf '%s' "$STUB_FILES"; }
+    # The pre-existing records-check run failed; every stamp (PR-body edit) adds one new run.
+    records_check_runs() {
+      local n i=1
+      printf 'old|COMPLETED|FAILURE\n'
+      n="$(grep -c . "$LOG_STAMPS" || true)"
+      while [ "$i" -le "${n:-0}" ]; do
+        printf 'run-%s|COMPLETED|%s\n' "$i" "$STUB_RECORDS_AFTER"
+        i=$((i + 1))
+      done
+    }
     gh() { case "$*" in *mergeable*) printf '%s\n' "$STUB_MERGEABLE" ;; *) return 1 ;; esac; }
   }
 
@@ -868,6 +956,35 @@ self_test() {
   run_case sc_green_head_moved_before_stamp 1
   expect_out green_head_moved_before_stamp "moved before stamping"
   expect_lines green_head_moved_before_stamp "$LOG_STAMPS" 0
+
+  # pr-policy's records check stays red until the records exist; alone it is "records pending"
+  sc_records_only_red() {
+    base_attest; auto_merge=1
+    STUB_SEQ="red"; STUB_FAILED="$RECORDS_CHECK | COMPLETED | FAILURE | u"
+  }
+  run_case sc_records_only_red 0
+  expect_out records_only_red "READY FOR MERGE"; expect_lines records_only_red "$LOG_VERIFY" 0
+  expect_lines records_only_red "$LOG_STAMPS" 1; expect_lines records_only_red "$LOG_MERGE" 1
+
+  sc_records_still_red() {
+    base_attest; auto_merge=1; STUB_RECORDS_AFTER=FAILURE
+    STUB_SEQ="red"; STUB_FAILED="$RECORDS_CHECK | COMPLETED | FAILURE | u"
+  }
+  run_case sc_records_still_red 1
+  expect_out records_still_red "did not pass"; expect_no_out records_still_red "READY FOR MERGE"
+  expect_lines records_still_red "$LOG_MERGE" 0
+
+  sc_records_never_rerun() { base_attest; auto_merge=1; STUB_RECORDS_AFTER=""; }
+  run_case sc_records_never_rerun 1
+  expect_no_out records_never_rerun "READY FOR MERGE"; expect_lines records_never_rerun "$LOG_MERGE" 0
+
+  sc_records_with_other_failure() {
+    base_attest; STUB_SEQ="red"
+    STUB_FAILED=$'build | COMPLETED | FAILURE | u\n'"$RECORDS_CHECK | COMPLETED | FAILURE | u"
+  }
+  run_case sc_records_with_other_failure 1
+  expect_out records_with_other_failure "nothing to push"; expect_lines records_with_other_failure "$LOG_VERIFY" 1
+  expect_lines records_with_other_failure "$LOG_STAMPS" 0
 
   sc_green_files_unreadable() { base_attest; STUB_FILES_FAIL=1; }
   run_case sc_green_files_unreadable 1

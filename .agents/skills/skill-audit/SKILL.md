@@ -53,9 +53,11 @@ workflow scripts and [deep document owners](../../../docs/README.md), not histor
   evidence; separate vehicle/cluster scope.
 - **`$ci-heal`**: the user's own invocation authorizes only attested stamping and fix pushes (the
   AGENTS.md exception); script never authors commits/reviews; explicit gate attestations, green current-head
-  CI, local HEAD equality, mergeability/relevance and unchanged-head check before merge-readiness
-  stamping; Phase 3 pre-push records attest the independently reviewed local fix commit;
-  iteration cap, actual red/green selftests and separate merge authority.
+  CI (a lone failing `current-head-records` counts as records pending), local HEAD equality,
+  mergeability/relevance and unchanged-head check before merge-readiness stamping, then a passing
+  new `current-head-records` run before readiness or merge; Phase 3 pre-push records attest the
+  independently reviewed local fix commit; iteration cap, actual red/green selftests and separate
+  merge authority.
 - **`$vehicle-command-audit`**: upstream/local/pinned-library feasibility, lexical full patch chain,
   resolved upstream paths, role restrictions, replay/authentication/request binding and clock domains.
 - **`$add-logic-test`**: firmware delegation or shipped-code parity with negative control, real owner
