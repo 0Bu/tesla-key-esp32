@@ -12,9 +12,11 @@
 #     $pr-hygiene, $project-review, $feature-docs, $vehicle-command-audit) is written to the PR
 #     only from an explicit --attest <gate>=<evidence> that names the independent review which
 #     was actually completed for the exact head being stamped.
-#   * Stamping, READY and --auto-merge require: local HEAD == PR head, green CI on that head, the
-#     PR reporting MERGEABLE, and an attestation for every gate the PR needs (relevance comes from
-#     the same GitHub-side changed-file list the merge hook uses).
+#   * Stamping, READY and --auto-merge require: local HEAD == PR head, a successful `build` check
+#     and every other check green on that head (a lone failing current-head-records counts as
+#     records pending; after stamping a new run of it must pass), the PR reporting MERGEABLE, and an
+#     attestation for every gate the PR needs (relevance comes from the same GitHub-side
+#     changed-file list the merge hook uses).
 #
 # Exit codes: 0 ready/diagnosed, 1 blocked or failed, 2 usage/configuration, 3 gate records withheld.
 set -euo pipefail
@@ -168,6 +170,15 @@ fetch_failed_runs() {
     .statusCheckRollup[]?
     | select(.conclusion == "FAILURE" or .conclusion == "TIMED_OUT" or .conclusion == "STARTUP_FAILURE")
     | "\(.name) | \(.status) | \(.conclusion) | \(.detailsUrl // "")"
+  '
+}
+
+# Prints one `<name>|<status>|<conclusion or state>` line per check run or commit status.
+check_rollup() {
+  local pr="$1"
+  gh pr view "$pr" --json statusCheckRollup -q '
+    .statusCheckRollup[]?
+    | "\(.name // .context // "")|\(.status // "")|\((.conclusion // .state // "") | ascii_upcase)"
   '
 }
 
@@ -477,6 +488,26 @@ only_records_check_failing() {
   [ "$seen" -eq 1 ]
 }
 
+# Succeeds only when the rollup is readable, a `build` check succeeded and no other check is
+# anything but SUCCESS, NEUTRAL or SKIPPED (queued, running, cancelled, failed and commit-status
+# entries all count as not green). Mode `records` allows the records check alone to be not green;
+# mode `all` allows nothing. A skipped `build` (its needs failed) is never green enough.
+ci_green_except_records() {
+  local mode="$2" rows name status conclusion nongreen=""
+  rows="$(check_rollup "$1")" || return 1
+  printf '%s\n' "$rows" | grep -Fxq 'build|COMPLETED|SUCCESS' || return 1
+  while IFS='|' read -r name status conclusion; do
+    [ -n "$name" ] || continue
+    case "$conclusion" in SUCCESS|NEUTRAL|SKIPPED) continue ;; esac
+    nongreen+="$name | $status | $conclusion"$'\n'
+  done <<< "$rows"
+  if [ "$mode" = all ]; then
+    [ -z "$nongreen" ]
+    return
+  fi
+  only_records_check_failing "$nongreen"
+}
+
 # Waits for a run of the records check that did not exist before stamping (its URL is not in $2)
 # and returns 0 only when that run succeeded. Stamping edits the PR body, which re-runs pr-policy.
 wait_for_records_check() {
@@ -536,7 +567,7 @@ run_heal() {
     # The records check validates the gate records this run stamps, so it stays red until they
     # exist. Alone it is "records pending", not a CI failure; it is re-checked after stamping.
     failed_info="$(fetch_failed_runs "$target_pr" || true)"
-    if only_records_check_failing "$failed_info"; then
+    if ci_green_except_records "$target_pr" records; then
       echo "ci-heal: every check except $RECORDS_CHECK is green for $head_sha; that check waits"
       echo "ci-heal: for the gate records and must pass again after stamping."
       green=1
@@ -677,8 +708,12 @@ run_heal() {
       echo "ci-heal: PR head moved before stamping; nothing was stamped. Re-run." >&2
       return 1
     fi
-    local records_before
-    records_before="$(records_check_runs "$target_pr" 2>/dev/null | cut -d'|' -f1 || true)"
+    local records_rows records_before
+    if ! records_rows="$(records_check_runs "$target_pr")"; then
+      echo "ci-heal: cannot read $RECORDS_CHECK runs before stamping; nothing was stamped." >&2
+      return 1
+    fi
+    records_before="$(printf '%s\n' "$records_rows" | cut -d'|' -f1)"
     stamp_attested_gates "$target_pr" "$final_head" "${gate_list[@]}"
     # The body edit re-runs pr-policy. Readiness needs that new records-check run to pass.
     rc=0
@@ -690,6 +725,11 @@ run_heal() {
     fi
     if [ "$(get_pr_head_sha "$target_pr")" != "$final_head" ]; then
       echo "ci-heal: PR head moved while $RECORDS_CHECK ran; not ready. Re-run." >&2
+      return 1
+    fi
+    if ! ci_green_except_records "$target_pr" all; then
+      echo "ci-heal: not every check is green for $final_head after stamping (build missing or not" >&2
+      echo "ci-heal: successful, or a check pending, cancelled or failed); not ready." >&2
       return 1
     fi
   elif [ "$records_pending" -eq 1 ]; then
@@ -800,7 +840,8 @@ self_test() {
     STUB_SEQ="green"; STUB_FAILED=""; STUB_REPRO=ok; STUB_DIRTY=0; STUB_ANCESTOR=0
     STUB_MERGEABLE=MERGEABLE; STUB_FILES="docs/notes.md"; STUB_FILES_FAIL=0
     STUB_HEAD_MOVE_AFTER=0; STUB_HEAD_COUNTER="$T/head-counter"; echo 0 > "$STUB_HEAD_COUNTER"
-    STUB_RECORDS_AFTER=SUCCESS
+    STUB_RECORDS_AFTER=SUCCESS; STUB_RECORDS_READ_FAIL=0
+    STUB_BUILD=SUCCESS; STUB_ROLLUP_EXTRA=""; STUB_ROLLUP_AFTER_EXTRA=""
     git_local_head()     { printf '%s' "$STUB_LOCAL"; }
     git_current_branch() { printf '%s' "$STUB_BRANCH"; }
     git_tree_dirty()     { [ "$STUB_DIRTY" = 1 ]; }
@@ -830,12 +871,32 @@ self_test() {
     # The pre-existing records-check run failed; every stamp (PR-body edit) adds one new run.
     records_check_runs() {
       local n i=1
+      if [ "$STUB_RECORDS_READ_FAIL" = 1 ]; then return 1; fi
       printf 'old|COMPLETED|FAILURE\n'
       n="$(grep -c . "$LOG_STAMPS" || true)"
       while [ "$i" -le "${n:-0}" ]; do
         printf 'run-%s|COMPLETED|%s\n' "$i" "$STUB_RECORDS_AFTER"
         i=$((i + 1))
       done
+    }
+    # Whole-rollup view, consistent with STUB_FAILED: the records check fails until a stamp exists,
+    # then follows the new run.
+    check_rollup() {
+      local records=FAILURE line name rest status conclusion
+      if [ -s "$LOG_STAMPS" ]; then records="$STUB_RECORDS_AFTER"; fi
+      if [ -n "$STUB_BUILD" ]; then printf 'build|COMPLETED|%s\n' "$STUB_BUILD"; fi
+      printf 'logic-test|COMPLETED|SUCCESS\nindependent-rebuild|COMPLETED|SKIPPED\n'
+      while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        name="${line%% | *}"; rest="${line#* | }"; status="${rest%% | *}"; rest="${rest#* | }"
+        conclusion="${rest%% | *}"
+        [ "$name" = "$RECORDS_CHECK" ] || printf '%s|%s|%s\n' "$name" "$status" "$conclusion"
+      done <<< "$STUB_FAILED"
+      if [ -n "$STUB_ROLLUP_EXTRA" ]; then printf '%s\n' "$STUB_ROLLUP_EXTRA"; fi
+      if [ -s "$LOG_STAMPS" ] && [ -n "$STUB_ROLLUP_AFTER_EXTRA" ]; then
+        printf '%s\n' "$STUB_ROLLUP_AFTER_EXTRA"
+      fi
+      printf '%s|COMPLETED|%s\n' "$RECORDS_CHECK" "$records"
     }
     gh() { case "$*" in *mergeable*) printf '%s\n' "$STUB_MERGEABLE" ;; *) return 1 ;; esac; }
   }
@@ -871,7 +932,7 @@ self_test() {
   run_case sc_red_dirty 1
   expect_out red_dirty "does not stage or commit"; expect_lines red_dirty "$LOG_PUSH" 0; expect_lines red_dirty "$LOG_STAMPS" 0
 
-  sc_red_unidentified() { STUB_SEQ="red"; STUB_FAILED=""; }
+  sc_red_unidentified() { STUB_SEQ="red"; STUB_FAILED=""; STUB_ROLLUP_EXTRA="logic-harness|IN_PROGRESS|"; }
   run_case sc_red_unidentified 1
   expect_out red_unidentified "no failed check could be identified"; expect_lines red_unidentified "$LOG_VERIFY" 0
 
@@ -979,12 +1040,46 @@ self_test() {
   expect_no_out records_never_rerun "READY FOR MERGE"; expect_lines records_never_rerun "$LOG_MERGE" 0
 
   sc_records_with_other_failure() {
-    base_attest; STUB_SEQ="red"
-    STUB_FAILED=$'build | COMPLETED | FAILURE | u\n'"$RECORDS_CHECK | COMPLETED | FAILURE | u"
+    base_attest; STUB_SEQ="red"; STUB_ROLLUP_EXTRA="logic-harness|COMPLETED|FAILURE"
+    STUB_FAILED=$'logic-harness | COMPLETED | FAILURE | u\n'"$RECORDS_CHECK | COMPLETED | FAILURE | u"
   }
   run_case sc_records_with_other_failure 1
   expect_out records_with_other_failure "nothing to push"; expect_lines records_with_other_failure "$LOG_VERIFY" 1
   expect_lines records_with_other_failure "$LOG_STAMPS" 0
+
+  # A cancelled check is not a FAILURE conclusion, yet it is not green either
+  sc_records_with_cancelled() {
+    base_attest; auto_merge=1; STUB_SEQ="red"; STUB_ROLLUP_EXTRA="logic-harness|COMPLETED|CANCELLED"
+    STUB_FAILED="$RECORDS_CHECK | COMPLETED | FAILURE | u"
+  }
+  run_case sc_records_with_cancelled 1
+  expect_no_out records_with_cancelled "READY FOR MERGE"
+  expect_lines records_with_cancelled "$LOG_STAMPS" 0; expect_lines records_with_cancelled "$LOG_MERGE" 0
+
+  # A failed host gate skips `build`; a skipped or missing build is never green enough
+  sc_records_build_skipped() {
+    base_attest; STUB_SEQ="red"; STUB_BUILD=SKIPPED; STUB_FAILED="$RECORDS_CHECK | COMPLETED | FAILURE | u"
+  }
+  run_case sc_records_build_skipped 1
+  expect_lines records_build_skipped "$LOG_STAMPS" 0; expect_no_out records_build_skipped "READY FOR MERGE"
+
+  sc_records_build_missing() {
+    base_attest; STUB_SEQ="red"; STUB_BUILD=""; STUB_FAILED="$RECORDS_CHECK | COMPLETED | FAILURE | u"
+  }
+  run_case sc_records_build_missing 1
+  expect_lines records_build_missing "$LOG_STAMPS" 0; expect_no_out records_build_missing "READY FOR MERGE"
+
+  sc_check_regressed_after_stamp() {
+    base_attest; auto_merge=1; STUB_ROLLUP_AFTER_EXTRA="logic-test|COMPLETED|CANCELLED"
+  }
+  run_case sc_check_regressed_after_stamp 1
+  expect_out check_regressed_after_stamp "not every check is green"
+  expect_no_out check_regressed_after_stamp "READY FOR MERGE"; expect_lines check_regressed_after_stamp "$LOG_MERGE" 0
+
+  sc_records_snapshot_unreadable() { base_attest; STUB_RECORDS_READ_FAIL=1; }
+  run_case sc_records_snapshot_unreadable 1
+  expect_out records_snapshot_unreadable "nothing was stamped"
+  expect_lines records_snapshot_unreadable "$LOG_STAMPS" 0
 
   sc_green_files_unreadable() { base_attest; STUB_FILES_FAIL=1; }
   run_case sc_green_files_unreadable 1

@@ -41,12 +41,14 @@ drives the real flow with stubbed `git`/`gh` and pins every refusal below.
   exact `--attest` flags that are missing.
 - **Readiness is about one commit.** Merge-readiness stamping, `READY FOR MERGE` and `--auto-merge` all require
   green CI on the PR head, local `HEAD` equal to that head, a clean working tree, the PR reporting
-  `MERGEABLE`, and an unchanged head immediately before the body edit. Any mismatch stops the run
-  before any merge-readiness record is stamped. `pr-policy / current-head-records` validates the
-  records this workflow stamps, so a failure of that check alone counts as "records pending", not
-  as red CI; after stamping, `READY FOR MERGE` and `--auto-merge` also require a new run of that
-  check to pass on the unchanged head. Phase 3 pre-push records instead attest the independently
-  reviewed local fix commit before it has green remote CI.
+  `MERGEABLE`, and an unchanged head immediately before the body edit. Green CI means a successful
+  `build` check and no other check queued, running, cancelled or failed (skipped and neutral checks
+  are fine; a `build` skipped because a host gate failed is not). Any mismatch stops the run before
+  any merge-readiness record is stamped. `pr-policy / current-head-records` validates the records
+  this workflow stamps, so a failure of that check alone counts as "records pending", not as red
+  CI; after stamping, `READY FOR MERGE` and `--auto-merge` also require a new run of that check to
+  pass and every check to be green on the unchanged head. Phase 3 pre-push records instead attest
+  the independently reviewed local fix commit before it has green remote CI.
 - **Relevance matches the merge hook.** The gates a PR needs come from the same GitHub-side
   changed-file list and the same shared predicates (`gate_feature_docs_relevant`,
   `gate_vehicle_command_relevant`, `gate_is_renovate_maintenance`) as
@@ -166,8 +168,9 @@ scripts/ci-heal.sh --pr <numeric-pr> \
 ```
 
 With every other check green, `MERGEABLE`, local `HEAD` equal to the PR head and every needed gate
-attested, ci-heal stamps the records, waits until a new `current-head-records` run passes on the
-same head, and only then prints the exact, single canonical squash merge command:
+attested, ci-heal stamps the records, waits until a new `current-head-records` run passes and
+every check is green on the same head, and only then prints the exact, single canonical squash
+merge command:
 
 ```bash
 gh --repo github.com/0Bu/tesla-key-esp32 pr merge <PR> --match-head-commit <FULL_40_HEX_HEAD_SHA> --squash
