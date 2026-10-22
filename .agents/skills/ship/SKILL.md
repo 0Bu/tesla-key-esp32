@@ -213,7 +213,7 @@ set -euo pipefail
 [ -c "$PORT" ] || { echo "REFUSING: PORT is not a character device: $PORT" >&2; exit 1; }
 case "${NO_AUTO_RESET:-0}" in
   0) RESET_ARGS=() ;;
-  1) RESET_ARGS=(--before no-reset) ;;
+  1) RESET_ARGS=(--before no-reset --after no-reset) ;;
   *) echo "REFUSING: NO_AUTO_RESET must be 0 or 1" >&2; exit 1 ;;
 esac
 APP_INFO=$(esptool image-info "$APP")
@@ -244,9 +244,10 @@ DELIVERY=usb
 ```
 
 `nvs@0x9000` is untouched → pairing/key/VIN/WiFi survive. Download-mode gotcha: a
-board with no auto-reset needs BOOT held and the input `NO_AUTO_RESET=1`, which adds
-`--before no-reset` to each esptool call. Port selection: see the
-**flash-esp32** skill — same host mechanics.
+board with no auto-reset needs BOOT held through the probe and both esptool calls, and the input
+`NO_AUTO_RESET=1`, which adds `--before no-reset --after no-reset` to each call as in
+`$usb-recovery`; the chip then stays in download mode, so release BOOT and replug the board before
+step 5. Port selection: see the **flash-esp32** skill — same host mechanics.
 
 ### Explicitly selected OTA delivery
 
