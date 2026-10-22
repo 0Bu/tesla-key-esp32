@@ -274,7 +274,7 @@ curl -s "http://$IP/status" | jq -r .version       # X.Y.Z  (no "-esp32"; must m
 curl -s -X POST "http://$IP/ota/check?ms=$(date +%s000)"
 sleep 3
 curl -s "http://$IP/ota/status" | jq
-#   {state, progress, message, available, update_available, current}
+#   {state, progress, message, available, update_available, current, channel[, pr]}
 ```
 
 `update_available:true` + `available` == the release reports a channel offer. Download, image
@@ -300,8 +300,9 @@ describes the failure symptom; use the table below to investigate before retryin
 
 ## See also
 
-- [`$ship`](../ship/SKILL.md) — cut a release and put it on the board (this skill verifies the
-  channel that leaves behind).
+- [`$ship`](../ship/SKILL.md) — merge an authorized PR, watch its main build and deliver the signed
+  image. A merge publishes only the Dev channel; this skill verifies the stable Release channel
+  that a separately authorized `release: true` run leaves behind.
 - [`$usb-recovery`](../usb-recovery/SKILL.md) — no-build USB reflash of the published signed image
   + otadata erase, the recovery a "signature bad" device needs.
 - [`docs/SECURITY.md`](../../../docs/SECURITY.md) — signing key lifecycle, TOFU trust anchor, and

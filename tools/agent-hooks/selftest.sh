@@ -806,7 +806,8 @@ PY
 then pass_case 'neutral core has no foreign-project policy residue'; else fail_case 'foreign-project residue'; fi
 
 # Shared-predicate loader canaries: a missing, truncated, incomplete or wrong-API pr-gate-lib.sh
-# must block every PR action (create, push, merge — all five gates) before any gate decision.
+# must block before the payload is even parsed, which covers create, push and merge (all five
+# gates); the canaries drive a create payload.
 lib_canary="$tmp/gate-lib-canary"
 mkdir -p "$lib_canary"
 cp "$gate" "$lib_canary/require-pr-gates.sh"
@@ -820,7 +821,7 @@ expect_lib_block() {  # <expected message fragment> <label>
 }
 rm -f "$lib_canary/pr-gate-lib.sh"
 expect_lib_block 'library could not be loaded' 'missing PR gate library blocks PR actions'
-head -n 29 "$lib_src" > "$lib_canary/pr-gate-lib.sh"
+awk '{print} /^GATE_PR_LIB_API=/{exit}' "$lib_src" > "$lib_canary/pr-gate-lib.sh"
 expect_lib_block 'library is incomplete (' 'truncated PR gate library blocks PR actions'
 { cat "$lib_src"; echo 'unset -f gate_vehicle_command_relevant'; } > "$lib_canary/pr-gate-lib.sh"
 expect_lib_block 'library is incomplete (gate_vehicle_command_relevant)' \

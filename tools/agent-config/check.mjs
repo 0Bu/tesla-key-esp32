@@ -116,16 +116,16 @@ const usbNoApprovalNeeded = /(?:live verification|HTTP requests?|(?:GET|POST|HTT
 const usbOtaNotStateChanging = /(?:GET|POST) \/ota\/check[^.!?]*(?:is not|isn't|not) state-changing/i;
 const usbAbsentApprovalProceeds = /(?:(?:approval|authorization)[^.!?]*(?:absent|missing|not obtained)|without (?:separate )?(?:approval|authorization))[^.!?]*(?:continue|proceed|run|contact|send|request)/i;
 const reviewedSkillSha256 = new Map([
-  ["add-logic-test", "1da99bd49187b66b96412861ea84ab69321f398564500981977e140033204d99"],
+  ["add-logic-test", "b7146bfa98cc70f300754ab07acf957bcb04f7a3efa91238162f07a088c6357a"],
   ["ci-heal", "e264e8379b61b5f78feb0b478914fa089fe6352ffc4d6984672940f8ac22b7ba"],
   ["deploy", "169d30f409d6a447752b5fc7f3b7579ee6e714df9ce33ecd51cb344dd0d877f0"],
   ["deploy-bench", "0471fee2f77a43b0e3e8292956bb74bc2d08020bd25fe29f416ea5ba609b7e02"],
   ["device-diag", "d1da99af7e304ef829614b9580101a1c0b6779e401de5d5f4dea884de708112e"],
   ["display-preview", "dd95c766cdec68e5ef175090d0f6137056cbd5ed3333488e4c1a25fa3500c25a"],
   ["feature-docs", "17a486258723b88a5d1257284a33e295529bd52331d3b066335e832b666f1884"],
-  ["flash-esp32", "161659aee56d71731fb9d715efdc9daae9d1d0c09f58c1241a096e3ab1a737c5"],
+  ["flash-esp32", "c067d50e94c661ef724030433dca8cbcd28a6ec44ba64e82b03d30ed274331dc"],
   ["mock-test", "386122cc09a6f1427acbe3b11ab4c05d63fe7ebdab43b07e626b9e710b6474e0"],
-  ["ota-release-verify", "3c531defb4c67f21e8939216a9144ea096c9be2738e1d2e32a0ae8ee01baf505"],
+  ["ota-release-verify", "4f2e8822c9cef05e97780a7b5392dc209233be4cf19ed8eabbd2ec726c1b9e86"],
   ["pr-hygiene", "8491da669686acc5e00741e5e1fcfec6d2caf29abb8ebff0479ca973f20e87f1"],
   ["project-review", "2f371c33df9fee2d2064cdf93e11e0f30e97ac2295383b100461b81f4c52878a"],
   ["ship", "0fe5d2afd2d38c5e3b5080c275329095f38fa1d550a8458c5b1cb43a8f422ef8"],
