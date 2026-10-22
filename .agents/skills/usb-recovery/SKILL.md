@@ -388,6 +388,22 @@ idf_version_of() {  # "major minor patch" from esptool image-info's "ESP-IDF: vX
   [[ "$info" =~ $re ]] || return 1
   printf '%s %s %s\n' "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}" "${BASH_REMATCH[5]:-0}"
 }
+# esptool <= 5.6.0 prints no "ESP-IDF:" line for esp32c6 bootloaders, although the image carries
+# it: fall back to the image's own esp_bootloader_desc_t at the start of its first segment.
+bootloader_idf_version_of() {
+  idf_version_of "$1" && return 0
+  local -a b
+  local ver re=$'^v([0-9]+)\\.([0-9]+)(\\.([0-9]+))?'
+  b=($(od -An -tu1 -j 0 -N 36 "$1" 2>/dev/null)) || return 1
+  # Image magic 0xE9, a first segment of at least sizeof(esp_bootloader_desc_t) = 80 bytes and
+  # the descriptor magic 0x50 at file offset 0x20; anything else stays a refusal.
+  (( ${#b[@]} == 36 && b[0] == 0xE9 && b[32] == 0x50 )) || return 1
+  (( b[28] + (b[29] << 8) + (b[30] << 16) + (b[31] << 24) >= 80 )) || return 1
+  ver=$(dd if="$1" bs=1 skip=40 count=32 2>/dev/null | LC_ALL=C tr '\000' '\n') || return 1
+  ver=${ver%%$'\n'*}  # idf_ver[32] is NUL-terminated
+  [[ "$ver" =~ $re ]] || return 1
+  printf '%s %s %s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[4]:-0}"
+}
 if [ -n "${BOOTLOADER:-}" ]; then
   BOOT_IMAGE="$BOOTLOADER"  # step 2 writes the same run's bootloader
 else
@@ -402,7 +418,7 @@ else
       "present that evidence and seek the separate step-2 approval" >&2; exit 1;
   }
 fi
-BOOT_IDF=$(idf_version_of "$BOOT_IMAGE") || {
+BOOT_IDF=$(bootloader_idf_version_of "$BOOT_IMAGE") || {
   echo "REFUSING: the bootloader carries no ESP-IDF version; stop and ask the user" >&2; exit 1;
 }
 APP_IDF=$(idf_version_of "$APP") || { echo "REFUSING: the app carries no ESP-IDF version" >&2; exit 1; }
