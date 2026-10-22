@@ -3,8 +3,9 @@ name: ci-heal
 description: Monitors GitHub Actions CI after push, runs host preflights, pushes an operator-authored fix commit with attested pre-push records, and reports merge readiness only from green CI on the exact head plus explicitly attested gate records. Protocol, sanitizer and compiler reproduction are separate operator steps. Never authors commits, never runs the reviews it records, and never merges without separate authorization.
 ---
 
-Invoke `$ci-heal`. Read [AGENTS.md](../../../AGENTS.md) first; this workflow grants no
-additional authorization. Canonical skills live under `.agents/skills/`; hooks enforce local policy.
+Invoke `$ci-heal`. Read [AGENTS.md](../../../AGENTS.md) first. Its one standing exception is the
+authorization stated in the boundary below; this workflow grants nothing beyond it. Canonical
+skills live under `.agents/skills/`; hooks enforce local policy.
 
 # ci-heal — Post-Push CI Monitoring, Failure Reproduction & Merge-Readiness Gate
 
@@ -13,19 +14,21 @@ Actions for an open pull request, extracts failed logs, runs host preflights, pu
 commit that the operator already made, and
 verifies that the PR reaches a mergeable state with current gate records.
 
-> **Authorization and Safety Boundary.** Invoking this skill authorizes running the repository
+> **Authorization and Safety Boundary.** The user's own invocation of this skill (not an agent's or
+> another workflow's decision to run it) is the user's explicit authorization, recorded as a
+> standing exception in [AGENTS.md](../../../AGENTS.md), for running the repository
 > verification scripts, editing the PR body's gate records **from explicit attestations**, and
 > pushing an already-committed fix to the active PR branch up to the iteration limit. It does
 > **not** authorize authoring commits, running or simulating a review, modifying `partitions.csv`,
 > Secure-Boot keys, NVS layouts, or PSA crypto seams. Any P1/P2 security, signing, NVS, pairing,
 > partition, or vehicle-safety finding is a stop condition. Executing the canonical squash merge
-> requires separate explicit user authorization (`--auto-merge` is that authorization, given
-> per invocation).
+> requires the user's separate explicit authorization for this exact PR; pass `--auto-merge` only
+> after that authorization. The flag executes the merge; it does not grant it.
 
 ## What the script guarantees (and what it refuses)
 
-`scripts/ci-heal.sh` is deliberately conservative; its self-test drives the real flow with stubbed
-`git`/`gh` and pins every refusal below.
+`scripts/ci-heal.sh` is deliberately conservative; its self-test (run by `scripts/test-pr-gates.sh`)
+drives the real flow with stubbed `git`/`gh` and pins every refusal below.
 
 - **It never commits.** A fix must already be committed by the operator (English message, no
   private identifiers). An uncommitted working tree stops the run. ci-heal only pushes when local
@@ -76,14 +79,13 @@ flowchart TD
 
 1. **Detect PR Context**:
    ```bash
-   PR=$(gh pr view --json number -q .number)
-   BRANCH=$(git rev-parse --abbrev-ref HEAD)
-   HEAD_SHA=$(gh pr view "$PR" --json headRefOid -q .headRefOid)
+   gh pr view --json number,headRefName,headRefOid
    ```
-   The current branch must be the PR's head branch; the script refuses otherwise.
+   The current branch (`git rev-parse --abbrev-ref HEAD`) must be the PR's `headRefName`; the
+   script refuses otherwise.
 2. **Watch CI Workflow Status**:
    ```bash
-   gh pr checks "$PR" --watch
+   gh pr checks <numeric-pr> --watch
    ```
 
 ---
@@ -113,15 +115,17 @@ treated as fixable; the script stops and points at `gh pr checks`.
 
 ## Phase 3: Fix, Pre-Push Records & Push
 
-1. **Apply a scoped fix and commit it yourself.** Keep the fix minimal and within
+1. **Commit a scoped fix under its own authorization.** The `$ci-heal` invocation covers only the
+   attested record edits and the push; editing and committing the fix need the user's separate
+   implementation and commit authorization. Keep the fix minimal and within
    [`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md) and [`AGENTS.md`](../../../AGENTS.md).
    Do not use `git add -A`; stage only the files the fix touches.
-2. **Complete the pre-push reviews for the new commit.** The push hook requires current
-   `$skill-audit` and `$pr-hygiene` records for the exact commit being pushed. Run both reviews
-   (read-only) against that commit.
+2. **Obtain independent pre-push reviews for the new commit.** The push hook requires current
+   `$skill-audit` and `$pr-hygiene` records for the exact commit being pushed. A reviewer other
+   than the fix's author runs both (read-only) against that commit; ci-heal only records them.
 3. **Re-run ci-heal with the attestations:**
    ```bash
-   scripts/ci-heal.sh --pr "$PR" \
+   scripts/ci-heal.sh --pr <numeric-pr> \
      --attest skill-audit="<report reference, 0 findings>" \
      --attest pr-hygiene="<report reference, clean>"
    ```
@@ -152,7 +156,7 @@ pairing or partition finding is a stop condition: escalate to the user.
 ## Phase 5: Attested Stamping & Merge Readiness
 
 ```bash
-scripts/ci-heal.sh --pr "$PR" \
+scripts/ci-heal.sh --pr <numeric-pr> \
   --attest skill-audit="<evidence>" --attest project-review="<evidence>" \
   --attest pr-hygiene="<evidence>"    # plus feature-docs / vehicle-command-audit when relevant
 ```
@@ -176,7 +180,8 @@ Paths that reach `evaluate_and_optimize()` report the following; some early refu
 before evaluation:
 
 1. **Report Run Metrics**: iterations vs limit, duration and the failure category (`repo-lint`,
-   `agent-config`, `mock-tests`, `pr-gates`, `build-contracts`, `sanitizers`, `compiler`).
+   `agent-config`, `mock-tests`, `pr-gates`, `build-contracts`, `sanitizers`, `compiler`,
+   `general-ci-failure`, or `unidentified` when no failed check could be read).
    Fix-footprint counters remain unmeasured zero placeholders.
 2. **Present Scorecard** summarizing the outcome and root cause.
 3. **Persist Statistics (`.tmp/ci-heal-cache.json`)**: category frequencies and recent runs are

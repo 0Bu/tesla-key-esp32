@@ -48,9 +48,11 @@ workflow scripts and [deep document owners](../../../docs/README.md), not histor
 - **`$deploy`**: authorized commit/push/PR/merge phases, independent fix/review loop, current-head
   gates, canonical squash and exact-main CI/publication observation; no device delivery.
 - **`$deploy-bench`**: physical USB identity across Tesla/Daikin firmware, no probing unrelated boards,
-  explicit port/chip and compatible retained layout, delegated signed `$flash-esp32`, exact-source
-  targeted positive/negative tests and same-board health evidence; separate vehicle/cluster scope.
-- **`$ci-heal`**: script never authors commits/reviews; explicit gate attestations, green current-head
+  explicit port/chip and compatible retained layout, delegated signed `$flash-esp32` or published-image
+  `$usb-recovery` steps, exact-source targeted positive/negative tests and same-board health
+  evidence; separate vehicle/cluster scope.
+- **`$ci-heal`**: the user's own invocation authorizes only attested stamping and fix pushes (the
+  AGENTS.md exception); script never authors commits/reviews; explicit gate attestations, green current-head
   CI, local HEAD equality, mergeability/relevance and unchanged-head check before merge-readiness
   stamping; Phase 3 pre-push records attest the independently reviewed local fix commit;
   iteration cap, actual red/green selftests and separate merge authority.
@@ -67,8 +69,9 @@ workflow scripts and [deep document owners](../../../docs/README.md), not histor
   shipped Pages (`docs/index.html`, `installer-bootstrap.mjs`, `serial-port-release.mjs`,
   `web-installer.mjs`, `docs/vendor/`),
   `.github/workflows/{build,signed-pr-preview,pr-preview-cleanup,pr-policy,bench-acceptance}.yml`
-  and `scripts/release-relevance.sh`. Missing/truncated shared predicates must fail all five gates
-  closed; `scripts/test-pr-gates.sh` proves the negative cases.
+  and `scripts/release-relevance.sh`. A missing, truncated or incomplete `pr-gate-lib.sh` must block
+  `require-pr-gates.sh` before any of the five records is read; `scripts/test-pr-gates.sh` pins
+  those negative cases.
 - **`$skill-audit`**: discovered inventory, current fact pointers, exact head and report-only gate;
   report self-drift without correcting it.
 - **`$device-diag`**: collected evidence first; separate live-target permission; cache-only GETs with

@@ -70,7 +70,7 @@ Presenter parity likewise proves decisions, not physical pixels.
 | `scripts/repo-lint.sh` | Syntax/local links, workflow-policy and host-gate mutation canaries, logic ownership and protocol wiring |
 | `tools/agent-config/selftest.sh` / `test_codex_setup.py` | Canonical skills/reviewers/hooks, native adapter parity/trust boundaries, read-only scopes, owner contracts, exact content and approval/artifact canaries |
 | `scripts/test-build-contracts.sh` | Targets, pins, partitions, generated artifacts, size/stack/effective-build and publication contracts; no real signing key |
-| `scripts/test-pr-gates.sh` | Exact-head review records, relevance and canonical Git command boundaries using fixtures |
+| `scripts/test-pr-gates.sh` | Exact-head review records, relevance, canonical Git command boundaries and shared-library loss using fixtures; `ci-heal.sh` refusals with stubbed `git`/`gh` |
 | `web_ui_browser_gate.py` | Actual assembled page in Chrome/Chromium: console/request failures, degraded poller, escaping, keyboard/accessibility and desktop/mobile layout |
 
 Browser profiles have a 45 s cold-start/DOM deadline within the 120 s outer gate. Missing browser

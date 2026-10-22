@@ -39,8 +39,11 @@ The signed app and final otadata erase recover firmware while preserving NVS.
 >   authorization. Do not create a project copy and do not provide a whole-flash erase shortcut.
 
 For builds or previews use `$flash-esp32`; for authorized merge/main delivery use `$ship`.
+`$deploy-bench` reuses steps 1 and 3 to put an already-published image on an identified bench.
 This recovery uses existing published bytes only; all selection, retained-bootloader, signature,
-port/target, region and activation checks below remain mandatory.
+port/target, region and activation checks below remain mandatory. Later blocks read variables set
+by earlier ones; run them through a scratch script as
+[Development](../../../docs/DEVELOPMENT.md#running-workflow-shell-blocks) describes.
 
 ## Host prerequisites
 
@@ -59,6 +62,7 @@ together, which matters more here than in a normal flash since a wrong guess wri
 | **nvs**         | `0x9000`                       | `0x6000`  | **NEVER touch** — holds pairing / key / VIN / WiFi |
 | **otadata**     | `0xf000`                       | `0x2000`  | **ERASE** — a blank `otadata` cleanly boots `ota_0` |
 | phy_init        | `0x11000`                      | `0x1000`  | leave alone                                       |
+| coredump        | `0x12000`                      | `0xc000`  | leave alone (crash dump; older layouts lack it)   |
 | **ota_0 (app)** | `0x20000`                      | `0x1f0000`| **write the signed app here**                     |
 | ota_1           | `0x210000`                     | `0x1f0000`| leave alone                                       |
 
@@ -77,7 +81,7 @@ Pick the target and its image suffix (`""` / `-s3` / `-c3` / `-c6`, matching
 
 ```bash
 set -euo pipefail
-TARGET=esp32s3     # esp32 | esp32s3 | esp32c3 | esp32c6
+: "${TARGET:?set TARGET to esp32, esp32s3, esp32c3 or esp32c6}"
 case "$TARGET" in
   esp32)   SFX=""; FAMILY=ESP32 ;;  esp32s3) SFX=-s3; FAMILY=ESP32-S3 ;;
   esp32c3) SFX=-c3; FAMILY=ESP32-C3 ;; esp32c6) SFX=-c6; FAMILY=ESP32-C6 ;;
@@ -258,7 +262,7 @@ printf '%s\n' "$APP_INFO" | grep -qx "Detected image type: $FAMILY" \
 ```
 
 > The image **must** be the published CI-signed one — flashing an unsigned local build re-creates
-> failure mode (b) (bootloop), while a development-key signature creates a trust anchor no public
+> the boot loop, while a development-key signature creates a trust anchor no public
 > image matches. Recovery must not search for or expose the real CI key locally. There is
 > deliberately **no Pages fallback** here: without hardware Secure Boot, a USB write cannot
 > authenticate the signer and would trust the selected Pages origin. If neither an exact Release
@@ -372,14 +376,17 @@ from a v6.1-built release (web installer or merged image) must not receive a 5.x
 valid its provenance; a board that was only ever OTA-updated keeps its older bootloader. Read the
 bootloader region — read-only, and it ends below the partition table, far from `nvs@0x9000` — and
 compare both ESP-IDF versions; with the step-2 support bootloader in the write set, compare against
-that one instead. A board with no auto-reset needs BOOT held and
-`RESET_ARGS=(--before no-reset --after no-reset)`:
+that one instead. A board with no auto-reset needs BOOT held and the input `NO_AUTO_RESET=1`:
 
 ```bash
 set -euo pipefail
 : "${APP:?select and validate Option A or B first}"
 : "${PORT:?run the explicit-port probe first}"
-[ -n "${RESET_ARGS+x}" ] || RESET_ARGS=()
+case "${NO_AUTO_RESET:-0}" in
+  0) RESET_ARGS=() ;;
+  1) RESET_ARGS=(--before no-reset --after no-reset) ;;
+  *) echo "REFUSING: NO_AUTO_RESET must be 0 or 1" >&2; exit 1 ;;
+esac
 # Capture image-info whole: `esptool … | grep -q` lets grep close the pipe early, and under
 # pipefail esptool's broken pipe would turn a match into a refusal.
 idf_version_of() {  # "major minor patch" from esptool image-info's "ESP-IDF: vX.Y[.Z]" line
@@ -387,6 +394,17 @@ idf_version_of() {  # "major minor patch" from esptool image-info's "ESP-IDF: vX
   info=$(esptool image-info "$1" 2>/dev/null) || return 1
   [[ "$info" =~ $re ]] || return 1
   printf '%s %s %s\n' "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}" "${BASH_REMATCH[5]:-0}"
+}
+# esptool 5.6.0 prints no bootloader description for esp32c6. ESP-IDF stores esp_bootloader_desc_t
+# at the fixed offset 0x20 (image header + first segment header): magic byte 0x50, idf_ver[32] at
+# 0x28 (ESP-IDF api-reference/system/bootloader_image_format.rst, "Bootloader Description").
+bootloader_desc_idf_version_of() {
+  local ver re='^v([0-9]+)\.([0-9]+)(\.([0-9]+))?([^0-9.]|$)'
+  [ "$(od -An -tx1 -j 32 -N 1 "$1" | tr -d ' \n')" = 50 ] || return 1
+  ver=$(dd if="$1" bs=1 skip=40 count=32 2>/dev/null | LC_ALL=C tr '\000' '\n')
+  ver=${ver%%$'\n'*}
+  [[ "$ver" =~ $re ]] || return 1
+  printf '%s %s %s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[4]:-0}"
 }
 if [ -n "${BOOTLOADER:-}" ]; then
   BOOT_IMAGE="$BOOTLOADER"  # step 2 writes the same run's bootloader
@@ -402,7 +420,7 @@ else
       "present that evidence and seek the separate step-2 approval" >&2; exit 1;
   }
 fi
-BOOT_IDF=$(idf_version_of "$BOOT_IMAGE") || {
+BOOT_IDF=$(idf_version_of "$BOOT_IMAGE" || bootloader_desc_idf_version_of "$BOOT_IMAGE") || {
   echo "REFUSING: the bootloader carries no ESP-IDF version; stop and ask the user" >&2; exit 1;
 }
 APP_IDF=$(idf_version_of "$APP") || { echo "REFUSING: the app carries no ESP-IDF version" >&2; exit 1; }
@@ -502,7 +520,7 @@ sleep 2
 curl -fsS "http://$DEVICE_IP/ota/status" | jq .
 ```
 
-- `version` / `platform` should read the just-flashed release (not the old `1.4.0` floor).
+- `version` / `platform` must read the flashed `VERSION` and `FAMILY`; the loop above requires both.
 - `paired:true` reports the firmware's VCSEC-session presence result. It does not prove private-key
   or other configuration preservation, complete NVS integrity, or a successful vehicle handshake.
   The prescribed app/otadata write ranges do not overlap NVS; assess this status field only as

@@ -15,7 +15,7 @@ fi
 worktree_tmp_rel="build/agent-hook-selftest.$$"
 worktree_tmp="$root/$worktree_tmp_rel"
 worktree_test_tmp="$root/test/$worktree_tmp_rel"
-trap 'rm -rf "$tmp" "$worktree_tmp" "$worktree_test_tmp" "$root/.tmp" 2>/dev/null || true' EXIT
+trap 'rm -rf "$tmp" "$worktree_tmp" "$worktree_test_tmp" 2>/dev/null; rmdir "$root/.tmp" 2>/dev/null || true' EXIT
 pass_case(){ printf 'PASS  %s\n' "$1"; pass=$((pass+1)); }
 fail_case(){ printf 'FAIL  %s\n' "$1" >&2; fail=$((fail+1)); }
 expect_rc(){ local want="$1" label="$2"; shift 2; "$@" >"$tmp/out" 2>&1; local rc=$?; if [ "$rc" = "$want" ]; then pass_case "$label"; else fail_case "$label (want=$want got=$rc: $(tail -c 300 "$tmp/out"))"; fi; }
@@ -418,6 +418,28 @@ sed 's/@ [0-9a-f]*/@ deadbee/' "$tmp/all.md" >"$tmp/stale.md"
 expect_rc 2 'stale record SHA rejected' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/stale.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/feature.files" "$gate" --check --project-dir "$root"
 sed "s/$sha/$short_sha/g" "$tmp/all.md" >"$tmp/prefix.md"
 expect_rc 2 'same-prefix records cannot satisfy current-head gate' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/prefix.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/feature.files" "$gate" --check --project-dir "$root"
+
+# A missing, truncated or incomplete shared library must block before any record is read, so none
+# of the five records can silently stop gating. The intact library accepts these inputs above.
+lib_src="$root/tools/agent-hooks/pr-gate-lib.sh"
+lib_canary="$tmp/lib-canary/tools/agent-hooks"
+mkdir -p "$lib_canary"
+cp "$gate" "$parser" "$lib_canary/"
+expect_lib_block(){
+  local out rc
+  out="$(env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/all.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/vehicle.files" bash "$lib_canary/require-pr-gates.sh" --check 2>&1)"; rc=$?
+  if [ "$rc" = 2 ] && printf '%s' "$out" | grep -qF 'PR gate library'; then pass_case "$1"; else fail_case "$1 (rc=$rc: $(printf '%s' "$out" | tail -c 200))"; fi
+  payload Bash command 'git push' "$root" >"$tmp/lib-canary.json"
+  out="$(bash "$lib_canary/require-pr-gates.sh" --payload-file "$tmp/lib-canary.json" 2>&1)"; rc=$?
+  if [ "$rc" = 2 ] && printf '%s' "$out" | grep -qF 'PR gate library'; then pass_case "$1 (push hook)"; else fail_case "$1 (push hook rc=$rc: $(printf '%s' "$out" | tail -c 200))"; fi
+}
+expect_lib_block 'missing shared library blocks all five records'
+head -n "$(( $(wc -l <"$lib_src") / 2 ))" "$lib_src" >"$lib_canary/pr-gate-lib.sh"
+expect_lib_block 'truncated shared library blocks all five records'
+sed 's/^gate_vehicle_command_relevant() {/gate_vehicle_command_relevant_removed() {/' "$lib_src" >"$lib_canary/pr-gate-lib.sh"
+expect_lib_block 'shared library without a required predicate blocks all five records'
+sed 's/^GATE_PR_LIB_API=3$/GATE_PR_LIB_API=2/' "$lib_src" >"$lib_canary/pr-gate-lib.sh"
+expect_lib_block 'shared library with another API version blocks all five records'
 
 merge_error(){ printf '%s' "$1" | python3 "$parser" | python3 -c 'import sys; p=sys.stdin.buffer.read().split(b"\0"); print((p[5] if len(p)>5 else b"parse-failed").decode())'; }
 canonical="gh --repo github.com/0Bu/tesla-key-esp32 pr merge 123 --match-head-commit $sha --squash"

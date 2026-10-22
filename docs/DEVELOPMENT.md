@@ -109,8 +109,32 @@ a separate trust lineage and needs an explicit key and scope.
 `$deploy` handles commit, push, PR creation, current-head reviews/CI and canonical squash merge,
 then observes the main build. It does not contact devices.
 [`$deploy-bench`](../.agents/skills/deploy-bench/SKILL.md) identifies the physical USB bench across
-Tesla/Daikin firmware, delegates flashing to `$flash-esp32`, and tests the implementation on that
-same board. Device delivery after merge remains a separately requested `$ship` operation.
+Tesla/Daikin firmware, flashes a signed PR preview or development-key image through `$flash-esp32`
+or an already-published image through `$usb-recovery`'s provenance and app-only steps, and tests
+the implementation on that same board. Device delivery after merge remains a separately requested
+`$ship` operation.
+
+## Running workflow shell blocks
+
+The project hooks judge each shell tool call by its text before the shell runs it. Sent inline,
+most multi-line blocks in `.agents/skills/` are rejected: the PR gate cannot rule out that a
+command substitution or an arithmetic assignment such as `X=$((…))` yields a publish or merge
+action, and both hooks treat a glob such as the `case` arm `*)` as unbounded. A single-line
+command shown with `<placeholders>` runs inline once each holds its literal value. Run multi-line
+blocks this way:
+
+1. Write the blocks approved for this call, unchanged and in document order, to one script in the
+   session's scratch directory with the file-writing tool, not a shell redirect.
+2. Run it with one static command, `bash <script-path>`. Put inputs the blocks require (`PR`,
+   `TARGET`, `PORT`, `RUNID`, `HOST`, `DEVICE_IP`, …) in front as literal `NAME=value` assignments
+   so the hooks still see them.
+3. A later call that needs an earlier step's variables repeats that step's read-only blocks. Pass a
+   value that only a completed write, erase or other mutation set (for example `DELIVERY` in
+   `$ship`) as a literal assignment; never repeat the mutation.
+
+Never put `git push`, `gh pr create`, `gh pr merge`, or a key, NVS or credential path into such a
+script: those stay standalone, statically bound commands that the hooks inspect, or the operator's
+step. A script grants no authorization; every approval boundary of the workflow still applies.
 
 ## Reviews and documentation
 

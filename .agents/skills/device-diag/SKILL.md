@@ -1,6 +1,6 @@
 ---
 name: device-diag
-description: Read-only, cache-only triage of tesla-key-esp32 health from existing evidence or, only with explicit user approval for the live board/target, passive GET /status, /diag, and /heap reads. Never wake or command the vehicle, change diagnostic state, pair, flash, or OTA; diagnose and hand off only.
+description: Read-only, cache-only triage of tesla-key-esp32 health from existing evidence or, only with explicit user approval for the live board/target, passive GET /status, /api/proxy/1/version, /diag, and /heap reads. Never wake or command the vehicle, change diagnostic state, pair, flash, or OTA; diagnose and hand off only.
 ---
 
 # Device diagnosis
@@ -21,14 +21,16 @@ parameters, a serial session that can toggle reset, and any recovery need separa
 [`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md) owns pairing lifecycle and invalidation.
 [API](../../../docs/API.md#management) owns status fields/units/presence;
 [Architecture](../../../docs/ARCHITECTURE.md#sleep--link-state-the-single-source-of-truth) owns link proof.
-The host may be `tesla-key-esp32.local` or the explicitly approved board IP.
+Set `HOST` to `tesla-key-esp32.local` or the explicitly approved board IP.
 
 ## 1. Status
 
-Use collected JSON first. If the exact GET is approved, inspect these vitals:
+Use collected JSON first. If the exact GET is approved, inspect these vitals (the secret guard
+rejects this multi-line filter inline; run it through a scratch script as
+[Development](../../../docs/DEVELOPMENT.md#running-workflow-shell-blocks) describes):
 
 ```bash
-curl -s http://<host>/status | jq '{
+curl -s "http://${HOST:?set HOST to the approved board address}/status" | jq '{
   version, paired, reauth, link, vcsec_sleep,
   wifi: {ssid: .wifi.ssid, rssi: .wifi.rssi},
   eth: .eth,

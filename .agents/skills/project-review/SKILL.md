@@ -111,15 +111,6 @@ applies. [FEATURES](../../../docs/FEATURES.md) remains a pointer catalog, not an
 rather than maintaining a second copy here. Check this workflow's discovered source coverage,
 invariants, owner references and recent source commits against its last update too.
 
-- **`$feature-docs`**: verify `gate_feature_docs_relevant` against `main/`, `test/`,
-  `sdkconfig.defaults*`, `partitions.csv`, `AGENTS.md`, `.agents/`, `.codex/`,
-  `.github/PULL_REQUEST_TEMPLATE.md`, `tools/agent-hooks/`, `tools/agent-config/`, `scripts/with-host-python.sh`,
-  shipped Pages (`docs/index.html`, `installer-bootstrap.mjs`, `serial-port-release.mjs`,
-  `web-installer.mjs`, `docs/vendor/`),
-  `.github/workflows/{build,signed-pr-preview,pr-preview-cleanup,pr-policy,bench-acceptance}.yml`
-  and `scripts/release-relevance.sh`. Missing/truncated shared predicates must fail all five gates
-  closed; `scripts/test-pr-gates.sh` proves the negative cases.
-
 ## Verification discipline
 
 Distinguish confirmed paths/reproductions from suspected risks; cite the signal that separates them.

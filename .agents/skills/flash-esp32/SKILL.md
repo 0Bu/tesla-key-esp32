@@ -9,13 +9,14 @@ additional authorization. Canonical skills live under `.agents/skills/`; hooks e
 # flash-esp32 — build & USB-flash the firmware
 
 Builds the ESP-IDF project (in Docker) and, only from an explicitly verified **signed** app and
-after the user explicitly approves this physical-board mutation, flashes a connected ESP32 board (esp32 / esp32s3 / esp32c3 / esp32c6 — set `TARGET`, default
-esp32s3) over USB from the host. NVS is left untouched, so the stored pairing, private key, VIN
+after the user explicitly approves this physical-board mutation, flashes a connected ESP32 board (esp32 / esp32s3 / esp32c3 / esp32c6 — set `TARGET`;
+only the compile block defaults to esp32s3, every flash path requires it explicitly) over USB from the host. NVS is left untouched, so the stored pairing, private key, VIN
 and WiFi survive the flash (no re-pair needed). Use it only when the user asks for a build or
 flash; editing anything under `main/` does not itself authorize hardware access —
 including the embedded web UI (`main/www/` — `index.html` + `style.css` + `app.js`, spliced into
-one page at build time), which is compiled into the app binary. A successful local compile is not
-a flashable artifact: `CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=n` by design.
+one page at build time, plus the separate captive-portal `setup.html`), which is compiled into the
+app binary. A successful local compile is not a flashable artifact:
+`CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=n` by design.
 
 > This flashes over **USB**. For a remote, no-cable update use OTA (**Check for updates**
 > in the web UI's **Firmware** tab). USB flashing requires physical access and the board plugged in.
@@ -29,7 +30,9 @@ a flashable artifact: `CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=n` by design.
 
 Build with the pinned Docker wrapper; USB delivery runs on the host. Compile is not signing or
 flash approval. [Development](../../../docs/DEVELOPMENT.md#delivery) owns the shared build/delivery
-contract; the exact artifact/key/port checks below remain mandatory.
+contract; the exact artifact/key/port checks below remain mandatory. Run the multi-line blocks
+through a scratch script as [Development](../../../docs/DEVELOPMENT.md#running-workflow-shell-blocks)
+describes.
 
 ## Local tree: compile first; signing is an explicit flash gate
 
@@ -53,7 +56,9 @@ fi
 
 To flash that local tree, the operator must provide an existing RSA-3072 development key. The
 skill must **not** generate one silently: changing the key changes the board's TOFU OTA trust
-anchor, so public Pages OTA will fail until a real CI-signed image is USB-flashed again.
+anchor, so public Pages OTA will fail until a real CI-signed image is USB-flashed again. The block
+takes a private-key path. Such a path never goes into an agent's scratch script, and the secret
+guard rejects key files (`*.pem`, `*.key`, …) in agent commands, so the operator runs this block.
 
 ```bash
 set -euo pipefail
@@ -152,7 +157,7 @@ did not complete successfully, **stop**; there is no signed PR image to flash.
 
 ```bash
 set -euo pipefail
-TARGET=esp32s3            # esp32 | esp32s3 | esp32c3 | esp32c6
+: "${TARGET:?set TARGET to esp32, esp32s3, esp32c3 or esp32c6}"
 : "${PR:?set PR to the pull-request number}"
 : "${RUNID:?set RUNID to the successful signed-pr-preview run for this PR}"
 [[ "$PR" =~ ^[1-9][0-9]*$ && "$RUNID" =~ ^[1-9][0-9]*$ ]] || {

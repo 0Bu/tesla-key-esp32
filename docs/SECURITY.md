@@ -157,8 +157,8 @@ agent tools, logs, repository files or tests. Tests use throwaway keys only.
 
 Counts and file sets are enforced by validators: 53 allowlisted unsigned payloads, 12 root firmware
 files, 28 diagnostics, 40 stable Release assets and 16 manifest parts. Do not use globs to broaden them.
-The main DAG is prepare → parallel host gates and two per-target build legs → build plus
-independent-rebuild joins → publish → deploy. `build` requires prepare, both host jobs (`logic-test`
+The main DAG starts prepare and both host gates concurrently; the two per-target build legs need
+prepare, then the build and independent-rebuild joins → publish → deploy. `build` requires prepare, both host jobs (`logic-test`
 and `logic-harness`) and target builds; the independent join has no key. Producer/independent target
 compiles run concurrently before protected publication.
 

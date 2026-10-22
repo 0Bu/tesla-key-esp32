@@ -693,6 +693,24 @@ self_test() {
   rel="$(printf 'docs/notes.md\n' | gate_feature_docs_relevant && echo yes || echo no)"
   [ "$rel" = no ] || { echo "self-test: feature-docs predicate matched a plain doc" >&2; exit 1; }
 
+  # Test 6: a missing or incomplete shared library stops ci-heal before it does anything
+  local lib_rc
+  mkdir -p "$T/lib-root/scripts" "$T/lib-root/tools/agent-hooks"
+  cp "$root/scripts/ci-heal.sh" "$T/lib-root/scripts/ci-heal.sh"
+  lib_rc=0; bash "$T/lib-root/scripts/ci-heal.sh" --help >"$T/lib.out" 2>&1 || lib_rc=$?
+  [ "$lib_rc" = 2 ] && grep -Fq "refusing to run without the shared PR-gate predicates" "$T/lib.out" \
+    || { echo "self-test: a missing pr-gate-lib.sh did not stop ci-heal (exit $lib_rc)" >&2; exit 1; }
+  sed 's/^gate_pr_changed_files() {/gate_pr_changed_files_removed() {/' "$lib" \
+    >"$T/lib-root/tools/agent-hooks/pr-gate-lib.sh"
+  lib_rc=0; bash "$T/lib-root/scripts/ci-heal.sh" --help >"$T/lib.out" 2>&1 || lib_rc=$?
+  [ "$lib_rc" = 2 ] && grep -Fq "pr-gate-lib.sh lacks gate_pr_changed_files" "$T/lib.out" \
+    || { echo "self-test: an incomplete pr-gate-lib.sh did not stop ci-heal (exit $lib_rc)" >&2; exit 1; }
+
+  # Test 7: a non-numeric PR number is a usage error before any PR state is read
+  lib_rc=0; ( gh() { echo "unexpected gh $*"; }; main --pr 42a ) >"$T/pr.out" 2>&1 || lib_rc=$?
+  [ "$lib_rc" = 2 ] && grep -Fq "PR number must be numeric" "$T/pr.out" && ! grep -Fq "unexpected gh" "$T/pr.out" \
+    || { echo "self-test: a non-numeric PR number was not refused (exit $lib_rc)" >&2; exit 1; }
+
   # ── scenario harness ──
   local LOG_STAMPS="$T/stamps" LOG_PUSH="$T/pushes" LOG_MERGE="$T/merges" LOG_VERIFY="$T/verify"
   local last_out last_rc
@@ -785,6 +803,11 @@ self_test() {
   run_case sc_wrong_branch 1
   expect_out wrong_branch "is not the head branch"
 
+  sc_bad_head() { STUB_HEAD="${SHA_A%?}"; }
+  run_case sc_bad_head 1
+  expect_out bad_head "unreadable PR head SHA"; expect_lines bad_head "$LOG_VERIFY" 0
+  expect_lines bad_head "$LOG_STAMPS" 0; expect_lines bad_head "$LOG_PUSH" 0
+
   # A pushed fix without attested $skill-audit/$pr-hygiene must not be stamped or pushed
   sc_push_unattested() { STUB_SEQ="red"; STUB_FAILED="build | COMPLETED | FAILURE | u"; STUB_LOCAL="$SHA_B"; STUB_ANCESTOR=1; }
   run_case sc_push_unattested 3
@@ -839,6 +862,12 @@ self_test() {
   sc_green_head_moved() { base_attest; STUB_HEAD_MOVE_AFTER=1; }
   run_case sc_green_head_moved 1
   expect_out green_head_moved "moved"; expect_lines green_head_moved "$LOG_STAMPS" 0
+
+  # The head is re-read immediately before the body edit, after every earlier check passed
+  sc_green_head_moved_before_stamp() { base_attest; STUB_HEAD_MOVE_AFTER=2; }
+  run_case sc_green_head_moved_before_stamp 1
+  expect_out green_head_moved_before_stamp "moved before stamping"
+  expect_lines green_head_moved_before_stamp "$LOG_STAMPS" 0
 
   sc_green_files_unreadable() { base_attest; STUB_FILES_FAIL=1; }
   run_case sc_green_files_unreadable 1

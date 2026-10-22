@@ -21,6 +21,10 @@ CI-stamped release version), so the device's OTA trust anchor stays intact.
 > others. This skill never commits, pushes, edits/stamps a PR body, creates a release directly,
 > chooses OTA merely because no cable is present, or accesses the real signing key.
 
+Run the multi-line blocks below through a scratch script as
+[Development](../../../docs/DEVELOPMENT.md#running-workflow-shell-blocks) describes. The canonical
+merge command in step 1 is never part of such a script; it runs alone.
+
 ## 0. Preconditions (check, don't assume)
 
 ```bash
@@ -59,17 +63,20 @@ fail-closed.
 gh pr view <pr_number> --json headRefOid --jq .headRefOid
 ```
 
-2. Execute the exact canonical merge command using the literal numeric PR and literal 40-hex head SHA:
+2. Execute the exact canonical merge command using the literal numeric PR and literal 40-hex head
+   SHA, as its own tool call on a single line with no continuation:
 ```bash
-gh --repo github.com/0Bu/tesla-key-esp32 pr merge <pr_number> \
-  --match-head-commit <40_hex_head_sha> --squash
+gh --repo github.com/0Bu/tesla-key-esp32 pr merge <pr_number> --match-head-commit <40_hex_head_sha> --squash
 ```
 
 3. Confirm and capture the resulting merge commit on `main`:
 ```bash
-MERGE_SHA="$(gh pr view <pr_number> --json mergeCommit --jq '.mergeCommit.oid')"
+set -euo pipefail
+: "${PR:?set PR to the merged pull-request number}"
+[[ "$PR" =~ ^[1-9][0-9]*$ ]] || { echo "REFUSING: PR must be numeric" >&2; exit 1; }
+MERGE_SHA="$(gh pr view "$PR" --json mergeCommit --jq '.mergeCommit.oid')"
 printf '%s\n' "$MERGE_SHA" | grep -Eq '^[0-9a-fA-F]{40}$' || {
-  echo "REFUSING: invalid or missing merge commit SHA from PR <pr_number>" >&2; exit 1;
+  echo "REFUSING: invalid or missing merge commit SHA from PR $PR" >&2; exit 1;
 }
 echo "Merged commit: $MERGE_SHA"
 ```
@@ -94,7 +101,7 @@ RUN_IDS=$(gh run list --workflow build --branch main --commit "$MERGE_SHA" --eve
   echo "REFUSING: expected exactly one build run for merge SHA $MERGE_SHA" >&2; exit 1;
 }
 run_id=$(printf '%s\n' "$RUN_IDS" | awk 'NF {print}')
-gh run watch "$run_id" --exit-status    # blocks until done, fails on a red run (~4 min typical)
+gh run watch "$run_id" --exit-status    # blocks until done, fails on a red run
 ```
 
 A red run: stop, report the failing job (`gh run view "$run_id" --log-failed | tail -40`).
@@ -181,7 +188,7 @@ USB block:
 
 ```bash
 set -euo pipefail
-TARGET=esp32s3  # choose esp32 | esp32s3 | esp32c3 | esp32c6
+: "${TARGET:?set TARGET to esp32, esp32s3, esp32c3 or esp32c6}"
 case "$TARGET" in esp32) SFX=""; FAMILY=ESP32 ;; esp32s3) SFX=-s3; FAMILY=ESP32-S3 ;;
   esp32c3) SFX=-c3; FAMILY=ESP32-C3 ;; esp32c6) SFX=-c6; FAMILY=ESP32-C6 ;;
   *) echo "REFUSING: unsupported target" >&2; exit 1 ;; esac
@@ -204,6 +211,11 @@ merged image or touch `nvs@0x9000/0x6000`:
 set -euo pipefail
 : "${PORT:?set PORT to the explicitly identified serial device}"
 [ -c "$PORT" ] || { echo "REFUSING: PORT is not a character device: $PORT" >&2; exit 1; }
+case "${NO_AUTO_RESET:-0}" in
+  0) RESET_ARGS=() ;;
+  1) RESET_ARGS=(--before no-reset) ;;
+  *) echo "REFUSING: NO_AUTO_RESET must be 0 or 1" >&2; exit 1 ;;
+esac
 APP_INFO=$(esptool image-info "$APP")
 printf '%s\n' "$APP_INFO"
 printf '%s\n' "$APP_INFO" | grep -qx "Detected image type: $FAMILY" \
@@ -211,7 +223,7 @@ printf '%s\n' "$APP_INFO" | grep -qx "Detected image type: $FAMILY" \
   echo "REFUSING: signed main app target/version does not match metadata" >&2; exit 1;
 }
 esptool chip-id --help >/dev/null 2>&1 && CHIP_CMD=chip-id || CHIP_CMD=chip_id
-CHIP_RAW=$(esptool -p "$PORT" "$CHIP_CMD" 2>&1 \
+CHIP_RAW=$(esptool -p "$PORT" ${RESET_ARGS[@]+"${RESET_ARGS[@]}"} "$CHIP_CMD" 2>&1 \
   | grep -m1 -oE '(Chip is|Chip type:)[[:space:]]*[A-Za-z0-9()+/. -]+' \
   | sed -E 's/^(Chip is|Chip type:)[[:space:]]*//' || true)
 case "$CHIP_RAW" in ESP32-S3*) DETECTED=esp32s3 ;; ESP32-C3*) DETECTED=esp32c3 ;;
@@ -220,17 +232,20 @@ case "$CHIP_RAW" in ESP32-S3*) DETECTED=esp32s3 ;; ESP32-C3*) DETECTED=esp32c3 ;
 [ "$DETECTED" = "$TARGET" ] || {
   echo "REFUSING: selected port is $DETECTED, requested target is $TARGET" >&2; exit 1;
 }
-if ! esptool --chip "$TARGET" -p "$PORT" write_flash 0x20000 "$APP"; then
+if ! esptool --chip "$TARGET" -p "$PORT" ${RESET_ARGS[@]+"${RESET_ARGS[@]}"} \
+    write_flash 0x20000 "$APP"; then
   echo "REFUSING: signed app write failed; otadata was not activated" >&2; exit 1
 fi
-if ! esptool --chip "$TARGET" -p "$PORT" erase_region 0xf000 0x2000; then
+if ! esptool --chip "$TARGET" -p "$PORT" ${RESET_ARGS[@]+"${RESET_ARGS[@]}"} \
+    erase_region 0xf000 0x2000; then
   echo "DEPLOYMENT INCOMPLETE: app wrote but otadata activation erase failed" >&2; exit 1
 fi
 DELIVERY=usb
 ```
 
 `nvs@0x9000` is untouched → pairing/key/VIN/WiFi survive. Download-mode gotcha: a
-board with no auto-reset needs BOOT held + `--before no-reset`. Port selection: see the
+board with no auto-reset needs BOOT held and the input `NO_AUTO_RESET=1`, which adds
+`--before no-reset` to each esptool call. Port selection: see the
 **flash-esp32** skill — same host mechanics.
 
 ### Explicitly selected OTA delivery

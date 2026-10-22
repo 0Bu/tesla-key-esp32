@@ -10,6 +10,10 @@
       "pattern": "implementation request[\\s\\S]{0,180}(does[\\s*]*not|not)[\\s\\S]{0,30}authorize[\\s\\S]{0,120}(commit|push|merge|release)"
     },
     {
+      "id": "ci-heal-exception-bounded",
+      "pattern": "user's own invocation of `\\$ci-heal`[\\s\\S]{0,120}not an agent's[\\s\\S]{0,300}never authorizes a commit or a review[\\s\\S]{0,40}merge still needs"
+    },
+    {
       "id": "four-target-contract",
       "pattern": "esp32[\\s\\S]{0,80}esp32s3[\\s\\S]{0,80}esp32c3[\\s\\S]{0,80}esp32c6"
     },
