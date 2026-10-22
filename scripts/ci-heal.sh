@@ -840,6 +840,16 @@ self_test() {
   run_case sc_green_head_moved 1
   expect_out green_head_moved "moved"; expect_lines green_head_moved "$LOG_STAMPS" 0
 
+  # The head moves after the readiness checks but before the body edit (third head read).
+  sc_green_head_moved_before_stamp() { base_attest; STUB_HEAD_MOVE_AFTER=2; }
+  run_case sc_green_head_moved_before_stamp 1
+  expect_out green_head_moved_before_stamp "moved before stamping"
+  expect_lines green_head_moved_before_stamp "$LOG_STAMPS" 0
+
+  sc_bad_head_sha() { base_attest; STUB_HEAD="not-a-sha"; STUB_LOCAL="not-a-sha"; }
+  run_case sc_bad_head_sha 1
+  expect_out bad_head_sha "unreadable PR head SHA"; expect_lines bad_head_sha "$LOG_STAMPS" 0
+
   sc_green_files_unreadable() { base_attest; STUB_FILES_FAIL=1; }
   run_case sc_green_files_unreadable 1
   expect_out green_files_unreadable "could not establish which gates"; expect_lines green_files_unreadable "$LOG_STAMPS" 0

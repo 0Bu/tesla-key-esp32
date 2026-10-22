@@ -41,7 +41,8 @@ gh pr view "$PR" --json number,state,mergeable,headRefOid,body
   vehicle-command-relevant diff (`gate_vehicle_command_relevant` in
   [`pr-gate-lib.sh`](../../../tools/agent-hooks/pr-gate-lib.sh)) also requires
   `- [x] $vehicle-command-audit clean — merge gate @ <sha>`. The
-  command must carry that same full head SHA in `--match-head-commit`. If any record is missing or
+  command must carry that same full head SHA in `--match-head-commit`, and the hook also requires
+  local `HEAD` to equal that PR head, so check out the exact head first. If any record is missing or
   stale, run the corresponding read-only review/sync workflow and report that a separately
   authorized PR-body update is needed; `$project-review` does not establish `$pr-hygiene`
   readiness. Never stamp from this skill and never use a structured/MCP merge action; the neutral
@@ -94,7 +95,7 @@ RUN_IDS=$(gh run list --workflow build --branch main --commit "$MERGE_SHA" --eve
   echo "REFUSING: expected exactly one build run for merge SHA $MERGE_SHA" >&2; exit 1;
 }
 run_id=$(printf '%s\n' "$RUN_IDS" | awk 'NF {print}')
-gh run watch "$run_id" --exit-status    # blocks until done, fails on a red run (~4 min typical)
+gh run watch "$run_id" --exit-status    # blocks until done, fails on a red run
 ```
 
 A red run: stop, report the failing job (`gh run view "$run_id" --log-failed | tail -40`).

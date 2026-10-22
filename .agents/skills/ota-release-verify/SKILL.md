@@ -78,7 +78,7 @@ printf 'Release %s -> %s\n' "$RELEASE_TAG" "$SOURCE_SHA"
 
 `REL` is the version the manifest and every embedded app descriptor must report; `SOURCE_SHA` is
 the only acceptable `manifest.sourceSha`. A merely well-formed but different SHA is stale or
-unreconciled channel state and fails closed. `version.txt` = `1.5.0` here is only the **floor** —
+unreconciled channel state and fails closed. `version.txt` holds only the **floor** —
 do not expect it to equal the live version; CI stamps the real one uncommitted.
 
 `build.yml` keeps this invariant structurally: a firmware-relevant `main` push enters the

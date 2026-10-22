@@ -127,9 +127,9 @@ fi
 > exactly one `PORT=/dev/...`; ambiguity is a hard stop. Install esptool via `pipx install
 > esptool` (no brew).
 
-**Success looks like:** `Hash of data verified.` for each region, then
-`Hard resetting via RTS pin...` → `Done`. The app image lands at `0x20000` (dual-OTA
-layout). After reset the device rejoins WiFi in a few seconds; reload
+**Success looks like:** `Hash of data verified.` for the app write, then
+`Flash memory region erased successfully …` for the otadata erase and
+`Hard resetting via RTS pin...`. The app image lands at `0x20000` (dual-OTA layout). After reset the device rejoins WiFi in a few seconds; reload
 `tesla-key-esp32.local` to see UI changes.
 
 > ⚠️ **A local (unsigned) build crash-loops at boot — flash a _signed_ image.** Since the

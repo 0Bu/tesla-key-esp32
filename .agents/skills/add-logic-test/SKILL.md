@@ -40,8 +40,8 @@ inherently about hardware or the network), it doesn't belong in `main/logic/`. E
 
 ### 1. Create `main/logic/<name>.hpp`
 
-Header-only, `#pragma once`, **standard-library includes only** (e.g. `<string>`, `<cstdint>`,
-`<cmath>`) — no IDF/FreeRTOS/NimBLE/NVS/cJSON. Put everything in `namespace tk`. Open with the
+Header-only, `#pragma once`, **standard C++17 and other `main/logic/` headers only** (e.g.
+`<string>`, `<cstdint>`, `<cmath>`) — no IDF/FreeRTOS/NimBLE/NVS/cJSON. Put everything in `namespace tk`. Open with the
 standard guard comment so the constraint travels with the file (copy the one at the top of
 [`main/logic/vin.hpp`](../../../main/logic/vin.hpp)). Document where the firmware delegates from.
 
