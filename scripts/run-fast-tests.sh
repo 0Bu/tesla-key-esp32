@@ -53,7 +53,7 @@ run_logic() {
 
 run_nvs() {
   echo "== compiling and running NVS storage adapter tests =="
-  "$CXX" -std=c++17 -Wall -Wextra -Werror -Itest/stubs -Imain \
+  "$CXX" -std=c++17 -Wall -Wextra -Werror -Itest/stubs -Imain -pthread \
     -o "$BUILD_DIR/nvs_storage_tests" \
     test/test_nvs_storage.cpp main/nvs_storage.cpp main/config_blob.cpp
   "$BUILD_DIR/nvs_storage_tests"
@@ -61,10 +61,24 @@ run_nvs() {
 
 run_boundary() {
   echo "== compiling and running runtime boundary tests =="
-  "$CXX" -std=c++17 -Wall -Wextra -Werror -Itest/stubs -Imain \
+  python3 test/generate_background_poll_adapter.py "$BUILD_DIR/background_poll_adapter.generated.hpp"
+  python3 test/generate_ota_admission_adapter.py "$BUILD_DIR/ota_admission_adapter.generated.hpp"
+  "$CXX" -std=c++17 -Wall -Wextra -Werror -Itest/stubs -Itest/coredump_stubs -Imain -I"$BUILD_DIR" -DTEST_BACKGROUND_POLL_ADAPTER=1 -DTEST_OTA_ADMISSION_ADAPTER=1 \
     -o "$BUILD_DIR/runtime_boundary_tests" \
-    test/test_runtime_boundaries.cpp main/diag_log.cpp main/safe_mode.cpp
+    test/test_runtime_boundaries.cpp test/test_background_poll.cpp test/test_ota_admission.cpp test/test_coredump_hash.cpp main/diag_log.cpp main/stack_watch.cpp main/safe_mode.cpp
   "$BUILD_DIR/runtime_boundary_tests"
+  python3 test/generate_syslog_adapters.py "$BUILD_DIR/syslog_adapters.generated.hpp"
+  "$CXX" -std=c++17 -Wall -Wextra -Werror -Imain -I"$BUILD_DIR" \
+    -o "$BUILD_DIR/syslog_runtime_tests" test/test_syslog_runtime.cpp
+  "$BUILD_DIR/syslog_runtime_tests"
+  for crash_arch in xtensa riscv; do
+    crash_flags=()
+    if [ "$crash_arch" = riscv ]; then crash_flags=(-DHOST_CRASH_RISCV=1); fi
+    "$CXX" -std=c++17 -Wall -Wextra -Werror ${crash_flags[@]+"${crash_flags[@]}"} \
+      -Itest/crash_stubs -Itest/coredump_stubs -Imain \
+      -o "$BUILD_DIR/crash_runtime_${crash_arch}_tests" test/test_crash_runtime.cpp
+    "$BUILD_DIR/crash_runtime_${crash_arch}_tests"
+  done
 }
 
 run_sanitizers() {

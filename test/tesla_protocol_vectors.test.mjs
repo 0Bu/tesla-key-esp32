@@ -299,6 +299,73 @@ test('H1: CarServer response is routed by UUID before delivering vehicleData tel
   assert.ok(callbackDelivery > dropCheck, 'must deliver vehicleData callbacks strictly AFTER successful routing');
 });
 
+test('CarServer zero counters use authenticated replay admission in the compiled native adapter', () => {
+  const telemetry = readFileSync('main/vehicle_telemetry.cpp', 'utf8');
+  const start = telemetry.indexOf('void VehicleController::handle_carserver_frame_(');
+  const end = telemetry.indexOf('void VehicleController::process_rx_frame_(', start);
+  const body = telemetry.slice(start, end);
+  assert.match(body, /const bool has_response_counter = sig_data &&\s*sig_data->which_sig_type == Signatures_SignatureData_AES_GCM_Response_data_tag;/);
+  assert.doesNotMatch(body, /response_counter\s*>\s*0/);
+  const authenticated = body.indexOf('if (res != 0) {');
+  const match = body.indexOf('if (!command_runner_.dispatcher().match_response_or_record_rejection(');
+  const parse = body.indexOf('client_->parse_payload_car_server_response(');
+  const replay = body.indexOf('if (has_response_counter && (!peer || !peer->validate_response_counter(response_counter))) {');
+  const route = body.indexOf('command_runner_.handle_response(');
+  assert.ok(match >= 0 && parse > match);
+  assert.ok(authenticated > parse && replay > authenticated && route > replay);
+  assert.match(body.slice(match, parse), /return;/);
+  assert.match(body.slice(route), /has_response_counter, response_counter,/);
+
+  const harness = readFileSync('test/test_tesla_ble_harness.cpp', 'utf8');
+  const runner = readFileSync('scripts/test-tesla-ble-harness.sh', 'utf8');
+  assert.match(harness, /#include "carserver-handler\.inc"/);
+  assert.match(harness, /static void check_native_carserver_replay\(\)/);
+  assert.match(harness, /^\s+check_native_carserver_replay\(\);/m);
+  assert.match(runner, /python3 - "\$ROOT_DIR\/main\/vehicle_telemetry\.cpp" "\$BUILD_DIR\/carserver-handler\.inc"/);
+  assert.match(runner, /-I "\$BUILD_DIR"/);
+});
+
+test('VCSEC regressions compile and execute the native routing and response methods', () => {
+  const harness = readFileSync('test/test_tesla_ble_harness.cpp', 'utf8');
+  const runner = readFileSync('scripts/test-tesla-ble-harness.sh', 'utf8');
+  assert.match(harness, /#include "vcsec-native\.inc"/);
+  assert.match(harness, /static void check_native_vcsec_routing\(\)/);
+  assert.match(harness, /^\s+check_native_vcsec_routing\(\);/m);
+  assert.match(runner, /python3 - "\$ROOT_DIR\/main\/vehicle_telemetry\.cpp" "\$BUILD_DIR\/vcsec-native\.inc"/);
+  for (const name of ['build_vcsec_attempt_', 'vcsec_response_matches_', 'handle_vcsec_frame_',
+                      'handle_session_info_frame_', 'process_rx_frame_', 'drive_command_runner_']) {
+    assert.ok(runner.includes('"' + name + '"'), 'native extraction must include ' + name);
+  }
+});
+
+test('Numeric fault and public completion regressions execute unchanged native adapters', () => {
+  const harness = readFileSync('test/test_tesla_ble_harness.cpp', 'utf8');
+  const fixture = readFileSync('test/command_completion_fixture.hpp', 'utf8');
+  const runner = readFileSync('scripts/test-tesla-ble-harness.sh', 'utf8');
+  for (const name of ['check_native_command_faults', 'check_native_command_completion']) {
+    assert.ok(harness.includes('    ' + name + '();'), 'native outcome test must execute ' + name);
+  }
+  for (const name of ['response_matches_current_', 'authenticate_fault_reply_', 'handle_signed_message_fault_',
+                      'publish_command_outcome_', 'invalidate_and_flush_', 'await_completion_', 'make_result_cb_']) {
+    assert.ok(runner.includes('"' + name + '"'), 'native outcome extraction must include ' + name);
+  }
+  for (const file of ['completion-types.inc', 'completion-native.inc', 'completion-on-done.inc']) {
+    assert.ok(fixture.includes('#include "' + file + '"'), 'completion fixture must compile actual source ' + file);
+    assert.ok(runner.includes(file), 'completion source must be generated from firmware ' + file);
+  }
+});
+
+test('Identity cleanup regressions compile and execute both native cleanup methods', () => {
+  const harness = readFileSync('test/test_tesla_ble_harness.cpp', 'utf8');
+  const runner = readFileSync('scripts/test-tesla-ble-harness.sh', 'utf8');
+  assert.match(harness, /#include "pairing-cleanup\.inc"/);
+  assert.match(harness, /static void check_native_pairing_cleanup\(\)/);
+  assert.match(harness, /^\s+check_native_pairing_cleanup\(\);/m);
+  assert.match(runner, /python3 - "\$ROOT_DIR\/main\/vehicle_pairing\.cpp" "\$BUILD_DIR\/pairing-cleanup\.inc"/);
+  assert.match(runner, /for name in \("clear_session_and_cache_", "finish_key_rotation_cleanup_"\):/);
+  assert.match(runner, /replace\("VehicleController::", "PairingCleanupController::", 1\)/);
+});
+
 test('H2: RxFramer is strictly single-owner on vehicle_loop', () => {
   const pairing = readFileSync('main/vehicle_pairing.cpp', 'utf8');
   assert.match(

@@ -20,7 +20,8 @@ export function bootstrapInstaller({
     // ?trace adds esptool-js's packet trace to the log.
     trace: new URLSearchParams(locationImpl.search).has("trace")
   });
-  // A single port this page is already paired with reconnects without the chooser.
+  // A single port this page is already paired with reconnects without the chooser; checking it
+  // restarts the board through its bootloader.
   controller.ready.then(() => controller.reconnectPaired());
   return controller;
 }

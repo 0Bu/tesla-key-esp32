@@ -5,11 +5,10 @@
 // Manual xSemaphoreTake()/xSemaphoreGive() pairs are NOT unwind-safe: any throw, early
 // return, or later maintenance edit inserted between the two calls leaks the lock, and a
 // silently-held mutex wedges every subsequent user of it until power-cycle. C++ exceptions
-// are enabled in this firmware (see AGENTS.md "Memory, exceptions and concurrency"), and the
-// tesla-ble builders/parsers, std::string/std::vector/std::function, and the cJSON/MQTT
-// payload builders can all throw std::bad_alloc while the largest contiguous free block is
-// exhausted — so a throw between a take and its give is a real, reachable failure, not a
-// theoretical one.
+// are enabled in this firmware (see docs/ARCHITECTURE.md, "Concurrency"). C++ containers and
+// tesla-ble builders/parsers can throw std::bad_alloc when a contiguous allocation fails.
+// cJSON and JsonBuilder instead report allocation failure through their return/state contract.
+// Both exception unwinding and early failure returns must release ownership.
 //
 // This guard takes on construction and gives on destruction, so release happens on the
 // normal return path AND while a C++ exception unwinds the stack. It is the ONE reusable

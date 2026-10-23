@@ -1,5 +1,5 @@
 #include "provisioning.hpp"
-#include "ota_update.hpp"      // ota_confirm_pending_image() — guard OTA rollback across the setup reboot
+#include "ota_update.hpp"      // request-owned setup save/restart lease
 #include "logic/http_body.hpp" // http_body_read() — reassemble a multi-segment POST body
 
 #include <array>
@@ -24,6 +24,8 @@
 #include "esp_timer.h"
 #include "lwip/sockets.h"
 #include "logic/vin.hpp"
+#include "logic/effect_reply.hpp"
+#include <type_traits>
 #include "logic/captive.hpp"
 #include "logic/setup_portal.hpp"
 #include "logic/wifi_credentials.hpp"
@@ -136,11 +138,71 @@ static esp_err_t form_get(httpd_req_t* req) {
   }
 }
 
-static esp_err_t save_post_impl(httpd_req_t* req) {
+struct PortalSaveContext {
+    OtaConfigRestartGuard restart{};
+    tk::EffectReplyState effect{};
+};
+static_assert(std::is_nothrow_default_constructible<PortalSaveContext>::value &&
+              std::is_nothrow_destructible<PortalSaveContext>::value,
+              "portal context must not throw outside its callback catch");
+
+static esp_err_t portal_save_send(httpd_req_t* req, PortalSaveContext& context,
+                                  const char* status, const char* type, const char* body) noexcept {
+    if (context.effect.terminal) return ESP_FAIL;
+    context.effect.terminal = true;
+    try {
+        esp_err_t result = httpd_resp_set_status(req, status);
+        if (result != ESP_OK) return result;
+        result = httpd_resp_set_type(req, type);
+        if (result != ESP_OK) return result;
+        return httpd_resp_sendstr(req, body);
+    } catch (...) { return ESP_FAIL; }
+}
+
+static esp_err_t portal_save_result(httpd_req_t* req, PortalSaveContext& context) noexcept {
+    if (!context.effect.success())
+        return portal_save_send(req, context, "500 Internal Server Error", "text/plain",
+            "configuration write outcome unknown; no restart requested");
+    if (context.effect.terminal) return ESP_FAIL;
+    context.effect.terminal = true;
+    try {
+        esp_err_t result = httpd_resp_set_status(req, "200 OK");
+        if (result != ESP_OK) return result;
+        result = httpd_resp_set_type(req, "text/html");
+        if (result != ESP_OK) return result;
+        static constexpr char prefix[] =
+            "<!doctype html><meta charset=utf-8><body style='font-family:system-ui'>"
+            "<h2>Saved &#9989;</h2>";
+        result = httpd_resp_send_chunk(req, prefix, sizeof(prefix) - 1);
+        if (result != ESP_OK) return result;
+        const bool warning = tk::config_image_warning(context.effect.image);
+        result = httpd_resp_sendstr_chunk(req, warning ? "<p id=firmware-warning>" : "<p>");
+        if (result != ESP_OK) return result;
+        const char* message = warning
+            ? tk::config_commit_reason(context.effect.image)
+            : "Configuration saved for the next boot. Rebooting to connect to your WiFi.";
+        result = httpd_resp_send_chunk(req, message, std::strlen(message));
+        if (result != ESP_OK) return result;
+        result = httpd_resp_sendstr_chunk(req, "</p>");
+        if (result != ESP_OK) return result;
+        return httpd_resp_send_chunk(req, nullptr, 0);
+    } catch (...) { return ESP_FAIL; }
+}
+
+static void portal_save_continue(PortalSaveContext& context) noexcept {
+    if (context.effect.take_continuation() != tk::ReplyContinuation::SuccessfulConfigRestart ||
+        !context.restart.owns_gate()) return;
+    try {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        esp_restart();
+    } catch (...) { /* never retry or unwind into the httpd C callback */ }
+}
+
+static esp_err_t save_post_impl(httpd_req_t* req, PortalSaveContext& context) {
     static constexpr size_t kSaveBodyMaxBytes = 1024;
     const int len = req->content_len;
     if (len <= 0) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "empty form");
+        (void)portal_save_send(req, context, "400 Bad Request", "text/plain", "empty form");
         return ESP_FAIL;
     }
 
@@ -148,7 +210,7 @@ static esp_err_t save_post_impl(httpd_req_t* req) {
     // A 1025-byte Content-Length is rejected before recv, so the terminator never leaves the array.
     std::array<char, kSaveBodyMaxBytes + 1> body{};
     if (!tk::http_body_fits_buffer(static_cast<size_t>(len), body.size())) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "oversized form");
+        (void)portal_save_send(req, context, "400 Bad Request", "text/plain", "oversized form");
         return ESP_FAIL;
     }
     // Reassemble the whole body: httpd_req_recv may return only the first TCP segment, so a single
@@ -164,11 +226,11 @@ static esp_err_t save_post_impl(httpd_req_t* req) {
     if (got < 0 || got != len) {
         // Prevent IDF's request cleanup from draining a slow residual body.
         (void)shutdown(httpd_req_to_sockfd(req), SHUT_RD);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "recv failed");
+        (void)portal_save_send(req, context, "400 Bad Request", "text/plain", "recv failed");
         return ESP_FAIL;
     }
     if (tk::http_body_has_embedded_nul(body.data(), static_cast<size_t>(got))) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid NUL in form");
+        (void)portal_save_send(req, context, "400 Bad Request", "text/plain", "invalid NUL in form");
         return ESP_FAIL;
     }
     const std::string_view body_view(body.data(), static_cast<size_t>(got));
@@ -179,18 +241,16 @@ static esp_err_t save_post_impl(httpd_req_t* req) {
     if (!form_field(body_view, "ssid", ssid) ||
         !form_field(body_view, "pass", pass) ||
         !form_field(body_view, "vin", vin)) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid form encoding");
+        (void)portal_save_send(req, context, "400 Bad Request", "text/plain", "invalid form encoding");
         return ESP_FAIL;
     }
 
     const tk::WifiCredentialError wifi_error = tk::wifi_credentials_error(ssid, pass);
     if (wifi_error != tk::WifiCredentialError::None) {
-        httpd_resp_set_type(req, "text/html");
         std::string message = "<p>";
         message += tk::wifi_credentials_reason(wifi_error);
         message += ". <a href=/>Back</a>.</p>";
-        httpd_resp_send(req, message.c_str(), message.size());
-        return ESP_OK;
+        return portal_save_send(req, context, "200 OK", "text/html", message.c_str());
     }
 
     // Normalise + validate like /set_vin (trim, uppercase, tk::vin_is_plausible) — the
@@ -202,36 +262,32 @@ static esp_err_t save_post_impl(httpd_req_t* req) {
     for (char& c : vin) c = (char)std::toupper((unsigned char)c);
 
     if (!vin.empty() && !tk::vin_is_plausible(vin)) {
-        httpd_resp_set_type(req, "text/html");
-        httpd_resp_sendstr(req, "<p>VIN must be 17 valid characters. <a href=/>Back</a>.</p>");
-        return ESP_OK;
+        return portal_save_send(req, context, "200 OK", "text/html",
+            "<p>VIN must be 17 valid characters. <a href=/>Back</a>.</p>");
     }
 
     tk::ConfigBlob cfg;
     if (!tk::cfg_load_for_update(*g_cfg, cfg)) {
         // The legacy mirrors cannot vouch for the stored VIN or service settings, and the
         // portal must not rewrite an identity from them. Leave the stored data alone.
-        httpd_resp_set_status(req, "503 Service Unavailable");
-        httpd_resp_set_type(req, "text/html");
-        httpd_resp_sendstr(req,
+        return portal_save_send(req, context, "503 Service Unavailable", "text/html",
             "<p>The stored configuration is unreadable, so nothing was changed. The device must "
             "be recovered over USB instead of being overwritten from stale data. "
             "<a href=/>Back</a>.</p>");
-        return ESP_OK;
     }
     // The captive portal runs before VehicleController exists, so it cannot transactionally
     // rotate the private key and sessions. It may set the first VIN or retain the current one,
     // but changing an established vehicle identity here would bind the old key/session to a new
     // car. Use /set_vin on the running firmware for that destructive, confirmed transaction.
     if (!cfg.vin.empty() && !vin.empty() && vin != cfg.vin) {
-        httpd_resp_set_status(req, "409 Conflict");
-        httpd_resp_set_type(req, "text/html");
-        httpd_resp_sendstr(req,
+        return portal_save_send(req, context, "409 Conflict", "text/html",
             "<p>An existing VIN cannot be changed from recovery setup because key rotation is "
             "not available yet. Reconnect using the saved VIN, then change it in the device UI. "
             "<a href=/>Back</a>.</p>");
-        return ESP_OK;
     }
+
+    if (!context.restart.try_begin())
+        return portal_save_send(req, context, "409 Conflict", "text/plain", tk::kConfigRestartBusyReason);
 
     // Persist the whole form as ONE atomic entry, and reboot only if that write succeeds.
     //
@@ -250,48 +306,29 @@ static esp_err_t save_post_impl(httpd_req_t* req) {
     // empty configuration — this same portal, one reboot later. In the retrying portal the stored
     // pair is still retried until the form is saved; saving is the explicit choice to replace it.
 
-    if (!tk::cfg_save(*g_cfg, cfg)) {
-        ESP_LOGE(TAG, "failed to persist setup form; staying in setup mode");
-        httpd_resp_set_status(req, "500 Internal Server Error");
-        httpd_resp_set_type(req, "text/html");
-        httpd_resp_sendstr(req,
-            "<p>Could not save the configuration. The device was not rebooted. "
-            "<a href=/>Try again</a>.</p>");
-        return ESP_FAIL;
-    }
-    ESP_LOGI(TAG, "saved config: ssid='%s' vin='%s' — rebooting", ssid.c_str(), vin.c_str());
-
-    httpd_resp_set_type(req, "text/html");
-    httpd_resp_sendstr(req,
-        "<!doctype html><meta charset=utf-8><body style='font-family:system-ui'>"
-        "<h2>Saved &#9989;</h2><p>Rebooting and connecting to your WiFi. "
-        "The device will be reachable at <b>http://tesla-key-esp32.local</b>.</p>");
-
-    ota_confirm_pending_image(tk::OtaRebootClass::SuccessfulUserConfigCommit);
-    if (!ota_config_restart_begin()) {
-        ESP_LOGW(TAG, "setup save: reboot postponed — active operation owns gate; "
-                      "configuration saved and will apply on next restart");
-        return ESP_OK;
-    }
-    vTaskDelay(pdMS_TO_TICKS(1000));
-    esp_restart();
-    return ESP_OK;
+    context.effect.attempting(tk::RequestEffect::Configuration);
+    if (!tk::cfg_save(*g_cfg, cfg)) return portal_save_result(req, context);
+    context.effect.succeeded();
+    context.effect.continuation = tk::ReplyContinuation::SuccessfulConfigRestart;
+    // The setup portal never confirms an image. Preserve the queried state before any log/reply.
+    context.effect.image = ota_config_image_state(context.restart);
+    ESP_LOGI(TAG, "setup configuration saved; automatic restart requested");
+    return portal_save_result(req, context);
 }
 
 static esp_err_t save_post(httpd_req_t* req) {
+    PortalSaveContext context{};
+    esp_err_t result = ESP_FAIL;
     try {
-        return save_post_impl(req);
-    } catch (const std::exception& e) {
-        ESP_LOGE(TAG, "setup save threw (%s); returning 503", e.what());
-        httpd_resp_set_status(req, "503 Service Unavailable");
-        httpd_resp_set_type(req, "text/plain");
-        return httpd_resp_sendstr(req, "out of memory");
+        result = save_post_impl(req, context);
     } catch (...) {
-        ESP_LOGE(TAG, "setup save threw (unknown); returning 503");
-        httpd_resp_set_status(req, "503 Service Unavailable");
-        httpd_resp_set_type(req, "text/plain");
-        return httpd_resp_sendstr(req, "out of memory");
+        // Keep the owner and committed outcome alive through outer catch and continuation.
+        result = context.effect.needs_effect_reply()
+            ? portal_save_result(req, context)
+            : portal_save_send(req, context, "503 Service Unavailable", "text/plain", "out of memory");
     }
+    portal_save_continue(context);
+    return result;
 }
 
 // ─── Captive-portal DNS ───────────────────────────────────────────────────────

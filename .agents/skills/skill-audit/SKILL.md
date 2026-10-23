@@ -12,9 +12,18 @@ implementation. This workflow establishes only its own gate; whole-project revie
 
 ## Audit
 
-0. **Step 0 — pin the baseline.** Run `git fetch origin` through the permitted boundary and verify
-   HEAD equals current main or exact target PR head. **Fail-fast on divergence** or local drift;
-   report synchronization limits rather than certifying stale content. **State reviewed SHA in report.**
+0. **Step 0 — pin the baseline and review purpose.** Use a permitted fresh `git fetch origin`
+   or the operator's verified fresh fetch result. A main audit requires HEAD equal current
+   `origin/main`; an audit of a published PR requires HEAD equal its exact remote head.
+   For a separately authorized PR-create or pre-push review, pin the clean local candidate SHA
+   and intended branch instead. Inspect fresh main, merge-base and intervening changes; if a PR
+   already exists, the candidate must descend from its published head without rewriting history.
+   State whether the reviewed SHA is a local publication candidate or an actual remote PR head;
+   neither local review nor its records establish remote CI or merge readiness. After push,
+   re-read GitHub and require the remote head to equal that reviewed SHA before using its records.
+   **Fail-fast on divergence unexplained by the selected review purpose, or local drift**; report
+   synchronization limits rather than certifying stale content.
+   **State reviewed SHA in report, together with baseline evidence.**
 1. Discover every canonical `.agents/skills/*/SKILL.md` and reviewer; do not hardcode the inventory.
    Check native `.codex/` generated registrations with `sync-codex.mjs --check`, effective
    primary-checkout hook trust and parent runtime overrides. Global host/cluster skills are outside this project audit.
@@ -34,7 +43,8 @@ and owning documents. Audit **all** prerequisites, authorization, required valid
 conditions, commands, outputs and evidence contracts. The bullets below focus coverage; they do not
 replace or relax any workflow requirement.
 
-This is the single per-sibling checklist. `$project-review` uses it by reference. Read current
+This is the per-sibling checklist. `$project-review` uses it by reference and repeats only the
+`$feature-docs` bullet, which the agent-config check requires in both skills. Read current
 workflow scripts and [deep document owners](../../../docs/README.md), not historical skill verdicts.
 
 - **`$project-review`**: whole-tree coverage, current invariants/consumer map, documentation-quality

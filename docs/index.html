@@ -128,7 +128,7 @@ button:disabled { cursor:default; opacity:.5; }
         <button class="installer-button installer-button-primary" type="button" id="flash-button"
                 title="Keeps WiFi, VIN, pairing key and sessions" disabled>Flash</button>
         <button class="installer-button installer-button-secondary" type="button" id="clean-flash-button"
-                title="Erases all flash first" disabled>Clean flash</button>
+                title="Erases all flash, including WiFi, VIN and the pairing key; asks for confirmation" disabled>Clean flash</button>
       </div>
     </div>
 
@@ -144,14 +144,16 @@ button:disabled { cursor:default; opacity:.5; }
   <section class="installer-notes" aria-label="After installing">
     <p><strong>After installing</strong></p>
     <ol>
-      <li>After <strong>Clean flash</strong>, join <code>tesla-key-esp32-setup</code> and enter WiFi and VIN. <strong>Flash</strong> keeps them.</li>
-      <li>Open <code>http://tesla-key-esp32.local</code>, generate the key and approve it in the car with your keycard.</li>
+      <li><strong>Clean flash</strong> erases WiFi, VIN, MQTT, the pairing key and sessions after a confirmation; then join <code>tesla-key-esp32-setup</code> and enter WiFi and VIN. <strong>Flash</strong> keeps all of it.</li>
+      <li>Open <code>http://tesla-key-esp32.local</code>. Key setup and pairing run automatically; when pairing is needed, place a Tesla keycard on the console reader and approve the request on the touchscreen.</li>
       <li>Later updates install over the air from the device page.</li>
     </ol>
+    <p><strong>Connecting restarts the board:</strong> the check enters its bootloader and the log starts the firmware again. A single port this page is paired with reconnects when the page loads or the board is plugged in.</p>
     <p><strong>Two USB ports?</strong> Choose the board's native port (<code>USB JTAG/serial debug unit</code>), not the UART bridge.</p>
   </section>
-  <p class="installer-footer">AGPL-3.0 · <a href="./vendor/esptool-js-0.7.0.LICENSE">esptool-js</a> (Apache-2.0) ·
-    <a href="https://github.com/0Bu/tesla-key-esp32" target="_blank" rel="noopener noreferrer">Source</a> · not affiliated with Tesla, Inc.</p>
+  <footer class="installer-footer"><a href="./LICENSE" target="_blank" rel="noopener noreferrer">AGPL-3.0</a> ·
+    <a href="./THIRD_PARTY.md" target="_blank" rel="noopener noreferrer">Third-party notices</a> ·
+    <a href="https://github.com/0Bu/tesla-key-esp32" target="_blank" rel="noopener noreferrer">Source</a> · not affiliated with Tesla, Inc.</footer>
 </main>
 
 <script type="module" src="./installer-bootstrap.mjs"></script>

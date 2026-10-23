@@ -311,19 +311,19 @@ run_local_verifications() {
 
   # Run the current failure category first when it has a supported host preflight.
   case "$prioritized_cause" in
-    repo-lint) "$root/scripts/repo-lint.sh" ;;
-    agent-config) "$root/tools/agent-config/selftest.sh" ;;
-    mock-tests) "$root/scripts/run-mock-tests.sh" ;;
-    build-contracts) "$root/scripts/test-build-contracts.sh" ;;
-    pr-gates) "$root/scripts/test-pr-gates.sh" ;;
+    repo-lint) "$root/scripts/repo-lint.sh" || return $? ;;
+    agent-config) "$root/tools/agent-config/selftest.sh" || return $? ;;
+    mock-tests) "$root/scripts/run-mock-tests.sh" || return $? ;;
+    build-contracts) "$root/scripts/test-build-contracts.sh" || return $? ;;
+    pr-gates) "$root/scripts/test-pr-gates.sh" || return $? ;;
     *) ;;
   esac
 
-  "$root/scripts/repo-lint.sh"
-  "$root/tools/agent-config/selftest.sh"
-  "$root/scripts/run-mock-tests.sh"
-  "$root/scripts/test-build-contracts.sh"
-  "$root/scripts/test-pr-gates.sh"
+  "$root/scripts/repo-lint.sh" || return $?
+  "$root/tools/agent-config/selftest.sh" || return $?
+  "$root/scripts/run-mock-tests.sh" || return $?
+  "$root/scripts/test-build-contracts.sh" || return $?
+  "$root/scripts/test-pr-gates.sh" || return $?
 }
 
 
@@ -693,6 +693,33 @@ self_test() {
   rel="$(printf 'docs/notes.md\n' | gate_feature_docs_relevant && echo yes || echo no)"
   [ "$rel" = no ] || { echo "self-test: feature-docs predicate matched a plain doc" >&2; exit 1; }
 
+  # Exercise the real preflight function under its production conditional context. Each stub
+  # appends its name; a failure must stop immediately, including in the prioritized pass.
+  local preflight_root="$T/preflights" preflight_name priority fail_name
+  local -a preflights=(scripts/repo-lint.sh tools/agent-config/selftest.sh scripts/run-mock-tests.sh scripts/test-build-contracts.sh scripts/test-pr-gates.sh)
+  local -a priorities=("" repo-lint agent-config mock-tests build-contracts pr-gates)
+  for preflight_name in "${preflights[@]}"; do
+    mkdir -p "$preflight_root/$(dirname "$preflight_name")"
+    printf '#!/usr/bin/env bash\nprintf "%%s\n" "%s" >> "$PREFLIGHT_LOG"\n[[ "${PREFLIGHT_FAIL:-}" != "%s" ]] || exit 41\n' "$preflight_name" "$preflight_name" > "$preflight_root/$preflight_name"
+    chmod +x "$preflight_root/$preflight_name"
+  done
+  for priority in "${priorities[@]}"; do
+    for fail_name in "" "${preflights[@]}"; do
+      (
+        root="$preflight_root"
+        export PREFLIGHT_LOG="$T/preflight-log" PREFLIGHT_FAIL="$fail_name"
+        : > "$PREFLIGHT_LOG"
+        local rc=0
+        if run_local_verifications "$priority" >/dev/null; then rc=0; else rc=$?; fi
+        if [[ -z "$fail_name" ]]; then [[ "$rc" == 0 ]] || exit 1
+        else
+          [[ "$rc" == 41 ]] || exit 1
+          [[ "$(tail -n1 "$PREFLIGHT_LOG")" == "$fail_name" ]] || exit 1
+        fi
+      ) || { echo "self-test: preflight propagation failed priority=$priority failure=$fail_name" >&2; exit 1; }
+    done
+  done
+
   # ── scenario harness ──
   local LOG_STAMPS="$T/stamps" LOG_PUSH="$T/pushes" LOG_MERGE="$T/merges" LOG_VERIFY="$T/verify"
   local last_out last_rc
@@ -839,6 +866,16 @@ self_test() {
   sc_green_head_moved() { base_attest; STUB_HEAD_MOVE_AFTER=1; }
   run_case sc_green_head_moved 1
   expect_out green_head_moved "moved"; expect_lines green_head_moved "$LOG_STAMPS" 0
+
+  # The head moves after the readiness checks but before the body edit (third head read).
+  sc_green_head_moved_before_stamp() { base_attest; STUB_HEAD_MOVE_AFTER=2; }
+  run_case sc_green_head_moved_before_stamp 1
+  expect_out green_head_moved_before_stamp "moved before stamping"
+  expect_lines green_head_moved_before_stamp "$LOG_STAMPS" 0
+
+  sc_bad_head_sha() { base_attest; STUB_HEAD="not-a-sha"; STUB_LOCAL="not-a-sha"; }
+  run_case sc_bad_head_sha 1
+  expect_out bad_head_sha "unreadable PR head SHA"; expect_lines bad_head_sha "$LOG_STAMPS" 0
 
   sc_green_files_unreadable() { base_attest; STUB_FILES_FAIL=1; }
   run_case sc_green_files_unreadable 1

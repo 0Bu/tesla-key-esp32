@@ -18,12 +18,25 @@ set -euo pipefail
 # dependency outputs or a different compiler search path; reject presence even when empty.
 for variable in \
   CPATH CPLUS_INCLUDE_PATH C_INCLUDE_PATH OBJC_INCLUDE_PATH \
-  DEPENDENCIES_OUTPUT SUNPRO_DEPENDENCIES GCC_EXEC_PREFIX COMPILER_PATH LIBRARY_PATH; do
+  DEPENDENCIES_OUTPUT SUNPRO_DEPENDENCIES GCC_EXEC_PREFIX COMPILER_PATH LIBRARY_PATH \
+  SDKCONFIG_DEFAULTS EXTRA_COMPONENT_DIRS CFLAGS CXXFLAGS CPPFLAGS LDFLAGS; do
   if declare -p "$variable" &>/dev/null; then
     echo "ERROR: compiler-injection environment variable is set: $variable" >&2
     exit 2
   fi
 done
+
+# Component/configuration overrides can change the build before compiler inventories exist.
+# Reject every present override, including empty values and future names under these namespaces.
+while IFS= read -r variable; do
+  case "$variable" in
+    IDF_COMPONENT_*|TESLA_BLE_*)
+      echo "ERROR: build-configuration environment variable is set: $variable" >&2
+      exit 2
+      ;;
+  esac
+done < <(compgen -A variable)
+
 
 # The pinned IDF image itself supplies IDF_CCACHE_ENABLE=1, but every CCACHE_* option is caller
 # configuration capable of changing the hidden launcher. Reject all present caller options, then

@@ -13,6 +13,7 @@ Start with [installation, pairing and evcc](../README.md).
 | Assess exposure, keys, signing or publication | [Security](SECURITY.md) |
 | Find a mechanism and its implementation | [Feature catalog](FEATURES.md) |
 | Understand a design decision or protocol departure | [ADRs](adr/) |
+| Inspect installer dependency licenses | [Third-party notices](THIRD_PARTY.md) |
 
 Each topic has one owning document. Update it when its contract changes; other documents link to
 it and retain only prerequisites or warnings needed at the point of use. Repository prose is English.

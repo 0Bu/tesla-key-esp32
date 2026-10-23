@@ -15,9 +15,32 @@ fi
 worktree_tmp_rel="build/agent-hook-selftest.$$"
 worktree_tmp="$root/$worktree_tmp_rel"
 worktree_test_tmp="$root/test/$worktree_tmp_rel"
-trap 'rm -rf "$tmp" "$worktree_tmp" "$worktree_test_tmp" "$root/.tmp" 2>/dev/null || true' EXIT
+cleanup() { rm -rf "$tmp" "$worktree_tmp" "$worktree_test_tmp" 2>/dev/null || true; }
+trap cleanup EXIT
 pass_case(){ printf 'PASS  %s\n' "$1"; pass=$((pass+1)); }
 fail_case(){ printf 'FAIL  %s\n' "$1" >&2; fail=$((fail+1)); }
+
+# Exercise the same cleanup in an isolated root: remove only this invocation's resources.
+cleanup_fixture="$tmp/cleanup-ownership"
+mkdir -p "$cleanup_fixture/.tmp" "$cleanup_fixture/owned-temp" \
+  "$cleanup_fixture/owned-build" "$cleanup_fixture/owned-test"
+printf 'keep\n' > "$cleanup_fixture/.tmp/unrelated"
+(
+  root="$cleanup_fixture"
+  tmp="$root/owned-temp"
+  worktree_tmp="$root/owned-build"
+  worktree_test_tmp="$root/owned-test"
+  cleanup
+)
+if [ -f "$cleanup_fixture/.tmp/unrelated" ] \
+  && [ "$(cat "$cleanup_fixture/.tmp/unrelated")" = keep ] \
+  && [ ! -e "$cleanup_fixture/owned-temp" ] \
+  && [ ! -e "$cleanup_fixture/owned-build" ] \
+  && [ ! -e "$cleanup_fixture/owned-test" ]; then
+  pass_case 'cleanup removes owned resources and preserves unrelated temporary data'
+else
+  fail_case 'cleanup ownership'
+fi
 expect_rc(){ local want="$1" label="$2"; shift 2; "$@" >"$tmp/out" 2>&1; local rc=$?; if [ "$rc" = "$want" ]; then pass_case "$label"; else fail_case "$label (want=$want got=$rc: $(tail -c 300 "$tmp/out"))"; fi; }
 payload(){ python3 - "$@" <<'PY'
 import json,sys
@@ -77,6 +100,10 @@ PY
 then pass_case 'secret denials redact untrusted tool and path values'; else fail_case 'secret denial redaction'; fi
 expect_guard allow "$(payload Bash command 'espsecure.py sign_data --keyfile ota_signing_key.pem firmware.bin' "$root")" 'sole exact sign_data keyfile use allowed'
 expect_guard allow "$(payload exec_command cmd 'python3 -m espsecure sign-data --keyfile ota_signing_key.pem firmware.bin' "$root")" 'module sign-data spelling allowed'
+expect_guard deny "$(payload Bash command 'espsecure.py sign_data --keyfile tesla_ota_signing_key.pem firmware.bin' "$root")" 'additional key basename is not a general signing exception'
+expect_guard allow "$(payload Bash command 'espsecure.py sign_data --keyfile "$OTA_SIGNING_KEY_FILE" firmware.bin' "$root")" 'configured key reference is allowed only in the signer keyfile position'
+expect_guard deny "$(payload Bash command 'espsecure.py sign_data --keyfile "$OTA_SIGNING_KEY_FILE" firmware.bin && true' "$root")" 'configured key reference does not allow chained signing'
+
 expect_guard deny "$(payload Bash command 'espsecure.py sign_data --keyfile ota_signing_key.pem firmware.bin && true' "$root")" 'chained sign_data denied'
 expect_guard deny "$(payload Bash command 'espsecure.py sign_data --keyfile ota_signing_key.pem firmware.bin | tee out' "$root")" 'piped sign_data denied'
 expect_guard deny "$(payload Bash command 'espsecure.py sign_data --keyfile ota_signing_key.pem ota_signing_key.pem' "$root")" 'key-as-datafile denied'
@@ -312,6 +339,13 @@ if printf '%s\n' 'main/logic/telemetry_poll.hpp' | gate_vehicle_command_relevant
 else
   fail_case 'header-only telemetry scheduler relevance'
 fi
+for patch_input in scripts/apply-tesla-ble-patches.sh scripts/apply-tesla-ble-patches.py scripts/tesla-ble-patch-state.json scripts/check-dependency-contract.py; do
+  if printf '%s\n' "$patch_input" | gate_vehicle_command_relevant; then
+    pass_case "patch admission input requires protocol review: $patch_input"
+  else
+    fail_case "patch admission input requires protocol review: $patch_input"
+  fi
+done
 if printf '%s\n' 'docs/README.md' | gate_vehicle_command_relevant \
    || printf '%s\n' 'main/display.cpp' | gate_vehicle_command_relevant \
    || printf '%s\n' 'main/logic/soc_gradient.hpp' | gate_vehicle_command_relevant; then
@@ -710,6 +744,9 @@ size_relevant_samples=(
   "dependencies.lock.esp32c6"
   "esp-idf-toolchain.txt"
   "scripts/apply-tesla-ble-patches.sh"
+  "scripts/apply-tesla-ble-patches.py"
+  "scripts/tesla-ble-patch-state.json"
+  "scripts/check-idf-container-mounts.py"
   "scripts/ci-build-all.sh"
   "scripts/idf-docker.sh"
   "scripts/idf-version.sh"
@@ -804,6 +841,30 @@ for path in paths:
   assert not pattern.search(data.decode(errors="replace")), path
 PY
 then pass_case 'neutral core has no foreign-project policy residue'; else fail_case 'foreign-project residue'; fi
+
+# Shared-predicate loader canaries: a missing, truncated, incomplete or wrong-API pr-gate-lib.sh
+# must block before the payload is even parsed, which covers create, push and merge (all five
+# gates); the canaries drive a create payload.
+lib_canary="$tmp/gate-lib-canary"
+mkdir -p "$lib_canary"
+cp "$gate" "$lib_canary/require-pr-gates.sh"
+lib_src="$root/tools/agent-hooks/pr-gate-lib.sh"
+expect_lib_block() {  # <expected message fragment> <label>
+  local out rc
+  out="$(payload Bash command 'gh pr create --body-file body.md' "$root" \
+    | bash "$lib_canary/require-pr-gates.sh" 2>&1)"; rc=$?
+  if [ "$rc" = 2 ] && printf '%s' "$out" | grep -Fq -- "$1"; then pass_case "$2"
+  else fail_case "$2 (rc=$rc: $(printf '%s' "$out" | tail -c 200))"; fi
+}
+rm -f "$lib_canary/pr-gate-lib.sh"
+expect_lib_block 'library could not be loaded' 'missing PR gate library blocks PR actions'
+awk '{print} /^GATE_PR_LIB_API=/{exit}' "$lib_src" > "$lib_canary/pr-gate-lib.sh"
+expect_lib_block 'library is incomplete (' 'truncated PR gate library blocks PR actions'
+{ cat "$lib_src"; echo 'unset -f gate_vehicle_command_relevant'; } > "$lib_canary/pr-gate-lib.sh"
+expect_lib_block 'library is incomplete (gate_vehicle_command_relevant)' \
+  'PR gate library without a shared predicate blocks PR actions'
+sed 's/^GATE_PR_LIB_API=3$/GATE_PR_LIB_API=2/' "$lib_src" > "$lib_canary/pr-gate-lib.sh"
+expect_lib_block 'library is incomplete (' 'wrong PR gate library API version blocks PR actions'
 
 if python3 -m py_compile "$hook" "$parser" "$runner" \
   && bash -n "$root/tools/agent-hooks/"*.sh \

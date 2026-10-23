@@ -68,6 +68,7 @@ Verify these paths at the reviewed upstream revision:
 | Wake / sleep / body controller | `pkg/vehicle/vcsec.go`, `pkg/vehicle/state.go`, `pkg/vehicle/vehicle.go`, `pkg/protocol/protobuf/vcsec.proto` |
 | Commands + params/ranges | `pkg/vehicle/charge.go` (**note: `charge.go`, not `charging.go`**), `pkg/vehicle/climate.go`, `cmd/tesla-control/commands.go` |
 | Error / fault taxonomy | `pkg/protocol/protobuf/universal_message.proto` (`MessageFault_E`, `OperationStatus_E`), `pkg/protocol/protobuf/car_server.proto` |
+| Command outcome / HTTP status | `pkg/vehicle/infotainment.go` (`getCarServerResponse`), `pkg/vehicle/vcsec.go` (VCSEC nominal errors), `pkg/protocol/error.go` (`NominalError`, `IsNominalError`, `GetError`), `pkg/proxy/proxy.go` (`handleVehicleCommand`, `httpStatusCode`, `writeJSONError`) |
 
 ### Feasibility — `yoziru/tesla-ble` at the pinned tag
 Fetch raw at the **pin** (base `https://raw.githubusercontent.com/yoziru/tesla-ble/<pin>`; confirm
@@ -78,7 +79,7 @@ and `src/{vehicle.cpp, client.cpp, peer.cpp, message_builders.cpp, message_proce
   `scheduledChargingAction` and `scheduledDepartureAction`; the firmware deliberately does not
   expose scheduled departure. Builder availability alone is not implementation, role or hardware acceptance.
 - **Enum / API values** (roles, form factors) → `include/client.h`; firmware-level `SleepState`, `WakePolicy` → `main/logic/command_runner.hpp`.
-- **How a fault becomes a string** the firmware matches → `include/command_error.h`, `main/logic/command_runner.hpp`, `main/vehicle_telemetry.cpp`.
+- **How a fault becomes a string** the firmware matches → `include/command_error.h`, `main/logic/command_runner.hpp`, `main/logic/command_result.hpp`, `main/vehicle_telemetry.cpp`.
 - **VIN→BLE-name / matching** → `include/vin_utils.h`, `src/vin_utils.cpp` (the firmware delegates here; it does **not** build the name itself).
 
 ### Local — firmware and owning documents
@@ -124,9 +125,16 @@ Verify every dimension against the reviewed revisions; previous audit results ar
    real-time 1-hour reuse window. Restore is attempted before controller init; absent/unreadable
    `last_time` or a failed clock set can leave the inherited negative-age acceptance path. Do not
    claim guaranteed expiry from this restore.
-4. **Pairing / whitelist** — Whitelist Add requires an explicit user action that sends the
-   existing Charging-Manager key through `POST /send_key`; the supervisor never enrolls
-   automatically. Automatic key generation is limited to verified first-boot key absence.
+3a. **Existing SessionInfo continuity** — a refresh must use the selected domain's retained secret
+   and match its stored vehicle public key before peer, availability or storage changes. Temporary
+   invalidity is not absence of material. Check native and library callers and direct/force updates.
+   Explicit clear/reset still removes material; do not claim a durable VIN-key pin across that boundary.
+4. **Pairing / whitelist** — the configured supervisor sends the existing Charging-Manager key
+   automatically after status probes, with bounded backoff and no manual HTTP/UI send path.
+   Verify storage-error rejection, the under-FIFO key/session/VIN recheck, Stable-only OTA
+   exclusion and zero immediate BLE retries. A recovery hint can request the same-key flow but
+   never proves key removal or authorizes key replacement/session deletion. Hint oscillation
+   must not reset the send cadence. Automatic generation remains limited to verified first-boot absence.
    Add-key carries role + `KEY_FORM_FACTOR_CLOUD_KEY`, no key name (car shows "Unknown key"),
    and requires an **NFC card on the console reader**. Local transmission completion is not
    vehicle approval; verify acceptance through an authenticated session/status observation.
@@ -144,7 +152,8 @@ Verify every dimension against the reviewed revisions; previous audit results ar
    `SESSION_INFO_STATUS_KEY_NOT_ON_WHITELIST`. Check the native
    `handle_signed_message_fault_` → `on_vehicle_message_` path, the `"whitelist"` error match,
    and the health-probe-only authentication-failure streak. These signals do not prove key
-   deletion or authorize key replacement, persisted-session removal or Whitelist Add.
+   deletion or authorize key replacement or persisted-session removal. Under the automatic pairing
+   policy they can request only a bounded same-key Whitelist Add after status probes (dimension 4).
    In-memory peer/session resets remain distinct from deleting persisted records.
    `paired` reports stored VCSEC-session presence; `reauth` may coexist with `paired:true`.
    Finding a stored session does not clear the hint. A successful health response can clear
@@ -157,11 +166,17 @@ Verify every dimension against the reviewed revisions; previous audit results ar
    `response`, **miles/mph on the `/api` path** (metric is MQTT-only), `charging_state` strings
    `Charging/Disconnected/Complete/Stopped/NoPower/Starting`. Verify selectors, cache freshness,
    energy/preconditioning/odometer presence and intentional proxy departures in
-   [API](../../../docs/API.md#vehicle-data) against all emitters and consumers.
+   [API](../../../docs/API.md#vehicle-data) against all emitters and consumers. Verify the command
+   outcome status too: REST status/`result` and MCP `isError` for success, `already_set`, car
+   refusals, transport failures and the degraded reply (`main/http_api.cpp` `send_command_result`,
+   `main/mcp_server.cpp`, `main/logic/command_result.hpp`, [API](../../../docs/API.md#commands)). vehicle-command's proxy answers CarServer refusals and
+   VCSEC nominal errors with HTTP 200 and `result:false`, maps other execution errors through
+   `httpStatusCode` with an error-only body, and passes a Fleet server error's own status through;
+   every departure must be recorded in ADR-0005.
 9a. **Response-counter anti-replay and patch series** — response-counter anti-replay and Request-UUID routing
     are enforced natively by `main/logic/ble_dispatcher.hpp` and `Peer::validate_response_counter()`, superseding
-    patch 0001 and ADR-0003. Verify the current 4 repository patches under `patches/tesla-ble/` (0004 parental
-    controls trim, 0005 session counter replay, 0006 PSA crypto-binding port and 0007 request RNG failure) apply lexically/idempotently
+    patch 0001 and ADR-0003. Verify the current 5 repository patches under `patches/tesla-ble/` (0004 parental
+    controls trim, 0005 session counter replay, 0006 PSA crypto-binding port, 0007 request RNG failure and 0008 existing-session continuity) apply lexically/idempotently
     through root CMake to the managed dependency tree, and are rebased explicitly on every pin bump; 0006 must
     keep the V1 vectors in `test/test_tesla_ble_harness.cpp` byte-identical and keep verifying response tags
     against response metadata bound to the counter the response carries (`Signer.Decrypt`), never the

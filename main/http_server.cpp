@@ -11,10 +11,16 @@
 #include "stack_watch.hpp"
 #include "logic/http_origin.hpp"
 #include <esp_log.h>
+#include <mdns.h>
+#include <sdkconfig.h>
 #include <lwip/inet.h>
 #include <lwip/sockets.h>
 #include <cstring>
 #include <exception>
+
+#if defined(CONFIG_LWIP_IPV6) && CONFIG_LWIP_IPV6
+#error "HTTP owned-address checks require an IPv6 socket policy before enabling IPv6"
+#endif
 
 static const char* TAG = "http_server";
 
@@ -43,22 +49,11 @@ static bool read_header_bounded(httpd_req_t* req, const char* name, char* out, s
     return httpd_req_get_hdr_value_str(req, name, out, capacity) == ESP_OK;
 }
 
-// Every IPv4 address this board owns right now: the active transport's lease AND the address this
-// very connection terminated on. WiFi and Ethernet keep their leases side by side, so a page opened
-// through the WiFi address is still served by this board after an Ethernet takeover; the socket's
-// local address is by construction an address the board holds. Host must still equal one of them
-// (or the canonical name), so a rebinding page cannot borrow this.
-//
-// Kept out of line on purpose: the per-frame stack budget of browser_mutation_allowed() (three
-// header buffers) is a reviewed maximum, and this lookup needs its own scratch space.
-__attribute__((noinline)) static bool origin_allowed_for_owned_addresses(
-    httpd_req_t* req, bool is_post, const char* host, const char* origin, const char* fetch_site,
-    bool has_custom_header,
-    const char* active_netif_ip) {
-    char referer[192];
-    if (!read_header_bounded(req, "Referer", referer, sizeof(referer))) {
-        return false;
-    }
+// Snapshot both the active lease and the socket-local address. The latter preserves a page on
+// the still-owned WiFi address after Ethernet takes the default route. mDNS may rename on conflict;
+// read its bounded live name instead of trusting the request's Host as its own authority.
+__attribute__((noinline))
+static bool owned_host_allowed(httpd_req_t* req, const char* host, const char* active_netif_ip) {
     char socket_ip[16] = {};
     const int fd = httpd_req_to_sockfd(req);
     if (fd >= 0) {
@@ -69,10 +64,42 @@ __attribute__((noinline)) static bool origin_allowed_for_owned_addresses(
             inet_ntop(AF_INET, &local.sin_addr, socket_ip, sizeof(socket_ip));
         }
     }
+    char mdns_hostname[MDNS_NAME_BUF_LEN] = {};
+    if (mdns_hostname_get(mdns_hostname) != ESP_OK) mdns_hostname[0] = '\0';
     const std::string_view device_ips[] = {active_netif_ip, socket_ip};
-    return tk::mutation_request_allowed(is_post, host, origin, fetch_site, referer,
-                                       has_custom_header, device_ips,
-                                       sizeof(device_ips) / sizeof(device_ips[0]));
+    const size_t ip_count = sizeof(device_ips) / sizeof(device_ips[0]);
+    return tk::device_host_allowed(host, device_ips, ip_count, mdns_hostname);
+}
+
+// Keep Referer's large fixed buffer separate from the owned-address scratch and the browser
+// header buffers: each existing HTTP frame has its own reviewed stack maximum.
+__attribute__((noinline))
+static bool origin_allowed_for_owned_addresses(
+    httpd_req_t* req, bool is_post, const char* host, const char* origin, const char* fetch_site,
+    bool has_custom_header, const char* active_netif_ip) {
+    char referer[192];
+    if (!read_header_bounded(req, "Referer", referer, sizeof(referer))) return false;
+    const bool host_owned = owned_host_allowed(req, host, active_netif_ip);
+    return tk::mutation_request_allowed_for_owned_host(is_post, host_owned, host, origin,
+                                                      fetch_site, referer, has_custom_header);
+}
+
+static void active_ipv4(char* out, size_t capacity) {
+    out[0] = '\0';
+    esp_netif_t* netif = tk::net_active_netif();
+    esp_netif_ip_info_t ip{};
+    if (netif && esp_netif_get_ip_info(netif, &ip) == ESP_OK) {
+        esp_ip4addr_ntoa(&ip.ip, out, capacity);
+    }
+}
+
+__attribute__((noinline))
+static bool diagnostic_host_allowed(httpd_req_t* req) {
+    char host[128];
+    if (!read_header_bounded(req, "Host", host, sizeof(host))) return false;
+    char device_ip[16];
+    active_ipv4(device_ip, sizeof(device_ip));
+    return owned_host_allowed(req, host, device_ip);
 }
 
 // Preserve the documented headerless trusted-LAN API used by evcc/curl on POST, but do not let a
@@ -92,12 +119,8 @@ static bool browser_mutation_allowed(httpd_req_t* req) {
 
     char host[128];
     if (!read_header_bounded(req, "Host", host, sizeof(host))) return false;
-    char device_ip[16] = {};
-    esp_netif_t* netif = tk::net_active_netif();
-    esp_netif_ip_info_t ip{};
-    if (netif && esp_netif_get_ip_info(netif, &ip) == ESP_OK) {
-        esp_ip4addr_ntoa(&ip.ip, device_ip, sizeof(device_ip));
-    }
+    char device_ip[16];
+    active_ipv4(device_ip, sizeof(device_ip));
     return origin_allowed_for_owned_addresses(req, is_post, host, origin, fetch_site,
                                              has_custom_header, device_ip);
 }
@@ -111,7 +134,8 @@ static esp_err_t reject_cross_origin_mutation(httpd_req_t* req) {
 // ─── Wildcard handler dispatching ─────────────────────────────────────────────
 
 // Single catch-all handler registered for /*
-static esp_err_t handle_all_dispatch(httpd_req_t* req) {
+static esp_err_t handle_all_dispatch(GuardedReq rq) {
+    httpd_req_t* req = rq.req();
     char path[128];
     uri_path(req, path, sizeof(path));
     const bool GET  = req->method == HTTP_GET;
@@ -134,6 +158,11 @@ static esp_err_t handle_all_dispatch(httpd_req_t* req) {
     const tk::HttpVerb verb = GET ? tk::HttpVerb::Get
                                   : (POST ? tk::HttpVerb::Post : tk::HttpVerb::Other);
     const tk::HttpRoute route = tk::classify_http_route(verb, path);
+    if (tk::http_route_requires_owned_host(verb, route) && !diagnostic_host_allowed(req)) {
+        httpd_resp_set_status(req, "403 Forbidden");
+        httpd_resp_set_type(req, "text/plain; charset=utf-8");
+        return httpd_resp_sendstr(req, "device-owned Host required");
+    }
     if (tk::http_route_requires_vehicle_runtime(route) &&
         !tk::runtime_admission_vehicle_ready()) {
         ESP_LOGW(TAG, "vehicle-active route refused while runtime is not ready: %s", path);
@@ -143,31 +172,30 @@ static esp_err_t handle_all_dispatch(httpd_req_t* req) {
             req, "{\"error\":\"vehicle runtime unavailable\",\"retryable\":false}");
     }
     switch (route) {
-        case tk::HttpRoute::Command:        return handle_command({req});
-        case tk::HttpRoute::VehicleData:    return handle_vehicle_data({req});
-        case tk::HttpRoute::BodyController: return handle_body_controller({req});
-        case tk::HttpRoute::OtaCheck:       return handle_ota_check({req});
-        case tk::HttpRoute::OtaUpdate:      return handle_ota_update({req});
-        case tk::HttpRoute::OtaStatus:      return handle_ota_status({req});
-        case tk::HttpRoute::OtaChangelog:   return handle_ota_changelog({req});
-        case tk::HttpRoute::GenKeys:        return handle_gen_keys({req});
-        case tk::HttpRoute::SendKey:        return handle_send_key({req});
-        case tk::HttpRoute::SetTime:        return handle_set_time({req});
-        case tk::HttpRoute::SetVin:         return handle_set_vin({req});
-        case tk::HttpRoute::SetMqtt:        return handle_set_mqtt({req});
-        case tk::HttpRoute::SetSyslog:      return handle_set_syslog({req});
-        case tk::HttpRoute::SetWifi:        return handle_set_wifi({req});
-        case tk::HttpRoute::SetOta:         return handle_set_ota({req});
-        case tk::HttpRoute::Scan:           return handle_scan({req});
-        case tk::HttpRoute::Coredump:       return handle_coredump({req});
-        case tk::HttpRoute::CrashDismiss:   return handle_crash_dismiss({req});
-        case tk::HttpRoute::Heap:           return handle_heap({req});
-        case tk::HttpRoute::McpPost:        return mcp_handle_post({req});
-        case tk::HttpRoute::McpGet:         return mcp_handle_get({req});
-        case tk::HttpRoute::Version:        return handle_version({req});
-        case tk::HttpRoute::Status:         return handle_status({req});
-        case tk::HttpRoute::Diag:           return handle_diag({req});
-        case tk::HttpRoute::Index:          return handle_index({req});
+        case tk::HttpRoute::Command:        return handle_command(rq);
+        case tk::HttpRoute::VehicleData:    return handle_vehicle_data(rq);
+        case tk::HttpRoute::BodyController: return handle_body_controller(rq);
+        case tk::HttpRoute::OtaCheck:       return handle_ota_check(rq);
+        case tk::HttpRoute::OtaUpdate:      return handle_ota_update(rq);
+        case tk::HttpRoute::OtaStatus:      return handle_ota_status(rq);
+        case tk::HttpRoute::OtaChangelog:   return handle_ota_changelog(rq);
+        case tk::HttpRoute::GenKeys:        return handle_gen_keys(rq);
+        case tk::HttpRoute::SetTime:        return handle_set_time(rq);
+        case tk::HttpRoute::SetVin:         return handle_set_vin(rq);
+        case tk::HttpRoute::SetMqtt:        return handle_set_mqtt(rq);
+        case tk::HttpRoute::SetSyslog:      return handle_set_syslog(rq);
+        case tk::HttpRoute::SetWifi:        return handle_set_wifi(rq);
+        case tk::HttpRoute::SetOta:         return handle_set_ota(rq);
+        case tk::HttpRoute::Scan:           return handle_scan(rq);
+        case tk::HttpRoute::Coredump:       return handle_coredump(rq);
+        case tk::HttpRoute::CrashDismiss:   return handle_crash_dismiss(rq);
+        case tk::HttpRoute::Heap:           return handle_heap(rq);
+        case tk::HttpRoute::McpPost:        return mcp_handle_post(rq);
+        case tk::HttpRoute::McpGet:         return mcp_handle_get(rq);
+        case tk::HttpRoute::Version:        return handle_version(rq);
+        case tk::HttpRoute::Status:         return handle_status(rq);
+        case tk::HttpRoute::Diag:           return handle_diag(rq);
+        case tk::HttpRoute::Index:          return handle_index(rq);
         case tk::HttpRoute::NotFound:       break;
     }
 
@@ -183,6 +211,9 @@ static esp_err_t handle_all_dispatch(httpd_req_t* req) {
 // cause is the low largest-free-block; this is the safety net so no request can crash
 // the box.)
 static esp_err_t handle_all(httpd_req_t* req) {
+    HttpGuardContext context{req, {}};
+    const GuardedReq rq{&context};
+    esp_err_t result = ESP_FAIL;
     try {
         // IDF otherwise purges every unread declared body after an ESP_OK reply.
         // This also covers origin/route/admission rejections before the reader.
@@ -194,7 +225,10 @@ static esp_err_t handle_all(httpd_req_t* req) {
                 if (req->content_len > 0) (void)shutdown(httpd_req_to_sockfd(req), SHUT_RD);
             }
         } retire_body_connection{req};
-        if (req->content_len > 0) (void)httpd_resp_set_hdr(req, "Connection", "close");
+        if (req->content_len > 0) {
+            result = httpd_resp_set_hdr(req, "Connection", "close");
+            if (result != ESP_OK) return result; // refuse before dispatch; no effect was attempted
+        }
         // Sample on every exit, including the exception fallbacks. The request that came closest to
         // the limit is exactly the one most likely to throw; a destructor also covers every early
         // return without duplicating the measurement at each route. Construct it inside the outer
@@ -202,18 +236,16 @@ static esp_err_t handle_all(httpd_req_t* req) {
         struct SampleHttpdStackOnExit {
             ~SampleHttpdStackOnExit() noexcept { tk::stack_watch_sample(tk::StackWatch::Httpd); }
         } sample_httpd_stack;
-        return handle_all_dispatch(req);
+        result = handle_all_dispatch(rq);
     } catch (const std::exception& e) {
-        ESP_LOGE(TAG, "handler for %s threw (%s) — likely OOM; returning 503", req->uri, e.what());
-        httpd_resp_set_status(req, "503 Service Unavailable");
-        httpd_resp_set_type(req, "text/plain");
-        return httpd_resp_sendstr(req, "out of memory");
+        ESP_LOGE(TAG, "handler for %s threw (%s) — containing reply failure", req->uri, e.what());
+        result = send_effect_exception(rq);
     } catch (...) {
-        ESP_LOGE(TAG, "handler for %s threw (unknown) — returning 503", req->uri);
-        httpd_resp_set_status(req, "503 Service Unavailable");
-        httpd_resp_set_type(req, "text/plain");
-        return httpd_resp_sendstr(req, "out of memory");
+        ESP_LOGE(TAG, "handler for %s threw (unknown) — containing reply failure", req->uri);
+        result = send_effect_exception(rq);
     }
+    run_effect_continuation(rq);
+    return result;
 }
 
 // ─── Start ────────────────────────────────────────────────────────────────────

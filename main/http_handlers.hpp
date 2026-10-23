@@ -6,7 +6,7 @@
 // http_server.hpp.
 //
 // Memory-model invariant (AGENTS.md): EVERY handler declared here is invoked exclusively
-// through handle_all's try/catch in http_server.cpp (503 on OOM). This is enforced
+// through handle_all's try/catch in http_server.cpp (effect-aware failure containment). This is enforced
 // structurally: handlers take GuardedReq — NOT the raw esp_http_server signature — so
 // registering one directly with httpd_register_uri_handler (which would bypass the
 // guard) is a compile error, not a comment violation.
@@ -14,6 +14,8 @@
 #include "http_server.hpp"
 #include "json_builder.hpp"
 #include "json_http_reply.hpp"
+#include "http_effect_reply.hpp"
+#include "ota_update.hpp"
 #include "mcp_json_payloads.hpp"
 #include "logic/command_registry.hpp"
 #include "logic/http_body.hpp"
@@ -24,7 +26,7 @@ extern VehicleController* g_vehicle;
 
 // Global runtime-config store (tesla_cfg NVS namespace; set once in http_server_start,
 // same idiom as g_vehicle). The configuration handlers read/write it directly: /set_vin,
-// /set_mqtt, /set_syslog and /set_wifi update the atomic `cfg` blob, while /set_time updates the
+// /set_mqtt, /set_syslog and /set_wifi update the atomic `cfg` blob, while NTP alone checkpoints the
 // separately owned `last_time` key. Keys must be ≤15 chars (NVS limit).
 extern NvsStorageAdapter* g_config;
 
@@ -32,7 +34,30 @@ extern NvsStorageAdapter* g_config;
 // http_server.cpp. Because every handler takes this instead of httpd_req_t*, its
 // signature cannot match httpd_uri_t::handler, making a guard-bypassing direct
 // registration impossible by construction.
-struct GuardedReq { httpd_req_t* req; };
+struct HttpGuardContext {
+    httpd_req_t* req;
+    tk::HttpEffectReply reply;
+    OtaConfigRestartGuard config_restart{};
+};
+struct GuardedReq {
+    HttpGuardContext* context;
+    httpd_req_t* req() const noexcept { return context->req; }
+    tk::HttpEffectReply* reply() const noexcept { return &context->reply; }
+};
+static_assert(sizeof(GuardedReq) == sizeof(void*), "handler wrapper stays one machine word");
+static_assert(std::is_trivially_copyable<GuardedReq>::value &&
+              std::is_nothrow_copy_constructible<GuardedReq>::value &&
+              std::is_nothrow_default_constructible<HttpGuardContext>::value &&
+              std::is_nothrow_destructible<HttpGuardContext>::value,
+              "request context and wrapper cannot throw before the catch boundary");
+
+// Post-effect replies own no borrowed handler data. Only handle_all owns the record.
+esp_err_t send_effect_json(GuardedReq rq, int status, cJSON* root);
+esp_err_t send_effect_exception(GuardedReq rq) noexcept;
+void run_effect_continuation(GuardedReq rq) noexcept;
+esp_err_t send_config_reply(GuardedReq rq, int status, bool ok,
+                            const char* command, const char* reason);
+void finish_config_save(GuardedReq rq) noexcept;
 
 #include "time_sync.hpp"
 
@@ -73,17 +98,6 @@ esp_err_t validate_query_string(httpd_req_t* req);
 // whose whole job is to gate the destructive key-overwrite that un-pairs the car.
 bool query_param_is(httpd_req_t* req, const char* key, const char* want);
 
-// True if a browser epoch (ms) is inside the floor..ceiling plausibility window
-// (floor ~2023-11, ceiling build year + 10). The clock gates OTA TLS certificate
-// validation, so an unauthenticated LAN client must not push it far in either direction.
-bool browser_time_plausible(double epoch_ms);
-
-// Apply an (already plausibility-checked) browser epoch as the wall clock and persist
-// it for the next offline boot. The ONE implementation both NTP-fallback entry points
-// (/set_time and /ota/check?ms=) share, so the security-sensitive clock-set path can
-// never drift between them. Returns the applied epoch seconds (for logging).
-long long apply_browser_clock(double epoch_ms);
-
 // The ONE kind → VehicleController dispatch both command surfaces execute through
 // (command_exec.cpp). ival/bval are the positional value arrays each surface filled
 // against the shared arg specs in logic/command_registry.hpp (tk::kCmdMaxArgs slots).
@@ -117,7 +131,6 @@ esp_err_t handle_ota_changelog(GuardedReq rq);    // GET  /ota/changelog
 
 // http_config.cpp — setup / pairing / persisted-config endpoints
 esp_err_t handle_gen_keys(GuardedReq rq);         // POST /gen_keys[?force=1]
-esp_err_t handle_send_key(GuardedReq rq);         // POST /send_key
 esp_err_t handle_set_time(GuardedReq rq);         // POST /set_time
 esp_err_t handle_set_vin(GuardedReq rq);          // POST /set_vin
 esp_err_t handle_set_mqtt(GuardedReq rq);         // POST /set_mqtt

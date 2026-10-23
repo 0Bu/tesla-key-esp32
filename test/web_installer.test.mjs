@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { createHash, webcrypto } from "node:crypto";
 import fs from "node:fs";
 import test from "node:test";
+import { bootstrapInstaller } from "../docs/installer-bootstrap.mjs";
 
 import { acquireSerialPortLease, releaseSerialPortLease, serialPortLease } from "../docs/serial-port-release.mjs";
 import {
@@ -248,15 +249,9 @@ test("native Espressif USB ports and UART bridges are described without restrict
   assert.equal(describeSerialConnection(cdcInfo), "USB Serial/JTAG");
   assert.equal(describeSerialConnection(uartInfo), "USB UART");
   assert.equal(describeSerialConnection({}), "Web Serial");
-  assert.equal(selectManifestBuild(document, "ESP32-S3", cdcInfo).parts[0].path, "bootloader-esp32s3.bin");
-  assert.equal(selectManifestBuild(document, "ESP32-S3", uartInfo).parts[0].path, "bootloader-esp32s3.bin");
-  assert.equal(selectManifestBuild(document, "ESP32-C6", cdcInfo).parts[0].path, "bootloader-esp32c6.bin");
-  assert.equal(selectManifestBuild(document, "ESP32-C5", cdcInfo), undefined);
-  const builds = { builds: [
-    { chipFamily: "ESP32-S3", parts: [{ path: "generic.bin" }] },
-    { chipFamily: "ESP32-S3", serialType: "cdc", parts: [{ path: "native.bin" }] }
-  ] };
-  assert.equal(selectManifestBuild(builds, "ESP32-S3", cdcInfo).parts[0].path, "native.bin", "a serial-type build wins");
+  assert.equal(selectManifestBuild(document, "ESP32-S3").parts[0].path, "bootloader-esp32s3.bin");
+  assert.equal(selectManifestBuild(document, "ESP32-C6").parts[0].path, "bootloader-esp32c6.bin");
+  assert.equal(selectManifestBuild(document, "ESP32-C5"), undefined);
 });
 
 test("multi-part progress is weighted by each uncompressed image size", () => {
@@ -300,6 +295,7 @@ test("the boot version comes only from the fixed IDF and BOOT line shapes", () =
 test("the subtitle channel follows the Pages path for previews and the version otherwise", () => {
   assert.equal(channelLabel("1.6.3", "/tesla-key-esp32/"), "Release");
   assert.equal(channelLabel("1.6.4-dev.7", "/tesla-key-esp32/"), "Dev");
+  assert.equal(channelLabel("1.6.4", "/tesla-key-esp32/dev/"), "Dev", "the dev feed by its path");
   assert.equal(channelLabel("1.6.3-PR-412", "/tesla-key-esp32/PR/412/"), "PR #412 preview");
   assert.equal(channelLabel("1.6.3-device", "/"), "Release");
 });
@@ -327,6 +323,7 @@ test("manifest v2 rejects malicious offsets, sizes, paths, products and incomple
   invalid((m) => { delete m.new_install_prompt_erase; }, /erase policy/);
   invalid((m) => { m.builds.pop(); }, /exactly four target builds/);
   invalid((m) => { m.builds[3].chipFamily = "ESP32"; }, /incomplete or duplicated/);
+  invalid((m) => { m.builds[1].serialType = "cdc"; }, /build fields must be exactly chipFamily and parts/);
   // The partition table may fill its sector up to nvs, never into it.
   const boundary = structuredClone(document);
   boundary.builds[1].parts[1].size = 0x1000;
@@ -1028,10 +1025,13 @@ const ownLines = (dom) => dom.element("serial-monitor-output").children
 
 // The ownership tests drive the live log themselves; followLog is exercised separately. `forget`
 // stands in for a browser whose SerialPort can forget its permission.
-async function attachedLifecycle(t, ports, {
-  followLog = false, forget = false, trace = false, pathname = "/tesla-key-esp32/", fixture = firmwareFixture(),
-  fetchImpl = null, cryptoImpl = webcrypto
-} = {}) {
+async function attachedLifecycle(t, ports, options = {}) {
+  const {
+    followLog = false, forget = false, trace = false, pathname = "/tesla-key-esp32/", fixture = firmwareFixture(),
+    fetchImpl = null, cryptoImpl = webcrypto
+  } = options;
+  // Clean flash is confirmed unless a test supplies its own answer, or none for the browser default.
+  const confirmEraseImpl = Object.hasOwn(options, "confirmEraseImpl") ? options.confirmEraseImpl : () => true;
   const priorSecureContext = globalThis.isSecureContext;
   globalThis.isSecureContext = true;
   t.after(() => { globalThis.isSecureContext = priorSecureContext; });
@@ -1049,7 +1049,7 @@ async function attachedLifecycle(t, ports, {
   for (const port of ports) port.onForget = () => { serial.grants = serial.grants.filter((granted) => granted !== port); };
   const controller = attachWebInstaller({
     root: dom.root, serial, TransportCtor: fake.Transport, ESPLoaderCtor: fake.Loader,
-    fetchImpl: fetchImpl || fixture.fetch, cryptoImpl, followLog, trace, delay: noDelay,
+    fetchImpl: fetchImpl || fixture.fetch, cryptoImpl, followLog, trace, delay: noDelay, confirmEraseImpl,
     locationImpl: { href: `https://example.test${pathname}`, pathname },
     SerialPortCtor: forget ? { prototype: { forget() {} } } : undefined
   });
@@ -1181,6 +1181,42 @@ test("other firmware, a moved nvs or an erased chip offer only Clean flash", asy
         "after installing, updates keep the configuration again");
     });
   }
+});
+
+test("Clean flash asks every time, and a declined confirmation leaves the board and its log untouched", async (t) => {
+  const a = lifecyclePort("A");
+  const messages = [];
+  const { controller, dom, fixture } = await attachedLifecycle(t, [a], {
+    followLog: true, confirmEraseImpl: (message) => { messages.push(message); return false; }
+  });
+  await controller.connect();
+  const downloads = fixture.seen.length;
+  const before = { opens: a.opens, closes: a.closes, signals: a.signals.length };
+  await dom.element("clean-flash-button").listeners.get("click")();
+  await dom.element("clean-flash-button").listeners.get("click")();
+  assert.equal(messages.length, 2, "each attempt asks again");
+  assert.match(messages[0], /WiFi, VIN, MQTT settings, the private pairing key and BLE sessions/);
+  assert.match(messages[0], /Back up secret NVS/);
+  assert.match(logLines(dom, "status").at(-1), /\] Clean flash cancelled; nothing was written$/);
+  assert.deepEqual([a.erases, a.writes, fixture.seen.length], [undefined, 0, downloads], "no download, erase or write");
+  assert.deepEqual({ opens: a.opens, closes: a.closes, signals: a.signals.length }, before, "the log keeps the port");
+  assert.equal(dom.element("serial-monitor-live").textContent, "Live");
+  assert.equal(dom.element("clean-flash-button").disabled, false);
+  await dom.element("flash-button").listeners.get("click")();
+  assert.equal(messages.length, 2, "Flash keeps the configuration and never asks");
+  assert.equal(a.writes, 4);
+});
+
+test("Clean flash fails closed when the browser cannot ask for confirmation", async (t) => {
+  const previous = globalThis.confirm;
+  globalThis.confirm = undefined;
+  t.after(() => { globalThis.confirm = previous; });
+  const a = lifecyclePort("A");
+  const { controller, dom } = await attachedLifecycle(t, [a], { confirmEraseImpl: undefined });
+  await controller.connect();
+  await controller.install({ eraseFirst: true });
+  assert.deepEqual([a.erases, a.writes], [undefined, 0]);
+  assert.match(logLines(dom, "status").at(-1), /Clean flash cancelled/);
 });
 
 test("an older layout with the same nvs keeps Flash and says the table will be rewritten", async (t) => {
@@ -1895,6 +1931,7 @@ test("the published page keeps one card, one always visible log and the Tesla st
   assert.match(html, /<button[^>]*id="disconnect-button"[^>]*hidden disabled>/);
   assert.match(html, /<div class="installer-group" aria-label="Firmware">\s*<button[^>]*id="flash-button"[^>]*>Flash<\/button>\s*<button[^>]*id="clean-flash-button"[^>]*>Clean flash<\/button>\s*<\/div>/);
   assert.match(html, /id="flash-button"[^>]*title="Keeps WiFi, VIN, pairing key and sessions"/);
+  assert.match(html, /id="clean-flash-button"[^>]*title="Erases all flash, including WiFi, VIN and the pairing key; asks for confirmation"/);
   // One card: no step rail, choice tiles, progress bar, success banner, monitor toggle or permission button.
   assert.doesNotMatch(html, /installer-rail|installer-step|install-mode|type="radio"|installer-progress|role="progressbar"|installer-success|serial-monitor-button|release-serial-port|Remove browser permission|page-status/);
   // The log has a fixed height, keeps long lines unwrapped and cannot be collapsed.
@@ -1912,11 +1949,16 @@ test("the published page keeps one card, one always visible log and the Tesla st
   // The commit link never leaves a running install.
   assert.match(html, /<a id="firmware-source-link" target="_blank" rel="noopener noreferrer"><\/a>/);
   // Short notes below the card; WiFi and VIN are entered in the setup network, not on this page.
-  assert.match(html, /join <code>tesla-key-esp32-setup<\/code> and enter WiFi and VIN\. <strong>Flash<\/strong> keeps them\./);
-  assert.match(html, /<code>http:\/\/tesla-key-esp32\.local<\/code>, generate the key and approve it in the car with your keycard/);
+  assert.match(html, /<strong>Clean flash<\/strong> erases WiFi, VIN, MQTT, the pairing key and sessions after a confirmation; then join <code>tesla-key-esp32-setup<\/code> and enter WiFi and VIN\. <strong>Flash<\/strong> keeps all of it\./);
+  assert.match(html, /<code>http:\/\/tesla-key-esp32\.local<\/code>\. Key setup and pairing run automatically; when pairing is needed, place a Tesla keycard on the console reader/);
+  assert.doesNotMatch(html, /generate the key/i, "the key is created automatically; regenerating it destroys a pairing");
+  assert.match(html, /<strong>Connecting restarts the board:<\/strong>/);
   assert.match(html, /<strong>Two USB ports\?<\/strong>/);
   assert.doesNotMatch(html, /type="password"|name="vin"/i);
-  assert.match(html, /AGPL-3\.0 · <a href="\.\/vendor\/esptool-js-0\.7\.0\.LICENSE">esptool-js<\/a> \(Apache-2\.0\)/);
+  // Licence notices ship with the page; every link opens beside a running install.
+  assert.match(html, /<a href="\.\/LICENSE" target="_blank" rel="noopener noreferrer">AGPL-3\.0<\/a>/);
+  assert.match(html, /<a href="\.\/THIRD_PARTY\.md" target="_blank" rel="noopener noreferrer">Third-party notices<\/a>/);
+  assert.doesNotMatch(html, /<a (?![^>]*target="_blank")[^>]*href=/, "no link replaces the installer tab");
   assert.doesNotMatch(html, /\bMIT\b/);
   // Content Security Policy: only same-origin scripts, the one inline stylesheet by hash, no CDN.
   assert.match(html, /<script type="module" src="\.\/installer-bootstrap\.mjs"><\/script>/);
@@ -1940,5 +1982,14 @@ test("the bootstrap loads the vendored esptool-js, honours ?trace and reconnects
     assert.ok(fs.existsSync(new URL(`../docs/vendor/${name}`, import.meta.url)), name);
   }
   assert.deepEqual(fs.readdirSync(new URL("../docs/vendor/", import.meta.url)).sort(),
-    ["esptool-js-0.7.0.LICENSE", "esptool-js-0.7.0.bundle.js"], "only the pinned runtime is served");
+    ["esptool-js-0.7.0.LICENSE", "esptool-js-0.7.0.bundle.js", "pako-2.1.0.LICENSE", "pako-2.1.0.zlib.README"],
+    "only the pinned runtime and its notices are served");
+  const notices = fs.readFileSync(new URL("../docs/THIRD_PARTY.md", import.meta.url), "utf8");
+  assert.match(notices, /\[Apache-2\.0\]\(vendor\/esptool-js-0\.7\.0\.LICENSE\)/);
+  assert.doesNotMatch(notices, /0\.6\.1/);
+});
+
+test("the bootstrap module loads the vendored bundle and stays inert without the installer root", () => {
+  assert.equal(bootstrapInstaller({ documentImpl: { getElementById: () => null }, locationImpl: { pathname: "/", search: "" } }), null);
+  assert.equal(bootstrapInstaller({ documentImpl: null }), null);
 });

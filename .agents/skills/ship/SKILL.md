@@ -41,7 +41,8 @@ gh pr view "$PR" --json number,state,mergeable,headRefOid,body
   vehicle-command-relevant diff (`gate_vehicle_command_relevant` in
   [`pr-gate-lib.sh`](../../../tools/agent-hooks/pr-gate-lib.sh)) also requires
   `- [x] $vehicle-command-audit clean — merge gate @ <sha>`. The
-  command must carry that same full head SHA in `--match-head-commit`. If any record is missing or
+  command must carry that same full head SHA in `--match-head-commit`, and the hook also requires
+  local `HEAD` to equal that PR head, so check out the exact head first. If any record is missing or
   stale, run the corresponding read-only review/sync workflow and report that a separately
   authorized PR-body update is needed; `$project-review` does not establish `$pr-hygiene`
   readiness. Never stamp from this skill and never use a structured/MCP merge action; the neutral
@@ -94,7 +95,7 @@ RUN_IDS=$(gh run list --workflow build --branch main --commit "$MERGE_SHA" --eve
   echo "REFUSING: expected exactly one build run for merge SHA $MERGE_SHA" >&2; exit 1;
 }
 run_id=$(printf '%s\n' "$RUN_IDS" | awk 'NF {print}')
-gh run watch "$run_id" --exit-status    # blocks until done, fails on a red run (~4 min typical)
+gh run watch "$run_id" --exit-status    # blocks until done, fails on a red run
 ```
 
 A red run: stop, report the failing job (`gh run view "$run_id" --log-failed | tail -40`).
@@ -197,8 +198,16 @@ python3 scripts/check-firmware-artifacts.py --app-only --target "$TARGET" --vers
 
 Write the app to `ota_0` and erase `otadata` so the bootloader boots the freshly written
 slot (a device that previously OTA'd may be running from `ota_1`). Do not run this branch without
-fresh explicit approval for the exact port/board/target and these two writes. Never substitute a
-merged image or touch `nvs@0x9000/0x6000`:
+approval covering the exact port/board/target, the retained-bootloader read and these two writes. Never substitute a
+merged image or touch `nvs@0x9000/0x6000`.
+
+Collect a fresh local `BOOT_IMAGE` for this identified board with the
+[retained-bootloader preflight](../usb-recovery/SKILL.md#retained-bootloader-compatibility), after
+establishing its project layout. Leave `BOOTLOADER` unset: this branch retains it. The shared
+check below requires an exact reviewed reference for a descriptorless bootloader and refuses an
+older-IDF app, unknown/unreadable metadata or a different chip before the
+app write. The collected bytes are evidence for this board, not a reusable fleet assumption:
+
 
 ```bash
 set -euo pipefail
@@ -220,6 +229,7 @@ case "$CHIP_RAW" in ESP32-S3*) DETECTED=esp32s3 ;; ESP32-C3*) DETECTED=esp32c3 ;
 [ "$DETECTED" = "$TARGET" ] || {
   echo "REFUSING: selected port is $DETECTED, requested target is $TARGET" >&2; exit 1;
 }
+python3 scripts/check-bootloader-compat.py --target "$TARGET" --bootloader "${BOOT_IMAGE:?collect the retained bootloader for this board first}" --app "$APP"
 if ! esptool --chip "$TARGET" -p "$PORT" write_flash 0x20000 "$APP"; then
   echo "REFUSING: signed app write failed; otadata was not activated" >&2; exit 1
 fi

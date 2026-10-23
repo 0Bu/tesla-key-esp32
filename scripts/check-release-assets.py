@@ -399,6 +399,19 @@ def self_test() -> None:
         release = make_release(root, version, source_sha)
         assert validate(release, root, version, source_sha) == 4
 
+        for tag in ("v1.2.4", None):
+            wrong_tag = json.loads(json.dumps(release))
+            if tag is None:
+                del wrong_tag["tag_name"]
+            else:
+                wrong_tag["tag_name"] = tag
+            try:
+                validate(wrong_tag, root, version, source_sha)
+            except ReleaseError as exc:
+                assert "tag/target" in str(exc)
+            else:
+                raise AssertionError("wrong/missing Release tag_name was accepted")
+
         bad_digest = json.loads(json.dumps(release))
         bad_digest["assets"][0]["digest"] = "sha256:" + "0" * 64
         try:
@@ -599,6 +612,38 @@ def self_test() -> None:
         else:
             raise AssertionError("ELF checksum drift was accepted")
         checksum.write_bytes(original_checksum)
+        # The earlier layout fixtures are deliberately opaque bytes. This separate positive
+        # fixture exercises the optional production-authority branch with disposable RSA data.
+        pin = None
+        for target, suffix in TARGETS:
+            stage = root / "_fw" / target
+            boot = FIRMWARE_CONTRACT.make_image(target, "ignored", app=False)
+            app = FIRMWARE_CONTRACT.fake_sign(
+                FIRMWARE_CONTRACT.make_image(target, version, app=True)
+            )
+            (stage / "bootloader.bin").write_bytes(boot)
+            (stage / "tesla-key-esp32.bin").write_bytes(app)
+            for name in (f"tesla-key-esp32{suffix}.bin", f"tesla-key-esp32{suffix}-{version}.bin"):
+                (root / name).write_bytes(app)
+            merged_bytes = bytearray(b"\xff" * (APP_OFFSET + len(app)))
+            for offset, data in ((BOOT_OFFSETS[target], boot),
+                                 (PARTITION_OFFSET, (stage / "partition-table.bin").read_bytes()),
+                                 (OTADATA_OFFSET, (stage / "ota_data_initial.bin").read_bytes()),
+                                 (APP_OFFSET, app)):
+                merged_bytes[offset:offset + len(data)] = data
+            (root / f"tesla-key-esp32{suffix}-{version}-merged.bin").write_bytes(merged_bytes)
+            pin = hashlib.sha256(app[-FIRMWARE_CONTRACT.SIGNATURE_SECTOR + FIRMWARE_CONTRACT.RSA_N_OFFSET:
+                                     -FIRMWARE_CONTRACT.SIGNATURE_SECTOR + FIRMWARE_CONTRACT.RSA_PUBLIC_FIELDS_END]).digest()
+        crypto_release = make_full_release(root, version, source_sha, "published-immutable")
+        assert validate_full_release(crypto_release, root, version, source_sha,
+                                     "published-immutable", pin) == 40
+        try:
+            validate_full_release(crypto_release, root, version, source_sha,
+                                  "published-immutable", b"\x00" * 32)
+        except ReleaseError as exc:
+            assert "production signature authority" in str(exc) and "pinned production" in str(exc)
+        else:
+            raise AssertionError("full Release skipped the supplied production pin")
     print("remote Release/local exact-asset byte contract self-test: PASS")
 
 

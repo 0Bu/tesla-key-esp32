@@ -1,6 +1,7 @@
 #pragma once
 
 #include "json_builder.hpp"
+#include "json_input_validation.hpp"
 #include "json_http_reply.hpp"
 #include "logic/command_registry.hpp"
 #include "logic/json_syntax.hpp"
@@ -10,6 +11,8 @@
 #include <cstring>
 
 namespace tk::mcp_json {
+
+using tk::has_duplicate_json_keys;
 
 // JSON-RPC ids are echoed, but an attacker-controlled 2-KiB id must not pin an input-sized cJSON
 // subtree while tools/list builds its own ~1.5-KiB contiguous print buffer. Accept the protocol's
@@ -71,28 +74,6 @@ inline size_t object_key_count(const cJSON* object, const char* key) noexcept {
         if (item->string && std::strcmp(item->string, key) == 0) ++count;
     }
     return count;
-}
-
-// cJSON preserves duplicate object members and its lookup API returns only one of them. Reject
-// duplicates recursively before routing so a second jsonrpc/id/method (including an escaped-key
-// spelling decoded to the same string) cannot select a different interpretation. The walk is
-// allocation-free and the syntax gate already caps nesting at 16 containers.
-inline bool has_duplicate_json_keys(const cJSON* value) noexcept {
-    if (!value) return false;
-    if (cJSON_IsObject(value)) {
-        for (const cJSON* item = value->child; item; item = item->next) {
-            if (!item->string) return true;
-            for (const cJSON* later = item->next; later; later = later->next) {
-                if (!later->string || std::strcmp(item->string, later->string) == 0) return true;
-            }
-        }
-    }
-    if (cJSON_IsObject(value) || cJSON_IsArray(value)) {
-        for (const cJSON* item = value->child; item; item = item->next) {
-            if (has_duplicate_json_keys(item)) return true;
-        }
-    }
-    return false;
 }
 
 enum class RpcRequestStatus { Valid, InvalidObject, DuplicateKey, InvalidId, InvalidVersion };
@@ -176,6 +157,8 @@ inline JsonOwner build_tool_result(const char* text, bool is_error) noexcept {
 struct VehicleStatePayload {
     const char* vin{};
     bool paired{};
+    bool session_available{};
+    bool charge_available{};
     const char* link{};
     bool has_last_seen{};
     double last_seen_s{};
@@ -197,16 +180,20 @@ inline JsonOwner build_vehicle_state_object(const VehicleStatePayload& in) noexc
     JsonBuilder json;
     json.string(json.root(), "vin", in.vin);
     json.boolean(json.root(), "paired", in.paired);
+    json.boolean(json.root(), "session_available", in.session_available);
+    json.boolean(json.root(), "charge_available", in.charge_available);
     json.string(json.root(), "link", in.link);
     if (in.has_last_seen) json.number(json.root(), "last_seen_s", in.last_seen_s);
-    if (in.has_soc) json.number(json.root(), "soc", in.soc);
-    if (in.has_usable_soc) json.number(json.root(), "usable_soc", in.usable_soc);
-    if (in.charging_state && in.charging_state[0] != '\0')
-        json.string(json.root(), "charging_state", in.charging_state);
-    if (in.has_charge_limit) json.number(json.root(), "charge_limit", in.charge_limit);
-    if (in.has_charge_amps) json.number(json.root(), "charge_amps", in.charge_amps);
-    if (in.has_charger_power)
-        json.number(json.root(), "charger_power_kw", in.charger_power_kw);
+    if (in.charge_available) {
+        if (in.has_soc) json.number(json.root(), "soc", in.soc);
+        if (in.has_usable_soc) json.number(json.root(), "usable_soc", in.usable_soc);
+        if (in.charging_state && in.charging_state[0] != '\0')
+            json.string(json.root(), "charging_state", in.charging_state);
+        if (in.has_charge_limit) json.number(json.root(), "charge_limit", in.charge_limit);
+        if (in.has_charge_amps) json.number(json.root(), "charge_amps", in.charge_amps);
+        if (in.has_charger_power)
+            json.number(json.root(), "charger_power_kw", in.charger_power_kw);
+    }
     return json.finish();
 }
 

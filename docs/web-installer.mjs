@@ -151,11 +151,11 @@ export function bootVersion(line) {
   return match ? match[1] : "";
 }
 
-// The subtitle's channel: a signed PR preview by its Pages path, otherwise the version's channel.
+// The subtitle's channel: a signed PR preview or the dev feed by its Pages path, else the version's.
 export function channelLabel(version, pathname = "") {
   const preview = /\/PR\/(\d+)\//.exec(String(pathname));
   if (preview) return `PR #${preview[1]} preview`;
-  return /-dev(?:[.-]|$)/.test(String(version)) ? "Dev" : "Release";
+  return /\/dev(?:\/|$)/.test(String(pathname)) || /-dev(?:[.-]|$)/.test(String(version)) ? "Dev" : "Release";
 }
 
 async function withTimeout(operation, milliseconds, timeoutError) {
@@ -424,14 +424,9 @@ export function describeSerialConnection(info = {}) {
   return "Web Serial";
 }
 
-export function selectManifestBuild(manifest, chipFamily, info = {}) {
+export function selectManifestBuild(manifest, chipFamily) {
   if (!manifest || !Array.isArray(manifest.builds)) return undefined;
-  const serialType = detectedSerialType(info);
-  return manifest.builds.find((build) =>
-    build.chipFamily === chipFamily && build.serialType === serialType
-  ) || manifest.builds.find((build) =>
-    build.chipFamily === chipFamily && build.serialType === undefined
-  );
+  return manifest.builds.find((build) => build.chipFamily === chipFamily);
 }
 
 export function combinedProgress(fileArray, fileIndex, written, total) {
@@ -464,6 +459,9 @@ function manifestError(message) {
 function validateBuild(build, manifestUrl) {
   if (!build || !SUPPORTED_CHIPS.includes(build.chipFamily)) {
     throw manifestError("The firmware manifest contains an unsupported chip family.");
+  }
+  if (Object.keys(build).sort().join(",") !== "chipFamily,parts") {
+    throw manifestError("Firmware build fields must be exactly chipFamily and parts.");
   }
   if (!Array.isArray(build.parts) || build.parts.length !== 4) {
     throw manifestError(`${build.chipFamily} must contain exactly four flash parts.`);
@@ -993,7 +991,7 @@ export async function probeDevice({
     operation.guard();
     const chipFamily = loader.chip && loader.chip.CHIP_NAME;
     if (!chipFamily) throw errorWithName("ChipDetectionError", "The connected ESP chip could not be identified.");
-    const build = selectManifestBuild(manifest, chipFamily, port.getInfo());
+    const build = selectManifestBuild(manifest, chipFamily);
     if (!build) throw errorWithName("UnsupportedChipError", `${chipFamily} is not supported by this firmware.`);
     await assertChipRevisionSupported(loader, chipFamily);
     operation.guard();
@@ -1053,7 +1051,7 @@ export async function flashDevice({
     if (typeof loader.flashId === "function") await loader.flashId();
     operation.guard();
     const chipFamily = loader.chip && loader.chip.CHIP_NAME;
-    const build = selectManifestBuild(manifest, chipFamily, port.getInfo());
+    const build = selectManifestBuild(manifest, chipFamily);
     if (!build) throw errorWithName("UnsupportedChipError",
       chipFamily ? `${chipFamily} is not supported by this firmware.` : "The ESP chip could not be identified.");
     await assertChipRevisionSupported(loader, chipFamily);
@@ -1117,7 +1115,9 @@ export function attachWebInstaller({
   SerialPortCtor = globalThis.SerialPort,
   followLog = true, // open the live log after connecting and after installing
   trace = false, // also log esptool-js's packet trace (diagnostics; the page enables it with ?trace)
-  delay = sleep // reset pulses and retry pauses
+  delay = sleep, // reset pulses and retry pauses
+  // Clean flash deletes the configuration and pairing; it needs its own confirmation.
+  confirmEraseImpl = (message) => globalThis.confirm?.(message) === true
 }) {
   if (!root) throw new Error("The installer root is missing.");
 
@@ -1569,6 +1569,13 @@ export function attachWebInstaller({
     if (!eraseFirst && !session.device?.keepable) {
       appendStatusLine("Flash refused: Clean flash required", "error");
       syncControls();
+      return;
+    }
+    if (eraseFirst && confirmEraseImpl(
+      "Clean flash? This permanently deletes WiFi, VIN, MQTT settings, the private pairing key and BLE sessions. " +
+      "Back up secret NVS before continuing. Vehicle pairing will be required again."
+    ) !== true) {
+      appendStatusLine("Clean flash cancelled; nothing was written");
       return;
     }
     const selectedOffer = offer;

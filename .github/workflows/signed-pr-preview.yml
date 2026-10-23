@@ -121,7 +121,7 @@ jobs:
             "${{ needs.validate.outputs.head-sha }}"
 
       - name: Upload trusted independent rebuild evidence
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: trusted-preview-rebuild-${{ needs.validate.outputs.head-sha }}
           if-no-files-found: error
@@ -345,7 +345,7 @@ jobs:
             --version "${{ steps.metadata.outputs.version }}"
 
       - name: Upload current-head signed hardware-test artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: tesla-key-esp32-pr${{ needs.validate.outputs.pr }}-${{ needs.validate.outputs.head-sha }}
           if-no-files-found: error
