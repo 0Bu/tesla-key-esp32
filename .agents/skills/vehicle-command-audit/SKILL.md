@@ -124,6 +124,10 @@ Verify every dimension against the reviewed revisions; previous audit results ar
    real-time 1-hour reuse window. Restore is attempted before controller init; absent/unreadable
    `last_time` or a failed clock set can leave the inherited negative-age acceptance path. Do not
    claim guaranteed expiry from this restore.
+3a. **Existing SessionInfo continuity** — a refresh must use the selected domain's retained secret
+   and match its stored vehicle public key before peer, availability or storage changes. Temporary
+   invalidity is not absence of material. Check native and library callers and direct/force updates.
+   Explicit clear/reset still removes material; do not claim a durable VIN-key pin across that boundary.
 4. **Pairing / whitelist** — the configured supervisor sends the existing Charging-Manager key
    automatically after status probes, with bounded backoff and no manual HTTP/UI send path.
    Verify storage-error rejection, the under-FIFO key/session/VIN recheck, Stable-only OTA
@@ -164,8 +168,8 @@ Verify every dimension against the reviewed revisions; previous audit results ar
    [API](../../../docs/API.md#vehicle-data) against all emitters and consumers.
 9a. **Response-counter anti-replay and patch series** — response-counter anti-replay and Request-UUID routing
     are enforced natively by `main/logic/ble_dispatcher.hpp` and `Peer::validate_response_counter()`, superseding
-    patch 0001 and ADR-0003. Verify the current 4 repository patches under `patches/tesla-ble/` (0004 parental
-    controls trim, 0005 session counter replay, 0006 PSA crypto-binding port and 0007 request RNG failure) apply lexically/idempotently
+    patch 0001 and ADR-0003. Verify the current 5 repository patches under `patches/tesla-ble/` (0004 parental
+    controls trim, 0005 session counter replay, 0006 PSA crypto-binding port, 0007 request RNG failure and 0008 existing-session continuity) apply lexically/idempotently
     through root CMake to the managed dependency tree, and are rebased explicitly on every pin bump; 0006 must
     keep the V1 vectors in `test/test_tesla_ble_harness.cpp` byte-identical and keep verifying response tags
     against response metadata bound to the counter the response carries (`Signer.Decrypt`), never the

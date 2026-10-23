@@ -483,6 +483,20 @@ test("charging power remains vehicle-reported alongside explicitly cached climat
   assert.doesNotMatch(context.copChip(context.state) + context.defrostChip(context.state), /kW/);
 });
 
+test("awake without fresh charge shows last-known battery and offers no action", () => {
+  const { context, element } = loadUi();
+  for (const charge_age_s of [undefined, 0, 31, 86400]) {
+    context.render({paired: true, link: "awake", last_seen_s: 0, charge_age_s,
+                    last: {usable_soc: 0, status: "Charging"}, ble: {connected: true}});
+    assert.match(element("hlabel").innerHTML, /Charge reading unavailable/);
+    assert.match(element("hstats").innerHTML, /Last battery/);
+    assert.doesNotMatch(element("hstats").innerHTML, /Power|kW|Idle/);
+    assert.match(element("hstats").innerHTML, />0<\/span>/);
+    assert.equal(context.heroActFn, null);
+    if (charge_age_s !== undefined) assert.match(element("hstats").innerHTML, /Updated/);
+  }
+});
+
 test("hero card remains visible when vehicle link is unreachable or unknown", () => {
   const { context, element } = loadUi();
   const hero = element("hero");
@@ -529,7 +543,7 @@ test("render handles s.link === 'idle' without ReferenceError and sets chips", (
     last_seen_s: 120
   });
   assert.match(element("hlabel").innerHTML, /Parked/);
-  assert.match(element("hstats").innerHTML, /Battery/);
+  assert.match(element("hstats").innerHTML, /Last battery/);
   assert.match(element("hstats").innerHTML, /75/);
   assert.match(element("hstats").innerHTML, /Idle/);
 });

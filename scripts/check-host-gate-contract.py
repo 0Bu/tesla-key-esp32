@@ -127,6 +127,7 @@ def validate(root: Path) -> None:
     for path in (
         "test/tesla_protocol_vectors.test.mjs",
         "test/test_runtime_boundary_contract.py",
+        "test/test_charge_presentation.py",
         "test/run-cjson-oom-tests.sh",
         "test/test_codex_setup.py",
         "scripts/check-bench-acceptance.py",
@@ -152,6 +153,8 @@ def validate(root: Path) -> None:
             "strict host gate must execute the locked cJSON intake/OOM tests")
     require("python3 scripts/check-host-gate-contract.py" in run_mock,
             "run-mock-tests.sh does not execute the host wiring contract")
+    require('run_gate "coherent charge presentation snapshot" 120 python3 test/test_charge_presentation.py' in run_mock,
+            "strict host gate must execute the coherent charge presentation snapshot")
     require('run_gate "retained bootloader compatibility and USB consumers" 120 python3 test/test_bootloader_preflight.py' in run_mock,
             "strict host gate must execute retained-bootloader and USB-consumer admission controls")
     require("python3 scripts/check-nvs-contract.py --self-test" in run_mock,
@@ -337,6 +340,8 @@ def replace_once(path: Path, old: str, new: str) -> None:
 def self_test(root: Path) -> None:
     validate(root)
     mutations = [
+        ("scripts/run-mock-tests.sh", 'run_gate "coherent charge presentation snapshot" 120 python3 test/test_charge_presentation.py',
+         'true # removed charge snapshot gate', "coherent charge presentation snapshot"),
         ("scripts/run-mock-tests.sh", 'run_gate "optional LED driver decisions and GPIO" 120 python3 test/test_led_driver_contract.py',
          '# removed LED gate', "actual optional LED driver gate is missing"),
         ("scripts/run-sanitizer-tests.sh", 'python3 test/test_led_driver_contract.py --sanitize',

@@ -453,6 +453,10 @@ Successful local transmission does not prove vehicle approval. Forced key genera
 that clear sessions/cache; a changed VIN also forgets the BLE MAC and reboots. Same VIN is a no-op.
 Successful NVS existence probes are cached; read errors retry instead of becoming absent.
 
+SessionInfo verification selects its domain explicitly. Existing peer material requires the same
+vehicle public key and HMAC authentication with its retained secret, including when only the
+session-valid flag is false. Key refusal precedes peer, availability and storage changes. Explicit
+peer reset still clears the binding; see [ADR-0005](adr/0005-tesla-ble-seam.md#established-session-continuity-2026-10-23).
 A verified SessionInfo establishes the RAM peer and runner tracker before its best-effort NVS
 save. A false return or exception records a persistence error without discarding that usable
 session or retrying the write. A later ordinary SessionInfo can confirm a successful save.

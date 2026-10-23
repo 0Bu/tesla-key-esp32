@@ -26,6 +26,12 @@ VIN transitions durably journal cross-namespace work. Protocol/key compatibility
 departures are recorded in [ADR-0002](adr/0002-idf6-mbedtls4-crypto-seam.md) and
 [ADR-0005](adr/0005-tesla-ble-seam.md).
 
+An existing domain peer binds SessionInfo refreshes to its retained vehicle public key and secret,
+even if its session is temporarily invalid. Rejected key changes preserve peer state, availability
+and session storage. Explicit peer clear/reset removes that binding; it is not a persistent
+VIN-to-vehicle-key pin across reconnects or reboots. The exact lifetime and bootstrap limits are in
+[ADR-0005](adr/0005-tesla-ble-seam.md#established-session-continuity-2026-10-23).
+
 ## Unencrypted-flash reality (factory devices)
 
 Factory devices normally have Flash Encryption/Secure Boot off and ROM download/JTAG open.

@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "link_state.hpp"
+#include "charge_control.hpp"
 #include "health_gate.hpp"
 #include "session_availability.hpp"
 #include "runtime_admission.hpp"
@@ -57,6 +58,9 @@ struct Inputs {
     std::string vin, ip, version;
     bool        key_present{false};
     std::string key_fingerprint;
+    // Charge age uses the existing gap before the aligned timestamp on supported targets.
+    // Inputs are assigned by name; emit_status independently owns JSON field order.
+    uint32_t    charge_age_s{0};
     long long   key_created{0};   // epoch s; emitted only above kEpochPlausibleFloor
     bool        paired{false};
     tk::SessionAvailability sessions;
@@ -124,12 +128,13 @@ struct Inputs {
     std::string vcsec_sleep{"UNKNOWN"};
 
     // Cached vehicle data (copies of the last_known_* caches).
-    ChargeStateResult   charge;    // drives "vehicle" (Awake only) and "last"
+    ChargeStateResult   charge;    // "vehicle" needs its own fresh sample; "last" retains the cache
     ClimateStateResult  climate;   // "tele" — emitted only while BLE-connected
     DriveStateResult    drive;
     TirePressureResult  tires;
     ClosuresStateResult closures;
 
+    bool     have_charge_age{false};
     bool     have_last_seen{false};
     uint32_t last_seen_s{0};
 
@@ -384,9 +389,10 @@ inline void emit_status(const Inputs& in, E& e) {
     e.str("link",        link_state_web_str(in.link));
     e.str("vcsec_sleep", in.vcsec_sleep.c_str());
 
-    // ── vehicle — live awake/SOC view, only with fresh telemetry (link == Awake),
+    // ── vehicle — live awake/SOC view, only with fresh ChargeState telemetry,
     // independent of the momentary BLE link. ──────────────────────────────────
-    if (in.link == LinkState::Awake && in.charge.valid) {
+    if (in.link == LinkState::Awake &&
+        tk::charge_sample_fresh(in.charge.valid, in.have_charge_age, in.charge_age_s)) {
         const ChargeStateResult& cs = in.charge;
         e.obj_begin("vehicle");
         if (cs.has_battery_level)        e.num("soc", cs.battery_level);
@@ -411,6 +417,7 @@ inline void emit_status(const Inputs& in, E& e) {
         e.obj_end();
     }
     if (in.have_last_seen) e.num("last_seen_s", (double)in.last_seen_s);
+    if (in.charge.valid && in.have_charge_age) e.num("charge_age_s", (double)in.charge_age_s);
     if (!in.last_reboot.empty()) e.str("last_reboot", in.last_reboot.c_str());
 
     // ── sys — always present ──────────────────────────────────────────────────

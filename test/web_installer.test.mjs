@@ -214,6 +214,7 @@ test("serial log parsing preserves split line endings and classifies IDF levels"
 
 function fakeEsptool(chipFamily = "ESP32-S3", { chipRevision, info, resetLines = true, writeError } = {}) {
   const calls = [];
+  const writeOptions = [];
   const resetSignals = [];
   class Transport {
     constructor(port) { this.port = port; calls.push("transport"); }
@@ -233,6 +234,7 @@ function fakeEsptool(chipFamily = "ESP32-S3", { chipRevision, info, resetLines =
     async flashId() { calls.push("flashId"); }
     async eraseFlash() { calls.push("erase"); }
     async writeFlash(options) {
+      writeOptions.push({ eraseAll: options.eraseAll });
       calls.push(["write", options.fileArray.map((file) => file.address)]);
       if (writeError) throw writeError;
       options.reportProgress(0, options.fileArray[0].data.length, options.fileArray[0].data.length);
@@ -246,7 +248,7 @@ function fakeEsptool(chipFamily = "ESP32-S3", { chipRevision, info, resetLines =
   }
   const port = { getInfo() { return info || { usbVendorId: 0x303a, usbProductId: 0x1001 }; } };
   if (resetLines) port.setSignals = async (signals) => { resetSignals.push(signals); };
-  return { calls, resetSignals, port, Transport, Loader };
+  return { calls, writeOptions, resetSignals, port, Transport, Loader };
 }
 
 test("the installer fake refuses a soft reset once the flasher stub runs", async () => {
@@ -700,6 +702,8 @@ test("keep-configuration writes ota_0 first, activates it last, and restarts via
   assert.equal(result.chipFamily, "ESP32-S3");
   assert.equal(result.restarted, true);
   assert.equal(fake.calls.includes("erase"), false);
+  assert.deepEqual(fake.writeOptions, Array.from({ length: 4 }, () => ({ eraseAll: false })),
+    "each Keep phase explicitly disables the flasher's full-chip erase option");
   assert.deepEqual(fake.calls.slice(-5), [
     ["write", [0]],
     ["write", [0x8000]],
@@ -1193,6 +1197,9 @@ test("disconnect waits for a pending serial monitor open before closing or relea
 
 test("factory-reset mode erases before writing the same manifest parts", async () => {
   const { fake } = await runFlash(true);
+  assert.equal(fake.calls.filter((call) => call === "erase").length, 1);
+  assert.deepEqual(fake.writeOptions, Array.from({ length: 4 }, () => ({ eraseAll: false })),
+    "full-chip erase belongs only to the explicit factory-reset phase");
   assert.ok(fake.calls.indexOf("erase") > fake.calls.indexOf("flashId"));
   assert.ok(fake.calls.indexOf("erase") < fake.calls.findIndex((call) => Array.isArray(call) && call[0] === "write"));
 });

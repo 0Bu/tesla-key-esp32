@@ -71,6 +71,7 @@ if [ "$REQUIRE_ALL" = 1 ]; then
         test/test_log_origin_contract.py \
         test/test_diagnostic_export_guidance.py \
         test/test_runtime_boundary_contract.py \
+        test/test_charge_presentation.py \
         test/generate_ota_admission_adapter.py \
         test/generate_mqtt_discovery_adapter.py \
         test/test_ota_admission.cpp \
@@ -187,6 +188,7 @@ if command -v python3 >/dev/null 2>&1; then
     run_gate "log origin contract" 120 python3 test/test_log_origin_contract.py
     run_gate "diagnostic export guidance" 120 python3 test/test_diagnostic_export_guidance.py
     run_gate "runtime C-boundary inventory" 120 python3 test/test_runtime_boundary_contract.py
+    run_gate "coherent charge presentation snapshot" 120 python3 test/test_charge_presentation.py
     run_gate "optional LED driver decisions and GPIO" 120 python3 test/test_led_driver_contract.py
     run_gate "locked cJSON intake and OOM" 120 bash test/run-cjson-oom-tests.sh
     run_gate "native Codex hook payload contract" 120 python3 test/test_codex_setup.py

@@ -169,7 +169,7 @@ static cJSON* build_status_object(bool redact) {
     }
     in.link        = g_vehicle->link_state();
     in.vcsec_sleep = g_vehicle->vcsec_sleep_raw();
-    in.charge      = g_vehicle->get_cached_charge();
+    in.charge = g_vehicle->get_cached_charge_with_age(in.have_charge_age, in.charge_age_s);
 
     uint32_t ago = 0;
     if (g_vehicle->seconds_since_contact(ago)) { in.have_last_seen = true; in.last_seen_s = ago; }

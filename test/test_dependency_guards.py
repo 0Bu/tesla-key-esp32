@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Native guards for the actual patched decrypt body and upstream logging macros.
+"""Native guards for patched decrypt/SessionInfo selection and upstream logging macros.
 
-Synthetic PSA failure drivers prove output cleanup, not AES or ESP driver behavior.
+Synthetic drivers prove output cleanup and secret selection, not AES/HMAC or ESP driver behavior.
 The real-library V1 harness separately owns cryptographic known answers and key compatibility.
 """
 from pathlib import Path
@@ -93,6 +93,164 @@ int main() {
 """
 
 
+
+# This facade observes secret selection/delegation only. It never creates a real HMAC or
+# routable message; cryptographic correctness belongs to the separate unchanged V1 vectors.
+SESSION_FACADE = r"""
+#include <algorithm>
+#include <array>
+#include <cstdint>
+#include <cstring>
+#include <cstdlib>
+#include <string>
+#include <vector>
+using pb_byte_t=unsigned char;
+enum UniversalMessage_Domain { DOMAIN_NONE=0, DOMAIN_SECURITY=2, DOMAIN_INFO=3 };
+constexpr int TeslaBLE_Status_E_OK=0;
+constexpr unsigned char Signatures_Tag_TAG_SIGNATURE_TYPE=0, Signatures_SignatureType_SIGNATURE_TYPE_HMAC=6,
+ Signatures_Tag_TAG_PERSONALIZATION=2, Signatures_Tag_TAG_CHALLENGE=3, Signatures_Tag_TAG_END=255;
+struct Signatures_SessionInfo { struct { size_t size=65; pb_byte_t bytes[65]{}; } publicKey; };
+struct UniversalMessage_RoutableMessage_session_info_t { size_t size=1; pb_byte_t bytes[128]{}; };
+static unsigned ecdh_calls,derive_calls,hmac_calls; static bool ecdh_fail;
+static std::array<uint8_t,16> selected_key{};
+template<class... Args> static void passive_log(Args&&...) {}
+#define LOG_ERROR(...) passive_log(__VA_ARGS__)
+struct Peer {
+ static constexpr size_t SHARED_KEY_SIZE_BYTES=16;
+ bool retained=false,valid=true,matching=true; std::array<uint8_t,16> secret{};
+ bool has_shared_secret() const{return retained;}
+ [[maybe_unused]] bool is_initialized() const{return retained&&valid;}
+ bool accepts_session_key(const uint8_t*,size_t) const{return matching;}
+ const uint8_t* get_shared_secret() const{return secret.data();}
+};
+struct CryptoContext {
+ int perform_tesla_ecdh(const uint8_t*,size_t,uint8_t* out){++ecdh_calls;std::memset(out,0x22,16);return ecdh_fail?-1:0;}
+};
+struct CryptoUtils {
+ static void clear_sensitive_memory(void* out,size_t n){std::memset(out,0,n);}
+ static int derive_session_info_key(const uint8_t* key,size_t n,uint8_t* out,size_t len){
+  ++derive_calls;if(n!=selected_key.size())return -1;std::memcpy(selected_key.data(),key,n);std::memset(out,0x33,len);return 0;
+ }
+ static int hmac_sha256(const uint8_t*,size_t,const uint8_t*,size_t,uint8_t* out,size_t len){++hmac_calls;std::memset(out,0x44,len);return 0;}
+ static bool secure_memory_compare(const void* a,const void* b,size_t n){return std::memcmp(a,b,n)==0;}
+};
+struct Client {
+ CryptoContext crypto_context_; std::string vin_{"SYNTHETICVIN00000"}; Peer security,info;
+ Peer* get_peer(UniversalMessage_Domain domain){return domain==DOMAIN_SECURITY?&security:domain==DOMAIN_INFO?&info:nullptr;}
+ bool verify_session_info_tag(UniversalMessage_Domain,const Signatures_SessionInfo&,const UniversalMessage_RoutableMessage_session_info_t&,const pb_byte_t*,size_t,const pb_byte_t*,size_t);
+};
+"""
+SESSION_MAIN = r"""
+int main(int argc,char** argv) {
+ if(argc!=2)return 2;const int mode=std::atoi(argv[1]);Client client;
+ client.security.secret.fill(0x11);client.info.secret.fill(0x55);
+ if(mode!=0&&mode!=7)client.security.retained=true;
+ if(mode==2)client.security.valid=false;
+ if(mode==3)client.security.matching=false;
+ if(mode==5)client.info.retained=true;
+ if(mode==6||mode==7)ecdh_fail=true;
+ Signatures_SessionInfo value;value.publicKey.bytes[0]=4;
+ UniversalMessage_RoutableMessage_session_info_t body;
+ if(mode==8)body.size=sizeof(body.bytes)+1;
+ if(mode==9)body.size=0;
+ const uint8_t uuid[16]{};uint8_t tag[32];std::memset(tag,0x44,sizeof(tag));
+ const auto domain=mode==4?DOMAIN_NONE:mode==5?DOMAIN_INFO:DOMAIN_SECURITY;
+ const bool accepted=client.verify_session_info_tag(domain,value,body,uuid,sizeof(uuid),tag,sizeof(tag));
+ if(mode==3||mode==4||mode==8||mode==9)return !accepted&&!ecdh_calls&&!derive_calls&&!hmac_calls?0:1;
+ if(mode==7)return !accepted&&ecdh_calls==1&&!derive_calls&&!hmac_calls?0:1;
+ const uint8_t expected=mode==0?0x22:mode==5?0x55:0x11;
+ if(!accepted||ecdh_calls!=(mode==0?1u:0u)||derive_calls!=1||hmac_calls!=1)return 1;
+ for(auto byte:selected_key)if(byte!=expected)return 1;
+ return 0;
+}
+"""
+
+
+def check_session_secret_selection(component: Path, work: Path, flags: list[str], compiler: str) -> None:
+    source = (component / "src/client.cpp").read_text()
+    start, end = "bool Client::verify_session_info_tag(", "\nint Client::build_universal_message_with_payload("
+    assert source.count(start) == source.count(end) == 1
+    method = start + source.split(start, 1)[1].split(end, 1)[0]
+    run_probe(work, "session-selection", SESSION_FACADE + method + SESSION_MAIN,
+              flags, compiler, [([str(mode)], 0) for mode in range(10)])
+    controls = (
+        ("session-empty-payload", "session_info_length == 0 || ", "", [(9, 1)]),
+        ("session-rederive", "if (peer->has_shared_secret())", "if (false)", [(1, 1), (6, 1)]),
+        ("session-key-source", "peer->get_shared_secret()", "session_info.publicKey.bytes", [(1, 1)]),
+        ("session-invalidity-bypass", "if (peer->has_shared_secret())", "if (peer->is_initialized())", [(2, 1)]),
+        ("session-domain", "get_peer(domain)", "get_peer((static_cast<void>(domain), DOMAIN_SECURITY))", [(5, 1), (4, 1)]),
+        ("session-key-match", "!peer || !peer->accepts_session_key(session_info.publicKey.bytes, session_info.publicKey.size)", "!peer", [(3, 1)]),
+    )
+    for label, old, new, cases in controls:
+        assert method.count(old) == 1, label
+        run_probe(work, label, SESSION_FACADE + method.replace(old, new) + SESSION_MAIN,
+                  flags, compiler, [(["0"], 0)] + [([str(mode)], result) for mode, result in cases])
+
+
+
+# Logging-order driver: every backing buffer stays65 bytes, even when its reported
+# size is short. A removed/moved guard fails by counters, never by an invalid read.
+SESSION_LOAD_FACADE = r"""
+#include <array>
+#include <cstdint>
+#include <cstring>
+#include <cstdlib>
+using pb_byte_t=unsigned char;
+constexpr int TeslaBLE_Status_E_OK=0,TeslaBLE_Status_E_ERROR_INVALID_PARAMS=-1;
+static unsigned verbose_calls,ecdh_calls;
+template<class... Args> static void passive_log(Args&&...) {}
+#define LOG_ERROR(...) passive_log(__VA_ARGS__)
+#define LOG_DEBUG(...) passive_log(__VA_ARGS__)
+#define LOG_VERBOSE(...) (++verbose_calls,passive_log(__VA_ARGS__))
+struct CryptoContext {
+ int perform_tesla_ecdh(const uint8_t*,size_t,uint8_t* out){++ecdh_calls;std::memset(out,0x31,16);return 0;}
+};
+struct Peer {
+ CryptoContext context;CryptoContext* crypto_context_=&context;
+ bool has_shared_secret_=false,is_valid_=false;
+ std::array<uint8_t,65> tesla_public_key_{};std::array<uint8_t,16> shared_secret_sha1_{};
+ bool accepts_session_key(const uint8_t*,size_t) const;
+ int load_tesla_key(const uint8_t*,size_t);
+};
+"""
+SESSION_LOAD_MAIN = r"""
+int main(int argc,char** argv){
+ if(argc!=2)return 2;const int mode=std::atoi(argv[1]);Peer peer;
+ std::array<uint8_t,65> key{};key[0]=4;
+ if(mode==2)key[0]=2;
+ if(mode==4){peer.has_shared_secret_=true;peer.is_valid_=true;peer.tesla_public_key_.fill(0x71);peer.shared_secret_sha1_.fill(0x72);}
+ const auto old_public=peer.tesla_public_key_;const auto old_secret=peer.shared_secret_sha1_;
+ const auto result=peer.load_tesla_key(mode==3?nullptr:key.data(),mode==1?1:key.size());
+ if(mode==0)return result==0&&verbose_calls==1&&ecdh_calls==1&&peer.has_shared_secret_&&peer.is_valid_?0:1;
+ return result==TeslaBLE_Status_E_ERROR_INVALID_PARAMS&&!verbose_calls&&!ecdh_calls&&
+  peer.tesla_public_key_==old_public&&peer.shared_secret_sha1_==old_secret&&
+  peer.has_shared_secret_==(mode==4)&&peer.is_valid_==(mode==4)?0:1;
+}
+"""
+
+
+def check_session_load_order(component: Path, work: Path, flags: list[str], compiler: str) -> None:
+    source = (component / "src/peer.cpp").read_text()
+    start, end = "bool Peer::accepts_session_key(", "\nint Peer::update_session("
+    assert source.count(start) == source.count(end) == 1
+    method = start + source.split(start, 1)[1].split(end, 1)[0]
+    run_probe(work, "session-pre-log", SESSION_LOAD_FACADE + method + SESSION_LOAD_MAIN,
+              flags, compiler, [([str(mode)], 0) for mode in range(5)])
+    guard = """  // Existing trust material may only be refreshed with the same vehicle public key.
+  if (!accepts_session_key(public_key_buffer, public_key_size)) {
+    LOG_ERROR("Session public key rejected");
+    return TeslaBLE_Status_E_ERROR_INVALID_PARAMS;
+  }
+
+"""
+    assert method.count(guard) == 1
+    marker = "  // Use CryptoContext's Tesla ECDH method"
+    assert method.count(marker) == 1
+    late = method.replace(guard, "").replace(marker, guard + marker)
+    run_probe(work, "session-late-log-guard", SESSION_LOAD_FACADE + late + SESSION_LOAD_MAIN,
+              flags, compiler, [(["0"], 0), (["1"], 1), (["2"], 1), (["4"], 1)])
+
+
 def run_probe(work: Path, label: str, code: str, flags: list[str], compiler: str,
               cases: list[tuple[list[str], int]]) -> None:
     source, binary = work / (label + ".cpp"), work / label
@@ -143,6 +301,8 @@ def main() -> None:
         ):
             run_probe(work, label, PSA_FACADE + function.replace(wipe, replacement) + DECRYPT_MAIN,
                       flags, compiler, [(["0"], 0), (["1"], 1), (["2"], 1)])
+        check_session_secret_selection(component, work, flags, compiler)
+        check_session_load_order(component, work, flags, compiler)
         includes = ["-I", str(component / "include"), "-I", str(component / "src")]
         for label, defines, expected in (
             ("info", ["-DTESLA_BLE_LOG_LEVEL=2"], 0),
@@ -151,7 +311,7 @@ def main() -> None:
         ):
             run_probe(work, label, LOG_MAIN, flags + includes + defines,
                       compiler, [([], expected)])
-    print("dependency guards: PASS (12 actual-decrypt runs, 3 logging controls; synthetic drivers)")
+    print("dependency guards: PASS (12 actual-decrypt runs, 3 logging controls, 10 SessionInfo selector/bounds cases/6 removed-guard controls and 5 pre-log cases/1 late-guard control; synthetic drivers)")
 
 
 if __name__ == "__main__":

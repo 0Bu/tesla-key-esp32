@@ -11,7 +11,7 @@ The firmware integrates `yoziru/tesla-ble` v6.2.0 as an ESP-IDF component. Upstr
 1. **The protocol crypto core** (`client.h`, `peer.h`, `crypto_context.h`, generated Nanopb protobufs): handles P-256 ECDH, HMAC key derivation, AES-GCM encryption/decryption, and protobuf serialization.
 2. **The vehicle orchestration layer** (`vehicle.cpp`, `tb_logging.cpp`): manages BLE stream reassembly, request-response dispatch, command queuing, authentication flows, and retry/timeout heuristics.
 
-While the protocol crypto core is sound, the upstream orchestration layer has proven fragile across repeated production incidents:
+The protocol primitives remain upstream with the reviewed binding patches below. The upstream orchestration layer has proven fragile across repeated production incidents:
 - **RX framing failure modes**: The upstream framing code in `vehicle.cpp` attempts heuristic recovery loops when bytes are corrupted or split unexpectedly, causing log floods (which required patch 0003 to rate-limit). Upstream's v5.1.4 response adds complex speculative scanning rather than deterministic framing.
 - **Incomplete anti-replay protection**: Patch 0001 (and ADR-0003) were introduced to halt execution in `handle_carserver_message_` when `validate_response_counter()` detects a duplicate counter. However, ADR-0003's rationale was incomplete: unauthenticated CarServer responses carry `response_counter == 0`, bypassing the replay check entirely in `vehicle.cpp`.
 - **Non-transactional key regeneration**: Upstream's `Vehicle::regenerate_key()` replaces the in-memory key before persistence without roll-back safety on storage error (requiring patch 0002).
@@ -265,6 +265,7 @@ With this architecture in place, patches 0001, 0002, 0003, and the `vehicle.cpp`
 2. `0005-align-session-counter-replay-with-signer-go.patch` (`peer.cpp` session counter monotonic progression alignment per `signer.go`)
 3. `0006-port-crypto-bindings-to-psa.patch` (crypto bindings on PSA Crypto for ESP-IDF 6 / Mbed TLS 4; wire bytes and key format unchanged, response tags now verified against the response's own counter, see §2)
 4. `0007-fail-closed-on-request-entropy-errors.patch` (reject message construction if routing-address or request-UUID randomness fails)
+5. `0008-bind-existing-session-info-key.patch` (domain-specific existing-peer key/secret continuity before SessionInfo refresh or state changes)
 
 ### 6. Compilation of Dead Translation Units (TESLABLE_SRCS)
 
@@ -328,3 +329,30 @@ and pinned builds remain separate from signed hardware and live vehicle acceptan
 - **NVS & Key Preservation**: Zero modification to durable NVS schemas, key formats, or session storage. Existing paired vehicles survive update without re-pairing.
 - **Memory evidence**: Pure decisions in `main/logic/` have host tests. Compiler frames and runtime stack minima are separate checks under the [concurrency contract](../ARCHITECTURE.md#concurrency-normative-contract); neither establishes a universal bound on composed call depth or heap demand.
 - **Dependency Contract**: Upstream `yoziru/tesla-ble` dependency pin (v6.2.0) and four firmware targets remain explicit; upstream also declares esp32c5.
+
+
+## Established-session continuity (2026-10-23)
+
+Patch 0008 corrects an inherited refresh difference from
+[vehicle-command `fc5a1910`](https://github.com/teslamotors/vehicle-command/tree/fc5a1910ad45c42921d541089e3e366d0b897f52),
+`Signer.UpdateSignedSessionInfo` and `UpdateSessionInfo`. A Client verifier must name VCSEC or
+Infotainment explicitly. While that domain retains shared key material, the incoming vehicle
+public key must match its stored key and the HMAC uses the retained secret. An invalid epoch or
+session flag does not remove that binding. A fresh peer still derives its initial secret through
+the existing ECDH path. HMAC layout, accepted tag lengths and successful V1 vector bytes are unchanged.
+The serialized payload is passed by bounded const reference and its declared length is checked
+before use. This avoids a separate pointer/length argument pair at the caller without copying the
+payload, allocating memory or adding a helper frame to the verification path.
+
+Native admission and both Peer update methods refuse missing, malformed or different keys before
+changing existing counters, epoch, time, replay window, availability or session storage. Direct key
+loading also refuses replacement while material remains. The library's own Vehicle caller uses
+the same mandatory domain-aware API even though firmware owns orchestration.
+
+This is a peer-lifetime binding, not a durable VIN-to-vehicle-key pin. Existing explicit
+`clear_shared_secret/reset` discards the stored public key and secret. Native link-loss reset,
+authenticated domain repair and identity cleanup retain that behavior; initial NVS session loading
+also retains its existing trust/age limits above. No new key rotation or storage format is added.
+The ordinary real-library harness checks both domains, valid refresh, temporary invalidity and
+state-preserving refusal. Synthetic driver checks additionally pin secret selection and removed
+checks; they do not prove HMAC correctness or radio/vehicle behavior. No real compromise is inferred.

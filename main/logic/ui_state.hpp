@@ -31,7 +31,7 @@ struct UiSnapshot {
     int       ble_rssi       = 0;       // dBm, valid iff ble_rssi_valid
     bool      have_soc       = false;   // charge cache valid AND battery level present
     int       soc            = 0;       // battery %, RAW (rounded, NOT yet clamped 0..100)
-    bool      charging       = false;   // charging_state == "Charging"
+    bool      charging       = false;   // fresh ChargeState says "Charging" while link is Awake
 
     // ── pairing presentation (caller, ≤1 Hz): durable presence OR usable VCSEC RAM ──
     bool      paired         = false;

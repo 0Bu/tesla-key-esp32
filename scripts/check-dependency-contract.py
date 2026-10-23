@@ -39,7 +39,7 @@ IDF_MBEDTLS_SUBMODULE = "components/mbedtls/mbedtls"
 # dependency update changes this validator together with the lockfiles; a normal build may not
 # silently rewrite an otherwise semantically plausible lock.
 FILE_DIGESTS = {
-    "scripts/tesla-ble-patch-state.json": "58a3a5b1ce838f78712a013798cdae0aecf12bc27fe24ff71642f0c6d1ad05ff",
+    "scripts/tesla-ble-patch-state.json": "2b87f2cd85d412df2368d88122741cf2bc2738c76d35e08f7cd211e5929c594e",
     "esp-idf-toolchain.txt": "6ef2f1d9c15bb269430cbb4530d689022d914b12ac8610b539d4ac00d148d84f",
     "main/idf_component.yml": "39bdf106eddeeb5b0299c757af3dcffb5ca85fc19f7633344b79a590efe07bbc",
     "dependencies.lock.esp32": "11301cd8b614c8003a515be3c03899c4700873b7e965cd1cea172500d82fe054",
@@ -63,6 +63,10 @@ PATCH_INVENTORY = (
     (
         "0007-fail-closed-on-request-entropy-errors.patch",
         "eb4c6dc7f653eb73f98a8609e3a350c6d9beeea63766a4dfcf8fce9cc9256c92",
+    ),
+    (
+        "0008-bind-existing-session-info-key.patch",
+        "213ac5d288e3e07b27a2a35bb8aee1989732128daf639c797f45714c1354473b",
     ),
 )
 # Espressif components resolved from their GitHub release sources: (name, repository, path in the

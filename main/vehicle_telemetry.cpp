@@ -1005,7 +1005,7 @@ void VehicleController::handle_session_info_frame_(const UniversalMessage_Routab
         return;
     }
 
-    if (!client_->verify_session_info_tag(session_info, msg.payload.session_info.bytes, msg.payload.session_info.size,
+    if (!client_->verify_session_info_tag(domain, session_info, msg.payload.session_info,
                                           request_uuid, request_uuid_len, tag.bytes, tag.size)) {
         ESP_LOGE(TAG, "Session info HMAC verification failed");
         if (is_waiting_auth) {
@@ -1035,10 +1035,11 @@ void VehicleController::handle_session_info_frame_(const UniversalMessage_Routab
 void VehicleController::establish_verified_session_locked_(UniversalMessage_Domain domain,
         Signatures_SessionInfo& session_info,
         const UniversalMessage_RoutableMessage_session_info_t& payload) {
+    auto* peer = client_->get_peer(domain);
+    if (!peer || !peer->accepts_session_key(session_info.publicKey.bytes, session_info.publicKey.size)) return;
     const uint32_t session_identity = identity_epoch_.load(std::memory_order_acquire);
     invalidate_session_runtime_locked_(domain);
-    auto* peer = client_->get_peer(domain);
-    if (peer && peer->update_session(&session_info) == 0 && peer->is_initialized()) {
+    if (peer->update_session(&session_info) == 0 && peer->is_initialized()) {
         ESP_LOGI(TAG, "Session updated for domain %d", static_cast<int>(domain));
         auto tk_domain = (domain == UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY)
             ? tk::BleDomain::VehicleSecurity : tk::BleDomain::Infotainment;

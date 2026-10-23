@@ -17,6 +17,10 @@
     {
       "name": "0007-fail-closed-on-request-entropy-errors.patch",
       "sha256": "eb4c6dc7f653eb73f98a8609e3a350c6d9beeea63766a4dfcf8fce9cc9256c92"
+    },
+    {
+      "name": "0008-bind-existing-session-info-key.patch",
+      "sha256": "213ac5d288e3e07b27a2a35bb8aee1989732128daf639c797f45714c1354473b"
     }
   ],
   "files": [
@@ -33,7 +37,7 @@
     {
       "path": "include/client.h",
       "beforeSha256": "c64b04197b6fb171478089ac60285d67490b2924623d60ea503ec2f324dbfc4b",
-      "afterSha256": "b4d08d6b3ab8b60b0ca911d5b6e72a9f8c6c56ae05fdb034ee09767dae6c1921"
+      "afterSha256": "a0e461337e1dfac5b9583b3f0787d6b1e3922fd1ac95d0c1ed1486b728a012cd"
     },
     {
       "path": "include/crypto_context.h",
@@ -43,12 +47,12 @@
     {
       "path": "include/peer.h",
       "beforeSha256": "35c2ced3c6ed921d1b7613d48fbac86b54a1d1695408a2736e6090edb283ac82",
-      "afterSha256": "f64d139da06287aa7b0258975fe0a4292f189769adb204dee348067d15c83735"
+      "afterSha256": "5a08e3900dbb7fdd22b45d5dd610eeb5fb8896467dee3f8adaadba15d2dcd5e9"
     },
     {
       "path": "src/client.cpp",
       "beforeSha256": "1e5a61595a0c3a073297493adfbfaed22ab04e2e21715f17a4205f9c9761abf7",
-      "afterSha256": "21bda492e2c683cd336b421082586197b905956239664eccafcdc968e842053a"
+      "afterSha256": "fdf3e7cd79488bd6ae43f3ee64884e5dde31eaed7c1e42160accc132569ad0de"
     },
     {
       "path": "src/crypto_context.cpp",
@@ -58,7 +62,12 @@
     {
       "path": "src/peer.cpp",
       "beforeSha256": "7153ced9e9401d1265d0b7493211083b7d544d2626940e1913b701990f951299",
-      "afterSha256": "bf8ef6c4f9ded033837e9b840955f6a62d0e50c1d80bc3b1cfd851c74154552f"
+      "afterSha256": "679e51e64047db96995928c1a38253046dd745bfa0ae2f2010845ecfa74a09c2"
+    },
+    {
+      "path": "src/vehicle.cpp",
+      "beforeSha256": "bdb505f66075e78f6cc29572b200472960843c7b552e8bb5c7e080c7c6b9caf9",
+      "afterSha256": "bd901e63e1f3b6dff89f7abb3ff3cd1d4abbb75ffeda9b6458a0e295cbed7d11"
     },
     {
       "path": "src/vin_utils.cpp",

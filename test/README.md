@@ -137,6 +137,15 @@ real vector-allocation failure after the length probe. Source pins cover every c
 read-modify-save refusal and fatal boot configuration validation. These do not simulate NVS durability.
 Presenter parity likewise proves decisions, not physical pixels.
 
+SessionInfo continuity checks use the existing published V1 vector for initial and established
+refreshes in both domains. Ordinary direct-API cases reject missing, malformed or different keys
+before peer, native availability or storage changes, including temporarily invalid sessions.
+`test_dependency_guards.py` compiles the actual Client verifier with passive crypto drivers to
+check domain/retained-secret selection and serialized-payload bounds, six removed-check controls and a pre-log key-validation
+control with fully backed buffers. These selector checks do
+not generate protocol messages or establish cryptographic answers; the real-library V1 harness
+owns those answers. Explicit peer reset remains a fresh-bootstrap boundary, not a durable key pin.
+
 The native VCSEC harness compiles the production routing and response methods with the real
 patched Client, Peer and CommandRunner. It covers status/action/auth/wake admission, proactive
 HMAC-verified session repair, failed writes, stale attempts, passive wake progress and zero-inclusive
@@ -219,8 +228,9 @@ WiFi-driver callback framing, a physical exported log or complete sanitation.
 | `test_diagnostic_export_guidance.py` | Actual bug-form diagnostic description, owned export URL, manual/serial sanitation and nine negative wording mutations |
 | HTTP security contract and UI request tests | Actual POST gate ordering, bounded provenance headers, socket/live-mDNS ownership, diagnostic Host checks, redaction selectors, exact UI proof header, no CORS grant and both anti-framing headers; 16 source mutations must fail. IPv6 enablement is rejected; these checks do not establish live network/browser attack behavior. |
 | `test_runtime_boundary_contract.py` | Shipped CMake source closure and actual task/callback registration; contained or mechanically bounded C boundaries; fixed mailbox/completion ownership, no forbidden work under locks, production JSON/OTA/MQTT wiring and closed source/flag surface |
+| `test_charge_presentation.py` | Compiled actual cache/indicator methods with passive RTOS facades: coherent value/stamp, tick zero/wrap, missing sample, lock failure and post-unlock publication. Pure status fixtures independently age charge while common contact stays fresh; browser fixtures verify the retained-data presentation without commands. |
 | `test_patch_incremental.py` | Shipped CMake admission block and unchanged validator functions with synthetic digest constants; ordinary incremental input/inventory changes stop before the forced compiler, while valid revalidation proceeds. Does not compile tesla-ble or establish real dependency bytes. |
-| `run-cjson-oom-tests.sh` | Rehashed pinned cJSON; real producers/parser, every allocation failpoint, exact IDs, ownership and early input release. Effect-aware reply renderer and extracted real handlers/outer catch exercise degraded outcomes, clock-plus-refused-OTA, typed identity recovery, original restart admission and terminal transport failures. |
+| `run-cjson-oom-tests.sh` | Rehashed pinned cJSON; real producers/parser, finite evcc numeric wire fields, every allocation failpoint, exact IDs, ownership and early input release. Effect-aware reply renderer and extracted real handlers/outer catch exercise degraded outcomes, clock-plus-refused-OTA, typed identity recovery, original restart admission and terminal transport failures. |
 | `run-mqtt-json-publish-tests.sh` | Every production discovery/state factory, full/minimal branches and all registry rows; build/print/publish faults cannot replace retained data and rearm discovery. Extracted real discovery rounds refresh the configuration address without changing identity/state topics; missing/racing/failed address reads omit it. Network and broker adapters remain passive. |
 | `scripts/check-nvs-contract.py` | Exact registered namespace/key/API/owner/retention/secrecy surface, session aliases and direct NVS calls; wrong-name/API/collision/missing-record mutations |
 | `scripts/repo-lint.sh` | Syntax/local links, workflow-policy and host-gate mutation canaries, logic ownership and protocol wiring |
@@ -228,6 +238,7 @@ WiFi-driver callback framing, a physical exported log or complete sanitation.
 | `scripts/test-build-contracts.sh` | Targets, pins, partitions, generated artifacts, size/stack/effective-build and publication contracts; validator self-tests isolate offsets, digest syntax, unsigned-prefix/size reuse, production pins, signed padding/image binding and complete Release/Pages bytes with deterministic disposable fixtures. Pages controls cover build-state/CLI consumption, bounded backoff beyond 50 seconds, delayed size/hash/404 failures for each of 16 parts, independent complete retries, bounded persistent failures, separate manifest/Release-byte delegation and immutable-input rejection before polling; no real signing key |
 | `scripts/test-pr-gates.sh` | Exact-head review records, relevance and canonical Git command boundaries using fixtures |
 | `web_ui_browser_gate.py` / `test_web_ui_browser_gate.py` | Linux-only browser launch policy plus the actual assembled page in Chrome/Chromium: console/request failures, degraded poller, escaping, DOM focus, actual CSS focus/hover rules under deterministic pseudo-state emulation, computed unfiltered control/icon contrast in light/dark themes, and desktop/mobile layout |
+| `web_installer.test.mjs` | Actual installer with passive serial/flasher adapters: phase ordering, abort/release, explicit erase confirmation, and `eraseAll:false` on every Keep write. No physical flash or NVS-preservation proof. |
 
 Automatic browser processes run only on Linux. macOS is refused before binary lookup or process
 creation, including an explicit `BROWSER_BIN`. Optional local mode reports a skip; `--require-all`

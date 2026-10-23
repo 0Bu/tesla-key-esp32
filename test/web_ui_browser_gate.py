@@ -213,6 +213,19 @@ console.error = function() {
     checkChipBounds();
     check(window.__browserGateFetchCalls === 2, "rendering climate does not request vehicle data");
 
+    render({paired: true, link: "awake", last_seen_s: 0, charge_age_s: 31,
+      last: {usable_soc: 0, status: "Charging"}, ble: {connected: true}});
+    check(document.getElementById("hlabel").textContent.includes("Charge reading unavailable"),
+          "fresh unrelated contact does not make old ChargeState look live");
+    check(climateChips.textContent.includes("Last battery") && climateChips.textContent.includes("Updated"),
+          "stale charge has an explicit retained battery and its own age");
+    check(!climateChips.textContent.includes("kW") && !climateChips.textContent.includes("Idle"),
+          "awake stale charge has no live power or fabricated idle age");
+    check(!document.querySelector("#hicon button") && !heroActFn,
+          "awake stale charge offers neither charging nor wake command");
+    checkChipBounds();
+    check(window.__browserGateFetchCalls === 2, "rendering stale charge remains cache-only");
+
     const notesList = document.getElementById("otaChanges");
     const otaCard = document.querySelector("#otaModal .sheet");
     const update = {current: "1.6.2-PR-400", available: "1.6.3-dev.19", channel: "dev"};

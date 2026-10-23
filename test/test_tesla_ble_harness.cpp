@@ -1883,6 +1883,137 @@ static void check_native_vcsec_routing() {
 
 }
 
+// Pack an existing published serialized fixture into the same bounded payload type as callers.
+static UniversalMessage_RoutableMessage_session_info_t session_info_payload(const std::vector<uint8_t>& bytes) {
+    UniversalMessage_RoutableMessage_session_info_t result{};
+    expect(bytes.size() <= sizeof(result.bytes), "published SessionInfo fixture fits its payload",
+           "published SessionInfo fixture exceeds the protocol payload");
+    if (bytes.size() > sizeof(result.bytes)) return result;
+    result.size = static_cast<pb_size_t>(bytes.size());
+    std::copy(bytes.begin(), bytes.end(), result.bytes);
+    return result;
+}
+
+// Ordinary defensive API tests: known published vectors, key matching and state preservation.
+// No generated SessionInfo tags, forged routable frames or radio/vehicle operations.
+static void check_session_info_continuity() {
+    namespace tc = TeslaBLE::TestConstants;
+    const auto encoded = kat::unhex(kat::kSessionInfo);
+    const auto payload = session_info_payload(encoded);
+    const auto uuid = kat::unhex(kat::kSessionInfoRequestUuid);
+    const auto tag = kat::unhex(kat::kSessionInfoTag);
+    Signatures_SessionInfo vector_info = Signatures_SessionInfo_init_default;
+    auto input = pb_istream_from_buffer(encoded.data(), encoded.size());
+    expect(pb_decode(&input, Signatures_SessionInfo_fields, &vector_info),
+           "continuity cases decode the unchanged published SessionInfo vector",
+           "continuity fixture could not decode the published vector");
+    for (auto domain : {UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY,
+                        UniversalMessage_Domain_DOMAIN_INFOTAINMENT}) {
+        Client client;
+        client.set_vin(tc::TEST_VIN);
+        const bool loaded = client.load_private_key(kat::client_pem(), kat::client_pem_size()) == 0;
+        auto verify = [&] (UniversalMessage_Domain selected, const Signatures_SessionInfo& info) {
+            return client.verify_session_info_tag(selected, info, payload,
+                uuid.data(), uuid.size(), tag.data(), tag.size());
+        };
+        auto* peer = client.get_peer(domain);
+        expect(loaded && peer && verify(domain, vector_info),
+               "both fresh domains accept the unchanged known-good SessionInfo HMAC",
+               "fresh domain rejected the known-good SessionInfo vector");
+        auto established = vector_info;
+        const bool ready = peer && peer->update_session(&established) == TeslaBLE_Status_E_OK;
+        expect(ready && verify(domain, vector_info),
+               "established same-key refresh authenticates against retained material",
+               "established known-good refresh failed");
+        peer->set_is_valid(false);
+        expect(peer->has_shared_secret() && verify(domain, vector_info),
+               "temporary validity loss retains the same-key authentication binding",
+               "temporary validity changed the established-key contract");
+        expect(!verify(UniversalMessage_Domain_DOMAIN_BROADCAST, vector_info),
+               "SessionInfo verification refuses an unsupported selected domain",
+               "SessionInfo verification inferred a peer for an unsupported domain");
+
+        // A different preexisting peer key must not be selected for this published vector.
+        const auto other = domain == UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY
+            ? UniversalMessage_Domain_DOMAIN_INFOTAINMENT : UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY;
+        auto alternate = vector_info;
+        std::memcpy(alternate.publicKey.bytes, tc::EXPECTED_CLIENT_PUBLIC_KEY, 65);
+        auto* other_peer = client.get_peer(other);
+        expect(other_peer && other_peer->update_session(&alternate) == TeslaBLE_Status_E_OK &&
+                   !verify(other, vector_info) && verify(domain, vector_info),
+               "mandatory domain selects only its own existing key binding",
+               "SessionInfo verification crossed a domain key binding");
+        other_peer->set_is_valid(false);
+        expect(!verify(other, vector_info),
+               "invalid session flag cannot bypass a retained different key",
+               "temporary invalidity bypassed retained key matching");
+    }
+
+    for (auto domain : {UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY,
+                        UniversalMessage_Domain_DOMAIN_INFOTAINMENT}) {
+        for (bool invalid : {false, true}) for (unsigned kind = 0; kind < 4; ++kind) {
+            Client client;
+            client.set_vin(tc::TEST_VIN);
+            const bool loaded = client.load_private_key(kat::client_pem(), kat::client_pem_size()) == 0;
+            auto original = vector_info;
+            original.counter = 7;
+            auto* peer = client.get_peer(domain);
+            const bool ready = loaded && peer && peer->update_session(&original) == TeslaBLE_Status_E_OK &&
+                               peer->validate_response_counter(42);
+            expect(ready, "refusal fixture establishes ordinary peer state", "refusal fixture setup failed");
+            if (!ready) continue;
+            peer->set_is_valid(!invalid);
+            VehicleController controller(client);
+            controller.publish_session_runtime_locked_(domain, tk::SessionSaveState::Confirmed, 0);
+            const auto bits = controller.session_runtime_bits_.load();
+            const auto records = controller.session_storage.records;
+            const auto epoch = std::array<uint8_t,16>{
+                original.epoch[0], original.epoch[1], original.epoch[2], original.epoch[3],
+                original.epoch[4], original.epoch[5], original.epoch[6], original.epoch[7],
+                original.epoch[8], original.epoch[9], original.epoch[10], original.epoch[11],
+                original.epoch[12], original.epoch[13], original.epoch[14], original.epoch[15]};
+            std::array<uint8_t,16> secret{};
+            std::memcpy(secret.data(), peer->get_shared_secret(), secret.size());
+            auto rejected = original;
+            rejected.counter = 99;
+            rejected.clock_time += 99;
+            rejected.epoch[0] ^= 1;
+            if (kind == 0) rejected.publicKey.size = 0;
+            if (kind == 1) rejected.publicKey.size = 64;
+            if (kind == 2) rejected.publicKey.bytes[0] = 0x02;
+            if (kind == 3) std::memcpy(rejected.publicKey.bytes, tc::EXPECTED_CLIENT_PUBLIC_KEY, 65);
+            auto unchanged = [&] {
+                return peer->get_counter() == original.counter && peer->get_clock_time() == original.clock_time &&
+                    peer->is_valid() == !invalid && peer->has_shared_secret() &&
+                    std::memcmp(peer->get_epoch(), epoch.data(), epoch.size()) == 0 &&
+                    std::memcmp(peer->get_shared_secret(), secret.data(), secret.size()) == 0 &&
+                    peer->accepts_session_key(original.publicKey.bytes, original.publicKey.size) &&
+                    !peer->validate_response_counter(42);
+            };
+            expect(peer->update_session(&rejected) != TeslaBLE_Status_E_OK && unchanged(),
+                   "ordinary update refuses missing/malformed/different key before peer changes",
+                   "ordinary update changed established state on key refusal");
+            expect(peer->force_update_session(&rejected) != TeslaBLE_Status_E_OK && unchanged(),
+                   "forced update cannot bypass the existing key binding",
+                   "forced update bypassed key matching or changed peer state");
+            expect(peer->load_tesla_key(rejected.publicKey.bytes, rejected.publicKey.size) != TeslaBLE_Status_E_OK && unchanged(),
+                   "direct key load cannot replace retained peer material",
+                   "direct load changed the existing peer binding");
+            UniversalMessage_RoutableMessage_session_info_t unused_payload{};
+            controller.establish_verified_session_locked_(domain, rejected, unused_payload);
+            expect(unchanged() && controller.session_runtime_bits_.load() == bits &&
+                       controller.session_persists == 0 && controller.session_storage.records == records &&
+                       controller.ble.writes == 0,
+                   "native refusal preserves availability, peer, storage and passive BLE sink",
+                   "native refusal cleared availability or changed peer/storage/BLE state");
+            peer->clear_shared_secret();
+            expect(!peer->has_shared_secret() && peer->accepts_session_key(tc::EXPECTED_CLIENT_PUBLIC_KEY, 65),
+                   "explicit clear retains its existing fresh-bootstrap lifetime boundary",
+                   "continuity correction silently made a persistent vehicle-key pin");
+        }
+    }
+}
+
 int main() {
     std::printf("=================================================================\n");
     std::printf("=== Tesla BLE Integration Harness (B1, B2, H1, V1)            ===\n");
@@ -2082,6 +2213,7 @@ int main() {
     check_native_command_completion();
     check_native_wake_confirmation();
     check_native_session_availability();
+    check_session_info_continuity();
     {
         auto context = kat::loaded_client_context();
         uint8_t point[65];
@@ -2132,7 +2264,6 @@ int main() {
                    std::memcmp(peer.get_shared_secret(), tc::EXPECTED_SESSION_KEY, 16) == 0,
                "official public key establishes a usable session with the known ECDH secret",
                "official public key did not establish the expected session");
-        info.publicKey.size = 0;
         info.counter = 3;
         ++info.clock_time;
         expect(peer.update_session(&info) == TeslaBLE_Status_E_OK && peer.is_initialized() &&
@@ -2140,6 +2271,7 @@ int main() {
                "lower reported counter preserves authentication and max(local, reported)",
                "session-counter alignment or established-session reuse regressed");
         peer.clear_shared_secret();
+        info.publicKey.size = 0;
         expect(peer.update_session(&info) == TeslaBLE_Status_E_OK && !peer.is_initialized() &&
                    !peer.has_shared_secret() && !peer.can_send_command(),
                "cleared key material cannot be restored by metadata-only SessionInfo",
@@ -2334,17 +2466,18 @@ int main() {
         Client client;
         client.set_vin(tc::TEST_VIN);
         const auto info_bytes = kat::unhex(kat::kSessionInfo);
+        const auto payload = session_info_payload(info_bytes);
         const auto uuid = kat::unhex(kat::kSessionInfoRequestUuid);
         auto tag = kat::unhex(kat::kSessionInfoTag);
         Signatures_SessionInfo info = Signatures_SessionInfo_init_default;
         pb_istream_t in = pb_istream_from_buffer(info_bytes.data(), info_bytes.size());
         const bool decoded = client.load_private_key(kat::client_pem(), kat::client_pem_size()) == 0 &&
                              pb_decode(&in, Signatures_SessionInfo_fields, &info);
-        const bool accepted = decoded && client.verify_session_info_tag(info, info_bytes.data(), info_bytes.size(),
+        const bool accepted = decoded && client.verify_session_info_tag(UniversalMessage_Domain_DOMAIN_INFOTAINMENT, info, payload,
                                                                         uuid.data(), uuid.size(), tag.data(),
                                                                         tag.size());
         tag[0] ^= 0x01;
-        const bool refused = decoded && !client.verify_session_info_tag(info, info_bytes.data(), info_bytes.size(),
+        const bool refused = decoded && !client.verify_session_info_tag(UniversalMessage_Domain_DOMAIN_INFOTAINMENT, info, payload,
                                                                         uuid.data(), uuid.size(), tag.data(),
                                                                         tag.size());
         expect(accepted && refused, "session-info tag verifies against the official vector; a flipped bit is refused",

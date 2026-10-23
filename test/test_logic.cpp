@@ -2184,6 +2184,37 @@ static bool golden_eq(const std::string& got, const char* want) {
 static void test_status_model() {
     using tk::status::Inputs;
 
+    // Unrelated contact stays fresh while ChargeState independently ages or is absent.
+    // Zero charge values are present values; age zero also represents a real tick-zero sample.
+    for (auto link : {tk::LinkState::Unknown, tk::LinkState::Awake, tk::LinkState::Asleep,
+                      tk::LinkState::Idle, tk::LinkState::Unreachable}) {
+        for (bool valid : {false, true}) for (bool have_age : {false, true}) {
+            for (uint32_t age : {0u, 29u, 30u, 31u, 86400u, UINT32_MAX}) {
+                Inputs sample;
+                sample.link = link;
+                sample.charge.valid = valid;
+                sample.charge.has_battery_level = true;
+                sample.charge.battery_level = 0;
+                sample.charge.charging_state = "Charging";
+                sample.charge.has_charger_power = true;
+                sample.charge.charger_power = 0;
+                sample.have_charge_age = have_age;
+                sample.charge_age_s = age;
+                sample.have_last_seen = true;
+                sample.last_seen_s = 0;
+                CollectEmitter actual;
+                tk::status::emit_status(sample, actual);
+                const bool live = link == tk::LinkState::Awake && valid && have_age && age <= 30;
+                CHECK((actual.out.find("vehicle{\n") != std::string::npos) == live);
+                CHECK((actual.out.find("vehicle.soc=0\n") != std::string::npos) == live);
+                CHECK((actual.out.find("vehicle.power=0\n") != std::string::npos) == live);
+                CHECK((actual.out.find("last.soc=0\n") != std::string::npos) == valid);
+                CHECK((actual.out.find("charge_age_s=") != std::string::npos) == (valid && have_age));
+                CHECK(actual.out.find("last_seen_s=0\n") != std::string::npos);
+            }
+        }
+    }
+
     // Scenario 1 — awake + charging, BLE link up, full telemetry with a deliberate mix
     // of present/absent fields (float-exact values so the golden is bit-stable).
     Inputs in;
@@ -2236,6 +2267,7 @@ static void test_status_model() {
     in.charge.has_voltage = true;          in.charge.charger_voltage = 231;
     in.charge.has_charger_phases = true;   in.charge.charger_phases = 2;
     in.have_last_seen = true; in.last_seen_s = 5;
+    in.have_charge_age = true; in.charge_age_s = 5;
 
     CollectEmitter e1;
     tk::status::emit_status(in, e1);
@@ -2320,6 +2352,7 @@ static void test_status_model() {
         "last.soc=72.5\n"
         "last.status=\"Charging\"\n"
         "last_seen_s=5\n"
+        "charge_age_s=5\n"
         "sys{\n"
         "sys.board_mac=\"02:00:00:32:55:20\"\n"
         "sys.free_heap=0\n"
@@ -2589,6 +2622,7 @@ static void test_status_model() {
     s5.charge.has_usable_battery_level = true; s5.charge.usable_battery_level = 72.0f;
     s5.charge.charging_state = "Charging";
     s5.have_last_seen = true; s5.last_seen_s = 5;
+    s5.have_charge_age = true; s5.charge_age_s = 0;
 
     CollectEmitter e5;
     tk::status::emit_status(s5, e5);
@@ -2636,6 +2670,7 @@ static void test_status_model() {
         "last.usable_soc=72\n"
         "last.status=\"Charging\"\n"
         "last_seen_s=5\n"
+        "charge_age_s=0\n"
         "sys{\n"
         "sys.board_mac=\"02:00:00:32:55:20\"\n"
         "sys.free_heap=0\n"
@@ -2696,6 +2731,18 @@ static void test_status_model() {
 
 // ─── GET /api/1/vehicles/{VIN}/vehicle_data charge_state contract ─────────────
 static void test_vehicle_data() {
+    CHECK(tk::vehicle_data_number(0.0) == 0.0);
+    CHECK(tk::vehicle_data_number(-0.0) == 0.0);
+    CHECK(tk::vehicle_data_number(12.5) == 12.5);
+    CHECK(tk::vehicle_data_number(-3.25) == -3.25);
+    CHECK(tk::vehicle_data_number(std::numeric_limits<double>::max()) ==
+          std::numeric_limits<double>::max());
+    CHECK(tk::vehicle_data_number(std::numeric_limits<double>::denorm_min()) ==
+          std::numeric_limits<double>::denorm_min());
+    CHECK(tk::vehicle_data_number(std::numeric_limits<double>::quiet_NaN()) == 0.0);
+    CHECK(tk::vehicle_data_number(std::numeric_limits<double>::infinity()) == 0.0);
+    CHECK(tk::vehicle_data_number(-std::numeric_limits<double>::infinity()) == 0.0);
+
     // Scenario 1 — actively charging: all fields populated, non-zero minutes_to_full_charge
     ChargeStateResult cs1{};
     cs1.valid = true;

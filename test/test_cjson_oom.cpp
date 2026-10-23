@@ -9,10 +9,12 @@
 
 #include <cJSON.h>
 
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -172,6 +174,8 @@ tk::JsonOwner build_status_fixture() {
     inputs.closures.has_user_present = true;
     inputs.closures.user_present = true;
     inputs.charge.valid = true;
+    inputs.have_charge_age = true;
+    inputs.charge_age_s = 0;
     inputs.charge.has_battery_level = true;
     inputs.charge.battery_level = 63;
     inputs.charge.charging_state = "Charging";
@@ -351,6 +355,130 @@ tk::JsonOwner build_combined_fixture() {
 }
 tk::JsonOwner build_all_domains_fixture() {
     return build_vehicle_data_fixture("charge_state;climate_state;drive_state");
+}
+
+// Print and reparse with the actual pinned cJSON: its in-memory Number type alone would
+// miss the regression, because NaN/infinity become null only when cJSON prints them.
+void check_wire_number(tk::JsonOwner root, const char* key, double expected) {
+    CHECK(root != nullptr);
+    tk::JsonPrintOwner printed(cJSON_PrintUnformatted(root.get()));
+    CHECK(printed != nullptr);
+    tk::JsonOwner parsed(cJSON_Parse(printed.get()));
+    CHECK(parsed != nullptr);
+    const cJSON* number = cJSON_GetObjectItemCaseSensitive(parsed.get(), key);
+    CHECK(cJSON_IsNumber(number));
+    CHECK(std::isfinite(number->valuedouble));
+    // The wire values originate as protobuf floats. cJSON may choose 15 decimal digits;
+    // require exact recovery of that float, rather than unrelated double-print precision.
+    CHECK(static_cast<float>(number->valuedouble) == static_cast<float>(expected));
+}
+
+void test_vehicle_data_numeric_domain() {
+    struct NumberCase { float input; double expected; };
+    const NumberCase cases[] = {
+        {std::numeric_limits<float>::quiet_NaN(), 0.0},
+        {std::numeric_limits<float>::infinity(), 0.0},
+        {-std::numeric_limits<float>::infinity(), 0.0},
+        {0.0f, 0.0}, {-0.0f, 0.0}, {12.5f, 12.5}, {-3.25f, -3.25},
+        {std::numeric_limits<float>::max(), std::numeric_limits<float>::max()},
+        {std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest()},
+        {std::numeric_limits<float>::denorm_min(), std::numeric_limits<float>::denorm_min()},
+    };
+    struct ChargeField { float ChargeStateResult::* member; const char* key; };
+    const ChargeField charge_fields[] = {
+        {&ChargeStateResult::battery_level, "battery_level"},
+        {&ChargeStateResult::usable_battery_level, "usable_battery_level"},
+        {&ChargeStateResult::charge_limit_soc, "charge_limit_soc"},
+        {&ChargeStateResult::charger_power, "charger_power"},
+        {&ChargeStateResult::charge_rate, "charge_rate"},
+        {&ChargeStateResult::charge_energy_added, "charge_energy_added"},
+        {&ChargeStateResult::battery_range, "battery_range"},
+    };
+    for (const auto& field : charge_fields) {
+        for (const auto& sample : cases) {
+            reset_allocator(0);
+            {
+                ChargeStateResult charge{};
+                charge.valid = charge.has_usable_battery_level = true;
+                charge.*(field.member) = sample.input;
+                tk::JsonBuilder json;
+                tk::StatusJsonEmitter emitter(json);
+                tk::emit_vehicle_charge_state(charge, emitter);
+                check_wire_number(emitter.finish(), field.key, sample.expected);
+            }
+            CHECK(live_allocations == 0);
+        }
+    }
+    struct ClimateField { float ClimateStateResult::* member; const char* key; };
+    const ClimateField climate_fields[] = {
+        {&ClimateStateResult::inside_temp, "inside_temp"},
+        {&ClimateStateResult::outside_temp, "outside_temp"},
+        {&ClimateStateResult::driver_setpoint, "driver_temp_setting"},
+    };
+    for (const auto& field : climate_fields) {
+        for (const auto& sample : cases) {
+            for (bool projected : {false, true}) {
+                reset_allocator(0);
+                {
+                    ClimateStateResult climate{};
+                    climate.valid = true;
+                    climate.*(field.member) = sample.input;
+                    tk::JsonBuilder json;
+                    tk::StatusJsonEmitter emitter(json);
+                    if (projected) tk::emit_vehicle_climate_state(tk::vehicle_climate_data(climate), emitter);
+                    else tk::emit_vehicle_climate_state(climate, emitter);
+                    check_wire_number(emitter.finish(), field.key, sample.expected);
+                }
+                CHECK(live_allocations == 0);
+            }
+        }
+    }
+    for (const auto& sample : cases) {
+        // Conversion is independently covered by the ordinary drive fixtures. Here, verify
+        // its output is always a number, including absent/invalid inputs and float extremes.
+        for (bool present : {false, true}) {
+            reset_allocator(0);
+            {
+                tk::VehicleDriveData drive{};
+                drive.valid = true;
+                drive.has_odometer = present;
+                drive.odometer_km = sample.input;
+                tk::JsonBuilder json;
+                tk::StatusJsonEmitter emitter(json);
+                tk::emit_vehicle_drive_state(drive, emitter);
+                auto root = emitter.finish();
+                const double expected = present && std::isfinite(sample.input)
+                    ? static_cast<float>(tk::km_to_mi(sample.input)) : 0.0;
+                check_wire_number(std::move(root), "odometer", expected);
+            }
+            CHECK(live_allocations == 0);
+        }
+    }
+    // A missing usable SOC still falls back to battery SOC; invalid hidden data is unused.
+    for (const auto& sample : cases) {
+        reset_allocator(0);
+        {
+            ChargeStateResult charge{};
+            charge.battery_level = 42;
+            charge.usable_battery_level = sample.input;
+            tk::JsonBuilder json;
+            tk::StatusJsonEmitter emitter(json);
+            tk::emit_vehicle_charge_state(charge, emitter);
+            check_wire_number(emitter.finish(), "usable_battery_level", 42);
+        }
+        CHECK(live_allocations == 0);
+        reset_allocator(0);
+        {
+            ChargeStateResult charge{};
+            charge.battery_level = sample.input;
+            charge.usable_battery_level = 42;
+            tk::JsonBuilder json;
+            tk::StatusJsonEmitter emitter(json);
+            tk::emit_vehicle_charge_state(charge, emitter);
+            check_wire_number(emitter.finish(), "usable_battery_level", sample.expected);
+        }
+        CHECK(live_allocations == 0);
+    }
 }
 
 void test_evcc_vehicle_data_fields() {
@@ -862,8 +990,11 @@ void test_rpc_request_envelope() {
 
     for (double nonfinite : {std::nan(""), HUGE_VAL, -HUGE_VAL}) {
         {
-            tk::JsonOwner value(cJSON_CreateNumber(nonfinite));
+            // Construct the malformed node without cJSON_CreateNumber(NaN)'s own
+            // float-to-int UB. This tests capture_id's defensive input domain.
+            tk::JsonOwner value(cJSON_CreateNumber(0));
             CHECK(value != nullptr);
+            value->valuedouble = nonfinite;
             tk::mcp_json::RpcId id;
             const tk::JsonRawNumberId invalid_raw{0, tk::JsonRawNumberStatus::InvalidNumber};
             CHECK(tk::mcp_json::capture_id(value.get(), invalid_raw, id) == RpcIdStatus::Invalid);
@@ -1461,6 +1592,17 @@ int main() {
     static constexpr char mcp_oom[] =
         "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":"
         "{\"code\":-32603,\"message\":\"out of memory\"}}";
+    reset_allocator(0);
+    {
+        auto status = build_status_fixture();
+        CHECK(status != nullptr);
+        const auto* vehicle = cJSON_GetObjectItemCaseSensitive(status.get(), "vehicle");
+        CHECK(cJSON_IsObject(vehicle));
+        CHECK(cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(vehicle, "power")));
+        const auto* age = cJSON_GetObjectItemCaseSensitive(status.get(), "charge_age_s");
+        CHECK(cJSON_IsNumber(age) && age->valuedouble == 0);
+    }
+    CHECK(live_allocations == 0);
     exhaust_build_and_print("full /status production emitter", build_status_fixture, rest_oom);
     exhaust_build_and_print("evcc charge production reply", build_rest_fixture, rest_oom);
     exhaust_build_and_print("evcc climate production reply", build_climate_fixture, rest_oom);
@@ -1468,6 +1610,7 @@ int main() {
     exhaust_build_and_print("evcc combined production reply", build_combined_fixture, rest_oom);
     exhaust_build_and_print("evcc all-domains production reply", build_all_domains_fixture, rest_oom);
     test_evcc_vehicle_data_fields();
+    test_vehicle_data_numeric_domain();
     test_evcc_default_selection_excludes_drive();
     test_evcc_absent_preconditioning_is_false_success();
     test_evcc_stale_in_window_climate_fails();

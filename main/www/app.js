@@ -432,8 +432,10 @@ function lastChips(s){
   if(lsoc==null) lsoc=num(ls.soc);
   if(lsoc!=null) lsoc=Math.round(Math.max(0,Math.min(100,lsoc)));
   var ago=fmtAgo(num(s.last_seen_s));
-  if(lsoc!=null) chips.push(stat('Battery','<span style="color:'+socColor(lsoc)+'">'+lsoc+'</span>','%'));
-  if(ago)        chips.push(stat('Idle', ago, ''));
+  if(lsoc!=null) chips.push(stat('Last battery','<span style="color:'+socColor(lsoc)+'">'+lsoc+'</span>','%'));
+  var chargeAgo=fmtAgo(num(s.charge_age_s));
+  if(chargeAgo)  chips.push(stat('Updated',chargeAgo,''));
+  if(ago && s.link!=='awake') chips.push(stat('Idle', ago, ''));
   return {html:chips.join(''), soc:lsoc};
 }
 function render(s){
@@ -507,7 +509,11 @@ function render(s){
     else if(!complete){ act=toggleCharge; actLabel=charging?'Stop charging':'Start charging'; }
   } else if(paired){
     var lk=lastChips(s);
-    if(waking){
+    if(s.link==='awake'){
+      if(waking){ waking=false; clearTimeout(wakeTimeout); }
+      g={mode:'neutral', pct:lk.soc, glyph:'car'};
+      head='Charge reading unavailable'; sub='Waiting for a fresh charge reading.'; chips=lk.html;
+    } else if(waking){
       g={mode:'waking', pct:lk.soc, glyph:'alarm'};
       head='Waking up…'; sub='Reaching your Tesla over Bluetooth…'; busyText='Waking up…';
     } else if(s.link==='asleep'){

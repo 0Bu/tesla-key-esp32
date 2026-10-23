@@ -97,6 +97,8 @@ public:
     // Non-blocking accessors for cached state (refreshed by vehicle_loop; copied under
     // cache_mutex_ because HTTP/MQTT readers run concurrently — see cache_mutex_).
     ChargeStateResult   get_cached_charge()   { return copy_locked_(last_known_charge_); }
+    // Same cache plus its coherent, monotonic ChargeState age; never connects or polls.
+    ChargeStateResult get_cached_charge_with_age(bool& have_age, uint32_t& age_s);
     VehicleStatusResult get_cached_status()   { return copy_locked_(last_known_status_); }
     ClimateStateResult  get_cached_climate()  { return copy_locked_(last_known_climate_); }
     DriveStateResult    get_cached_drive()    { return copy_locked_(last_known_drive_); }
