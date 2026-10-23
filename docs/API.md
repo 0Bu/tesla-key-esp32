@@ -34,8 +34,12 @@ POST /api/1/vehicles/{VIN}/command/{command}   Content-Type: application/json
   fresh, serialized `ChargeState` request and the car reported *exactly* the requested current.
   Missing/malformed input is `400`; an unreachable car, rejected command or missing/mismatched
   readback is `502`, so controllers such as evcc retry instead of accepting a false success.
-- **Failures** keep the Tesla-compatible JSON (`result:false` plus the vehicle/proxy reason) but use
-  HTTP `502`, not a misleading `200`.
+- **Outcome status:** success and the nominal `already_set` are HTTP `200` with `result:true`. Every
+  failure after argument validation (car refusal, authentication or role fault, asleep or
+  unreachable car, timeout) keeps the Tesla-compatible JSON (`result:false` plus the reason) but
+  uses HTTP `502`, not a misleading `200`. vehicle-command's proxy maps these differently (200 for
+  car refusals, otherwise 408/412/500/503 with an error-only body); see
+  [ADR-0005](adr/0005-tesla-ble-seam.md#2-platform-forced-departures-and-reference-deviations).
 
 > A **Charging-Manager** key may only run charging actions + wake. The car therefore **rejects**
 > `door_lock`/`door_unlock`, `flash_lights`/`honk_horn`, `set_sentry_mode` and
