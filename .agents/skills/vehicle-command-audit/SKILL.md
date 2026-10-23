@@ -68,7 +68,7 @@ Verify these paths at the reviewed upstream revision:
 | Wake / sleep / body controller | `pkg/vehicle/vcsec.go`, `pkg/vehicle/state.go`, `pkg/vehicle/vehicle.go`, `pkg/protocol/protobuf/vcsec.proto` |
 | Commands + params/ranges | `pkg/vehicle/charge.go` (**note: `charge.go`, not `charging.go`**), `pkg/vehicle/climate.go`, `cmd/tesla-control/commands.go` |
 | Error / fault taxonomy | `pkg/protocol/protobuf/universal_message.proto` (`MessageFault_E`, `OperationStatus_E`), `pkg/protocol/protobuf/car_server.proto` |
-| Command outcome / HTTP status | `pkg/vehicle/infotainment.go` (`getCarServerResponse`), `pkg/vehicle/vcsec.go` (VCSEC nominal errors), `pkg/protocol/error.go` (`NominalError`, `IsNominalError`), `pkg/proxy/proxy.go` (`handleVehicleCommand`, `httpStatusCode`, `writeJSONError`) |
+| Command outcome / HTTP status | `pkg/vehicle/infotainment.go` (`getCarServerResponse`), `pkg/vehicle/vcsec.go` (VCSEC nominal errors), `pkg/protocol/error.go` (`NominalError`, `IsNominalError`, `GetError`), `pkg/proxy/proxy.go` (`handleVehicleCommand`, `httpStatusCode`, `writeJSONError`) |
 
 ### Feasibility — `yoziru/tesla-ble` at the pinned tag
 Fetch raw at the **pin** (base `https://raw.githubusercontent.com/yoziru/tesla-ble/<pin>`; confirm
@@ -162,8 +162,9 @@ Verify every dimension against the reviewed revisions; previous audit results ar
    outcome status too: REST status/`result` and MCP `isError` for success, `already_set`, car
    refusals and transport failures (`main/logic/command_result.hpp`,
    [API](../../../docs/API.md#commands)). vehicle-command's proxy answers CarServer refusals and
-   VCSEC nominal errors with HTTP 200 and `result:false`, and maps other execution errors through
-   `httpStatusCode` with an error-only body; every departure must be recorded in ADR-0005.
+   VCSEC nominal errors with HTTP 200 and `result:false`, maps other execution errors through
+   `httpStatusCode` with an error-only body, and passes a Fleet server error's own status through;
+   every departure must be recorded in ADR-0005.
 9a. **Response-counter anti-replay and patch series** — response-counter anti-replay and Request-UUID routing
     are enforced natively by `main/logic/ble_dispatcher.hpp` and `Peer::validate_response_counter()`, superseding
     patch 0001 and ADR-0003. Verify the current 4 repository patches under `patches/tesla-ble/` (0004 parental

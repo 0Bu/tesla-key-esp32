@@ -116,7 +116,7 @@ const usbNoApprovalNeeded = /(?:live verification|HTTP requests?|(?:GET|POST|HTT
 const usbOtaNotStateChanging = /(?:GET|POST) \/ota\/check[^.!?]*(?:is not|isn't|not) state-changing/i;
 const usbAbsentApprovalProceeds = /(?:(?:approval|authorization)[^.!?]*(?:absent|missing|not obtained)|without (?:separate )?(?:approval|authorization))[^.!?]*(?:continue|proceed|run|contact|send|request)/i;
 const reviewedSkillSha256 = new Map([
-  ["add-logic-test", "b7146bfa98cc70f300754ab07acf957bcb04f7a3efa91238162f07a088c6357a"],
+  ["add-logic-test", "564c0e171f99e6cb55117c55dcb272f9c07ac0342315b48199274c6c7f347b0a"],
   ["ci-heal", "e264e8379b61b5f78feb0b478914fa089fe6352ffc4d6984672940f8ac22b7ba"],
   ["deploy", "169d30f409d6a447752b5fc7f3b7579ee6e714df9ce33ecd51cb344dd0d877f0"],
   ["deploy-bench", "0471fee2f77a43b0e3e8292956bb74bc2d08020bd25fe29f416ea5ba609b7e02"],
@@ -131,7 +131,7 @@ const reviewedSkillSha256 = new Map([
   ["ship", "0fe5d2afd2d38c5e3b5080c275329095f38fa1d550a8458c5b1cb43a8f422ef8"],
   ["skill-audit", "79df156d7166d98e7507a612140b489312cd4456b08b8830a8a3665b323e2baf"],
   ["usb-recovery", "e6b38731c276e0ff03b8b8b61469bfa431095dda7431dec72b6c3ef0e29f0759"],
-  ["vehicle-command-audit", "b4eb4936a37e564f5676699345d053388ebd35d4b02e6d002a8ae9068facd365"],
+  ["vehicle-command-audit", "8056eb40f21994756e6aff08e65b34c32b3be94b44f26d114afc6043f4049272"],
 ]);
 const featureDocsScopeTokens = [
   "main/", "test/", "sdkconfig.defaults*", "partitions.csv", "AGENTS.md", ".agents/", ".codex/",
