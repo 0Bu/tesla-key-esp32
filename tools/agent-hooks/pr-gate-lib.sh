@@ -92,7 +92,7 @@ gate_is_renovate_maintenance() {
 #   Reads repo-relative changed paths on stdin and succeeds when vehicle command dispatch,
 #   BLE protocol client, command registry, or pinned tesla-ble dependencies can have moved.
 gate_vehicle_command_relevant() {
-  grep -Eq '^(main/(command_exec\.cpp|vehicle_commands\.cpp|vehicle_ctrl\.(cpp|hpp)|vehicle_ctrl_internal\.hpp|vehicle_telemetry\.cpp|vehicle_pairing\.cpp|ble_client\.(cpp|hpp)|logic/(command_registry|command_runner|ble_dispatcher|rx_framing|session_state|command_result|key_rotation|ble_chunk|ble_deferred_event|wake_poll|active_window|telemetry_poll)\.hpp|idf_component\.yml)|patches/tesla-ble/|\.agents/skills/vehicle-command-audit/|test/test_tesla_ble_harness\.cpp|scripts/test-tesla-ble-harness\.sh|docs/adr/0005-tesla-ble-seam\.md)'
+  grep -Eq '^(main/(command_exec\.cpp|vehicle_commands\.cpp|vehicle_ctrl\.(cpp|hpp)|vehicle_ctrl_internal\.hpp|vehicle_telemetry\.cpp|vehicle_pairing\.cpp|ble_client\.(cpp|hpp)|logic/(command_registry|command_runner|ble_dispatcher|rx_framing|session_state|command_result|key_rotation|ble_chunk|ble_deferred_event|wake_poll|active_window|telemetry_poll)\.hpp|idf_component\.yml)|patches/tesla-ble/|\.agents/skills/vehicle-command-audit/|test/test_tesla_ble_harness\.cpp|scripts/test-tesla-ble-harness\.sh|scripts/(apply-tesla-ble-patches\.(sh|py)|tesla-ble-patch-state\.json|check-dependency-contract\.py)$|docs/adr/0005-tesla-ble-seam\.md)'
 }
 
 # gate_firmware_size_relevant
@@ -105,7 +105,7 @@ gate_vehicle_command_relevant() {
 #   without changing their compiled inputs. Self-tests for the local wrapper and evaluators run in
 #   scripts/test-build-contracts.sh; sdkconfig validation is self-tested in the build workflow.
 gate_firmware_size_relevant() {
-  grep -Eq '^(main/|CMakeLists\.txt$|sdkconfig|partitions\.csv$|patches/tesla-ble/|dependencies\.lock\.|esp-idf-toolchain\.txt$|scripts/(apply-tesla-ble-patches\.sh|ci-build-all\.sh|idf-docker\.sh|idf-version\.sh|firmware-size-baseline\.json|firmware-stack-baseline\.json)$)'
+  grep -Eq '^(main/|CMakeLists\.txt$|sdkconfig|partitions\.csv$|patches/tesla-ble/|dependencies\.lock\.|esp-idf-toolchain\.txt$|scripts/(apply-tesla-ble-patches\.(sh|py)|tesla-ble-patch-state\.json|check-idf-container-mounts\.py|ci-build-all\.sh|idf-docker\.sh|idf-version\.sh|firmware-size-baseline\.json|firmware-stack-baseline\.json)$)'
 }
 
 

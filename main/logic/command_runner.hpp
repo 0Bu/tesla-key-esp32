@@ -1,5 +1,7 @@
 #pragma once
 
+#include "vcsec_response.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cstddef>
@@ -12,6 +14,7 @@
 
 #include "ble_dispatcher.hpp"
 #include "command_result.hpp"
+#include "command_fault.hpp"
 #include "rx_framing.hpp"
 #include "session_state.hpp"
 
@@ -23,7 +26,7 @@
 //
 // Key Characteristics:
 // - Integrates RxFramer, BleDispatcher, and SessionTracker into a deterministic command FIFO.
-// - Strict FreeRTOS/heap friendliness: bounded static queue capacity (kMaxQueueDepth = 8), zero unbounded allocations.
+// - Strict FreeRTOS/heap friendliness: bounded static queue capacity (kMaxQueueSize = 8), zero unbounded allocations.
 // - Multi-phase prerequisite coordination:
 //     VCSEC Auth -> Wake (if asleep and WakeIfNeeded) -> Infotainment Auth -> Command Transmission.
 // - Wake-up policy enforcement:
@@ -214,11 +217,13 @@ struct CommandRequest {
     std::string name{};
     BleDomain domain{BleDomain::VehicleSecurity};
     WakePolicy wake_policy{WakePolicy::WakeIfNeeded};
+    VcsecReplyKind vcsec_reply_kind{VcsecReplyKind::Action};
     BleUuid uuid{};
     uint32_t dispatcher_request_id{0};
 
     CommandState state{CommandState::Idle};
     CommandPhase phase{CommandPhase::Queued};
+    CommandFailureInfo failure{};
 
     uint32_t enqueued_at_ms{0};
     uint32_t phase_started_at_ms{0};
@@ -241,9 +246,11 @@ struct CommandRequest {
     // True for commands whose transmission over BLE constitutes completion (e.g. Wake).
     // Prerequisite transmissions (like SessionInfoRequest) do NOT complete the command.
     bool completes_on_transmit{false};
+    CommandEffect effect{CommandEffect::Mutating};
+    bool payload_maybe_sent{false};
 
     // User completion callback
-    std::function<void(bool success, const std::string& err)> on_complete{nullptr};
+    std::function<void(bool success, const std::string& err, CommandFailureInfo)> on_complete{nullptr};
 };
 
 class CommandRunner {
@@ -252,7 +259,7 @@ public:
     static constexpr uint32_t kDefaultStepTimeoutMs = 5000;
     static constexpr uint32_t kDefaultResponseTimeoutMs = 7000;
     static constexpr uint32_t kDefaultCommandTimeoutMs = 20000;
-    static constexpr uint32_t kInitialRetryDelayMs = 500;
+    static constexpr uint32_t kInitialRetryDelayMs = 1000;
     static constexpr uint32_t kMaxRetryDelayMs = 5000;
     static constexpr uint32_t kDefaultRxInterChunkTimeoutMs = 3000;
 
@@ -290,8 +297,9 @@ public:
     uint32_t enqueue(std::string_view name, BleDomain domain, WakePolicy wake_policy,
                      uint32_t timeout_ms = kDefaultCommandTimeoutMs, uint32_t now_ms = 0,
                      const BleUuid& uuid = {},
-                     std::function<void(bool, const std::string&)> on_complete = nullptr,
-                     bool completes_on_transmit = false, uint32_t max_retries = 3) {
+                     std::function<void(bool, const std::string&, CommandFailureInfo)> on_complete = nullptr,
+                     bool completes_on_transmit = false, uint32_t max_retries = 3,
+                     VcsecReplyKind vcsec_reply_kind = VcsecReplyKind::Action) {
         if (queue_count_ >= kMaxQueueSize) {
             return 0; // Queue full
         }
@@ -313,9 +321,37 @@ public:
         cmd.phase = CommandPhase::Queued;
         cmd.completes_on_transmit = completes_on_transmit;
         cmd.max_retries = max_retries;
+        cmd.vcsec_reply_kind = vcsec_reply_kind;
 
         queue_count_++;
         return cmd.id;
+    }
+
+    bool set_command_effect(uint32_t id, CommandEffect effect) noexcept {
+        for (size_t i = 0; i < queue_count_; ++i) {
+            auto& cmd = queue_[(queue_head_ + i) % kMaxQueueSize];
+            if (cmd.id == id && cmd.state == CommandState::Idle && !cmd.payload_maybe_sent) {
+                cmd.effect = effect;
+                return true;
+            }
+        }
+        return false;
+    }
+    CommandFailureInfo failure_info(uint32_t id) const noexcept {
+        for (size_t i = 0; i < queue_count_; ++i) {
+            const auto& cmd = queue_[(queue_head_ + i) % kMaxQueueSize];
+            if (cmd.id == id) return cmd.failure;
+        }
+        return uncertain_command_failure();
+    }
+    CommandFailureInfo pending_failure_info(uint32_t id) const noexcept {
+        for (size_t i = 0; i < queue_count_; ++i) {
+            const auto& cmd = queue_[(queue_head_ + i) % kMaxQueueSize];
+            if (cmd.id == id) return cmd.is_completed ? (cmd.is_success ? uncertain_command_failure() : cmd.failure)
+                : cmd.payload_maybe_sent ? uncertain_command_failure()
+                : CommandFailureInfo{CommandError::Severity::Temporary, CommandError::Outcome::DefinitelyFailed};
+        }
+        return uncertain_command_failure();
     }
 
     // Pop the front command from the FIFO
@@ -345,21 +381,7 @@ public:
     void cancel_current(TerminalReason reason = TerminalReason::Cancelled) {
         CommandRequest* cmd = current_command();
         if (!cmd) return;
-        if (!cmd->is_completed) {
-            cmd->is_completed = true;
-            cmd->is_success = false;
-            cmd->terminal_reason = reason;
-            if (cmd->error_message.empty()) {
-                cmd->error_message = "command cancelled";
-            }
-            if (cmd->dispatcher_request_id != 0) {
-                dispatcher_.unregister_request(cmd->dispatcher_request_id);
-                cmd->dispatcher_request_id = 0;
-            }
-            if (cmd->on_complete) {
-                cmd->on_complete(false, cmd->error_message);
-            }
-        }
+        finish_command_(cmd, false, "command cancelled", reason);
     }
 
     // Complete currently active command with outcome
@@ -427,10 +449,20 @@ public:
             return TxAction::None;
         }
 
+        // All retry paths share a real, wrap-safe delay before prerequisites or a new build.
+        if (cmd->next_retry_delay_ms && cmd->state != CommandState::AwaitingResponse) {
+            if (now_ms - cmd->phase_started_at_ms < cmd->next_retry_delay_ms) return TxAction::None;
+            cmd->next_retry_delay_ms = 0;
+        }
+
         // 3. Response timeout and retry handling for AwaitingResponse
         if (cmd->state == CommandState::AwaitingResponse) {
             const uint32_t elapsed = now_ms - cmd->last_tx_ms;
             if (elapsed >= kDefaultResponseTimeoutMs) {
+                if (cmd->effect == CommandEffect::Mutating && cmd->payload_maybe_sent) {
+                    finish_command_(cmd, false, uncertain_command_reason(), TerminalReason::ResponseTimeout);
+                    return TxAction::None;
+                }
                 if (cmd->retry_count < cmd->max_retries) {
                     cmd->retry_count++;
                     const uint32_t shift = std::min<uint32_t>(cmd->retry_count - 1, 10);
@@ -468,9 +500,13 @@ public:
             cmd->state == CommandState::WaitingInfoAuth) {
             const uint32_t elapsed = now_ms - cmd->phase_started_at_ms;
             if (elapsed >= kDefaultStepTimeoutMs) {
+                if (cmd->effect == CommandEffect::Mutating && cmd->payload_maybe_sent) {
+                    finish_command_(cmd, false, uncertain_command_reason(), TerminalReason::StepTimeout);
+                    return TxAction::None;
+                }
                 if (cmd->retry_count < cmd->max_retries) {
                     cmd->retry_count++;
-                    cmd->next_retry_delay_ms = 0;
+                    cmd->next_retry_delay_ms = kInitialRetryDelayMs;
                     cmd->wake_confirmed = false;
                     cmd->state = CommandState::Idle; // Reset to idle to retry prerequisites
                     cmd->phase = CommandPhase::Queued;
@@ -515,8 +551,8 @@ public:
                 return TxAction::SendVcsecSessionInfoRequest;
             }
 
-            // VCSEC body controller is always reachable while connected; commands do not
-            // require vehicle infotainment to be awake, and health poll runs while vehicle sleeps.
+            // VCSEC commands do not require Infotainment to be awake; a BLE connection
+            // alone does not guarantee a response. Health polls can run while the vehicle sleeps.
             return emit_payload(cmd);
         }
 
@@ -529,7 +565,7 @@ public:
                 return TxAction::SendVcsecSessionInfoRequest;
             }
 
-            // Prerequisite 2: Wake policy evaluation (aligned with vehicle-command & upstream)
+            // Prerequisite 2: local wake policy (an explicit adaptation recorded in ADR-0005).
             // Once VCSEC session is established, send SendWake if vehicle is asleep / unknown.
             // A confirmed wake is remembered for this attempt, but re-evaluated if vehicle is asleep on retry.
             if (!cmd->wake_confirmed && is_asleep) {
@@ -571,11 +607,18 @@ public:
         return TxAction::None;
     }
 
+    // Called before crossing the BLE transport boundary, not only after its bool result.
+    void notify_tx_started(TxAction action) noexcept {
+        auto* cmd = current_command();
+        if (cmd && !cmd->is_completed && action == TxAction::SendCommandPayload) cmd->payload_maybe_sent = true;
+    }
+
     // Call after TX action was successfully transmitted over BLE
     void notify_tx_complete(TxAction action, uint32_t now_ms) {
         CommandRequest* cmd = current_command();
         if (!cmd) return;
 
+        notify_tx_started(action);
         cmd->last_tx_ms = now_ms;
         if (cmd->completes_on_transmit) {
             // Wake action has no commandStatus acknowledgement from Tesla; its payload transmission completes it.
@@ -606,18 +649,20 @@ public:
         notify_tx_complete(action, now_ms);
     }
 
-    // Call if TX action transmission failed
-    void notify_tx_failed(const char* reason = "BLE write failed") {
-        CommandRequest* cmd = current_command();
-        if (!cmd) return;
-        if (cmd->retry_count < cmd->max_retries) {
-            cmd->retry_count++;
-            cmd->next_retry_delay_ms = 0;
-            cmd->wake_confirmed = false;
-            cmd->state = CommandState::Idle;
-        } else {
-            finish_command_(cmd, false, reason, TerminalReason::BleDisconnected);
+    // A false BLE result can follow final-chunk submission. A build failure occurs before
+    // notify_tx_started and is definitely unexecuted; it is not a transient transport retry.
+    void notify_tx_failed(const char* reason = "BLE write failed", uint32_t now_ms = 0,
+                          bool build_failure = false) {
+        auto* cmd = current_command();
+        if (!cmd || cmd->is_completed) return;
+        if (build_failure || (cmd->payload_maybe_sent && cmd->effect == CommandEffect::Mutating) ||
+            cmd->retry_count >= cmd->max_retries) {
+            finish_command_(cmd, false, reason, TerminalReason::BleDisconnected,
+                {build_failure ? CommandError::Severity::Permanent : CommandError::Severity::Temporary,
+                 CommandError::Outcome::DefinitelyFailed});
+            return;
         }
+        schedule_retry_(cmd, now_ms);
     }
 
     // Notify that vehicle wake status was confirmed
@@ -640,35 +685,36 @@ public:
         finish_command_(cmd, false, reason, TerminalReason::BleDisconnected);
     }
 
-    // Notify signed message fault: retry if session error, otherwise fail immediately
+    // Numeric fault classification alone cannot erase post-submission uncertainty. Only
+    // the fault-bound GCM tag can prove a current temporary rejection safe to retry.
+    void notify_message_fault(MessageFaultDecision decision, bool authenticated, uint32_t now_ms) {
+        auto* cmd = current_command();
+        if (!cmd || cmd->is_completed) return;
+        const auto info = fault_failure_info(decision, authenticated, cmd->payload_maybe_sent);
+        const bool retry_allowed = fault_allows_retry(decision, authenticated, cmd->payload_maybe_sent, cmd->effect);
+        if (authenticated && decision.known && !decision.possible_success) cmd->payload_maybe_sent = false;
+        if (retry_allowed &&
+            cmd->retry_count < cmd->max_retries) {
+            if (authenticated && !decision.possible_success) cmd->payload_maybe_sent = false;
+            schedule_retry_(cmd, now_ms);
+            return;
+        }
+        finish_command_(cmd, false, decision.reason, TerminalReason::AuthenticationFailed, info);
+    }
+    // Legacy callers cannot assert cryptographic authentication through a bool.
     void notify_signed_message_fault(bool is_session_error,
                                      const char* reason = "signed message authentication failed") {
-        CommandRequest* cmd = current_command();
-        if (!cmd) return;
-        if (is_session_error) {
-            if (cmd->retry_count < cmd->max_retries) {
-                cmd->retry_count++;
-                cmd->next_retry_delay_ms = 0;
-                cmd->wake_confirmed = false;
-                cmd->state = CommandState::Idle;
-                if (cmd->dispatcher_request_id != 0) {
-                    dispatcher_.unregister_request(cmd->dispatcher_request_id);
-                    cmd->dispatcher_request_id = 0;
-                }
-            } else {
-                finish_command_(cmd, false, "session error; max retries exceeded",
-                                TerminalReason::AuthenticationFailed);
-            }
-        } else {
-            finish_command_(cmd, false, reason, TerminalReason::AuthenticationFailed);
-        }
+        auto decision = classify_message_fault(is_session_error ? 15 : 0);
+        decision.reason = reason;
+        notify_message_fault(decision, false, current_command() ? current_command()->phase_started_at_ms : 0);
     }
 
     // Handle generic incoming command response
     DispatchOutcome handle_response(BleDomain from_domain,
                                     const uint8_t* uuid_bytes, size_t uuid_len,
                                     bool has_counter, uint32_t counter,
-                                    bool is_success, const std::string& error_string = "") {
+                                    bool is_success, const std::string& error_string = "",
+                                    bool authenticated_rejection = false) {
         DispatchOutcome outcome = dispatcher_.dispatch(from_domain, uuid_bytes, uuid_len, has_counter, counter);
         if (!outcome.routed) {
             return outcome;
@@ -680,6 +726,7 @@ public:
             return outcome;
         }
 
+        if (!is_success && authenticated_rejection) cmd->payload_maybe_sent = false;
         // Evaluate outcome with normative already_set mapping
         if (is_nominal_already_set(error_string)) {
             cmd->is_already_set = true;
@@ -688,7 +735,9 @@ public:
             finish_command_(cmd, true, "", TerminalReason::Success);
         } else {
             finish_command_(cmd, false, error_string.empty() ? "command rejected by vehicle" : error_string.c_str(),
-                            TerminalReason::AuthenticationFailed);
+                            TerminalReason::AuthenticationFailed,
+                            {authenticated_rejection ? CommandError::Severity::Permanent : CommandError::Severity::Temporary,
+                             CommandError::Outcome::DefinitelyFailed});
         }
 
         return outcome;
@@ -704,12 +753,25 @@ public:
     }
 
 private:
+    void schedule_retry_(CommandRequest* cmd, uint32_t now_ms) noexcept {
+        ++cmd->retry_count;
+        const auto shift = std::min<uint32_t>(cmd->retry_count - 1, 10);
+        cmd->next_retry_delay_ms = std::min(kMaxRetryDelayMs, kInitialRetryDelayMs * (1U << shift));
+        cmd->wake_confirmed = false;
+        cmd->phase_started_at_ms = now_ms;
+        cmd->state = CommandState::Idle;
+        cmd->phase = CommandPhase::Queued;
+        if (cmd->dispatcher_request_id) dispatcher_.unregister_request(cmd->dispatcher_request_id);
+        cmd->dispatcher_request_id = 0;
+    }
     [[gnu::noinline]] void finish_command_(CommandRequest* cmd, bool success, const char* err,
-                                          TerminalReason reason) {
+                                          TerminalReason reason,
+            CommandFailureInfo info = {CommandError::Severity::Temporary, CommandError::Outcome::DefinitelyFailed}) {
         if (!cmd || cmd->is_completed) return;
         cmd->is_completed = true;
         cmd->is_success = success;
-        cmd->error_message = (err != nullptr) ? err : "";
+        if (!success && cmd->payload_maybe_sent) info.outcome = CommandError::Outcome::MayHaveSucceeded;
+        cmd->failure = info;
         cmd->terminal_reason = reason;
         cmd->state = success ? CommandState::Completed : CommandState::Failed;
         cmd->phase = CommandPhase::Terminal;
@@ -719,8 +781,16 @@ private:
             cmd->dispatcher_request_id = 0;
         }
 
+        cmd->error_message = !success && execution_uncertain(info) ? uncertain_command_reason()
+                                                                : (err != nullptr ? err : "");
+        if (!success && execution_uncertain(info) && err && *err &&
+            std::strcmp(err, uncertain_command_reason()) != 0) {
+            cmd->error_message += "; ";
+            cmd->error_message += err;
+        }
+
         if (cmd->on_complete) {
-            cmd->on_complete(success, cmd->error_message);
+            cmd->on_complete(success, cmd->error_message, cmd->failure);
         }
     }
 

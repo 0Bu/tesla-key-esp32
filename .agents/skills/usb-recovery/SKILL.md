@@ -366,13 +366,25 @@ fi
 This explicit-port cross-check is not optional. With two boards on USB, a naive first-responder
 pick can select the wrong device even when both share the same chip family.
 
+### Retained-bootloader compatibility
+
+The shared checker accepts stable `vMAJOR.MINOR[.PATCH]` descriptors only. Prerelease, development,
+dirty or unknown suffixes stop instead of being treated as equal to a stable release. This
+metadata comparison does not replace signed-artifact validation or prove runtime compatibility.
+Descriptorless bootloaders require an exact match to the independently checked
+[reference catalog](../../../scripts/bootloader-references.json), including its bound toolchain
+and source/run/artifact provenance. Only the exact image or a complete project bootloader region
+with an all-`0xff` suffix is accepted. Partial padding, altered bytes and unknown references stop;
+there is no caller-supplied version override. The [reference contract](../../../docs/DEVELOPMENT.md#retained-bootloader-references)
+owns catalog updates. This adds no physical read or write scope.
+
 **ESP-IDF compatibility with the bootloader that stays.** ESP-IDF's bootloader boots apps built by
 the same or a newer ESP-IDF, never by an older one (ESP-IDF v6.1 `api-guides/bootloader.rst`,
 "Bootloader Compatibility"). The minimal flow keeps the installed bootloader, so a board installed
 from a v6.1-built release (web installer or merged image) must not receive a 5.x-built app, however
 valid its provenance; a board that was only ever OTA-updated keeps its older bootloader. Read the
 bootloader region — read-only, and it ends below the partition table, far from `nvs@0x9000` — and
-compare both ESP-IDF versions; with the step-2 support bootloader in the write set, compare against
+compare both ESP-IDF versions through `scripts/check-bootloader-compat.py`; with the step-2 support bootloader in the write set, compare against
 that one instead. A board with no auto-reset needs BOOT held and
 `RESET_ARGS=(--before no-reset --after no-reset)`:
 
@@ -383,33 +395,6 @@ set -euo pipefail
 [ -n "${RESET_ARGS+x}" ] || RESET_ARGS=()
 # Capture image-info whole: `esptool … | grep -q` lets grep close the pipe early, and under
 # pipefail esptool's broken pipe would turn a match into a refusal.
-idf_version_of() {  # "major minor patch" from esptool image-info's "ESP-IDF: vX.Y[.Z]" line
-  local info re=$'(^|\n)ESP-IDF: v([0-9]+)\\.([0-9]+)(\\.([0-9]+))?'
-  info=$(esptool image-info "$1" 2>/dev/null) || return 1
-  [[ "$info" =~ $re ]] || return 1
-  # 10#: a leading zero ("v6.08") would otherwise be octal and break the comparison below.
-  printf '%s %s %s\n' "$((10#${BASH_REMATCH[2]}))" "$((10#${BASH_REMATCH[3]}))" \
-    "$((10#${BASH_REMATCH[5]:-0}))"
-}
-# esptool (observed: 5.6.0) prints no "ESP-IDF:" line for esp32c6 bootloaders, although the image
-# carries it: fall back to the image's own esp_bootloader_desc_t at the start of its first segment.
-bootloader_idf_version_of() {
-  idf_version_of "$1" && return 0
-  local -a b
-  local ver re=$'^v([0-9]+)\\.([0-9]+)(\\.([0-9]+))?'
-  # od -v: never collapse repeated lines into "*"; read -a: no word globbing of the bytes.
-  read -r -a b <<< "$(od -An -v -tu1 -j 0 -N 36 "$1" 2>/dev/null | tr '\n' ' ')" || return 1
-  (( ${#b[@]} == 36 )) || return 1
-  # Image magic 0xE9, a first segment of at least sizeof(esp_bootloader_desc_t) = 80 bytes and
-  # the descriptor magic 0x50 at file offset 0x20; anything else stays a refusal.
-  (( b[0] == 0xE9 && b[32] == 0x50 )) || return 1
-  (( b[28] + (b[29] << 8) + (b[30] << 16) + (b[31] << 24) >= 80 )) || return 1
-  ver=$(dd if="$1" bs=1 skip=40 count=32 2>/dev/null | LC_ALL=C tr '\000' '\n') || return 1
-  ver=${ver%%$'\n'*}  # idf_ver[32] is NUL-terminated
-  [[ "$ver" =~ $re ]] || return 1
-  printf '%s %s %s\n' "$((10#${BASH_REMATCH[1]}))" "$((10#${BASH_REMATCH[2]}))" \
-    "$((10#${BASH_REMATCH[4]:-0}))"
-}
 if [ -n "${BOOTLOADER:-}" ]; then
   BOOT_IMAGE="$BOOTLOADER"  # step 2 writes the same run's bootloader
 else
@@ -424,18 +409,8 @@ else
       "present that evidence and seek the separate step-2 approval" >&2; exit 1;
   }
 fi
-BOOT_IDF=$(bootloader_idf_version_of "$BOOT_IMAGE") || {
-  echo "REFUSING: the bootloader carries no ESP-IDF version; stop and ask the user" >&2; exit 1;
-}
-APP_IDF=$(idf_version_of "$APP") || { echo "REFUSING: the app carries no ESP-IDF version" >&2; exit 1; }
-read -r BOOT_MAJ BOOT_MIN BOOT_PAT <<< "$BOOT_IDF"
-read -r APP_MAJ APP_MIN APP_PAT <<< "$APP_IDF"
-echo "bootloader ESP-IDF $BOOT_MAJ.$BOOT_MIN.$BOOT_PAT, app ESP-IDF $APP_MAJ.$APP_MIN.$APP_PAT"
-if (( APP_MAJ < BOOT_MAJ || (APP_MAJ == BOOT_MAJ && (APP_MIN < BOOT_MIN ||
-      (APP_MIN == BOOT_MIN && APP_PAT < BOOT_PAT))) )); then
-  echo "REFUSING: the app was built by an older ESP-IDF than the bootloader that would boot it;" \
-    "choose a release built by ESP-IDF $BOOT_MAJ.$BOOT_MIN.$BOOT_PAT or newer" >&2; exit 1
-fi
+python3 scripts/check-bootloader-compat.py --target "$TARGET" --bootloader "$BOOT_IMAGE" --app "$APP"
+
 ```
 
 **s3 / c3 / c6 / classic esp32** (auto-reset works):

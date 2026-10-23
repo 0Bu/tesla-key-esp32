@@ -142,7 +142,7 @@ def parse_dev_manifest_parts(raw: bytes, version: str, source_sha: str) -> list[
                 raise AcceptanceError(f"unexpected offset for {chip}/{path}: expected {expected_offset}, got {offset}")
             if isinstance(size, bool) or not isinstance(size, int) or size < min_size or size > max_size:
                 raise AcceptanceError(f"invalid part size in dev manifest for {chip}/{path}: {size!r}")
-            if not isinstance(digest, str) or not SHA256_RE.match(digest):
+            if not isinstance(digest, str) or not SHA256_RE.fullmatch(digest):
                 raise AcceptanceError(f"invalid part sha256 in dev manifest for {chip}/{path}")
             parts.append((path, size, digest))
     return parts
@@ -151,6 +151,25 @@ def parse_dev_manifest_parts(raw: bytes, version: str, source_sha: str) -> list[
 def parse_dev_manifest(raw: bytes, version: str, source_sha: str) -> list[str]:
     parts = parse_dev_manifest_parts(raw, version, source_sha)
     return [p[0] for p in parts]
+
+
+def require_polling_bounds(attempts: int, interval: float) -> None:
+    if not 1 <= attempts <= 20 or not 0 <= interval <= 60:
+        raise AcceptanceError("acceptance polling bounds are invalid")
+
+
+def verify_remote_parts(
+    base: str, parts: list[tuple[str, int, str]], cache_key: str, fetcher: Fetcher,
+) -> int:
+    if len(parts) != 16:
+        raise AcceptanceError(f"dev manifest must contain exactly 16 parts, got {len(parts)}")
+    for path, size, digest in parts:
+        data = fetcher(exact_url(base, path, cache_key), PART_MAX)
+        if len(data) != size:
+            raise AcceptanceError(f"dev Pages part {path} is {len(data)} bytes, manifest declares {size}")
+        if hashlib.sha256(data).hexdigest() != digest:
+            raise AcceptanceError(f"dev Pages part {path} does not match its manifest SHA-256")
+    return len(parts)
 
 
 def verify_dev_channel_live(
@@ -175,14 +194,13 @@ def verify_dev_channel_live(
         raise AcceptanceError(f"invalid source SHA format: {source_sha!r}")
     if expected_manifest_sha is not None and not SHA256_RE.match(expected_manifest_sha):
         raise AcceptanceError(f"invalid expected manifest SHA format: {expected_manifest_sha!r}")
+    require_polling_bounds(attempts, interval)
     dev_base = pages_base_url.rstrip("/") + "/dev"
-    manifest_url = exact_url(dev_base, "manifest.json", source_sha)
-
-    parts: list[tuple[str, int, str]] | None = None
     last_error: AcceptanceError | None = None
     for attempt in range(1, attempts + 1):
         try:
-            raw_manifest = fetcher(manifest_url, MANIFEST_MAX)
+            cache_key = f"{source_sha}-{attempt}"
+            raw_manifest = fetcher(exact_url(dev_base, "manifest.json", cache_key), MANIFEST_MAX)
             if expected_manifest_sha is not None:
                 actual_manifest_sha = hashlib.sha256(raw_manifest).hexdigest()
                 if actual_manifest_sha != expected_manifest_sha.lower():
@@ -190,25 +208,12 @@ def verify_dev_channel_live(
                         f"dev manifest SHA-256 mismatch: expected {expected_manifest_sha}, got {actual_manifest_sha}"
                     )
             parts = parse_dev_manifest_parts(raw_manifest, version, source_sha)
-            break
+            return verify_remote_parts(dev_base, parts, cache_key, fetcher)
         except AcceptanceError as exc:
             last_error = exc
             if attempt < attempts:
-                sleeper(interval)
-    if parts is None:
-        raise AcceptanceError(f"dev manifest failed to settle after {attempts} attempts: {last_error}")
-    if len(parts) != 16:
-        raise AcceptanceError(f"dev manifest must contain exactly 16 parts, got {len(parts)}")
-
-    verified_count = 0
-    for path, size, digest in parts:
-        data = fetcher(exact_url(dev_base, path, source_sha), PART_MAX)
-        if len(data) != size:
-            raise AcceptanceError(f"dev Pages part {path} is {len(data)} bytes, manifest declares {size}")
-        if hashlib.sha256(data).hexdigest() != digest:
-            raise AcceptanceError(f"dev Pages part {path} does not match its manifest SHA-256")
-        verified_count += 1
-    return verified_count
+                sleeper(min(interval * (2 ** (attempt - 1)), 60))
+    raise AcceptanceError(f"dev served-byte snapshot failed to settle after {attempts} attempts: {last_error}")
 
 
 def verify_dev_pages(
@@ -225,6 +230,7 @@ def verify_dev_pages(
         raise AcceptanceError(f"invalid version format: {version!r}")
     if not SOURCE_RE.match(source_sha):
         raise AcceptanceError(f"invalid source SHA format: {source_sha!r}")
+    require_polling_bounds(attempts, interval)
     if staged_site.is_symlink() or not staged_site.is_dir():
         raise AcceptanceError(f"staged site must be a valid directory: {staged_site}")
 
@@ -232,51 +238,31 @@ def verify_dev_pages(
     if staged_manifest_path.is_symlink() or not staged_manifest_path.is_file():
         raise AcceptanceError(f"missing or invalid staged manifest: {staged_manifest_path}")
     staged_manifest_bytes = staged_manifest_path.read_bytes()
-
-    dev_base = pages_base_url.rstrip("/") + "/dev"
-    manifest_url = exact_url(dev_base, "manifest.json", source_sha)
-
-    parts: list[tuple[str, int, str]] | None = None
-    last_error: AcceptanceError | None = None
-
-    for attempt in range(1, attempts + 1):
-        try:
-            raw_manifest = fetcher(manifest_url, MANIFEST_MAX)
-            if hashlib.sha256(raw_manifest).digest() != hashlib.sha256(staged_manifest_bytes).digest():
-                raise AcceptanceError("deployed dev manifest bytes do not match staged manifest.json")
-            parts = parse_dev_manifest_parts(raw_manifest, version, source_sha)
-            break
-        except AcceptanceError as exc:
-            last_error = exc
-            if attempt < attempts:
-                sleeper(interval)
-
-    if parts is None:
-        raise AcceptanceError(f"dev manifest failed to settle after {attempts} attempts: {last_error}")
-    if len(parts) != 16:
-        raise AcceptanceError(f"dev manifest must contain exactly 16 parts, got {len(parts)}")
-
-    verified_count = 0
+    # Immutable local inputs must fail before any remote polling, rather than consuming retries.
+    parts = parse_dev_manifest_parts(staged_manifest_bytes, version, source_sha)
     for part_name, size, digest in parts:
         local_path = staged_site / part_name
         if local_path.is_symlink() or not local_path.is_file():
             raise AcceptanceError(f"missing local staged part: {local_path}")
         local_bytes = local_path.read_bytes()
-        if len(local_bytes) != size:
-            raise AcceptanceError(f"staged part {part_name} size {len(local_bytes)} does not match manifest {size}")
-        if hashlib.sha256(local_bytes).hexdigest() != digest:
-            raise AcceptanceError(f"staged part {part_name} does not match manifest SHA-256")
-        part_url = exact_url(dev_base, part_name, source_sha)
-        remote_bytes = fetcher(part_url, PART_MAX)
-        if len(remote_bytes) != size:
-            raise AcceptanceError(f"remote part {part_name} size {len(remote_bytes)} does not match manifest {size}")
-        if hashlib.sha256(remote_bytes).hexdigest() != digest:
-            raise AcceptanceError(f"remote part {part_name} does not match manifest SHA-256")
-        if hashlib.sha256(remote_bytes).digest() != hashlib.sha256(local_bytes).digest():
-            raise AcceptanceError(f"byte mismatch for dev Pages part {part_name}")
-        verified_count += 1
+        if len(local_bytes) != size or hashlib.sha256(local_bytes).hexdigest() != digest:
+            raise AcceptanceError(f"staged part {part_name} does not match manifest size/SHA-256")
+    dev_base = pages_base_url.rstrip("/") + "/dev"
+    last_error: AcceptanceError | None = None
 
-    return verified_count
+    for attempt in range(1, attempts + 1):
+        try:
+            cache_key = f"{source_sha}-{attempt}"
+            raw_manifest = fetcher(exact_url(dev_base, "manifest.json", cache_key), MANIFEST_MAX)
+            if hashlib.sha256(raw_manifest).digest() != hashlib.sha256(staged_manifest_bytes).digest():
+                raise AcceptanceError("deployed dev manifest bytes do not match staged manifest.json")
+            return verify_remote_parts(dev_base, parts, cache_key, fetcher)
+        except AcceptanceError as exc:
+            last_error = exc
+            if attempt < attempts:
+                sleeper(min(interval * (2 ** (attempt - 1)), 60))
+
+    raise AcceptanceError(f"dev served-byte snapshot failed to settle after {attempts} attempts: {last_error}")
 
 
 def self_test() -> None:
@@ -453,6 +439,24 @@ def self_test() -> None:
             return
         raise AssertionError(f"--verify-live accepted: {label}")
 
+    # Exercise the parser directly so later byte/hash checks cannot hide a missing guard.
+    def reject_parse(manifest: dict[str, Any], label: str) -> None:
+        try:
+            parse_dev_manifest_parts(json.dumps(manifest).encode(), version, source_sha)
+        except AcceptanceError:
+            return
+        raise AssertionError(f"dev manifest parser accepted: {label}")
+
+    for build_index in range(4):
+        for part_index in range(4):
+            bad = live_manifest()
+            bad["builds"][build_index]["parts"][part_index]["offset"] += 1
+            reject_parse(bad, f"wrong offset {build_index}/{part_index}")
+    for digest in ("g" * 64, "a" * 63, "A" * 64, "a" * 64 + "\n"):
+        bad = live_manifest()
+        bad["builds"][0]["parts"][0]["sha256"] = digest
+        reject_parse(bad, f"invalid digest {digest!r}")
+
     part_names = list(files.keys())
     stale = dict(live_files)
     stale[part_names[7]] = b"old-binary-still-served" * 10
@@ -502,6 +506,110 @@ def self_test() -> None:
     extra_field = live_manifest()
     extra_field["unexpected_key"] = "bad"
     must_fail(extra_field, live_files, "a manifest with extra top-level field")
+
+    # A current manifest can reach a CDN node before any one of its sixteen parts.
+    # Exercise real acceptance functions, including a same-size stale object and a transient 404.
+    with tempfile.TemporaryDirectory(prefix="dev-pages-propagation-") as directory:
+        staged = Path(directory)
+        raw_manifest = json.dumps(live_manifest()).encode()
+        (staged / "manifest.json").write_bytes(raw_manifest)
+        for name, data in files.items():
+            (staged / name).write_bytes(data)
+        for mode in ("live", "staged"):
+            def accept(fetch: Fetcher, sleeps: list[float], attempts: int = 2) -> int:
+                if mode == "live":
+                    return verify_dev_channel_live(
+                        pages_base, version, source_sha, attempts, 0.25, fetch,
+                        expected_manifest_sha=hashlib.sha256(raw_manifest).hexdigest(), sleeper=sleeps.append,
+                    )
+                return verify_dev_pages(
+                    pages_base, staged, version, source_sha, attempts, 0.25, fetch, sleeper=sleeps.append,
+                )
+
+            for lagging in part_names:
+                for failure in ("length", "hash", "404"):
+                    calls: list[tuple[int, str]] = []
+                    sleeps: list[float] = []
+
+                    def propagating(url: str, _maximum: int) -> bytes:
+                        parsed = urllib.parse.urlsplit(url)
+                        key = urllib.parse.parse_qs(parsed.query)["accept"][0]
+                        attempt = int(key.removeprefix(source_sha + "-"))
+                        name = parsed.path.rsplit("/", 1)[-1]
+                        calls.append((attempt, name))
+                        if name == "manifest.json":
+                            return raw_manifest
+                        data = files[name]
+                        if attempt == 1 and name == lagging:
+                            if failure == "404":
+                                raise AcceptanceError("not propagated")
+                            return data[:-1] if failure == "length" else bytes([data[0] ^ 1]) + data[1:]
+                        return data
+
+                    assert accept(propagating, sleeps) == 16
+                    assert sleeps == [0.25]
+                    assert [name for attempt, name in calls if attempt == 2] == ["manifest.json", *part_names]
+
+            # No attempt is complete: successes from different attempts must never be accumulated.
+            calls = []
+            sleeps = []
+
+            def alternating(url: str, maximum: int) -> bytes:
+                parsed = urllib.parse.urlsplit(url)
+                attempt = int(urllib.parse.parse_qs(parsed.query)["accept"][0].removeprefix(source_sha + "-"))
+                name = parsed.path.rsplit("/", 1)[-1]
+                calls.append((attempt, name))
+                if name == "manifest.json":
+                    return raw_manifest
+                if name == part_names[attempt % 2]:
+                    raise AcceptanceError("each attempt has a missing part")
+                return files[name]
+
+            try:
+                accept(alternating, sleeps, 3)
+            except AcceptanceError:
+                pass
+            else:
+                raise AssertionError(f"{mode} accumulated incomplete propagation attempts")
+            assert sleeps == [0.25, 0.5]
+            assert [attempt for attempt, name in calls if name == "manifest.json"] == [1, 2, 3]
+
+            # A valid but old HTTP200 manifest may persist beyond the former 50-second window.
+            clock = [0.0]
+            waits: list[float] = []
+            stale_identity = json.loads(raw_manifest)
+            stale_identity["sourceSha"] = "f" * 40
+            def advance(seconds: float) -> None:
+                waits.append(seconds)
+                clock[0] += seconds
+            def delayed(url: str, _maximum: int) -> bytes:
+                name = urllib.parse.urlsplit(url).path.rsplit("/", 1)[-1]
+                if name == "manifest.json":
+                    return json.dumps(stale_identity).encode() if clock[0] < 60 else raw_manifest
+                return files[name]
+            if mode == "live":
+                count = verify_dev_channel_live(
+                    pages_base, version, source_sha, 6, 10, delayed,
+                    expected_manifest_sha=hashlib.sha256(raw_manifest).hexdigest(), sleeper=advance,
+                )
+            else:
+                count = verify_dev_pages(pages_base, staged, version, source_sha, 6, 10, delayed, sleeper=advance)
+            assert count == 16 and waits == [10, 20, 40] and clock[0] == 70
+
+        # Bad staged bytes are an immutable build failure, not a Pages propagation condition.
+        (staged / part_names[-1]).write_bytes(b"invalid local bytes")
+        external_calls: list[str] = []
+        sleeps = []
+        try:
+            verify_dev_pages(
+                pages_base, staged, version, source_sha, 3, 0.25,
+                lambda url, _maximum: external_calls.append(url) or b"", sleeper=sleeps.append,
+            )
+        except AcceptanceError:
+            pass
+        else:
+            raise AssertionError("invalid immutable staged bytes were accepted")
+        assert not external_calls and not sleeps
 
     print("check-dev-pages self-test: PASS")
 

@@ -14,7 +14,7 @@
 // Surface semantics stay deliberately different and are encoded per-surface:
 //   REST accepts documented compatibility defaults for absent optional fields, but every
 //   supplied integer must be integral and inside the advertised range. Safety-critical
-//   arguments may also set api_required (set_charging_amps does).
+//   arguments also set api_required (charging amps and scheduled-charging enable).
 //   MCP is STRICT: an absent REQUIRED arg or a present-but-unparseable one is a
 //   -32602 protocol error (silently defaulting set_scheduled_charging's "enable"
 //   would DISABLE the schedule and report success).
@@ -51,7 +51,8 @@ enum class CmdKind {
 
 // Parsed REST request-body shape. TeslaBleHttpProxy-compatible callers normally send
 // objects (or no body), but evcc's generic boolean setter serializes chargeEnable as the
-// JSON scalar true/false. Keep that exception command-specific: accepting arbitrary
+// JSON scalar true/false and wakeup as the scalar true (its tesla-ble template gives
+// neither setter a body). Keep that exception command-specific: accepting arbitrary
 // scalars for argument-bearing commands would bypass their object-key validation.
 enum class RestBodyShape {
     Empty,
@@ -64,7 +65,8 @@ enum class RestBodyShape {
 inline constexpr bool rest_body_allowed(CmdKind kind, RestBodyShape shape) {
     if (shape == RestBodyShape::Empty || shape == RestBodyShape::Object) return true;
     return (kind == CmdKind::ChargeStart && shape == RestBodyShape::BoolTrue) ||
-           (kind == CmdKind::ChargeStop && shape == RestBodyShape::BoolFalse);
+           (kind == CmdKind::ChargeStop && shape == RestBodyShape::BoolFalse) ||
+           (kind == CmdKind::WakeUp && shape == RestBodyShape::BoolTrue);
 }
 
 enum class CmdArgType { None, Int, Bool };
@@ -127,7 +129,7 @@ inline constexpr CmdInfo kCommands[] = {
       { { "percent", "percent", CmdArgType::Int, false, true, 80, 50, 100 }, kNoCmdArg } },
     { CmdKind::SetScheduledCharging, "set_scheduled_charging", "set_scheduled_charging",
       "Enable/disable daily scheduled charging; start_minutes = minutes after local midnight.",
-      { { "enable",        "enable",        CmdArgType::Bool, false, true,  0, 0, 0 },
+      { { "enable",        "enable",        CmdArgType::Bool, true,  true,  0, 0, 0 },
         { "start_minutes", "start_minutes", CmdArgType::Int,  false, false, 0, 0, 1439 } } },
     // ── REST-only (role-refused; kept for API compatibility, absent from tools/list) ──
     { CmdKind::DoorLock,     "door_lock",     nullptr, nullptr, { kNoCmdArg, kNoCmdArg } },

@@ -11,4 +11,5 @@ BaseType_t xTaskCreate(TaskFunction_t task, const char* name, uint32_t stack_dep
 void vTaskDelay(TickType_t ticks);
 void vTaskDelete(TaskHandle_t task);
 TickType_t xTaskGetTickCount();
+UBaseType_t uxTaskGetStackHighWaterMark(TaskHandle_t task);
 }

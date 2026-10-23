@@ -281,6 +281,14 @@ inline bool heap_persist_valid(const HeapPersist& p) {
 // the one thing a reader of this chart must be able to see. A downtime longer than one bucket is
 // not lost either: record() fills the skipped buckets with the absence sentinel, so the gap is
 // drawn as a gap.
+inline constexpr bool heap_timeline_fits(uint32_t uptime_s, uint32_t carry_s) noexcept {
+    return uptime_s <= UINT32_MAX - carry_s;
+}
+
+inline constexpr bool heap_carry_fits(const HeapRing& r) noexcept {
+    return r.open_bucket_ < UINT32_MAX / kHeapHistoryDtS;
+}
+
 inline constexpr uint32_t heap_persist_next_carry(const HeapRing& r) {
     return (r.open_bucket_ + 1u) * kHeapHistoryDtS;
 }

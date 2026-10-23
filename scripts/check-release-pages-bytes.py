@@ -130,12 +130,80 @@ def verify(site: Path, release_dir: Path, version: str) -> int:
     return compared
 
 
+def self_test() -> None:
+    import tempfile
+
+    # Reuse only deterministic fixture construction, never the local validator's verdict.
+    spec = importlib.util.spec_from_file_location(
+        "pages_fixture", Path(__file__).with_name("check-pages-manifest.py"))
+    assert spec is not None and spec.loader is not None
+    fixture = importlib.util.module_from_spec(spec); spec.loader.exec_module(fixture)
+    with tempfile.TemporaryDirectory(prefix="release-pages-test-") as directory:
+        root = Path(directory); site = root / "site"; release = root / "release"
+        site.mkdir(); release.mkdir()
+        manifest = fixture.make_test_site(site)
+        manifest_path = site / "manifest.json"
+        originals = {}
+        for build in manifest["builds"]:
+            merged = bytearray(b"\xff" * max(p["offset"] + p["size"] for p in build["parts"]))
+            for part in build["parts"]:
+                merged[part["offset"]:part["offset"] + part["size"]] = (site / part["path"]).read_bytes()
+            name = MERGED_NAMES[build["chipFamily"]].format(version="1.2.3")
+            originals[name] = bytes(merged); (release / name).write_bytes(merged)
+        assert verify(site, release, "1.2.3") == 16
+
+        def reject(reason: str) -> None:
+            try:
+                verify(site, release, "1.2.3")
+            except ValueError as exc:
+                assert reason in str(exc), (reason, str(exc))
+            else:
+                raise AssertionError(f"Release/Pages accepted: {reason}")
+
+        for build_index in range(4):
+            for part_index in range(4):
+                bad = json.loads(json.dumps(manifest))
+                bad["builds"][build_index]["parts"][part_index]["offset"] += 1
+                manifest_path.write_text(json.dumps(bad), encoding="utf-8")
+                reject("offsets/order")
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        name = MERGED_NAMES["ESP32"].format(version="1.2.3"); merged_path = release / name
+        original = originals[name]
+        for offset, reason in ((0x1000, "differs from Release"), (0x9000, "not erased")):
+            changed = bytearray(original); changed[offset] ^= 1; merged_path.write_bytes(changed)
+            reject(reason)
+        merged_path.write_bytes(original + b"\xff"); reject("length must end exactly")
+        merged_path.write_bytes(original[:0x20000]); reject("too short")
+        merged_path.write_bytes(original)
+        page = site / manifest["builds"][0]["parts"][2]["path"]
+        old = page.read_bytes(); page.write_bytes(b"X" + old[1:])
+        # Updating the manifest digest makes this a locally valid Pages site, but it must still
+        # fail the independent Release binding.
+        bad = json.loads(json.dumps(manifest))
+        import hashlib
+        bad["builds"][0]["parts"][2]["sha256"] = hashlib.sha256(page.read_bytes()).hexdigest()
+        manifest_path.write_text(json.dumps(bad), encoding="utf-8")
+        fixture.validate(site, "a" * 40, "1.2.3")
+        reject("differs from Release")
+        page.write_bytes(old); manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        merged_path.unlink(); merged_path.symlink_to(page); reject("symlink")
+        merged_path.unlink(); merged_path.write_bytes(original)
+        assert verify(site, release, "1.2.3") == 16
+    print("Release/Pages byte binding self-test: PASS")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("site", type=Path)
-    parser.add_argument("release_dir", type=Path)
-    parser.add_argument("--version", required=True)
+    parser.add_argument("site", type=Path, nargs="?")
+    parser.add_argument("release_dir", type=Path, nargs="?")
+    parser.add_argument("--version")
+    parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
+    if args.self_test:
+        self_test()
+        return 0
+    if None in (args.site, args.release_dir, args.version):
+        parser.error("site, release_dir and --version are required")
     try:
         count = verify(args.site, args.release_dir, args.version)
     except (OSError, ValueError, json.JSONDecodeError) as exc:

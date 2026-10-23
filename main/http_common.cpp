@@ -9,6 +9,10 @@
 #include <cstdlib>
 #include <sys/time.h>
 #include <lwip/sockets.h>
+#include "ota_update.hpp"
+#include <esp_system.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 static const char* TAG = "http_server";
 
@@ -17,7 +21,8 @@ static const char* TAG = "http_server";
 static constexpr size_t MAX_BODY_LEN = 2048;
 
 static const char* http_status_text_(int status) noexcept {
-    return status == 400 ? "400 Bad Request"
+    return status == 200 ? "200 OK"
+         : status == 400 ? "400 Bad Request"
          : status == 403 ? "403 Forbidden"
          : status == 404 ? "404 Not Found"
          : status == 409 ? "409 Conflict"
@@ -48,6 +53,82 @@ esp_err_t send_json(httpd_req_t* req, int status, cJSON* root) {
         tk::json_owner(root),
         status,
         "{\"result\":false,\"reason\":\"out of memory\"}");
+}
+
+// Checked adapter used only for effect-aware responses. Ordinary pre-effect paths retain
+// their existing envelopes. Every header/chunk error is terminal for this logical reply.
+struct EffectJsonTransport {
+    httpd_req_t* req;
+    esp_err_t set_json_type() const noexcept {
+        return httpd_resp_set_type(req, "application/json");
+    }
+    esp_err_t set_status(int status) const noexcept {
+        return httpd_resp_set_status(req, http_status_text_(status));
+    }
+    esp_err_t send(const char* body) const noexcept { return httpd_resp_sendstr(req, body); }
+    esp_err_t chunk(const char* body, size_t size) const noexcept {
+        return httpd_resp_send_chunk(req, body, size);
+    }
+};
+
+esp_err_t send_effect_json(GuardedReq rq, int status, cJSON* root) {
+    if (!rq.reply()->state.needs_effect_reply()) return send_json(rq.req(), status, root);
+    EffectJsonTransport transport{rq.req()};
+    return tk::effect_json_reply(transport, *rq.reply(), status, tk::json_owner(root));
+}
+
+esp_err_t send_effect_exception(GuardedReq rq) noexcept {
+    if (rq.reply()->state.terminal) return ESP_FAIL;
+    try {
+        EffectJsonTransport transport{rq.req()};
+        if (rq.reply()->state.needs_effect_reply())
+            return tk::degraded_effect_reply(transport, *rq.reply());
+        rq.reply()->state.terminal = true;
+        esp_err_t result = transport.set_status(503);
+        if (result != ESP_OK) return result;
+        result = httpd_resp_set_type(rq.req(), "text/plain");
+        if (result != ESP_OK) return result;
+        return transport.send("out of memory");
+    } catch (...) { return ESP_FAIL; } // never retry a partial response or unwind into httpd C
+}
+
+void run_effect_continuation(GuardedReq rq) noexcept {
+    const auto continuation = rq.reply()->state.take_continuation();
+    if (continuation == tk::ReplyContinuation::None) return;
+    try {
+        if (continuation == tk::ReplyContinuation::SuccessfulConfigRestart) {
+            if (!rq.context->config_restart.owns_gate()) return;
+        }
+        // Identity recovery/failure reboots never confirm a pending OTA image.
+        vTaskDelay(pdMS_TO_TICKS(800));
+        esp_restart();
+    } catch (...) {
+        // Never retry a consumed continuation or let diagnostics unwind into httpd.
+        try { ESP_LOGE(TAG, "saved configuration restart interrupted; no continuation retry"); }
+        catch (...) {}
+    }
+}
+
+void finish_config_save(GuardedReq rq) noexcept {
+    rq.reply()->state.succeeded();
+    rq.reply()->state.continuation = tk::ReplyContinuation::SuccessfulConfigRestart;
+    rq.reply()->state.image = ota_confirm_pending_image(
+        rq.context->config_restart, tk::OtaRebootClass::SuccessfulUserConfigCommit);
+}
+
+esp_err_t send_config_reply(GuardedReq rq, int status, bool ok,
+                            const char* command, const char* reason) {
+    tk::JsonBuilder json;
+    cJSON* response = json.object(json.root(), "response");
+    json.boolean(response, "result", ok);
+    json.string(response, "command", command);
+    json.string(response, "vin", "");
+    const auto image = rq.reply()->state.image;
+    json.string(response, "reason", ok && tk::config_image_warning(image)
+        ? tk::config_commit_reason(image) : reason);
+    if (image != tk::ConfigImageResult::None)
+        json.string(response, "firmware_verification", tk::config_image_code(image));
+    return send_effect_json(rq, status, json.release());
 }
 
 cJSON* make_response(bool result, const char* command,
@@ -107,59 +188,4 @@ bool query_param_is(httpd_req_t* req, const char* key, const char* want) {
     char val[32];
     if (httpd_query_key_value(q, key, val, sizeof(val)) != ESP_OK) return false;
     return strcmp(val, want) == 0;
-}
-
-// ─── Browser-clock plausibility window ────────────────────────────────────────
-// For a browser-supplied wall clock (the NTP fallback: POST /set_time and /ota/check?ms=).
-// The clock gates OTA TLS certificate validation, so an unauthenticated LAN client must not
-// be able to push it arbitrarily far in EITHER direction: too far back makes valid certs
-// look not-yet-valid; too far forward makes them look expired (and not-yet-valid certs look
-// valid). The lower floor is fixed at ~2023-11; the upper bound is BUILD-RELATIVE (build
-// year + 10) so it never goes stale as real time advances — a fixed ceiling would eventually
-// reject a correct clock on a long-lived device.
-static constexpr double kClockFloorMs = 1700000000000.0;   // ~2023-11-14
-
-// Epoch ms at 00:00 UTC on Jan 1 of `year` (proleptic Gregorian, year ≥ 1970). Pure integer
-// arithmetic — the leap-day terms count Feb 29s strictly before Jan 1 of `year`.
-static double jan1_epoch_ms(int year) {
-    long long days = 365LL * (year - 1970)
-                   + (year - 1969) / 4
-                   - (year - 1901) / 100
-                   + (year - 1601) / 400;
-    return (double)days * 86400.0 * 1000.0;
-}
-
-// Upper plausibility bound = (build year + 10) as epoch ms. esp_app_get_description()->date is
-// the compiler __DATE__ string "Mmm dd yyyy", so the 4-digit year is its last token.
-static double clock_ceiling_ms() {
-    const char* d = esp_app_get_description()->date;
-    size_t n = d ? strlen(d) : 0;
-    int year = (n >= 4) ? atoi(d + n - 4) : 0;
-    if (year < 2023) year = 2023;   // unparseable → conservative base
-    return jan1_epoch_ms(year + 10);
-}
-
-bool browser_time_plausible(double epoch_ms) {
-    return epoch_ms >= kClockFloorMs && epoch_ms < clock_ceiling_ms();
-}
-
-long long apply_browser_clock(double epoch_ms) {
-    long long sec = (long long)(epoch_ms / 1000.0);
-    struct timeval tv = {};
-    tv.tv_sec  = (time_t)sec;
-    tv.tv_usec = (suseconds_t)((long long)epoch_ms % 1000) * 1000;
-    settimeofday(&tv, nullptr);
-    mark_clock_authoritative();
-    // Persist the applied wall clock ("last_time", tesla_cfg): the device has no battery-backed
-    // RTC, so main.cpp restores this on boot — a headless reboot (evcc only, NTP blocked, no
-    // browser visit) still comes up with a plausible clock for OTA TLS cert validation and the
-    // key_created/paired_at timestamps. NOT needed for tesla-ble signed-command freshness
-    // (expires_at derives from the vehicle's SessionInfo.ClockTime + a monotonic delta).
-    if (!g_config->save_str(tk::nvs_contract::kLastTime, std::to_string(sec))) {
-        // The clock is already applied in RAM, so this request still succeeded; what is lost is
-        // only the restore across the NEXT reboot. Naming it here is what separates "NVS is
-        // failing" from "the browser never set the time" when a headless boot comes up at 1970.
-        ESP_LOGW(TAG, "wall clock applied but not persisted — a reboot will come up unset");
-    }
-    return sec;
 }
