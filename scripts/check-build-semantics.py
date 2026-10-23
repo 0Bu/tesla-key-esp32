@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import ast
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -1115,15 +1116,9 @@ def validate_generated_firmware_sources(
         if actual != expected_digest:
             raise SemanticsError(f"pinned nanopb generated source drifted: {relative_name}")
 
-    page = canonical_regular_file(source_root / "main/www/index.html", "web index source").read_text(
-        encoding="utf-8"
-    )
-    css = canonical_regular_file(source_root / "main/www/style.css", "web style source").read_text(
-        encoding="utf-8"
-    )
-    js = canonical_regular_file(source_root / "main/www/app.js", "web script source").read_text(
-        encoding="utf-8"
-    )
+    page = canonical_regular_file(source_root / "main/www/index.html", "web index source").read_bytes().decode("utf-8")
+    css = canonical_regular_file(source_root / "main/www/style.css", "web style source").read_bytes().decode("utf-8")
+    js = canonical_regular_file(source_root / "main/www/app.js", "web script source").read_bytes().decode("utf-8")
     style_marker = "/*@@INLINE:style.css@@*/\n"
     script_marker = "//@@INLINE:app.js@@\n"
     if page.count(style_marker) != 1 or page.count(script_marker) != 1 or any(
@@ -1132,6 +1127,14 @@ def validate_generated_firmware_sources(
         for marker in (style_marker, script_marker)
     ):
         raise SemanticsError("web inline marker contract drifted")
+    helper = canonical_regular_file(source_root / "main/www/prune_css_comments.py", "CSS pruning helper")
+    spec = importlib.util.spec_from_file_location("build_css_comments", helper)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    try:
+        css = module.prune(css.encode("utf-8")).decode("utf-8")
+    except ValueError as exc:
+        raise SemanticsError("web CSS pruning refused repository input") from exc
     expected_page = page.replace(style_marker, css).replace(script_marker, js).encode("utf-8")
     generated_page = canonical_regular_file(
         build_root / "esp-idf/main/index_inlined.html", "generated inlined web page"
@@ -1293,12 +1296,17 @@ def validate_generated_producer_commands(
 
     inline_tokens = commands["esp-idf/main/index_inlined.html"]
     inline_cmake = cmake_at(inline_tokens, 3)
+    if len(inline_tokens) != 11 or not inline_tokens[8].startswith("-DPYTHON="):
+        raise SemanticsError("generated web producer lacks its explicit Python interpreter")
+    inline_python = inline_tokens[8].removeprefix("-DPYTHON=")
+    pinned_tool(inline_python, Path("/opt/esp/python_env"), "python", "web generator Python")
     exact("esp-idf/main/index_inlined.html", (
         "cd", main_build, "&&", inline_cmake,
         f"-DHTML={source_root / 'main/www/index.html'}",
         f"-DCSS={source_root / 'main/www/style.css'}",
         f"-DJS={source_root / 'main/www/app.js'}",
         f"-DOUT={build_root / 'esp-idf/main/index_inlined.html'}",
+        f"-DPYTHON={inline_python}",
         "-P", str(source_root / "main/www/inline_assets.cmake"),
     ))
     exact("esp-idf/main/index.html.gz", (

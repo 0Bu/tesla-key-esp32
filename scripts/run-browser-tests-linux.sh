@@ -20,5 +20,6 @@ docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-
     "$browser_image" /bin/sh -ec '
         chromium --version
         python3 test/test_web_ui_browser_gate.py
+        python3 test/test_browser_cdp.py
         python3 test/web_ui_browser_gate.py --require-browser
     '
