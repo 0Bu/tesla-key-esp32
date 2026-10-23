@@ -131,7 +131,7 @@ const reviewedSkillSha256 = new Map([
   ["ship", "58e9b0f6d049e6fc25b6eab784f74b043899d4171d5c4d9f5435e2f386ca7fe6"],
   ["skill-audit", "c304ac0048085acd9394a1e12462e80b6b6670babf65b770f1efc9ddd0c25325"],
   ["usb-recovery", "598d19f1d4ef7b036ad0ae2a973ed29d6497ae8a7943bdadb8ea7abbb01816e9"],
-  ["vehicle-command-audit", "74ca7142156952af39304c2d34b4be6f92790971600c0fbde830899db9f26a7a"],
+  ["vehicle-command-audit", "c76fd109218ebf2969e1541930b472cc04cf42423d7193aded794ee62edd7c2d"],
 ]);
 const featureDocsScopeTokens = [
   "main/", "test/", "sdkconfig.defaults*", "partitions.csv", "AGENTS.md", ".agents/", ".codex/",

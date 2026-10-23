@@ -53,10 +53,13 @@ dispatch; the same rule applies to vehicle-data routes.
   fresh, serialized `ChargeState` request and the car reported *exactly* the requested current.
   Missing/malformed input is `400`; an unreachable car, rejected command or missing/mismatched
   readback is `502`, so controllers such as evcc retry instead of accepting a false success.
-- **Outcome status:** success and the nominal `already_set` are HTTP `200` with `result:true`. Every
-  vehicle or transport failure (car refusal, authentication or role fault, asleep or unreachable
-  car, timeout) keeps the Tesla-compatible JSON (`result:false` plus the reason) but uses HTTP
-  `502`, not a misleading `200`; a device-local out-of-memory response stays `503`.
+- **Outcome status:** in a complete reply, success and the nominal `already_set` are HTTP `200`
+  with `result:true`. Every other failed command (car refusal, authentication or role fault,
+  asleep or unreachable car, timeout, or a device-side refusal such as a full command queue) keeps
+  the Tesla-compatible JSON (`result:false` plus the reason) but uses HTTP `502`, not a misleading
+  `200`. Intake and out-of-memory failures before dispatch keep their own codes; a reply that
+  cannot be built after the attempt is the degraded HTTP `200` reply with `result:false` and
+  `outcome:"unknown"` (see [Response classes](#response-classes)).
   vehicle-command's proxy maps these differently (200 for car refusals, otherwise 408/412/500/503
   with an error-only body, or a Fleet server error's own status); see
   [ADR-0005](adr/0005-tesla-ble-seam.md#2-platform-forced-departures-and-reference-deviations).
