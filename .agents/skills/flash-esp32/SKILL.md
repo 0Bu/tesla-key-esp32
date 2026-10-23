@@ -10,8 +10,9 @@ additional authorization. Canonical skills live under `.agents/skills/`; hooks e
 
 Builds the ESP-IDF project (in Docker) and, only from an explicitly verified **signed** app and
 after the user explicitly approves this physical-board mutation, flashes a connected ESP32 board (esp32 / esp32s3 / esp32c3 / esp32c6 — set `TARGET`;
-the compile block defaults to esp32s3 and the local signing block reuses that value, the signed-preview
-block requires it explicitly, and every flash path refuses a port whose detected chip differs) over USB from the host. NVS is left untouched, so the stored pairing, private key, VIN
+the compile block defaults to esp32s3, the operator-run local signing block needs the same TARGET set
+in its own shell, the signed-preview block requires it explicitly, and every flash path refuses a port
+whose detected chip differs) over USB from the host. NVS is left untouched, so the stored pairing, private key, VIN
 and WiFi survive the flash (no re-pair needed). Use it only when the user asks for a build or
 flash; editing anything under `main/` does not itself authorize hardware access —
 including the embedded web UI (`main/www/` — `index.html` + `style.css` + `app.js`, spliced into
@@ -63,7 +64,7 @@ guard rejects key files (`*.pem`, `*.key`, …) in agent commands, so the operat
 
 ```bash
 set -euo pipefail
-: "${TARGET:?run the compile block for the intended target first}"
+: "${TARGET:?set TARGET to the target the compile block built}"
 : "${DEV_SIGNING_KEY_FILE:?set DEV_SIGNING_KEY_FILE to an explicit RSA-3072 development key}"
 [ -f "$DEV_SIGNING_KEY_FILE" ] && [ ! -L "$DEV_SIGNING_KEY_FILE" ] || {
   echo "REFUSING: signing key is missing, non-regular or a symlink" >&2; exit 1;
