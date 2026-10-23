@@ -842,6 +842,30 @@ for path in paths:
 PY
 then pass_case 'neutral core has no foreign-project policy residue'; else fail_case 'foreign-project residue'; fi
 
+# Shared-predicate loader canaries: a missing, truncated, incomplete or wrong-API pr-gate-lib.sh
+# must block before the payload is even parsed, which covers create, push and merge (all five
+# gates); the canaries drive a create payload.
+lib_canary="$tmp/gate-lib-canary"
+mkdir -p "$lib_canary"
+cp "$gate" "$lib_canary/require-pr-gates.sh"
+lib_src="$root/tools/agent-hooks/pr-gate-lib.sh"
+expect_lib_block() {  # <expected message fragment> <label>
+  local out rc
+  out="$(payload Bash command 'gh pr create --body-file body.md' "$root" \
+    | bash "$lib_canary/require-pr-gates.sh" 2>&1)"; rc=$?
+  if [ "$rc" = 2 ] && printf '%s' "$out" | grep -Fq -- "$1"; then pass_case "$2"
+  else fail_case "$2 (rc=$rc: $(printf '%s' "$out" | tail -c 200))"; fi
+}
+rm -f "$lib_canary/pr-gate-lib.sh"
+expect_lib_block 'library could not be loaded' 'missing PR gate library blocks PR actions'
+awk '{print} /^GATE_PR_LIB_API=/{exit}' "$lib_src" > "$lib_canary/pr-gate-lib.sh"
+expect_lib_block 'library is incomplete (' 'truncated PR gate library blocks PR actions'
+{ cat "$lib_src"; echo 'unset -f gate_vehicle_command_relevant'; } > "$lib_canary/pr-gate-lib.sh"
+expect_lib_block 'library is incomplete (gate_vehicle_command_relevant)' \
+  'PR gate library without a shared predicate blocks PR actions'
+sed 's/^GATE_PR_LIB_API=3$/GATE_PR_LIB_API=2/' "$lib_src" > "$lib_canary/pr-gate-lib.sh"
+expect_lib_block 'library is incomplete (' 'wrong PR gate library API version blocks PR actions'
+
 if python3 -m py_compile "$hook" "$parser" "$runner" \
   && bash -n "$root/tools/agent-hooks/"*.sh \
   && python3 -m json.tool "$root/.agents/hooks.json" >/dev/null; then pass_case 'Python, Bash, JSON syntax'; else fail_case 'syntax'; fi

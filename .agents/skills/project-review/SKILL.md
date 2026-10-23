@@ -108,7 +108,8 @@ applies. [FEATURES](../../../docs/FEATURES.md) remains a pointer catalog, not an
 ## Reviewing the skills
 
 [Skill-audit](../skill-audit/SKILL.md#per-target-checklist) owns the per-sibling checklist; execute it
-rather than maintaining a second copy here. Check this workflow's discovered source coverage,
+rather than maintaining a second copy here. Only the `$feature-docs` bullet below is repeated,
+because the agent-config check requires it in both skills. Check this workflow's discovered source coverage,
 invariants, owner references and recent source commits against its last update too.
 
 - **`$feature-docs`**: verify `gate_feature_docs_relevant` against `main/`, `test/`,
