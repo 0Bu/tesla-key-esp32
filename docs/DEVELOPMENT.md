@@ -174,7 +174,7 @@ source `e1c3197596575728f336bec9eee0eafc4a0793f6`, and match the separately acce
 That workflow's host sanitizer failure remains a publication blocker; these references certify
 only the recorded bootloader bytes and toolchain, with no app-delivery or whole-workflow approval.
 
-For a descriptorless image, accept only the exact recorded image or the full confirmed project
+For an image whose ESP-IDF version esptool does not report, accept only the exact recorded image or the full confirmed project
 bootloader region with an all-`0xff` suffix: `0x1000/0x7000` on ESP32, `0x0/0x8000` on S3/C3/C6.
 Unknown bytes, partial padding, missing provenance or a wrong target fail closed. Collection
 belongs to the explicitly identified board and approved read plan; the checker contacts no device.

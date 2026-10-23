@@ -303,7 +303,7 @@ against passive esptool metadata/write adapters for all four targets. Older, unk
 or wrong-chip metadata must stop before a stubbed write. Consumer-omission controls pin the local,
 preview, ship and recovery paths. These tests do not inspect a board, validate a signature or prove
 that a collected bootloader belongs to the chosen port; the delivery plan owns that binding.
-Descriptorless-reference cases copy the actual checker and use explicitly synthetic catalog
+Reference-catalog cases (no ESP-IDF version reported) copy the actual checker and use explicitly synthetic catalog
 digests. Exact image/full-region positives and byte, padding, provenance-shape and downgrade
 negatives exercise CLI admission. Real catalog bytes require separate provenance verification;
 fixture success does not establish it. See [reference maintenance](../docs/DEVELOPMENT.md#retained-bootloader-references).
