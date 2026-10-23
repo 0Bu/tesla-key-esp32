@@ -44,35 +44,38 @@ Any time you touch the presenter or the renderer and want to confirm the pixels 
 | Tool | Job |
 |------|-----|
 | **this skill** | Render the sim to PNGs for **human visual review**. Does not replace the parity gate. |
-| [`scripts/check-display-sim-parity.sh`](../../../scripts/check-display-sim-parity.sh) | The **automated correctness gate for the display** (one of two parity gates `run-mock-tests.sh` runs; the other pins the web UI's BLE row): compiles a golden dumper from the C++ presenter (`tk::display::compose` in `display_model.hpp`), has the sim re-`decide()` the same inputs, and diffs them. Runs at the end of [`scripts/run-mock-tests.sh`](../../../scripts/run-mock-tests.sh) and in CI's `logic-test` job. |
+| [`scripts/check-display-sim-parity.sh`](../../../scripts/check-display-sim-parity.sh) | The **automated correctness gate for the display** (one of two parity gates `run-mock-tests.sh` runs; the other pins the web UI's BLE row): compiles a golden dumper from the C++ presenter (`tk::display::compose` in `display_model.hpp`), has the sim re-`decide()` the same inputs, and diffs them. Runs in [`scripts/run-mock-tests.sh`](../../../scripts/run-mock-tests.sh) after the host C++ tests and in CI's `logic-test` job. |
 | [`$add-logic-test`](../add-logic-test/SKILL.md) | Adds the pure-logic units + `CHECK` cases (the presenter *decisions* are host-tested there). |
 
 ## Render the state montages
 
-Run from the repo root. Each mode takes an optional output path; the defaults below match the
-built-in ones (all under `tools/`).
+Run from the repo root. Each mode takes an optional output path. Without one it overwrites the
+tracked reference image of the same name under `tools/`; regenerating those is a deliberate source
+change, like `cheader`. For a preview, write to the ignored `build/display-preview/`:
 
 ```bash
+mkdir -p build/display-preview
+
 # LANDSCAPE 160x80 — montage of the listed states (charging, SoC red/amber/green, 100%,
 # asleep-dim, BLE/WiFi/LAN search, pairing, LAN, punctuation, UTF-8 byte fallback and SafeMode)
-python3 tools/display_sim.py states tools/display_states.png
+python3 tools/display_sim.py states build/display-preview/display_states.png
 
 # PORTRAIT 80x160 — the BOOT-rotated layout (vertical battery) in the listed states
-python3 tools/display_sim.py states-portrait tools/display_states_portrait.png
+python3 tools/display_sim.py states-portrait build/display-preview/display_states_portrait.png
 
 # WiFi + BLE "searching" sweep, frame-by-frame (the ping-pong highlight)
-python3 tools/display_sim.py search tools/display_search.png
+python3 tools/display_sim.py search build/display-preview/display_search.png
 
 # too-long SSID at several marquee offsets — verify horizontal scroll + clipping
-python3 tools/display_sim.py scroll tools/display_scroll.png
+python3 tools/display_sim.py scroll build/display-preview/display_scroll.png
 
 # single charging "hero" preview frame (Demo-Net / 64% / charging)
-python3 tools/display_sim.py png tools/display_preview.png
+python3 tools/display_sim.py png build/display-preview/display_preview.png
 ```
 
 Every mode prints `wrote <path> (<w>x<h> …)` on success.
 
-**Then look at the output.** Inspect/attach the PNGs (`tools/display_states.png`, etc.) and
+**Then look at the output.** Inspect/attach the PNGs (`build/display-preview/display_states.png`, etc.) and
 eyeball the layout: header bars + SSID, the battery fill colour across the SoC range, the bolt,
 the "ASLEEP" caption, the search/pairing frames, and — for the portrait montage — the vertical
 battery geometry.

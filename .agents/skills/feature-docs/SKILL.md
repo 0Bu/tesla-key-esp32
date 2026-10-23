@@ -99,5 +99,5 @@ that separate authority through the appropriate workflow.
 ## What this skill is not
 
 It does not review the feature. Correctness, memory safety and cross-cutting coherence are
-`$project-review`'s job; per-target build divergence is the `multi-target-build-reviewer` agent's.
+`$project-review`'s job; per-target build divergence is the `multi_target_build_reviewer` agent's.
 This skill answers exactly one question: **can the next reader find out that this exists, and why?**

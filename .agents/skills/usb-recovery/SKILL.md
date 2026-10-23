@@ -39,8 +39,11 @@ The signed app and final otadata erase recover firmware while preserving NVS.
 >   authorization. Do not create a project copy and do not provide a whole-flash erase shortcut.
 
 For builds or previews use `$flash-esp32`; for authorized merge/main delivery use `$ship`.
+`$deploy-bench` reuses steps 1 and 3 to put an already-published image on an identified bench.
 This recovery uses existing published bytes only; all selection, retained-bootloader, signature,
-port/target, region and activation checks below remain mandatory.
+port/target, region and activation checks below remain mandatory. Later blocks read variables set
+by earlier ones; run them through a scratch script as
+[Development](../../../docs/DEVELOPMENT.md#running-workflow-shell-blocks) describes.
 
 ## Host prerequisites
 
@@ -78,7 +81,7 @@ Pick the target and its image suffix (`""` / `-s3` / `-c3` / `-c6`, matching
 
 ```bash
 set -euo pipefail
-TARGET=esp32s3     # esp32 | esp32s3 | esp32c3 | esp32c6
+: "${TARGET:?set TARGET to esp32, esp32s3, esp32c3 or esp32c6}"
 case "$TARGET" in
   esp32)   SFX=""; FAMILY=ESP32 ;;  esp32s3) SFX=-s3; FAMILY=ESP32-S3 ;;
   esp32c3) SFX=-c3; FAMILY=ESP32-C3 ;; esp32c6) SFX=-c6; FAMILY=ESP32-C6 ;;
@@ -259,7 +262,7 @@ printf '%s\n' "$APP_INFO" | grep -qx "Detected image type: $FAMILY" \
 ```
 
 > The image **must** be the published CI-signed one — flashing an unsigned local build re-creates
-> failure mode (b) (bootloop), while a development-key signature creates a trust anchor no public
+> the boot loop, while a development-key signature creates a trust anchor no public
 > image matches. Recovery must not search for or expose the real CI key locally. There is
 > deliberately **no Pages fallback** here: without hardware Secure Boot, a USB write cannot
 > authenticate the signer and would trust the selected Pages origin. If neither an exact Release
@@ -385,14 +388,17 @@ from a v6.1-built release (web installer or merged image) must not receive a 5.x
 valid its provenance; a board that was only ever OTA-updated keeps its older bootloader. Read the
 bootloader region — read-only, and it ends below the partition table, far from `nvs@0x9000` — and
 compare both ESP-IDF versions through `scripts/check-bootloader-compat.py`; with the step-2 support bootloader in the write set, compare against
-that one instead. A board with no auto-reset needs BOOT held and
-`RESET_ARGS=(--before no-reset --after no-reset)`:
+that one instead. A board with no auto-reset needs BOOT held and the input `NO_AUTO_RESET=1`:
 
 ```bash
 set -euo pipefail
 : "${APP:?select and validate Option A or B first}"
 : "${PORT:?run the explicit-port probe first}"
-[ -n "${RESET_ARGS+x}" ] || RESET_ARGS=()
+case "${NO_AUTO_RESET:-0}" in
+  0) RESET_ARGS=() ;;
+  1) RESET_ARGS=(--before no-reset --after no-reset) ;;
+  *) echo "REFUSING: NO_AUTO_RESET must be 0 or 1" >&2; exit 1 ;;
+esac
 # Capture image-info whole: `esptool … | grep -q` lets grep close the pipe early, and under
 # pipefail esptool's broken pipe would turn a match into a refusal.
 if [ -n "${BOOTLOADER:-}" ]; then
@@ -499,8 +505,8 @@ sleep 2
 curl -fsS "http://$DEVICE_IP/ota/status" | jq .
 ```
 
-- `version` / `platform` should read the just-flashed release (not the `version.txt` floor that an
-  unstamped local build reports).
+- `version` / `platform` must read the flashed `VERSION` and `FAMILY` (not the `version.txt` floor
+  that an unstamped local build reports); the loop above requires both.
 - `paired:true` reports the firmware's VCSEC-session presence result. It does not prove private-key
   or other configuration preservation, complete NVS integrity, or a successful vehicle handshake.
   The prescribed app/otadata write ranges do not overlap NVS; assess this status field only as

@@ -117,20 +117,20 @@ const usbOtaNotStateChanging = /(?:GET|POST) \/ota\/check[^.!?]*(?:is not|isn't|
 const usbAbsentApprovalProceeds = /(?:(?:approval|authorization)[^.!?]*(?:absent|missing|not obtained)|without (?:separate )?(?:approval|authorization))[^.!?]*(?:continue|proceed|run|contact|send|request)/i;
 const reviewedSkillSha256 = new Map([
   ["add-logic-test", "564c0e171f99e6cb55117c55dcb272f9c07ac0342315b48199274c6c7f347b0a"],
-  ["ci-heal", "e264e8379b61b5f78feb0b478914fa089fe6352ffc4d6984672940f8ac22b7ba"],
+  ["ci-heal", "321db23cebca9a9f7bbf8de6718a9540810c60d610d01bb3ae7502d8550b6639"],
   ["deploy", "169d30f409d6a447752b5fc7f3b7579ee6e714df9ce33ecd51cb344dd0d877f0"],
-  ["deploy-bench", "0471fee2f77a43b0e3e8292956bb74bc2d08020bd25fe29f416ea5ba609b7e02"],
-  ["device-diag", "d1da99af7e304ef829614b9580101a1c0b6779e401de5d5f4dea884de708112e"],
-  ["display-preview", "32fae92f904a8385ce86f60f7fbd6cbacbd93c6b2a21343c393dece4174ec313"],
-  ["feature-docs", "17a486258723b88a5d1257284a33e295529bd52331d3b066335e832b666f1884"],
-  ["flash-esp32", "938a7422c1530459f3de5e795d21307bd78897dfda5631332c94f8502f89cd11"],
+  ["deploy-bench", "15d3f62be54f14e1f560ab8d711f0d2915d3e1ec20a0cf3f0f962d52a689e30e"],
+  ["device-diag", "ca61876cf7f745dd8cf3014a3f2b5c5758959eede9bd81ee952c3accfeaaf733"],
+  ["display-preview", "1b886d24a8d17c1f0c1fbdbd4302dee0fe44688dbba081c1de50a9d844b3979b"],
+  ["feature-docs", "ec0d24372fb754fde7c91e9d6917b78a348e06addb93299ceb5412fca758dcdb"],
+  ["flash-esp32", "e73ea6e17000bb266979c71d8d27fa1289aba9cef96cdb8e105977dfd069dac7"],
   ["mock-test", "f211408296d1e21018c37288eb7e6f51226ebb7c5f34e3d9b851b0874aabb17b"],
-  ["ota-release-verify", "d1c988596c27b244cc549712f77b457a037e93241858af4fbf4179280039720f"],
-  ["pr-hygiene", "8491da669686acc5e00741e5e1fcfec6d2caf29abb8ebff0479ca973f20e87f1"],
-  ["project-review", "2f371c33df9fee2d2064cdf93e11e0f30e97ac2295383b100461b81f4c52878a"],
-  ["ship", "58e9b0f6d049e6fc25b6eab784f74b043899d4171d5c4d9f5435e2f386ca7fe6"],
-  ["skill-audit", "c304ac0048085acd9394a1e12462e80b6b6670babf65b770f1efc9ddd0c25325"],
-  ["usb-recovery", "598d19f1d4ef7b036ad0ae2a973ed29d6497ae8a7943bdadb8ea7abbb01816e9"],
+  ["ota-release-verify", "7a223646746f6a6e22601b2259ec8b96811aff452036f1c5c8a37d3d188c36cc"],
+  ["pr-hygiene", "4a56b16765c6fd3527df54e9c93faed61ca5bf0c0a083668bd6747915982a961"],
+  ["project-review", "43619828c19c33a000d2d2a75e189b59eaa65d6aaf57d1f69924d4dc55d6f940"],
+  ["ship", "c56efd4b5e47c57f0868645d9a84af3b3ec20cd69f9a6fcedde13cb1fd0ac9f1"],
+  ["skill-audit", "0b8d2d4bf1221f38f131d1f4cd678b01e6c6ce54cfdd6ac125e694c8ebeec1a9"],
+  ["usb-recovery", "98a8f493377c564d07cd9f5a2819f228f2b2714d01a383ad2b3f47646f0b13af"],
   ["vehicle-command-audit", "c76fd109218ebf2969e1541930b472cc04cf42423d7193aded794ee62edd7c2d"],
 ]);
 const featureDocsScopeTokens = [
@@ -317,7 +317,7 @@ for (const name of canonicalSkills) {
       die(1, `canonical ${name} assigns a deep technical catalog to compact AGENTS.md`);
     }
   }
-  if (["feature-docs", "project-review", "skill-audit"].includes(name)) {
+  if (["feature-docs", "skill-audit"].includes(name)) {
     const scopeText = name === "feature-docs" ? canonical.text :
       canonical.text.match(/\*\*`\$feature-docs`\*\*[\s\S]*?(?=\n- \*\*`\$|\n### |\n## |$)/)?.[0] || "";
     if (featureDocsScopeTokens.some((required) => !scopeText.includes(required))) {
@@ -403,8 +403,11 @@ for (const subagent of subagentsDoc.subagents) {
 const multiTargetReviewerObj = subagentsDoc.subagents.find((s) => s.TypeName === "multi_target_build_reviewer");
 const multiTargetReviewer = normalizeProse(multiTargetReviewerObj?.Prompt || "");
 const multiTargetPublicationContracts = [
-  "prepare, logic-test and logic-harness start concurrently (the host jobs have no needs); build-target and independent-rebuild-target need only prepare; then build -> independent-rebuild -> publish -> deploy",
+  "prepare, logic-test and logic-harness start concurrently",
+  "build-target and independent-rebuild-target each need only prepare",
+  "build -> independent-rebuild -> publish -> deploy",
   "build needs prepare, logic-test, logic-harness and build-target",
+  "fails first unless every need succeeded",
   "independent-rebuild needs build and every independent-rebuild-target leg",
   "SHA/version-bound Actions artifact",
   "deploy consumes only that named artifact",

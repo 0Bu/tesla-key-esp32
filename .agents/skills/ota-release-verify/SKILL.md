@@ -42,7 +42,8 @@ Read [Security](../../../docs/SECURITY.md#release-pipeline-and-trust-boundaries)
 `main/logic/target.hpp`, `main/ota_update.cpp`, and `scripts/check-release-pages-bytes.py`.
 Verify their current four-target suffix/offset map and the fixed publication URLs before continuing.
 Root Pages is stable Release; Dev and previews are separate. A test-mode dispatch does not publish.
-The full two-snapshot byte-verification procedure below is mandatory.
+The full two-snapshot byte-verification procedure below is mandatory. Run steps 1 and 2 through a
+scratch script as [Development](../../../docs/DEVELOPMENT.md#running-workflow-shell-blocks) describes.
 
 ## The check
 
