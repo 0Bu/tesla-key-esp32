@@ -189,9 +189,18 @@ self_test() {
     echo "--exact for existing tag was accepted" >&2
     return 1
   fi
+  if (cd "$tmp/current-stable" && "$self_script" --exact 1.3.0 >/dev/null 2>&1); then
+    echo "--exact below newest stable tag was accepted" >&2
+    return 1
+  fi
+  # Prerelease and invalid tags are not stable authorities.
+  git -C "$tmp/invalid-tags" tag v9.0.0-rc.1
+  local prerelease_exact
+  prerelease_exact="$(cd "$tmp/invalid-tags" && "$self_script" --exact 1.3.0)"
+  [[ "$prerelease_exact" == 1.3.0 ]] || return 1
   local got_exact
-  got_exact="$(cd "$tmp/current-stable" && "$self_script" --exact 1.3.0)"
-  [[ "$got_exact" == "1.3.0" ]] || { echo "--exact: expected 1.3.0 got $got_exact" >&2; return 1; }
+  got_exact="$(cd "$tmp/current-stable" && "$self_script" --exact 2.0.0)"
+  [[ "$got_exact" == "2.0.0" ]] || { echo "--exact: expected 2.0.0 got $got_exact" >&2; return 1; }
 
   echo "next-version SemVer self-test: PASS"
 }
@@ -238,6 +247,18 @@ if [ -n "$exact" ]; then
   fi
   if git -C "$repo_root" rev-parse -q --verify "refs/tags/v$exact" >/dev/null; then
     echo "$0: tag v$exact already exists" >&2
+    exit 2
+  fi
+  latest_stable=""
+  stable_tags="$(git -C "$repo_root" tag -l 'v*')" || exit 2
+  while IFS= read -r tag; do
+    [[ "$tag" =~ ^v${CORE_RE#^} ]] || continue
+    core="$(normalize_core "${tag#v}")" || continue
+    latest_stable="$(printf '%s\n%s\n' "$latest_stable" "$core" | sort -V | tail -n1)" || exit 2
+  done <<< "$stable_tags"
+  if [[ -n "$latest_stable" ]] && { [[ "$exact" == "$latest_stable" ]] ||
+      [[ "$(printf '%s\n%s\n' "$latest_stable" "$exact" | sort -V | tail -n1)" != "$exact" ]]; }; then
+    echo "$0: --exact version $exact must exceed newest stable tag v$latest_stable" >&2
     exit 2
   fi
   printf '%s\n' "$exact"

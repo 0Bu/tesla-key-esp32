@@ -16,8 +16,8 @@ mirroring the "what to show" decisions from the pure presenter
 [`main/logic/display_model.hpp`](../../../main/logic/display_model.hpp) (fed
 [`main/logic/ui_state.hpp`](../../../main/logic/ui_state.hpp)). This skill runs the sim's render
 modes to produce **PNGs a human can look at** — the complement to the automated decision-parity gate.
-Known rendering difference: portrait network search displays "WiFi" in the simulator even when
-`eth_present` makes the firmware display "LAN". The simulator does not establish pixel equality.
+Both orientations use the model's WiFi/LAN search label. Native model/font/text-primitive checks
+do not establish complete-frame pixel equality. SafeMode previews cover the recovery hero after display startup, not the earlier setup portal.
 
 It needs only **python3 (stdlib — no Pillow, no board, no ESP-IDF, no Docker)**, so it works in a
 cloud session as well as on a host. It writes image files; it changes no source.
@@ -27,7 +27,7 @@ cloud session as well as on a host. It writes image files; it changes no source.
 Any time you touch the presenter or the renderer and want to confirm the pixels still look right:
 
 - editing [`main/logic/display_model.hpp`](../../../main/logic/display_model.hpp) — the priority
-  ladder (network search > pairing > BLE search > battery — `Hero::NetSearch` labels itself
+  ladder (SafeMode > network search > pairing > BLE search > battery — `Hero::NetSearch` labels itself
   "WiFi" or "LAN" from `UiSnapshot::eth_present`), the SoC red→green gradient, RSSI→bars,
   or the SSID-scroll geometry (the `Orient` axis picks landscape vs portrait);
 - editing [`main/display.cpp`](../../../main/display.cpp) — `draw_landscape` / `draw_portrait`,
@@ -36,7 +36,7 @@ Any time you touch the presenter or the renderer and want to confirm the pixels 
   the sim is the only cheap way to sanity-check that geometry before flashing.
 
 > **Parity green ≠ "looks right".** The automated gate proves the sim *decides* the same thing the
-> C++ presenter decides; it does not compare rendered pixels or establish that a frame is legible
+> C++ presenter decides; it does not compare complete frames or establish that a frame is legible
 > or well laid-out. Use this eyeball pass to inspect the simulated layout with its known limits.
 
 ## Scope boundary — what this is NOT
@@ -56,11 +56,11 @@ change, like `cheader`. For a preview, write to the ignored `build/display-previ
 ```bash
 mkdir -p build/display-preview
 
-# LANDSCAPE 160x80 — montage of every state (charging, SoC red/amber/green, 100%,
-# asleep-dim, BLE search, WiFi search, pairing)
+# LANDSCAPE 160x80 — montage of the listed states (charging, SoC red/amber/green, 100%,
+# asleep-dim, BLE/WiFi/LAN search, pairing, LAN, punctuation, UTF-8 byte fallback and SafeMode)
 python3 tools/display_sim.py states build/display-preview/display_states.png
 
-# PORTRAIT 80x160 — the BOOT-rotated layout (vertical battery) in every state
+# PORTRAIT 80x160 — the BOOT-rotated layout (vertical battery) in the listed states
 python3 tools/display_sim.py states-portrait build/display-preview/display_states_portrait.png
 
 # WiFi + BLE "searching" sweep, frame-by-frame (the ping-pong highlight)
@@ -69,7 +69,7 @@ python3 tools/display_sim.py search build/display-preview/display_search.png
 # too-long SSID at several marquee offsets — verify horizontal scroll + clipping
 python3 tools/display_sim.py scroll build/display-preview/display_scroll.png
 
-# single charging "hero" preview frame (sample SSID / 64% / charging)
+# single charging "hero" preview frame (Demo-Net / 64% / charging)
 python3 tools/display_sim.py png build/display-preview/display_preview.png
 ```
 

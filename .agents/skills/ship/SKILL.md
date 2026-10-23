@@ -204,8 +204,16 @@ python3 scripts/check-firmware-artifacts.py --app-only --target "$TARGET" --vers
 
 Write the app to `ota_0` and erase `otadata` so the bootloader boots the freshly written
 slot (a device that previously OTA'd may be running from `ota_1`). Do not run this branch without
-fresh explicit approval for the exact port/board/target and these two writes. Never substitute a
-merged image or touch `nvs@0x9000/0x6000`:
+approval covering the exact port/board/target, the retained-bootloader read and these two writes. Never substitute a
+merged image or touch `nvs@0x9000/0x6000`.
+
+Collect a fresh local `BOOT_IMAGE` for this identified board with the
+[retained-bootloader preflight](../usb-recovery/SKILL.md#retained-bootloader-compatibility), after
+establishing its project layout. Leave `BOOTLOADER` unset: this branch retains it. The shared
+check below requires an exact reviewed reference for a descriptorless bootloader and refuses an
+older-IDF app, unknown/unreadable metadata or a different chip before the
+app write. The collected bytes are evidence for this board, not a reusable fleet assumption:
+
 
 ```bash
 set -euo pipefail
@@ -232,6 +240,7 @@ case "$CHIP_RAW" in ESP32-S3*) DETECTED=esp32s3 ;; ESP32-C3*) DETECTED=esp32c3 ;
 [ "$DETECTED" = "$TARGET" ] || {
   echo "REFUSING: selected port is $DETECTED, requested target is $TARGET" >&2; exit 1;
 }
+python3 scripts/check-bootloader-compat.py --target "$TARGET" --bootloader "${BOOT_IMAGE:?collect the retained bootloader for this board first}" --app "$APP"
 if ! esptool --chip "$TARGET" -p "$PORT" ${RESET_ARGS[@]+"${RESET_ARGS[@]}"} \
     write_flash 0x20000 "$APP"; then
   echo "REFUSING: signed app write failed; otadata was not activated" >&2; exit 1

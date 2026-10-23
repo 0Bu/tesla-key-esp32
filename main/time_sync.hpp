@@ -1,14 +1,17 @@
 #pragma once
+#include <cstdint>
+#include "logic/clock_policy.hpp"
 
-// Returns true if the system clock has been authoritatively synchronized this boot,
-// either via SNTP (on_time_sync) or via an explicit browser timestamp (apply_browser_clock).
-// A wall clock restored from NVS (restore_clock_from_nvs) is NOT authoritative because it
-// represents historical time from a prior shutdown/sync.
+// Only validated successful NTP application in this boot permits durable new dates.
+// Restored and browser time are temporary estimates. Historical dates have no source marker.
 bool clock_is_authoritative() noexcept;
+bool clock_synced_via_ntp() noexcept; // ever committed; a later failed sync does not clear it
+int64_t clock_plausibility_ceiling() noexcept; // exclusive, build year + 10
 
-// Marks the system clock as authoritatively synchronized (called on SNTP sync or browser clock apply).
-void mark_clock_authoritative() noexcept;
+enum class BrowserClockStatus : uint8_t { Applied, AlreadyNtpSynced, Busy, Invalid, SetFailed };
+struct BrowserClockResult { BrowserClockStatus status; int64_t seconds; };
 
-// True specifically if SNTP has synced this boot. Used by HTTP /set_time and /ota/check
-// to avoid overwriting a verified NTP time with browser time.
-bool clock_synced_via_ntp() noexcept;
+// Serialized with the strong SNTP hook; never persists or marks browser time authoritative.
+// Busy/Invalid/AlreadyNtpSynced prove no browser write; SetFailed preserves effect uncertainty.
+BrowserClockResult apply_browser_clock(double milliseconds) noexcept;
+BrowserClockResult apply_browser_clock_sample(tk::ClockSample sample) noexcept;

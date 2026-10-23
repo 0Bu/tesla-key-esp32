@@ -301,7 +301,8 @@ bool VehicleController::start_tasks() {
 
     TaskHandle_t loop_task = nullptr;
     // 10240 B: a paired ESP32-S3 at 1.6.3-dev.4 reported 444 B minimum free of the former 8192 B;
-    // #375 grew the loop_task_fn_ root frame by 112 B. Projected (not yet measured) reserve ~2.3 KB.
+    // that historical observation motivated the increase. Current reserve needs fresh runtime
+    // minima for this build and workload; compiler root frames do not bound composed call depth.
     if (xTaskCreate(loop_task_fn_, "vehicle_loop", 10240, this,
                     tk::kPrioVehicleLoop, &loop_task) != pdPASS) {
         ESP_LOGE(TAG, "vehicle_loop task creation failed");
@@ -414,18 +415,38 @@ VehicleController::LinkState VehicleController::link_state() const {
     return tk::compute_link_state(in);
 }
 
+ChargeStateResult VehicleController::get_cached_charge_with_age(bool& have_age, uint32_t& age_s) {
+    ChargeStateResult charge;
+    uint32_t sample = 0;
+    have_age = false;
+    age_s = 0;
+    {
+        tk::SemGuard g(cache_mutex_);
+        if (!g) return charge;
+        charge = last_known_charge_;
+        sample = last_charge_ticks_.load();
+        have_age = charge_state_generation_.load() != 0;
+    }
+    if (have_age) age_s = (xTaskGetTickCount() - sample) / configTICK_RATE_HZ;
+    return charge;
+}
+
 // Assemble the vehicle-owned half of the on-device indicators' input snapshot (see
 // logic/ui_state.hpp). One pass over link_state / ble_* / the cached charge — the charge
-// copy is taken under cache_mutex_ by get_cached_charge() — so a presenter reads one
+// copy and its timestamp are taken together under cache_mutex_ — so a presenter reads one
 // consistent view instead of racing five separate accessors across a frame. `soc` is left
 // RAW (the presenter clamps); `paired` and the wifi_* fields are filled by the caller.
 tk::UiSnapshot VehicleController::ui_snapshot() {
     tk::UiSnapshot s;
-    ChargeStateResult cs = get_cached_charge();
+    bool have_age = false;
+    uint32_t age_s = 0;
+    ChargeStateResult cs = get_cached_charge_with_age(have_age, age_s);
     s.have_soc  = cs.valid && (cs.has_usable_battery_level || cs.has_battery_level);
     s.soc       = static_cast<int>(lroundf(tk::effective_usable_soc(cs)));
-    s.charging  = (cs.charging_state == "Charging");
     s.link_state    = link_state();
+    s.charging = s.link_state == tk::LinkState::Awake &&
+                 tk::charge_sample_fresh(cs.valid, have_age, age_s) &&
+                 cs.charging_state == "Charging";
     s.ble_connected = ble_connected();
     int8_t rssi = 0;
     s.ble_rssi_valid = s.ble_connected && ble_rssi(rssi);

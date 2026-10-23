@@ -19,6 +19,12 @@ scripts/idf-docker.sh idf.py menuconfig
 The targets are exactly esp32, esp32s3, esp32c3 and esp32c6. The component manifest and four target
 lockfiles pin the graph. CMake applies the ordered hash-checked tesla-ble patch series; do not edit
 managed checkouts or silently substitute a host IDF. Protocol rationale: [ADR-0005](adr/0005-tesla-ble-seam.md).
+The patch-state manifest binds every touched file's complete before/after digest. Unknown or mixed
+source states fail even with an existing marker; rematerialise the component deliberately. Environment
+patch overrides are refused. Native harnesses may pass an explicit component path to the same verifier.
+Incremental builds monitor the verifier inputs, postimages, marker and patch/lock inventories and
+rerun admission when they change. This uses normal CMake timestamp and inventory tracking;
+independent fresh rebuilds establish delivery provenance.
 
 Host gates use `scripts/with-host-python.sh` to resolve Python ≥3.11 for tomllib. It re-execs once,
 not a hidden source change. Native Codex adapters are checked/generated with
@@ -28,6 +34,9 @@ registration/trust in sync in linked worktrees. Adapter parity does not prove ru
 Optional build acceleration: `IDF_FAST_BUILD=1` uses a container-native volume;
 `scripts/idf-docker.sh daemon start` keeps a warm container, and `daemon stop` releases it.
 The same limits and toolchain apply. USB flashing runs on the host, not Docker Desktop.
+For linked worktrees, only the external Git common directory is mounted read-only; the primary
+checkout's source files are not exposed. Daemon reuse checks the actual mount inventory as well
+as its image, resource limits and mount-policy label. An older, broader daemon is recreated.
 
 ## Validate a change
 
@@ -42,6 +51,16 @@ scripts/test-pr-gates.sh
 tools/agent-config/selftest.sh
 ```
 
+Automatic browser tests are Linux-only. On macOS, use `scripts/run-browser-tests-linux.sh`
+(Docker and package access for the initial image build), or the Linux CI host job. The container
+runs the actual desktop/mobile DOM and accessibility checks without network or writable source
+access. Native macOS browser launches are refused; `--require-all` runs this Linux container
+on macOS and fails if Docker, the image build or the real browser check fails. Prepare a cold
+image with `scripts/run-browser-tests-linux.sh` first; the strict sub-gate keeps its 120-second
+outer deadline, including Docker startup. Controlled launch-policy tests are separate
+from real-browser evidence. For optional local visual review, use the provided in-app Browser
+with an offline fixture; do not launch native Chrome from shell tests.
+
 Before firmware handoff, use the complete four-target contract:
 
 ```bash
@@ -53,11 +72,16 @@ Never use the real offline OTA key in tests. Before a firmware push, `scripts/pr
 checks all four size and stack baselines incrementally; `--target` narrows investigation and
 `--clean` removes its cache. Narrow checks do not replace the four-target handoff.
 
+The IDF wrapper applies the same CPU/memory ceiling to ordinary builds, daemon creation and
+Fast-Build volume setup. Volume setup uses the pinned IDF image and stops on failure. Its offline
+self-test executes the shipped wrapper with a passive Docker CLI, including setup failures; it
+neither accesses a Docker daemon nor establishes actual container resource enforcement.
+
 ## Build and evidence contracts
 
 | Contract | Authority |
 |---|---|
-| Toolchain, locked components and patches | `esp-idf-toolchain.txt`, `main/idf_component.yml`, `dependencies.lock.*`, `patches/tesla-ble/` |
+| Toolchain, locked components and patches | `esp-idf-toolchain.txt`, `main/idf_component.yml`, `dependencies.lock.*`, `patches/tesla-ble/`, `scripts/tesla-ble-patch-state.json` |
 | Exact four targets and unsigned outputs | `scripts/ci-build-all.sh`, `check-build-artifact-inventory.py` |
 | Physical flash layout | `partitions.csv`, `check-partition-contract.py`, `check-otadata-contract.py` |
 | Effective compiler/generated/link inputs | `check-build-semantics.py` |
@@ -74,7 +98,12 @@ the other components are covered by the checked `CONFIG_COMPILER_OPTIMIZATION_DE
 value, Mbed TLS/TF-PSA-Crypto `-Os` is checked as the effective Kconfig value, and the bootloader,
 which builds with size optimization, is compared only between independent builds. Main privately
 enforces C++17 and return-value/format warnings.
-Compiler/include/search and `CCACHE_*` overrides are rejected, and ccache is disabled.
+The Tesla BLE component privately selects `TESLA_BLE_LOG_LEVEL=2`; effective commands must
+contain that single definition. Its host harness uses the same level and keys object reuse to
+the patch-state digest. DEBUG/VERBOSE arguments and formatting are excluded; INFO remains.
+Compiler/include/search flags, `SDKCONFIG_DEFAULTS`, `EXTRA_COMPONENT_DIRS`, and all
+`IDF_COMPONENT_*`, `TESLA_BLE_*` and `CCACHE_*` environment overrides are rejected even when empty.
+Both primary and reproduction entry points apply these guards; ccache is disabled.
 
 The size policy limits the projected signed app to slot minus 32 KiB (`0x1e8000`): the app is
 padded to 64 KiB and signing adds one 4 KiB sector, bounded by the `0x1f0000` slot. Because size
@@ -91,6 +120,17 @@ incremental `precheck-firmware.sh` on all four (`PRE_PUSH_TARGETS` narrows it de
 checks only the size and stack gates, not CI's dependency, partition, otadata, semantics,
 artifact-identity, reproducibility or signing gates. Stack reports inventory frames, reject unbounded dynamic frames
 and frames over 4096 B; they do not prove call depth or runtime stack margin.
+
+### ESP-IDF migration inputs
+
+An approved toolchain migration must update the image tag and digest in `esp-idf-toolchain.txt`,
+the dependency verifier's IDF/Mbed TLS pins, all four lockfiles, the harness `MBEDTLS_REF`,
+the workflow's independent-rebuild image literal, both resource baselines' toolchain identities,
+the SDK-default and build-semantic version literals, and the compiled X509 bundle hash.
+Review the PSA patch and canonical postimages, then rerun the protocol vectors and complete
+four-target contract. CI action inputs must still use the toolchain output, and both target
+matrices must still contain exactly the four supported targets. This list is a migration checklist,
+not authorization to change any pin.
 
 ## Delivery
 
@@ -136,10 +176,38 @@ Never put `git push`, `gh pr create`, `gh pr merge`, or a key, NVS or credential
 script: those stay standalone, statically bound commands that the hooks inspect, or the operator's
 step. A script grants no authorization; every approval boundary of the workflow still applies.
 
+### Retained-bootloader references
+
+`scripts/check-bootloader-compat.py` compares stable ESP-IDF descriptors before an app-only USB
+write. Some IDF bootloaders omit that descriptor. These require a byte match to
+[`scripts/bootloader-references.json`](../scripts/bootloader-references.json), never a guessed
+version or the assumption that the current app's bootloader is installed. The selected target's
+reference binds image length/SHA-256, source commit, CI run/artifact identity and ZIP digest,
+toolchain tag/digest and the independently accepted local rebuild's source/receipt digests.
+The catalog is reviewed policy, not a self-authenticating producer manifest or an app-signing key.
+
+Before adding or replacing a reference, independently verify the CI job's exact source and pinned
+toolchain, the downloaded ZIP against GitHub's artifact digest, its exact bootloader path and bytes,
+and a separately rebuilt byte-equal bootloader. Retain the evidence and obtain independent review
+of the entry. Schema validation alone cannot establish those facts. The initial four references
+come from the successful primary target jobs in [run 39685199994](https://github.com/0Bu/tesla-key-esp32/actions/runs/39685199994),
+source `e1c3197596575728f336bec9eee0eafc4a0793f6`, and match the separately accepted local builds.
+That workflow's host sanitizer failure remains a publication blocker; these references certify
+only the recorded bootloader bytes and toolchain, with no app-delivery or whole-workflow approval.
+
+For a descriptorless image, accept only the exact recorded image or the full confirmed project
+bootloader region with an all-`0xff` suffix: `0x1000/0x7000` on ESP32, `0x0/0x8000` on S3/C3/C6.
+Unknown bytes, partial padding, missing provenance or a wrong target fail closed. Collection
+belongs to the explicitly identified board and approved read plan; the checker contacts no device.
+This admission does not prove bootability, signature authority, physical identity or runtime stack.
+
 ## Reviews and documentation
 
 Required independent checks and exact-head records are in [AGENTS.md](../AGENTS.md#pr-and-review).
 Skills specify how to perform them; a green build does not substitute for review.
+Before PR creation or a new push, publication reviews can bind a clean local candidate with
+verified branch, base and ancestry. Recheck the exact GitHub head after push; these records do
+not establish remote CI or merge acceptance.
 Update the owning document with each changed contract. Keep [FEATURES](FEATURES.md) as an index,
 not a second narrative. `$project-review` always assesses documentation structure, clarity,
 concision and completeness; unresolved material documentation findings prevent a clean result.

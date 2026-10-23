@@ -15,9 +15,35 @@ fi
 worktree_tmp_rel="build/agent-hook-selftest.$$"
 worktree_tmp="$root/$worktree_tmp_rel"
 worktree_test_tmp="$root/test/$worktree_tmp_rel"
-trap 'rm -rf "$tmp" "$worktree_tmp" "$worktree_test_tmp" 2>/dev/null; rmdir "$root/.tmp" 2>/dev/null || true' EXIT
+cleanup() {
+  rm -rf "$tmp" "$worktree_tmp" "$worktree_test_tmp" 2>/dev/null || true
+  rmdir "$root/.tmp" 2>/dev/null || true  # only if empty: never a cache or unrelated data
+}
+trap cleanup EXIT
 pass_case(){ printf 'PASS  %s\n' "$1"; pass=$((pass+1)); }
 fail_case(){ printf 'FAIL  %s\n' "$1" >&2; fail=$((fail+1)); }
+
+# Exercise the same cleanup in an isolated root: remove only this invocation's resources.
+cleanup_fixture="$tmp/cleanup-ownership"
+mkdir -p "$cleanup_fixture/.tmp" "$cleanup_fixture/owned-temp" \
+  "$cleanup_fixture/owned-build" "$cleanup_fixture/owned-test"
+printf 'keep\n' > "$cleanup_fixture/.tmp/unrelated"
+(
+  root="$cleanup_fixture"
+  tmp="$root/owned-temp"
+  worktree_tmp="$root/owned-build"
+  worktree_test_tmp="$root/owned-test"
+  cleanup
+)
+if [ -f "$cleanup_fixture/.tmp/unrelated" ] \
+  && [ "$(cat "$cleanup_fixture/.tmp/unrelated")" = keep ] \
+  && [ ! -e "$cleanup_fixture/owned-temp" ] \
+  && [ ! -e "$cleanup_fixture/owned-build" ] \
+  && [ ! -e "$cleanup_fixture/owned-test" ]; then
+  pass_case 'cleanup removes owned resources and preserves unrelated temporary data'
+else
+  fail_case 'cleanup ownership'
+fi
 expect_rc(){ local want="$1" label="$2"; shift 2; "$@" >"$tmp/out" 2>&1; local rc=$?; if [ "$rc" = "$want" ]; then pass_case "$label"; else fail_case "$label (want=$want got=$rc: $(tail -c 300 "$tmp/out"))"; fi; }
 payload(){ python3 - "$@" <<'PY'
 import json,sys
@@ -77,6 +103,10 @@ PY
 then pass_case 'secret denials redact untrusted tool and path values'; else fail_case 'secret denial redaction'; fi
 expect_guard allow "$(payload Bash command 'espsecure.py sign_data --keyfile ota_signing_key.pem firmware.bin' "$root")" 'sole exact sign_data keyfile use allowed'
 expect_guard allow "$(payload exec_command cmd 'python3 -m espsecure sign-data --keyfile ota_signing_key.pem firmware.bin' "$root")" 'module sign-data spelling allowed'
+expect_guard deny "$(payload Bash command 'espsecure.py sign_data --keyfile tesla_ota_signing_key.pem firmware.bin' "$root")" 'additional key basename is not a general signing exception'
+expect_guard allow "$(payload Bash command 'espsecure.py sign_data --keyfile "$OTA_SIGNING_KEY_FILE" firmware.bin' "$root")" 'configured key reference is allowed only in the signer keyfile position'
+expect_guard deny "$(payload Bash command 'espsecure.py sign_data --keyfile "$OTA_SIGNING_KEY_FILE" firmware.bin && true' "$root")" 'configured key reference does not allow chained signing'
+
 expect_guard deny "$(payload Bash command 'espsecure.py sign_data --keyfile ota_signing_key.pem firmware.bin && true' "$root")" 'chained sign_data denied'
 expect_guard deny "$(payload Bash command 'espsecure.py sign_data --keyfile ota_signing_key.pem firmware.bin | tee out' "$root")" 'piped sign_data denied'
 expect_guard deny "$(payload Bash command 'espsecure.py sign_data --keyfile ota_signing_key.pem ota_signing_key.pem' "$root")" 'key-as-datafile denied'
@@ -312,6 +342,13 @@ if printf '%s\n' 'main/logic/telemetry_poll.hpp' | gate_vehicle_command_relevant
 else
   fail_case 'header-only telemetry scheduler relevance'
 fi
+for patch_input in scripts/apply-tesla-ble-patches.sh scripts/apply-tesla-ble-patches.py scripts/tesla-ble-patch-state.json scripts/check-dependency-contract.py; do
+  if printf '%s\n' "$patch_input" | gate_vehicle_command_relevant; then
+    pass_case "patch admission input requires protocol review: $patch_input"
+  else
+    fail_case "patch admission input requires protocol review: $patch_input"
+  fi
+done
 if printf '%s\n' 'docs/README.md' | gate_vehicle_command_relevant \
    || printf '%s\n' 'main/display.cpp' | gate_vehicle_command_relevant \
    || printf '%s\n' 'main/logic/soc_gradient.hpp' | gate_vehicle_command_relevant; then
@@ -732,6 +769,9 @@ size_relevant_samples=(
   "dependencies.lock.esp32c6"
   "esp-idf-toolchain.txt"
   "scripts/apply-tesla-ble-patches.sh"
+  "scripts/apply-tesla-ble-patches.py"
+  "scripts/tesla-ble-patch-state.json"
+  "scripts/check-idf-container-mounts.py"
   "scripts/ci-build-all.sh"
   "scripts/idf-docker.sh"
   "scripts/idf-version.sh"

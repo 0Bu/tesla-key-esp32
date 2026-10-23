@@ -122,6 +122,8 @@ jobs:
         run: ./tools/agent-config/selftest.sh
       - name: Validate repository syntax, links and workflow policy
         run: ./scripts/repo-lint.sh
+      - name: Verify vendored installer source and notices
+        run: ./scripts/verify-vendored-esptool-js.sh --source
       - name: Run host-side logic tests
         run: ./scripts/run-mock-tests.sh --require-all
 
@@ -151,6 +153,7 @@ jobs:
           python3 scripts/check-sdkconfig-defaults.py --self-test
           python3 scripts/report-firmware-size.py --self-test
           python3 scripts/check-dev-pages.py --self-test
+          python3 scripts/wait-pages-build.py --self-test
           python3 scripts/generate-ota-changelog.py --self-test
           python3 scripts/check-build-gate-contract.py --self-test
           python3 tools/agent-hooks/agent_hook.py build-efficiency --self-test
@@ -264,7 +267,7 @@ jobs:
 
       - name: Upload target build artifacts
         if: steps.changes.outputs.firmware == 'yes' && matrix.leg == 'primary'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: firmware-target-${{ matrix.target }}
           if-no-files-found: error
@@ -275,7 +278,7 @@ jobs:
 
       - name: Upload reproduction copy
         if: steps.changes.outputs.firmware == 'yes' && matrix.leg == 'reproduction'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: firmware-repro-${{ matrix.target }}
           if-no-files-found: error
@@ -425,7 +428,7 @@ jobs:
 
       - name: Upload unsigned build and diagnostics
         if: steps.changes.outputs.firmware == 'yes'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: firmware-unsigned
           if-no-files-found: error
@@ -508,7 +511,7 @@ jobs:
             "${{ github.sha }}"
       - name: Upload independent target rebuild
         if: steps.changes.outputs.firmware == 'yes'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: firmware-independent-target-${{ matrix.target }}
           if-no-files-found: error
@@ -562,7 +565,7 @@ jobs:
             --write --artifact-root . --source-root . \
             --expected-source-sha "$SOURCE_SHA" --version "$DISPLAY_VERSION"
       - name: Upload independent rebuild evidence
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: firmware-independent-rebuild
           if-no-files-found: error
@@ -821,7 +824,7 @@ jobs:
           python3 scripts/check-signed-root-inventory.py . --version "$DISPLAY_VERSION"
 
       - name: Upload signed firmware artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: tesla-key-esp32-${{ needs.build.outputs.display-version }}-${{ github.sha }}
           if-no-files-found: error
@@ -1049,6 +1052,8 @@ jobs:
           gh api "repos/$GITHUB_REPOSITORY/pages" > "$pages_json"
           pages_base_url="$(python3 scripts/check-pages-source.py "$pages_json" --print-url)"
           gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$RELEASE_VERSION" > "$release_json"
+          python3 scripts/wait-pages-build.py --repository "$GITHUB_REPOSITORY" \
+            --attempts 8 --interval 10 --timeout 15
           python3 scripts/check-published-release.py \
             --pages-base-url "$pages_base_url" \
             --release-base-url "https://github.com/$GITHUB_REPOSITORY/releases/download/v$RELEASE_VERSION" \
@@ -1067,6 +1072,17 @@ jobs:
         env:
           SOURCE_SHA: ${{ github.sha }}
         run: ./scripts/select-release-version.sh --require-current-main "$SOURCE_SHA"
+
+      - name: Revalidate branch-backed Pages authority immediately before dev deployment
+        if: needs.build.outputs.mode == 'dev'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          pages_json="$(mktemp)"
+          trap 'rm -f "$pages_json"' EXIT
+          gh api "repos/$GITHUB_REPOSITORY/pages" > "$pages_json"
+          python3 scripts/check-pages-source.py "$pages_json"
 
       - name: Deploy dev site to gh-pages
         if: needs.build.outputs.mode == 'dev'
@@ -1087,6 +1103,8 @@ jobs:
           trap 'rm -f "$pages_json"' EXIT
           gh api "repos/$GITHUB_REPOSITORY/pages" > "$pages_json"
           pages_base_url="$(python3 scripts/check-pages-source.py "$pages_json" --print-url)"
+          python3 scripts/wait-pages-build.py --repository "$GITHUB_REPOSITORY" \
+            --attempts 8 --interval 10 --timeout 15
           python3 scripts/check-dev-pages.py \
             --pages-base-url "$pages_base_url" \
             --staged-site ./_deploy-input/_site \

@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-T-Dongle-S3 / -C5 display layout simulator + 5x7 font source of truth.
+T-Dongle-S3 display layout simulator + 5x7 font source of truth.
 
-Renders the 0.96" ST7735 screen in LANDSCAPE (160x80 px) exactly as the
-firmware will, using the SAME 5x7 bitmap font and the SAME drawing primitives,
-so we can validate the layout offline — BEFORE flashing hardware.
+Approximates the 0.96" ST7735 screen in LANDSCAPE (160x80 px), sharing the
+font source and checking native model/font/text data. This supports offline visual
+review; the parity gate does not establish complete-frame pixel equality.
 
 Layout (matches main/display.cpp compose()):
   ┌──────────────────────────────────────────┐
-  │ ▂▄▆█  Jupiter                  *  ▂▄▆█    │  header: WiFi bars+SSID | BLE sym+bars
+  │ ▂▄▆█  Demo-Net                  *  ▂▄▆█    │  header: WiFi bars+SSID | BLE sym+bars
   ├──────────────────────────────────────────┤
   │  ███████████░░░░░░░░░░░░░░░░░░░░░░░░  ▐    │  battery: gradient fill to SoC,
   │  ███████████░░░░░⚡ 64%░░░░░░░░░░░░░  ▐    │           bolt while charging (<100%)
@@ -21,8 +21,8 @@ battery + two-row header — is rendered by compose_portrait() (mirrors display.
 
 Outputs (stdlib only, no Pillow):
   python3 tools/display_sim.py png  [out.png]             -> the charging hero frame (preview)
-  python3 tools/display_sim.py states [out.png]           -> a montage of all LANDSCAPE states
-  python3 tools/display_sim.py states-portrait [out.png]  -> a montage of all PORTRAIT states
+  python3 tools/display_sim.py states [out.png]           -> a montage of listed LANDSCAPE states
+  python3 tools/display_sim.py states-portrait [out.png]  -> a montage of listed PORTRAIT states
   python3 tools/display_sim.py cheader [out.h]            -> main/display_font.h (font + glyphs)
 
 The font dict below is authored as 7-row x 5-col ASCII art ('#'=on). The C-header
@@ -77,7 +77,7 @@ G = {
 'd': ["....#","....#",".####","#...#","#...#","#...#",".####"],
 'e': [".....",".....",".###.","#...#","#####","#....",".###."],
 'f': ["..##.",".#..#",".#...","###..",".#...",".#...",".#..."],
-'g': [".....",".####","#...#","#...#",".####","....#",".###."],
+'g': [".....",".....",".####","#...#",".####","....#",".###."],
 'h': ["#....","#....","####.","#...#","#...#","#...#","#...#"],
 'i': ["..#..",".....",".##..","..#..","..#..","..#..",".###."],
 'j': ["...#.",".....","..##.","...#.","...#.","#..#.",".##.."],
@@ -86,7 +86,7 @@ G = {
 'm': [".....",".....","##.#.","#.#.#","#.#.#","#...#","#...#"],
 'n': [".....",".....","####.","#...#","#...#","#...#","#...#"],
 'o': [".....",".....",".###.","#...#","#...#","#...#",".###."],
-'p': [".....","####.","#...#","#...#","####.","#....","#...."],
+'p': [".....",".....","####.","#...#","#...#","####.","#...."],
 'q': [".....",".####","#...#","#...#",".####","....#","....#"],
 'r': [".....",".....","#.##.","##..#","#....","#....","#...."],
 's': [".....",".....",".####","#....",".###.","....#","####."],
@@ -105,13 +105,40 @@ G = {
 '+': [".....","..#..","..#..","#####","..#..","..#..","....."],
 '(': ["..##.",".#...","#....","#....","#....",".#...","..##."],
 ')': [".##..","...#.","....#","....#","....#","...#.",".##.."],
-'~': [".....",".....","....."]+[".....",".....",".....","....."],  # placeholder
+'!': ['..#..', '..#..', '..#..', '..#..', '..#..', '.....', '..#..'],
+'"': ['.#.#.', '.#.#.', '.#.#.', '.....', '.....', '.....', '.....'],
+'#': ['.#.#.', '.#.#.', '#####', '.#.#.', '#####', '.#.#.', '.#.#.'],
+'$': ['..#..', '.####', '#.#..', '.###.', '..#.#', '####.', '..#..'],
+'&': ['.##..', '#..#.', '#.#..', '.##..', '#.#.#', '#..#.', '.##.#'],
+"'": ['..#..', '..#..', '.#...', '.....', '.....', '.....', '.....'],
+'*': ['.....', '#.#.#', '.###.', '#####', '.###.', '#.#.#', '.....'],
+',': ['.....', '.....', '.....', '.....', '.##..', '.##..', '.#...'],
+';': ['.....', '.##..', '.##..', '.....', '.##..', '.##..', '.#...'],
+'<': ['...#.', '..#..', '.#...', '#....', '.#...', '..#..', '...#.'],
+'=': ['.....', '.....', '#####', '.....', '#####', '.....', '.....'],
+'>': ['.#...', '..#..', '...#.', '....#', '...#.', '..#..', '.#...'],
+'?': ['.###.', '#...#', '....#', '...#.', '..#..', '.....', '..#..'],
+'@': ['.###.', '#...#', '#.###', '#.#.#', '#.###', '#....', '.####'],
+'[': ['.###.', '.#...', '.#...', '.#...', '.#...', '.#...', '.###.'],
+'\\': ['#....', '.#...', '..#..', '..#..', '...#.', '....#', '....#'],
+']': ['.###.', '...#.', '...#.', '...#.', '...#.', '...#.', '.###.'],
+'^': ['..#..', '.#.#.', '#...#', '.....', '.....', '.....', '.....'],
+'_': ['.....', '.....', '.....', '.....', '.....', '.....', '#####'],
+'{': ['...#.', '..#..', '..#..', '.#...', '..#..', '..#..', '...#.'],
+'|': ['..#..', '..#..', '..#..', '..#..', '..#..', '..#..', '..#..'],
+'}': ['.#...', '..#..', '..#..', '...#.', '..#..', '..#..', '.#...'],
+'~': ['.....', '.....', '.#..#', '#.##.', '.....', '.....', '.....'],
 }
 # small lightning bolt, addressed as key '`' (kept for back-compat / inline text)
 G['`'] = ["..##.",".##..","#####","..##.",".##..","#....","#...."]
 
+def display_bytes(text):
+    """The panel advances once per UTF-8 byte and stops at the first NUL."""
+    return text.encode("utf-8").split(b"\0", 1)[0].decode("latin1")
+
 def glyph(ch):
-    return G.get(ch, ["#####","#...#","#...#","#...#","#...#","#...#","#####"] if ch != ' ' else G[' '])
+    # The native renderer blanks each byte outside printable ASCII.
+    return G.get(ch, G[' '])
 
 # ── Bluetooth glyph (5 wide x 9 tall) and big charging bolt (10 wide x 16 tall)
 # Authored row-major ('#'=lit). The cheader generator emits these as bitmaps
@@ -188,21 +215,30 @@ def _iround(x):
     # Round half away from zero, matching C++ lroundf — and round the DELTA (b-a)*t, exactly
     # like display.cpp/soc_gradient.hpp lerp8 (a + lroundf((b-a)*t)). Python's built-in round()
     # is banker's rounding on the SUM, which disagrees by 1 where a delta lands on a clean .5
-    # (e.g. the asleep-dim blend); this keeps the sim pixel-exact to the firmware.
+    # (e.g. the asleep-dim blend); this matches the native integer colour calculation, not every rendered pixel.
     return int(x + 0.5) if x >= 0 else -int(-x + 0.5)
 
 def lerp(a, b, t):
     return tuple(a[i] + _iround((b[i] - a[i]) * t) for i in range(3))
 
+def _f32(value):
+    return struct.unpack("f", struct.pack("f", value))[0]
+
 def soc_color(soc):
-    p = max(0.0, min(1.0, soc / 100.0))
+    # Mirror each C++ float intermediate, including negative half-away-from-zero deltas.
+    p = _f32(max(0.0, min(1.0, _f32(soc) / _f32(100.0))))
     for i in range(len(GRAD) - 1):
         p0, c0 = GRAD[i]
         p1, c1 = GRAD[i + 1]
+        p0, p1 = _f32(p0), _f32(p1)
         if p <= p1:
-            t = 0 if p1 == p0 else (p - p0) / (p1 - p0)
-            return lerp(c0, c1, t)
+            span = _f32(p1 - p0)
+            t = 0.0 if span <= 0 else _f32(_f32(p - p0) / span)
+            return tuple(c0[k] + _iround(_f32((c1[k] - c0[k]) * t)) for k in range(3))
     return GRAD[-1][1]
+
+def rssi_bars(rssi):
+    return 4 if rssi >= -55 else 3 if rssi >= -65 else 2 if rssi >= -75 else 1 if rssi >= -85 else 0
 
 def dim(col, t=0.5):   # blend a colour toward the panel (for the asleep state)
     return lerp(col, PANEL, t)
@@ -238,14 +274,14 @@ class Canvas:
                             self.px(x + c*scale + dx, y + r*scale + dy, col)
     def text(self, x, y, s, col, scale=1):
         cx = x
-        for ch in s:
+        for ch in display_bytes(s):
             self.char(cx, y, ch, col, scale)
             cx += 6 * scale
         return cx
     def text_clip(self, x, y, s, col, scale, cx0, cx1):
         # like text() but only sets pixels with cx0 <= px < cx1 (for the scroll box)
         cx = x
-        for ch in s:
+        for ch in display_bytes(s):
             gl = glyph(ch)
             for r in range(7):
                 row = gl[r]
@@ -277,7 +313,7 @@ class Canvas:
                             self.px(x + c*scale + dx, y + r*scale + dy, col)
 
 def textw(s, scale=1):
-    return len(s) * 6 * scale
+    return len(display_bytes(s)) * 6 * scale
 
 # Horizontal marquee for an over-long SSID: ping-pong (pause, scroll out to reveal
 # the end, pause, scroll back) so the whole name is readable. Returns the left
@@ -360,8 +396,16 @@ def draw_pairing(cv, frame):
 # main/logic/display_model.hpp. scripts/check-display-sim-parity.sh diffs this against golden
 # vectors the C++ presenter emits, so a drift between the firmware and this pixel sim fails CI
 # instead of going unnoticed by hand. compose() below draws exactly this model — the same
-# presenter/renderer split the firmware uses. Bars (rssi→level) are not decided here (the sim
-# is fed levels directly); everything else is.
+# presenter/renderer split the firmware uses. RSSI bar and glyph decisions are included;
+# this is not renderer pixel or physical animation equivalence.
+def signal_inputs(st):
+    # Montage callers may provide legacy bar levels; raw-RSSI callers use the native inputs.
+    def from_level(level):
+        return (-100, -80, -70, -60, -50)[max(0, min(4, int(level)))]
+    return {"wifi_rssi": st.get("wifi_rssi", from_level(st.get("wifi", 0))),
+            "ble_rssi_valid": st.get("ble_rssi_valid", bool(st.get("ble_on") and st.get("ble", 0))),
+            "ble_rssi": st.get("ble_rssi", from_level(st.get("ble", 0)))}
+
 def decide(inp):
     link     = inp["link"]
     net      = inp["net"]                  # "none" | "wifi" | "eth" — the TRANSPORT, not a bool
@@ -372,15 +416,17 @@ def decide(inp):
     charging = inp["charging"]
     paired   = inp["paired"]
     tick     = inp["tick"]
+    safe_mode = inp.get("safe_mode", False)
 
     unreachable   = link == "unreachable"
     net_searching = net == "none"
     pairing       = ble_conn and not paired          # BLE link up but not yet paired
     battery_ok    = (not unreachable) and have_soc
     # BLE search bars appear ONLY when nothing else claims the centre (car out of range).
-    ble_bars      = not (net_searching or pairing or battery_ok)
+    ble_bars      = not safe_mode and not (net_searching or pairing or battery_ok)
 
-    if   net_searching:  hero = "net_search"
+    if   safe_mode:      hero = "safe_mode"
+    elif net_searching:  hero = "net_search"
     elif pairing:        hero = "pairing"
     elif not battery_ok: hero = "ble_search"
     else:                hero = "battery"
@@ -388,21 +434,25 @@ def decide(inp):
     # Ethernet takes the WiFi slot but draws a static "LAN" label: it has neither a signal
     # level nor a network name, so every ssid_* below stays at its default.
     m = {"hero": hero, "show_wifi": net == "wifi", "show_lan": net == "eth",
-         "search_is_lan": eth_pres, "show_ble": not ble_bars,
+         "search_is_lan": eth_pres, "show_ble": not safe_mode and not ble_bars,
          "ssid_avail": 0, "ssid_scrolling": False, "ssid_off": 0, "soc": 0,
          "fill_r": 0, "fill_g": 0, "fill_b": 0, "asleep": False, "show_bolt": False,
-         "animating": False}
+         "animating": False, "wifi_bars": 0, "ble_bars": 0, "ble_glyph_on": False}
 
     if m["show_wifi"]:
+        m["wifi_bars"] = rssi_bars(inp.get("wifi_rssi", 0))
         if inp.get("orient", "landscape") == "portrait":
             avail, scale = 72, 1                       # SSID own row, full width, scale 1
         else:
-            avail, scale = ((158 - 28) if ble_bars else (158 - 28 - 32)), 2
+            avail, scale = ((158 - 28) if (ble_bars or safe_mode) else (158 - 28 - 32)), 2
         m["ssid_avail"] = avail
         if textw(ssid, scale) > avail:                # too long → horizontal marquee
             m["ssid_scrolling"] = True
             m["ssid_off"] = scroll_offset(tick, textw(ssid, scale) - avail)
 
+    if m["show_ble"]:
+        m["ble_bars"] = rssi_bars(inp.get("ble_rssi", 0)) if inp.get("ble_rssi_valid", False) else 0
+        m["ble_glyph_on"] = ble_conn
     if hero == "battery":
         s = max(0, min(100, int(inp["soc"])))
         m["soc"] = s
@@ -411,13 +461,14 @@ def decide(inp):
         m["fill_r"], m["fill_g"], m["fill_b"] = col
         m["show_bolt"] = charging and s < 100 and not m["asleep"]
 
-    m["animating"] = (hero != "battery") or m["ssid_scrolling"]
+    m["animating"] = (hero not in {"battery", "safe_mode"}) or m["ssid_scrolling"]
     return m
 
 def compose(cv, st):
     cv.rect(0, 0, W, H, BG)
     inp = {
         "link":          st.get("link", "awake"),
+        "safe_mode":     st.get("safe_mode", False),
         # The sim is driven by bar LEVELS, so "wifi > 0" is its stand-in for a WiFi lease;
         # an explicit net="eth" state exercises the wired layout.
         "net":           st.get("net") or ("wifi" if st.get("wifi", 0) > 0 else "none"),
@@ -429,6 +480,7 @@ def compose(cv, st):
         "charging":      st.get("charging", False),
         "paired":        st.get("paired", True),
         "tick":          st.get("frame", 0),
+        **signal_inputs(st),
     }
     m = decide(inp)
     f = inp["tick"]
@@ -441,7 +493,7 @@ def compose(cv, st):
         cv.text(4, 4, "LAN", INK, 2)
 
     if m["show_wifi"]:
-        signal_bars(cv, 4, 4, st.get("wifi", 0))
+        signal_bars(cv, 4, 4, m["wifi_bars"])
         ssid = inp["ssid"]
         if not m["ssid_scrolling"]:
             cv.text(28, 4, ssid, INK, 2)
@@ -450,12 +502,17 @@ def compose(cv, st):
 
     if m["show_ble"]:
         bx = 158 - 16                  # 4 bars * 4px
-        signal_bars(cv, bx, 4, st.get("ble", 0) if inp["ble_connected"] else 0)
-        cv.bitmap(bx - 13, 1, BT_ROWS, INK if inp["ble_connected"] else GREY, 2)  # BT glyph, scale 2
+        signal_bars(cv, bx, 4, m["ble_bars"])
+        cv.bitmap(bx - 13, 1, BT_ROWS, INK if m["ble_glyph_on"] else GREY, 2)  # BT glyph, scale 2
 
     cv.rect(3, 22, W - 3, 23, DIV)     # divider under the (taller) header
 
-    # ── centre hero: network search > pairing > BLE search > battery ─────────
+    # ── centre hero: SafeMode > network search > pairing > BLE search > battery ─────────
+    if m["hero"] == "safe_mode":
+        hint = "Open web UI" if (m["show_wifi"] or m["show_lan"]) else "Check network"
+        cv.text((W - textw("SAFE MODE", 2)) // 2, 34, "SAFE MODE", INK, 2)
+        cv.text((W - textw(hint, 1)) // 2, 57, hint, GREY, 1)
+        return m["animating"]
     if m["hero"] == "net_search":
         draw_searching(cv, f, SRCH_ICON_LAN if m["search_is_lan"] else SRCH_ICON_WIFI)
         return True
@@ -487,7 +544,7 @@ def compose(cv, st):
         cv.bitmap(gx, (H + 18 - len(BOLT_ROWS)*2)//2 - 2, BOLT_ROWS, (255, 235, 120), 2, outline=BG)
         cv.text_outline(gx + bw + gap, 41, num, INK, 3, BG)
     else:
-        cv.text_outline((W - textw(num, 3))//2, 41, num, GREY if m["asleep"] else INK, 3, BG)
+        cv.text_outline((W - textw(num, 3))//2, 36 if m["asleep"] else 41, num, GREY if m["asleep"] else INK, 3, BG)
 
     if m["asleep"]:
         cv.text((W - textw("ASLEEP", 1))//2, 64, "ASLEEP", GREY, 1)
@@ -512,9 +569,10 @@ def draw_portrait_search_bars(cv, frame):
         x = x0 + i * (PSB_BW + PSB_GAP)
         cv.rect(x, PSB_BASE - h, x + PSB_BW, PSB_BASE, col)
 
-def draw_portrait_search(cv, frame, wifi):
+def draw_portrait_search(cv, frame, wifi, lan=False):
     if wifi:
-        cv.text((cv.w - textw("WiFi", 2)) // 2, 52, "WiFi", INK, 2)
+        label = "LAN" if lan else "WiFi"
+        cv.text((cv.w - textw(label, 2)) // 2, 52, label, INK, 2)
     else:
         cv.bitmap((cv.w - 5 * 3) // 2, 46, BT_ROWS, INK, 3)   # BT glyph, scale 3
     draw_portrait_search_bars(cv, frame)
@@ -528,6 +586,7 @@ def compose_portrait(cv, st):
     cv.rect(0, 0, cv.w, cv.h, BG)
     inp = {
         "link":          st.get("link", "awake"),
+        "safe_mode":     st.get("safe_mode", False),
         "net":           st.get("net") or ("wifi" if st.get("wifi", 0) > 0 else "none"),
         "eth_present":   st.get("eth_present", False),
         "ssid":          st.get("ssid") or "-",
@@ -537,6 +596,7 @@ def compose_portrait(cv, st):
         "charging":      st.get("charging", False),
         "paired":        st.get("paired", True),
         "tick":          st.get("frame", 0),
+        **signal_inputs(st),
         "orient":        "portrait",
     }
     m = decide(inp)
@@ -546,7 +606,7 @@ def compose_portrait(cv, st):
     if m["show_lan"]:
         cv.text(4, 4, "LAN", INK, 2)     # no bars: a wire has no signal level
     if m["show_wifi"]:
-        signal_bars(cv, 4, 4, st.get("wifi", 0))
+        signal_bars(cv, 4, 4, m["wifi_bars"])
         ssid = inp["ssid"]
         if not m["ssid_scrolling"]:
             cv.text((cv.w - textw(ssid, 1)) // 2, 21, ssid, INK, 1)
@@ -554,12 +614,18 @@ def compose_portrait(cv, st):
             cv.text_clip(4 - m["ssid_off"], 21, ssid, INK, 1, 4, 4 + m["ssid_avail"])
     if m["show_ble"]:
         bx = cv.w - 4 - 16
-        signal_bars(cv, bx, 4, st.get("ble", 0) if inp["ble_connected"] else 0)
-        cv.bitmap(bx - 12, 1, BT_ROWS, INK if inp["ble_connected"] else GREY, 2)
+        signal_bars(cv, bx, 4, m["ble_bars"])
+        cv.bitmap(bx - 12, 1, BT_ROWS, INK if m["ble_glyph_on"] else GREY, 2)
     cv.rect(4, 31, cv.w - 4, 32, DIV)
 
+    if m["hero"] == "safe_mode":
+        hint = "Open web UI" if (m["show_wifi"] or m["show_lan"]) else "Check network"
+        cv.text((cv.w - textw("SAFE", 2)) // 2, 64, "SAFE", INK, 2)
+        cv.text((cv.w - textw("MODE", 2)) // 2, 86, "MODE", INK, 2)
+        cv.text((cv.w - textw(hint, 1)) // 2, 122, hint, GREY, 1)
+        return m["animating"]
     if m["hero"] == "net_search":
-        draw_portrait_search(cv, f, True);  return True
+        draw_portrait_search(cv, f, True, m["search_is_lan"]);  return True
     if m["hero"] == "pairing":
         draw_portrait_pairing(cv, f);       return True
     if m["hero"] == "ble_search":
@@ -567,7 +633,7 @@ def compose_portrait(cv, st):
 
     # vertical battery: terminal nub on top, fill grows bottom→top
     cv.rect(30, 34, 50, 40, BORDER)
-    bx0, by0, bx1, by1 = 10, 40, 70, 152
+    bx0, by0, bx1, by1 = 6, 40, 74, 152
     cv.rect(bx0 + 2, by0 + 2, bx1 - 2, by1 - 2, PANEL)
     cv.frame(bx0, by0, bx1, by1, 3, BORDER)
     ix0, iy0, ix1, iy1 = bx0 + 3, by0 + 3, bx1 - 3, by1 - 3   # 13,43 .. 67,149
@@ -599,105 +665,84 @@ def upscale(cv, S):
 
 def cmd_png(out="tools/display_preview.png"):
     cv = Canvas()
-    compose(cv, dict(wifi=4, ssid="Jupiter", ble=3, ble_on=True,
+    compose(cv, dict(wifi=4, ssid="Demo-Net", ble=3, ble_on=True,
                      soc=64, charging=True, link="awake"))
     S = 6
     write_png(out, W*S, H*S, upscale(cv, S))
     print("wrote", out, f"({W*S}x{H*S}, logical {W}x{H})")
 
-def cmd_states(out="tools/display_states.png"):
-    states = [
-        dict(wifi=4, ssid="Jupiter", ble=3, ble_on=True,  soc=64,  charging=True,  link="awake"),
-        dict(wifi=3, ssid="Jupiter", ble=2, ble_on=True,  soc=5,   charging=False, link="awake"),
-        dict(wifi=3, ssid="Jupiter", ble=3, ble_on=True,  soc=20,  charging=False, link="awake"),
-        dict(wifi=4, ssid="Jupiter", ble=3, ble_on=True,  soc=45,  charging=False, link="awake"),
-        dict(wifi=4, ssid="Jupiter", ble=4, ble_on=True,  soc=80,  charging=True,  link="awake"),
-        dict(wifi=4, ssid="Jupiter", ble=4, ble_on=True,  soc=100, charging=True,  link="awake"),
-        dict(wifi=2, ssid="Jupiter", ble=2, ble_on=True,  soc=72,  charging=False, link="asleep"),
-        dict(wifi=3, ssid="Jupiter", ble=0, ble_on=False, soc=None,charging=False, link="unreachable", frame=6),
-        dict(wifi=0, ssid="Jupiter", ble=0, ble_on=False, soc=None,charging=False, link="unreachable", frame=6),
-        dict(wifi=3, ssid="Jupiter", ble=4, ble_on=True,  paired=False, soc=None, charging=False, link="unreachable", frame=8),
+def state_cases():
+    """The same labelled cases are available in both panel orientations."""
+    base = dict(wifi=4, ssid="Demo-Net", ble=3, ble_on=True, paired=True,
+                soc=64, charging=False, link="awake")
+    variants = [
+        ("charging 64%", dict(charging=True)),
+        ("5% red", dict(soc=5)),
+        ("20% amber", dict(soc=20)),
+        ("45% green", dict(soc=45)),
+        ("charging 80%", dict(soc=80, charging=True)),
+        ("100% no bolt", dict(soc=100, charging=True)),
+        ("asleep 72%", dict(soc=72, link="asleep")),
+        ("BLE search", dict(soc=None, ble=0, ble_on=False, link="unreachable", frame=6)),
+        ("WiFi setup/search", dict(wifi=0, soc=None, ble_on=False, link="unreachable", frame=6)),
+        ("pairing", dict(paired=False, soc=None, frame=8)),
+        ("LAN connected", dict(net="eth")),
+        ("LAN search", dict(net="none", eth_present=True, soc=None, frame=6)),
+        ("SSID punctuation", dict(ssid="Net_2.4G![]{}~", frame=0)),
+        ("UTF-8 bytes blanked", dict(ssid="Demo-ü-☀", frame=0)),
+        ("SafeMode recovery", dict(safe_mode=True)),
+        ("SafeMode no network", dict(safe_mode=True, net="none")),
     ]
-    labels = ["awake / charging 64%", "5% (red)", "20% (amber)", "45% (green)",
-              "charging 80%", "100% (no bolt)", "asleep (dim)", "searching BLE (car unreachable)",
-              "searching WiFi (priority)", "pairing (BLE up, not paired)"]
-    S = 4
-    pad = 10
-    cap = 16
-    cellw, cellh = W*S, H*S + cap
-    cols = 2
-    rows = (len(states) + cols - 1)//cols
-    bw = cols*cellw + (cols+1)*pad
-    bh = rows*cellh + (rows+1)*pad
-    big = [[(8,9,12) for _ in range(bw)] for _ in range(bh)]
-    # tiny label font via a throwaway canvas region is overkill; draw caption text
-    # by rendering each frame and stamping a 1x caption with the Canvas font.
-    for idx, st in enumerate(states):
-        cv = Canvas()
-        compose(cv, st)
-        up = upscale(cv, S)
-        r, cc = idx//cols, idx % cols
-        ox = pad + cc*(cellw + pad)
-        oy = pad + r*(cellh + pad)
-        for y in range(H*S):
-            for x in range(W*S):
-                big[oy+y][ox+x] = up[y][x]
-        # caption strip
-        capcv = Canvas()
-        capcv.text(2, 4, labels[idx][:26], INK, 1)
-        capup = upscale(capcv, 2)
-        for y in range(cap):
-            for x in range(min(cellw, W*2)):
-                big[oy + H*S + y][ox + x] = capup[y][x]
+    return [(label, dict(base, **values)) for label, values in variants]
+
+
+def state_montage(out, portrait):
+    cases = state_cases()
+    width, height, scale, cols = (PW, PH, 3, 4) if portrait else (W, H, 4, 2)
+    pad, cap = 14, 36
+    cellw, cellh = width * scale, height * scale + cap
+    rows = (len(cases) + cols - 1) // cols
+    bw, bh = cols * cellw + (cols + 1) * pad, rows * cellh + (rows + 1) * pad
+    big = [[(8, 9, 12) for _ in range(bw)] for _ in range(bh)]
+    for index, (label, state) in enumerate(cases):
+        canvas = Canvas(width, height)
+        (compose_portrait if portrait else compose)(canvas, state)
+        image = upscale(canvas, scale)
+        caption = Canvas(cellw // 2, cap // 2)
+        # Wrap at complete words; each caption pixel is copied at its actual 2x scale.
+        words, lines, line = label.split(), [], ""
+        for word in words:
+            candidate = (line + " " + word).strip()
+            if textw(candidate) > caption.w - 4:
+                lines.append(line)
+                line = word
+            else:
+                line = candidate
+        lines.append(line)
+        assert len(lines) <= 2 and all(textw(line) <= caption.w - 4 for line in lines)
+        for row, line in enumerate(lines):
+            caption.text(2, 1 + row * 8, line, INK)
+        image += upscale(caption, 2)
+        ox, oy = pad + (index % cols) * (cellw + pad), pad + (index // cols) * (cellh + pad)
+        for row, pixels in enumerate(image):
+            big[oy + row][ox:ox + cellw] = pixels
     write_png(out, bw, bh, big)
-    print("wrote", out, f"({bw}x{bh})")
+    print("wrote", out, f"({bw}x{bh}, {len(cases)} states)")
+
+
+def cmd_states(out="tools/display_states.png"):
+    state_montage(out, False)
+
 
 def cmd_states_portrait(out="tools/display_states_portrait.png"):
-    """Montage of the PORTRAIT (80x160) layout — the BOOT-rotated design — in every state."""
-    states = [
-        dict(wifi=4, ssid="Jupiter", ble=3, ble_on=True,  soc=64,  charging=True,  link="awake"),
-        dict(wifi=3, ssid="Jupiter", ble=2, ble_on=True,  soc=5,   charging=False, link="awake"),
-        dict(wifi=4, ssid="Jupiter", ble=3, ble_on=True,  soc=45,  charging=False, link="awake"),
-        dict(wifi=4, ssid="Jupiter", ble=4, ble_on=True,  soc=100, charging=True,  link="awake"),
-        dict(wifi=2, ssid="Jupiter", ble=2, ble_on=True,  soc=72,  charging=False, link="asleep"),
-        dict(wifi=3, ssid="Jupiter", ble=0, ble_on=False, soc=None, charging=False, link="unreachable", frame=6),
-        dict(wifi=0, ssid="Jupiter", ble=0, ble_on=False, soc=None, charging=False, link="unreachable", frame=6),
-        dict(wifi=3, ssid="Jupiter", ble=4, ble_on=True,  paired=False, soc=None, charging=False, link="unreachable", frame=8),
-    ]
-    labels = ["charging 64%", "5% (red)", "45% (green)", "100% (full)",
-              "asleep 72% (dim)", "searching BLE", "searching WiFi", "pairing"]
-    S = 3
-    pad, cap = 14, 26
-    cellw, cellh = PW*S, PH*S + cap
-    cols = 4
-    rows = (len(states) + cols - 1)//cols
-    bw = cols*cellw + (cols+1)*pad
-    bh = rows*cellh + (rows+1)*pad
-    big = [[(8,9,12) for _ in range(bw)] for _ in range(bh)]
-    for idx, st in enumerate(states):
-        cv = Canvas(PW, PH)
-        compose_portrait(cv, st)
-        up = upscale(cv, S)
-        r, cc = idx//cols, idx % cols
-        ox, oy = pad + cc*(cellw + pad), pad + r*(cellh + pad)
-        for y in range(PH*S):
-            for x in range(PW*S):
-                big[oy+y][ox+x] = up[y][x]
-        capcv = Canvas(PW*2, cap)
-        capcv.text(2, 4, labels[idx][:18], INK, 1)
-        capup = upscale(capcv, 1)
-        for y in range(cap):
-            for x in range(min(cellw, PW*2)):
-                big[oy + PH*S + y][ox + x] = capup[y][x]
-    write_png(out, bw, bh, big)
-    print("wrote", out, f"({bw}x{bh})")
+    state_montage(out, True)
 
 def cmd_search(out="tools/display_search.png"):
     """Render the WiFi (left col) and BLE (right col) searching sweeps frame-by-frame."""
     frames = list(range(0, SRCH_CYCLE, 2))     # every other frame across one sweep
     # col 0 = WiFi search (wifi down → priority); col 1 = BLE search (wifi up, car gone)
-    wifi_st = dict(wifi=0, ssid="Jupiter", soc=None, charging=False, link="unreachable", ble_on=False)
-    ble_st  = dict(wifi=3, ssid="Jupiter", soc=None, charging=False, link="unreachable", ble_on=False)
+    wifi_st = dict(wifi=0, ssid="Demo-Net", soc=None, charging=False, link="unreachable", ble_on=False)
+    ble_st  = dict(wifi=3, ssid="Demo-Net", soc=None, charging=False, link="unreachable", ble_on=False)
     S = 4
     pad, cap = 10, 16
     cellw, cellh = W*S, H*S + cap
@@ -758,27 +803,16 @@ def cmd_scroll(out="tools/display_scroll.png"):
     write_png(out, bw, bh, big)
     print("wrote", out, f"({bw}x{bh})")
 
-def cmd_cheader(out="main/display_font.h"):
-    def cols_of(gl):
-        cols = []
-        for c in range(5):
-            b = 0
-            for r in range(7):
-                if c < len(gl[r]) and gl[r][c] == '#':
-                    b |= (1 << r)
-            cols.append(b)
-        return cols
-    def rows_bits(rows):       # row-major, bit (W-1-c) = leftmost column
-        w = max(len(r) for r in rows)
-        out = []
-        for row in rows:
-            b = 0
-            for c in range(w):
-                if c < len(row) and row[c] == '#':
-                    b |= (1 << (w - 1 - c))
-            out.append(b)
-        return w, out
+def font_cols(gl):
+    return [sum(1 << row for row in range(7) if col < len(gl[row]) and gl[row][col] == '#')
+            for col in range(5)]
 
+def bitmap_rows(rows):
+    width = max(map(len, rows))
+    return width, [sum(1 << (width - 1 - col) for col, pixel in enumerate(row) if pixel == '#')
+                   for row in rows]
+
+def cmd_cheader(out="main/display_font.h"):
     L = []
     L.append("// Auto-generated by tools/display_sim.py — do not edit by hand.")
     L.append("// 5x7 column-major font: glyph[c] bit r (0=top) = pixel (col c, row r).")
@@ -788,7 +822,7 @@ def cmd_cheader(out="main/display_font.h"):
     L.append("static const uint8_t DISPLAY_FONT5X7[][5] = {")
     for code in range(0x20, 0x7F):
         ch = chr(code)
-        cols = cols_of(glyph(ch))
+        cols = font_cols(glyph(ch))
         # Sanitize the label char: space and backslash would otherwise produce an
         # empty/line-continuation comment (-Werror=comment on the trailing '\').
         label = {' ': 'SP', '\\': 'BSL'}.get(ch, ch)
@@ -796,16 +830,16 @@ def cmd_cheader(out="main/display_font.h"):
     L.append("};")
     # small inline bolt glyph (back-compat; '`' is outside the printable range used above)
     L.append("static const uint8_t DISPLAY_GLYPH_BOLT[5] = {%s};" %
-             ",".join("0x%02x" % v for v in cols_of(glyph('`'))))
+             ",".join("0x%02x" % v for v in font_cols(glyph('`'))))
     # Bluetooth glyph (row-major bitmap)
-    bw, brows = rows_bits(BT_ROWS)
+    bw, brows = bitmap_rows(BT_ROWS)
     L.append("// Bluetooth glyph, row-major: bit (W-1-c) of row r = pixel (col c, row r).")
     L.append("#define DISPLAY_BT_W %d" % bw)
     L.append("#define DISPLAY_BT_H %d" % len(brows))
     L.append("static const uint8_t DISPLAY_BT_ROWS[%d] = {%s};" %
              (len(brows), ",".join("0x%02x" % v for v in brows)))
     # Big charging bolt (row-major bitmap)
-    lw, lrows = rows_bits(BOLT_ROWS)
+    lw, lrows = bitmap_rows(BOLT_ROWS)
     L.append("// Big charging bolt, row-major (same bit convention as the BT glyph).")
     L.append("#define DISPLAY_BOLT_W %d" % lw)
     L.append("#define DISPLAY_BOLT_H %d" % len(lrows))
@@ -814,27 +848,96 @@ def cmd_cheader(out="main/display_font.h"):
     open(out, "w").write("\n".join(L) + "\n")
     print("wrote", out)
 
+def cmd_font_parity(golden):
+    expected = [("ascii", str(code), ",".join(map(str, font_cols(glyph(chr(code))))))
+                for code in range(32, 127)]
+    expected += [("bolt", "0", ",".join(map(str, font_cols(glyph('`'))))),
+                 ("bt", "0", ",".join(map(str, bitmap_rows(BT_ROWS)[1]))),
+                 ("big-bolt", "0", ",".join(map(str, bitmap_rows(BOLT_ROWS)[1])))]
+    rows = [line.rstrip("\n").split("\t") for line in open(golden)]
+    if not rows or rows[0] != ["kind", "code", "values"] or rows[1:] != [list(row) for row in expected]:
+        print("display font parity: incomplete, malformed or mismatched native glyph bytes", file=sys.stderr)
+        return 1
+    print("OK  native display font matches simulator source on 98 glyph/bitmap records")
+    return 0
+
 # ── parity: verify decide() against the C++ presenter's golden vectors ──────────
 # Reads the TSV emitted by test/display_golden_dump.cpp (input columns + the C++
 # tk::display::compose() decision), re-runs decide() on each input here, and diffs the
 # decisions. Exit non-zero on any mismatch. Wired via scripts/check-display-sim-parity.sh.
 OUT_FIELDS = ["hero", "show_wifi", "show_lan", "search_is_lan", "show_ble", "ssid_avail",
               "ssid_scrolling", "ssid_off", "out_soc", "fill_r", "fill_g", "fill_b", "asleep",
-              "show_bolt", "animating"]
+              "show_bolt", "animating", "wifi_bars", "ble_bars", "ble_glyph_on"]
+INPUT_FIELDS = ["link", "net", "eth_present", "ssid", "ble_connected", "have_soc", "soc",
+                "charging", "paired", "tick", "orient", "wifi_rssi", "ble_rssi_valid", "ble_rssi", "safe_mode", "group"]
+EXPECTED_GOLDEN_CASES = 14114
 def _b01(x):
     return "1" if x else "0"
 def cmd_parity(golden):
     rows = [ln.rstrip("\n") for ln in open(golden) if ln.strip() and not ln.startswith("#")]
+    if len(rows) != EXPECTED_GOLDEN_CASES + 1:
+        print("display parity: incomplete golden (%d rows, expected %d)" % (len(rows), EXPECTED_GOLDEN_CASES + 1), file=sys.stderr)
+        return 1
     header = rows[0].split("\t")
+    if header != INPUT_FIELDS + OUT_FIELDS:
+        print("display parity: invalid golden header", file=sys.stderr)
+        return 1
     fails = n = 0
+    coverage = {"base": [], "soc": [], "wifi-rssi": [], "ble-rssi": [], "safe-mode": []}
     for ln in rows[1:]:
-        rec = dict(zip(header, ln.split("\t")))
+        values = ln.split("\t")
+        if len(values) != len(header):
+            print("display parity: malformed golden row", file=sys.stderr)
+            return 1
+        rec = dict(zip(header, values))
+        bool_fields = ("eth_present", "ble_connected", "have_soc", "charging", "paired", "ble_rssi_valid", "safe_mode")
+        if (any(rec[field] not in {"0", "1"} for field in bool_fields)
+                or rec["link"] not in {"awake", "asleep", "idle", "unreachable", "unknown"}
+                or rec["net"] not in {"none", "wifi", "eth"}
+                or rec["orient"] not in {"landscape", "portrait"}):
+            print("display parity: invalid boolean/enum/orientation input", file=sys.stderr)
+            return 1
+        for field, low, high in (("soc", -2147483648, 2147483647),
+                                 ("wifi_rssi", -2147483648, 2147483647),
+                                 ("ble_rssi", -2147483648, 2147483647),
+                                 ("tick", 0, 4294967295)):
+            try:
+                value = int(rec[field])
+            except ValueError:
+                value = None
+            if value is None or str(value) != rec[field] or not low <= value <= high:
+                print("display parity: invalid canonical integer input", file=sys.stderr)
+                return 1
         inp = {"link": rec["link"], "net": rec["net"],
                "eth_present": rec["eth_present"] == "1", "ssid": rec["ssid"],
                "ble_connected": rec["ble_connected"] == "1", "have_soc": rec["have_soc"] == "1",
                "soc": int(rec["soc"]), "charging": rec["charging"] == "1",
                "paired": rec["paired"] == "1", "tick": int(rec["tick"]),
-               "orient": rec.get("orient", "landscape")}
+               "safe_mode": rec["safe_mode"] == "1",
+               "orient": rec["orient"], "wifi_rssi": int(rec["wifi_rssi"]),
+               "ble_rssi_valid": rec["ble_rssi_valid"] == "1", "ble_rssi": int(rec["ble_rssi"])}
+        group = rec["group"]
+        if group not in coverage:
+            print("display parity: invalid case group", file=sys.stderr)
+            return 1
+        if inp["safe_mode"] != (group == "safe-mode"):
+            print("display parity: invalid recovery case group", file=sys.stderr)
+            return 1
+        if group == "safe-mode":
+            coverage[group].append((inp["link"], inp["net"], inp["ble_connected"], inp["paired"],
+                                    inp["have_soc"], inp["eth_present"], inp["orient"]))
+        elif group == "soc":
+            coverage[group].append((inp["link"], inp["orient"], inp["soc"]))
+        elif group in {"wifi-rssi", "ble-rssi"}:
+            if (group == "wifi-rssi" and inp["ble_rssi"] != -55
+                    or group == "ble-rssi" and inp["wifi_rssi"] != -85):
+                print("display parity: invalid orthogonal RSSI sweep", file=sys.stderr)
+                return 1
+            axis = inp["wifi_rssi"] if group == "wifi-rssi" else inp["ble_rssi"]
+            coverage[group].append((inp["net"], inp["ble_rssi_valid"], inp["ble_connected"],
+                                    inp["orient"], axis))
+        else:
+            coverage[group].append(tuple(rec[field] for field in INPUT_FIELDS))
         m = decide(inp)
         got = {"hero": m["hero"], "show_wifi": _b01(m["show_wifi"]),
                "show_lan": _b01(m["show_lan"]), "search_is_lan": _b01(m["search_is_lan"]),
@@ -842,7 +945,9 @@ def cmd_parity(golden):
                "ssid_avail": str(m["ssid_avail"]), "ssid_scrolling": _b01(m["ssid_scrolling"]),
                "ssid_off": str(m["ssid_off"]), "out_soc": str(m["soc"]),
                "fill_r": str(m["fill_r"]), "fill_g": str(m["fill_g"]), "fill_b": str(m["fill_b"]),
-               "asleep": _b01(m["asleep"]), "show_bolt": _b01(m["show_bolt"]), "animating": _b01(m["animating"])}
+               "asleep": _b01(m["asleep"]), "show_bolt": _b01(m["show_bolt"]), "animating": _b01(m["animating"]),
+               "wifi_bars": str(m["wifi_bars"]), "ble_bars": str(m["ble_bars"]),
+               "ble_glyph_on": _b01(m["ble_glyph_on"])}
         n += 1
         for k in OUT_FIELDS:
             if rec.get(k) != got[k]:
@@ -851,6 +956,25 @@ def cmd_parity(golden):
                       "ble=%s soc=%s chg=%s paired=%s tick=%s)" % (
                           n, k, rec.get(k), got[k], inp["link"], inp["net"], inp["ssid"],
                           inp["ble_connected"], inp["soc"], inp["charging"], inp["paired"], inp["tick"]))
+    soc_values = list(range(-100, 201)) + [-2147483648, 2147483647]
+    rssi_values = list(range(-128, 128)) + [-2147483648, 2147483647]
+    want_soc = {(link, orient, soc) for link in ("idle", "asleep")
+                for orient in ("landscape", "portrait") for soc in soc_values}
+    want_rssi = {(net, valid, connected, orient, rssi) for net in ("none", "wifi", "eth")
+                 for valid in (False, True) for connected in (False, True)
+                 for orient in ("landscape", "portrait") for rssi in rssi_values}
+    want_safe = {(link, net, ble, paired, soc, eth, orient)
+                 for link in ("unknown", "idle", "awake", "asleep", "unreachable")
+                 for net in ("none", "wifi", "eth") for ble in (False, True)
+                 for paired in (False, True) for soc in (False, True)
+                 for eth in (False, True) for orient in ("landscape", "portrait")}
+    if (len(coverage["safe-mode"]) != len(want_safe) or set(coverage["safe-mode"]) != want_safe
+            or len(coverage["base"]) != 38 or len(set(coverage["base"])) != 38
+            or len(coverage["soc"]) != len(want_soc) or set(coverage["soc"]) != want_soc
+            or any(len(coverage[group]) != len(want_rssi) or set(coverage[group]) != want_rssi
+                   for group in ("wifi-rssi", "ble-rssi"))):
+        print("display parity: golden coverage is incomplete or duplicated", file=sys.stderr)
+        return 1
     if fails == 0:
         print("OK  sim decide() matches the C++ presenter on %d golden cases" % n)
         return 0
@@ -872,6 +996,8 @@ if __name__ == "__main__":
         cmd_scroll(arg or "tools/display_scroll.png")
     elif mode == "cheader":
         cmd_cheader(arg or "main/display_font.h")
+    elif mode == "font-parity":
+        sys.exit(cmd_font_parity(arg or "build_mock/display_font_golden.tsv"))
     elif mode == "parity":
         sys.exit(cmd_parity(arg or "build_mock/display_golden.tsv"))
     else:

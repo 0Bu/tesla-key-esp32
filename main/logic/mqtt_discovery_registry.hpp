@@ -175,7 +175,7 @@ inline constexpr std::array<DiscoveryEntry, kDiscoveryEntryCount> kDiscoveryEntr
     {StateDomain::Device, DiscoveryComponent::Sensor, "min_free_heap", "Min free heap",
      "min_free_heap", JsonValueKind::Number, "data_size", "B", "measurement", "diagnostic",
      false},
-    {StateDomain::Device, DiscoveryComponent::Sensor, "wifi_reconn", "WiFi reconnects",
+    {StateDomain::Device, DiscoveryComponent::Sensor, "wifi_reconn", "Network reconnects",
      "wifi_reconnects", JsonValueKind::Number, "", "", "total_increasing",
      "diagnostic", false},
     {StateDomain::Device, DiscoveryComponent::Sensor, "mqtt_reconn", "MQTT reconnects",

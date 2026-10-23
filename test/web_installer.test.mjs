@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash, webcrypto } from "node:crypto";
 import fs from "node:fs";
 import test from "node:test";
+import { bootstrapInstaller } from "../docs/installer-bootstrap.mjs";
 
 import {
   attachWebInstaller,
@@ -90,18 +91,24 @@ test("native Espressif USB ports and UART bridges are described without restrict
   assert.equal(selectManifestBuild(manifest, "ESP32-C5", cdcInfo), undefined);
 });
 
-test("a serial-type-specific build wins over the generic fallback", () => {
-  const builds = {
-    builds: [
-      { chipFamily: "ESP32-S3", parts: [{ path: "generic.bin", offset: 0 }] },
-      { chipFamily: "ESP32-S3", serialType: "cdc", parts: [{ path: "native.bin", offset: 0 }] }
-    ]
-  };
-  assert.equal(selectManifestBuild(
-    builds,
-    "ESP32-S3",
-    { usbVendorId: 0x303a, usbProductId: 0x1001 }
-  ).parts[0].path, "native.bin");
+test("published builds have no serial-type-specific branch", () => {
+  const invalid = structuredClone(manifest);
+  invalid.builds[1].serialType = "cdc";
+  assert.throws(() => validateManifest(invalid, "https://example.test/manifest.json"), /build fields must be exactly/);
+});
+
+test("installer labels root, development and PR channels before device setup", () => {
+  for (const [pathname, expected] of [["/", "Release"], ["/project/", "Release"],
+                                    ["/project/dev/", "Development"], ["/project/PR/404/", "Preview build · PR #404"]]) {
+    const elements = new Map();
+    for (const id of ["build-channel", "preview-note", "preview-note-text"]) {
+      elements.set(id, { textContent: "", dataset: {}, hidden: true, append() {} });
+    }
+    const documentImpl = { getElementById(id) { return elements.get(id) || null; }, createElement() { return {}; } };
+    assert.equal(bootstrapInstaller({ documentImpl, locationImpl: { pathname }, navigatorImpl: {} }), null);
+    assert.equal(elements.get("build-channel").textContent, expected);
+    assert.equal(elements.get("preview-note").hidden, !pathname.includes("/PR/"));
+  }
 });
 
 test("multi-part progress is weighted by each uncompressed image size", () => {
@@ -207,6 +214,7 @@ test("serial log parsing preserves split line endings and classifies IDF levels"
 
 function fakeEsptool(chipFamily = "ESP32-S3", { chipRevision, info, resetLines = true, writeError } = {}) {
   const calls = [];
+  const writeOptions = [];
   const resetSignals = [];
   class Transport {
     constructor(port) { this.port = port; calls.push("transport"); }
@@ -226,6 +234,7 @@ function fakeEsptool(chipFamily = "ESP32-S3", { chipRevision, info, resetLines =
     async flashId() { calls.push("flashId"); }
     async eraseFlash() { calls.push("erase"); }
     async writeFlash(options) {
+      writeOptions.push({ eraseAll: options.eraseAll });
       calls.push(["write", options.fileArray.map((file) => file.address)]);
       if (writeError) throw writeError;
       options.reportProgress(0, options.fileArray[0].data.length, options.fileArray[0].data.length);
@@ -239,7 +248,7 @@ function fakeEsptool(chipFamily = "ESP32-S3", { chipRevision, info, resetLines =
   }
   const port = { getInfo() { return info || { usbVendorId: 0x303a, usbProductId: 0x1001 }; } };
   if (resetLines) port.setSignals = async (signals) => { resetSignals.push(signals); };
-  return { calls, resetSignals, port, Transport, Loader };
+  return { calls, writeOptions, resetSignals, port, Transport, Loader };
 }
 
 test("the installer fake refuses a soft reset once the flasher stub runs", async () => {
@@ -577,14 +586,124 @@ function fakeInstallerPage() {
     },
     querySelectorAll(selector) { return selector === ".installer-step" ? steps : []; }
   };
-  return { root, element, steps };
+  return { root, element, steps, modes };
 }
+
+async function withInstallerPage(confirmEraseImpl, exercise, beforeConnect = () => {}) {
+  const previous = { location: globalThis.location, isSecureContext: globalThis.isSecureContext };
+  globalThis.location = { href: "https://example.test/", pathname: "/" };
+  globalThis.isSecureContext = true;
+  try {
+    const fake = fakeEsptool();
+    const page = fakeInstallerPage();
+    const downloads = [];
+    const installer = attachWebInstaller({
+      root: page.root,
+      serial: { async requestPort() { return fake.port; }, addEventListener() {} },
+      TransportCtor: fake.Transport,
+      ESPLoaderCtor: fake.Loader,
+      confirmEraseImpl,
+      verifyBootImpl: async ({ expectedVersion }) => ({ version: expectedVersion, log: "" }),
+      fetchImpl: async (url) => {
+        if (url.endsWith("manifest.json")) {
+          return { ok: true, status: 200, json: async () => structuredClone(manifest) };
+        }
+        downloads.push(url);
+        return firmwareResponse(url);
+      }
+    });
+    for (let attempt = 0; page.element("firmware-version-value").textContent === "" && attempt < 50; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    assert.equal(page.element("firmware-version-value").textContent, manifest.version);
+    beforeConnect(page);
+    await installer.connect();
+    await exercise({ fake, page, downloads, installer });
+  } finally {
+    globalThis.location = previous.location;
+    globalThis.isSecureContext = previous.isSecureContext;
+  }
+}
+
+test("first-install guidance never replaces the Keep default or prompts during an update", async () => {
+  await withInstallerPage(() => { assert.fail("Keep must not prompt for erase"); }, async ({ fake, page, installer }) => {
+    assert.deepEqual(page.modes.map((mode) => mode.checked), [true, false]);
+    assert.equal(page.element("keep-recommended").hidden, false);
+    assert.equal(page.element("erase-recommended").hidden, false);
+    assert.match(page.element("page-status").textContent, /Keep configuration preserves/);
+    await installer.install();
+    assert.equal(fake.calls.includes("erase"), false);
+    assert.equal(page.root.dataset.finished, "true");
+  });
+});
+
+test("connecting preserves a deliberate Erase choice without claiming Keep is selected", async () => {
+  await withInstallerPage(() => false, async ({ page }) => {
+    assert.deepEqual(page.modes.map((mode) => mode.checked), [false, true]);
+    assert.match(page.element("page-status").textContent, /For a first install, choose Erase/);
+    assert.doesNotMatch(page.element("page-status").textContent, /Keep.*selected/);
+  }, (page) => {
+    page.modes[0].checked = false;
+    page.modes[1].checked = true;
+  });
+});
+
+test("cancelling Erase requires a fresh confirmation and performs no flash work", async () => {
+  const messages = [];
+  await withInstallerPage((message) => { messages.push(message); return false; }, async ({ fake, page, downloads, installer }) => {
+    page.modes[0].checked = false;
+    page.modes[1].checked = true;
+    const priorCalls = structuredClone(fake.calls);
+    await installer.install();
+    await installer.install();
+    assert.equal(messages.length, 2);
+    assert.match(messages[0], /WiFi, VIN, MQTT settings, the private pairing key and BLE sessions/);
+    assert.match(messages[0], /Back up secret NVS/);
+    assert.deepEqual(fake.calls, priorCalls);
+    assert.deepEqual(downloads, []);
+    assert.equal(page.element("install-button").disabled, false);
+    assert.match(page.element("page-status").textContent, /cancelled.*No flash changes/);
+  });
+});
+
+test("an explicit Erase confirmation allows the factory reset and verified install", async () => {
+  let confirmations = 0;
+  await withInstallerPage(() => { confirmations += 1; return true; }, async ({ fake, page, installer }) => {
+    page.modes[0].checked = false;
+    page.modes[1].checked = true;
+    await installer.install();
+    assert.equal(confirmations, 1);
+    assert.equal(fake.calls.filter((call) => call === "erase").length, 1);
+    assert.ok(fake.calls.indexOf("erase") < fake.calls.findIndex((call) => Array.isArray(call) && call[0] === "write"));
+    assert.equal(page.root.dataset.finished, "true");
+  });
+});
+
+test("Erase fails closed when browser confirmation is unavailable", async () => {
+  const previous = globalThis.confirm;
+  globalThis.confirm = undefined;
+  try {
+    await withInstallerPage(undefined, async ({ fake, page, downloads, installer }) => {
+      page.modes[0].checked = false;
+      page.modes[1].checked = true;
+      const priorCalls = structuredClone(fake.calls);
+      await installer.install();
+      assert.deepEqual(fake.calls, priorCalls);
+      assert.deepEqual(downloads, []);
+      assert.match(page.element("page-status").textContent, /cancelled/);
+    });
+  } finally {
+    globalThis.confirm = previous;
+  }
+});
 
 test("keep-configuration writes ota_0 first, activates it last, and restarts via EN", async () => {
   const { fake, states, result } = await runFlash(false);
   assert.equal(result.chipFamily, "ESP32-S3");
   assert.equal(result.restarted, true);
   assert.equal(fake.calls.includes("erase"), false);
+  assert.deepEqual(fake.writeOptions, Array.from({ length: 4 }, () => ({ eraseAll: false })),
+    "each Keep phase explicitly disables the flasher's full-chip erase option");
   assert.deepEqual(fake.calls.slice(-5), [
     ["write", [0]],
     ["write", [0x8000]],
@@ -1078,6 +1197,9 @@ test("disconnect waits for a pending serial monitor open before closing or relea
 
 test("factory-reset mode erases before writing the same manifest parts", async () => {
   const { fake } = await runFlash(true);
+  assert.equal(fake.calls.filter((call) => call === "erase").length, 1);
+  assert.deepEqual(fake.writeOptions, Array.from({ length: 4 }, () => ({ eraseAll: false })),
+    "full-chip erase belongs only to the explicit factory-reset phase");
   assert.ok(fake.calls.indexOf("erase") > fake.calls.indexOf("flashId"));
   assert.ok(fake.calls.indexOf("erase") < fake.calls.findIndex((call) => Array.isArray(call) && call[0] === "write"));
 });

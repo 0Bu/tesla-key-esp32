@@ -1,11 +1,39 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
 #include "nvs_contract.hpp"
 
 namespace tk {
+
+// Display/journal spelling of the first four SHA-1 bytes. Hashing and key derivation remain the
+// caller's job; this formatter only preserves the existing uppercase XX:XX:XX:XX representation.
+inline std::array<char, 12> key_fingerprint_text(const uint8_t* digest, size_t size) noexcept {
+    std::array<char, 12> text{};
+    if (!digest || size < 4) return text;
+    constexpr char hex[] = "0123456789ABCDEF";
+    for (size_t i = 0; i < 4; ++i) {
+        text[3*i] = hex[digest[i] >> 4];
+        text[3*i + 1] = hex[digest[i] & 15];
+        if (i < 3) text[3*i + 2] = ':';
+    }
+    return text;
+}
+
+enum class KeyCreatedDateResult : uint8_t { Stamped, Retired, Untrusted };
+
+// Metadata only, after the new key is durable. Failure to stamp must retire the old key's date;
+// failed retirement keeps the journal's existing recovery obligation. Callbacks own storage.
+template <typename Stamp, typename Retire>
+KeyCreatedDateResult stamp_or_retire_key_date(bool stamp_allowed, Stamp stamp, Retire retire) {
+    if (stamp_allowed) {
+        try { if (stamp()) return KeyCreatedDateResult::Stamped; } catch (...) {}
+    }
+    try { if (retire()) return KeyCreatedDateResult::Retired; } catch (...) {}
+    return KeyCreatedDateResult::Untrusted;
+}
 
 // Lives in the same tesla_ble namespace as the private key and peer sessions. NVS entry names
 // are limited to 15 bytes, so keep this spelling short and pin its length in the host tests.
@@ -123,7 +151,7 @@ constexpr AutomaticKeyAction decide_automatic_key_action(bool probe_ok,
     // Verified first-boot absence remains the sole unsafe-runtime generation case.
     if (key_exists && !runtime_safe) return AutomaticKeyAction::RebootRequired;
     // A remote pairing hint is not authority to replace a durable identity. Keep the existing
-    // key and require an explicit user action to re-enrol it; this also covers the inconsistent
+    // key and probe its enrollment without changing identity; this also covers the inconsistent
     // case where the key is absent but the runtime flag claims the identity is safe.
     if (recovery_hint) return AutomaticKeyAction::RecoveryRequired;
     if (!key_exists) {
@@ -132,6 +160,17 @@ constexpr AutomaticKeyAction decide_automatic_key_action(bool probe_ok,
     }
     return runtime_safe ? AutomaticKeyAction::Continue
                         : AutomaticKeyAction::RebootRequired;
+}
+
+// Cached visibility only: no storage probe, identity change or new recovery action.
+constexpr const char* pairing_block_reason(bool key_reload, bool cleanup_pending,
+                                           bool vin_pending, AutomaticKeyAction action) noexcept {
+    if (key_reload) return "key_reload_required";
+    if (vin_pending) return "vin_transition_pending";
+    if (cleanup_pending) return "key_cleanup_pending";
+    if (action == AutomaticKeyAction::StorageUnavailable) return "key_storage_unavailable";
+    if (action == AutomaticKeyAction::RebootRequired) return "key_runtime_mismatch";
+    return nullptr;
 }
 
 constexpr KeyRotationMarkerProbe classify_key_rotation_marker_probe(bool probe_ok,

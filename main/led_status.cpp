@@ -1,4 +1,5 @@
 #include "led_status.hpp"
+#include "runtime_fault_log.hpp"
 
 #include "sdkconfig.h"
 
@@ -15,10 +16,11 @@
 
 #include "logic/led_status.hpp"
 #include "task_config.hpp"
-#include "logic/soc_gradient.hpp"   // shared SoC colour ramp (same one the display uses)
+#include "logic/led_driver.hpp"
 #include "logic/ui_state.hpp"
 #include "net.hpp"
 #include "ota_update.hpp"
+#include "safe_mode.hpp"
 #include "vehicle_ctrl.hpp"
 
 // The network seam (net.hpp) — see the note in display.cpp on why this task must not read
@@ -32,23 +34,8 @@ constexpr gpio_num_t kDI = (gpio_num_t)CONFIG_TESLA_LED_DI_GPIO;   // APA102 dat
 constexpr gpio_num_t kCI = (gpio_num_t)CONFIG_TESLA_LED_CI_GPIO;   // APA102 clock
 constexpr int        kGlobalBright = CONFIG_TESLA_LED_BRIGHTNESS;  // APA102 5-bit field (1..31)
 
-// Resting states (parked SoC) render at a fraction of full so the dongle isn't a bright dot
-// in a dark garage. Done by scaling the 8-bit colour (smooth) rather than the coarse 5-bit
-// global-brightness field.
-constexpr float kDimScale = 0.30f;
-
-// "See the car, can't connect": this many consecutive recent connect failures raise the amber
-// warning (car at its ~3-BLE-device limit, or another controller holds its single link).
-constexpr uint32_t kConnFailWarn = 3;
-
-// Hold a fault on the LED at least this long after its source clears, so a brief blip is seen.
-constexpr int64_t kErrorLatchUs = 15'000'000;  // 15 s
-constexpr int64_t kWarnLatchUs  = 10'000'000;  // 10 s
-
 constexpr int kFrameMs           = 33;  // ~30 Hz render (smooth breathing on one pixel)
-constexpr int kSampleEveryFrames = 30;  // resample cached state ~1 Hz (has_session() hits NVS)
-
-constexpr float kTwoPi = 6.2831853f;
+constexpr int kSampleEveryFrames = 30;  // resample cached state ~1 Hz (has_session() can hit NVS)
 
 // ─── APA102 bit-bang (1 pixel) ────────────────────────────────────────────────────
 // APA102/SK9822 has no reset timing — it's plain SPI clocked as fast as you drive it, so a
@@ -63,52 +50,35 @@ inline void apa_byte(uint8_t b) {
     }
 }
 void apa_show(uint8_t r, uint8_t g, uint8_t b) {
-    int bright = kGlobalBright < 1 ? 1 : (kGlobalBright > 31 ? 31 : kGlobalBright);
-    apa_byte(0x00); apa_byte(0x00); apa_byte(0x00); apa_byte(0x00);   // start frame
-    apa_byte(0xE0 | (uint8_t)bright);
-    apa_byte(b); apa_byte(g); apa_byte(r);                            // APA102 order: B, G, R
-    apa_byte(0xFF); apa_byte(0xFF); apa_byte(0xFF); apa_byte(0xFF);   // end frame
+    const auto bytes = tk::led_apa102_frame({r, g, b}, kGlobalBright);
+    for (uint8_t byte : bytes) apa_byte(byte);
 }
 
-// ─── colour + animation ───────────────────────────────────────────────────────────
-void color_rgb(tk::LedColor c, int soc, uint8_t& r, uint8_t& g, uint8_t& b) {
-    switch (c) {
-        case tk::LedColor::Off:         r = 0;   g = 0;   b = 0;   break;
-        case tk::LedColor::Blue:        r = 0;   g = 40;  b = 255; break;
-        case tk::LedColor::Teal:        r = 0;   g = 200; b = 120; break;
-        case tk::LedColor::Magenta:     r = 255; g = 0;   b = 110; break;
-        case tk::LedColor::Green:       r = 0;   g = 220; b = 40;  break;
-        case tk::LedColor::Amber:       r = 255; g = 110; b = 0;   break;
-        case tk::LedColor::Red:         r = 255; g = 0;   b = 0;   break;
-        case tk::LedColor::SocGradient: {
-            int ri, gi, bi; tk::soc_rgb(soc, ri, gi, bi);   // shared logic/soc_gradient.hpp
-            r = (uint8_t)ri; g = (uint8_t)gi; b = (uint8_t)bi;
-            break;
-        }
+// Keep the once-per-second snapshot temporary out of the persistent frame loop. This
+// separates compiler frames; composed call-chain headroom still needs runtime measurement.
+[[gnu::noinline]] void led_sample(VehicleController& v, uint64_t now, tk::UiSnapshot& snap,
+                                 tk::LedAlerts& alerts, tk::LedLatches& latches) {
+    const bool safe_mode = tk::safe_mode_active();
+    // Recovery needs only its latched fault indication. Avoid vehicle/session probes and
+    // the OTA status mutex when those subsystems are intentionally unavailable.
+    const OtaState ota = safe_mode ? OtaState::Idle : ota_get_state();
+    alerts = tk::led_sample_alerts(latches, now, safe_mode ? false : v.reauth_required(),
+        ota == OtaState::Error, ota == OtaState::Downloading,
+        safe_mode ? 0 : v.ble_connect_fail(), safe_mode);
+    if (safe_mode) {
+        snap = {};
+        return;
     }
-}
 
-// Brightness envelope 0..1 for the current animation at monotonic time t (seconds). A single
-// pixel can't run a spatial wave, so "wave" is this temporal swell (Breathe).
-float anim_factor(tk::LedAnim a, float t) {
-    switch (a) {
-        case tk::LedAnim::Off:   return 0.0f;
-        case tk::LedAnim::Solid: return 1.0f;
-        case tk::LedAnim::Breathe: {                       // ~2.6 s sine swell, floored at 0.15
-            float s = sinf(t * (kTwoPi / 2.6f));
-            return 0.575f + 0.425f * s;
-        }
-        case tk::LedAnim::Pulse: {                         // ~1.1 s: fast attack, linear decay
-            float p = fmodf(t, 1.1f) / 1.1f;
-            float f = (p < 0.12f) ? (p / 0.12f)
-                    : (p < 0.60f) ? (1.0f - (p - 0.12f) / 0.48f)
-                    : 0.0f;
-            return 0.08f + 0.92f * f;
-        }
-        case tk::LedAnim::Blink:                            // ~0.9 s hard on/off (alarm)
-            return (fmodf(t, 0.9f) < 0.45f) ? 1.0f : 0.0f;
-    }
-    return 1.0f;
+    // Shared connectivity/charge facts use the same snapshot type as the display;
+    // independent sampling and LED alert latches can differ. ui_snapshot() fills
+    // the vehicle-owned fields under the cache lock; transport/pairing are sampled here.
+    // Use the display's same WiFi signal-read downgrade during reassociation.
+    snap = v.ui_snapshot();
+    snap.net = tk::net_kind();
+    if (snap.net == tk::NetLink::Wifi && !tk::net_wifi_signal(&snap.wifi_rssi, snap.ssid))
+        snap.net = tk::NetLink::None;
+    snap.paired = v.has_session() || v.session_available();
 }
 
 void led_task(void* arg) {
@@ -126,49 +96,31 @@ void led_task(void* arg) {
 
     tk::UiSnapshot snap{};
     tk::LedAlerts  alerts{};
-    int64_t error_until = 0, warn_until = 0;
+    tk::LedLatches latches{};
     const int64_t t0 = esp_timer_get_time();
+    tk::IterationFaultLog fault_log{};
 
     for (int frame = 0;; ++frame) {
-      // Iteration-boundary containment (issue #204): ota_get_status() copies std::strings and
-      // ui_snapshot() reads the cache — both can throw bad_alloc under heap pressure. A cosmetic
+      // ui_snapshot() and durable-session probes can fail under heap pressure. The OTA read
+      // copies only its state enum; it does not materialize status strings. This is a cosmetic
       // task with no lock held across the frame, so contain any throw rather than let it unwind
       // into the FreeRTOS C task trampoline → std::terminate → reboot.
       try {
         const int64_t now = esp_timer_get_time();
 
         if (frame % kSampleEveryFrames == 0) {
-            OtaStatus ota = ota_get_status();
-            if (v.reauth_required() || ota.state == OtaState::Error) error_until = now + kErrorLatchUs;
-            if (v.ble_connect_fail() >= kConnFailWarn)               warn_until  = now + kWarnLatchUs;
-
-            // LED-only latched alerts (top of the ladder), held visible past the fault.
-            alerts.error           = now < error_until;              // sticky reauth or latched OTA fail
-            alerts.ota_downloading = (ota.state == OtaState::Downloading);
-            alerts.warn            = now < warn_until;
-
-            // Shared connectivity/charge facts — the SAME snapshot the display reads, so the LED
-            // and the panel can never disagree (link_state has one source). ui_snapshot() fills
-            // the vehicle-owned fields under the cache lock; the LED supplies the transport (it
-            // shows no SSID or RSSI, so `net` is all it needs) and paired (its own ≤1 Hz
-            // has_session() sample; hits NVS).
-            snap = v.ui_snapshot();
-            snap.net    = tk::net_kind();
-            snap.paired = v.has_session();
+            led_sample(v, static_cast<uint64_t>(now), snap, alerts, latches);
         }
 
         const tk::LedPattern p = tk::led_pattern(snap, alerts);
         const float t = (now - t0) / 1e6f;
-        float f = anim_factor(p.anim, t);
-        if (p.dim) f *= kDimScale;
-
-        uint8_t r, g, b;
-        color_rgb(p.color, snap.soc, r, g, b);
-        apa_show((uint8_t)(r * f), (uint8_t)(g * f), (uint8_t)(b * f));
+        const tk::LedRgb color = tk::led_frame_rgb(p, snap.soc, t);
+        apa_show(color.r, color.g, color.b);
 
         vTaskDelay(pdMS_TO_TICKS(kFrameMs));
       } catch (...) {
-          ESP_LOGE(TAG, "led frame threw — skipping this frame");
+          tk::report_iteration_fault(fault_log, static_cast<uint64_t>(esp_timer_get_time()) / 1000,
+              [](uint32_t suppressed) { ESP_LOGE(TAG, "iteration fault; %u suppressed", (unsigned)suppressed); });
           vTaskDelay(pdMS_TO_TICKS(200));
       }
     }

@@ -362,8 +362,10 @@ def validate_set(
     return boot_info, app_info
 
 
-def make_image(target: str, version: str, *, app: bool) -> bytes:
-    segment = bytearray(256)
+def make_image(target: str, version: str, *, app: bool, segment_size: int = 256) -> bytes:
+    # Test fixture only; larger valid segments isolate the real policy limit from padding checks.
+    assert segment_size >= 256
+    segment = bytearray(segment_size)
     if app:
         struct.pack_into("<I", segment, 0, APP_DESC_MAGIC)
         segment[16 : 16 + len(version)] = version.encode("utf-8")
@@ -447,6 +449,22 @@ def self_test() -> None:
         app.write_bytes(make_image("esp32c6", "1.2.3-test", app=True))
         validate_set("esp32c6", "1.2.3-test", boot, app, signed_app=False)
 
+        # Keep the ESP segment checksum and appended SHA consistent while corrupting only the
+        # checksum padding. A generic byte flip could fail the wrong guard instead.
+        padded = bytearray(app.read_bytes())
+        segment_end = 24 + 8 + 256
+        padded[segment_end] = 1
+        padded[-32:] = hashlib.sha256(padded[:-32]).digest()
+        for data, reason in ((bytes(padded), "checksum padding"),
+                             (app.read_bytes()[:-1] + bytes([app.read_bytes()[-1] ^ 1]),
+                              "appended SHA-256 mismatch")):
+            try:
+                parse_image(data, signed=False, expect_app_desc=True)
+            except ArtifactError as exc:
+                assert reason in str(exc), (reason, str(exc))
+            else:
+                raise AssertionError(f"unsigned fixture accepted: {reason}")
+
         signed = root / "app-signed.bin"
         signed.write_bytes(fake_sign(app.read_bytes()))
         validate_set("esp32c6", "1.2.3-test", boot, signed, signed_app=True)
@@ -485,6 +503,30 @@ def self_test() -> None:
             assert "pinned production authority" in str(exc)
         else:
             raise AssertionError("wrong Secure Boot v2 public-key pin was accepted")
+
+        def reject_signed(data: bytes, message: str) -> None:
+            try:
+                parse_image(data, signed=True, expect_app_desc=True)
+            except ArtifactError as exc:
+                assert message in str(exc), (message, str(exc))
+            else:
+                raise AssertionError(f"signed fixture accepted: {message}")
+
+        # This has a valid ESP checksum, minimal alignment, CRC and RSA signature. Only the
+        # policy-size gate rejects it; no production key or oversized file is used for delivery.
+        reject_signed(fake_sign(make_image("esp32c6", "1.2.3-test", app=True,
+                                           segment_size=APP_POLICY_LIMIT)), "over policy limit")
+        # Sign the non-erased alignment bytes too, so RSA/digest verification cannot mask a
+        # deleted padding guard.
+        reject_signed(fake_sign(app.read_bytes() + b"\x00"), "alignment padding")
+        block_padding = bytearray(signed.read_bytes())
+        block_padding[-SIGNATURE_SECTOR + SIGNATURE_DATA_SIZE + 4] = 1
+        reject_signed(bytes(block_padding), "signature-block padding")
+        # Both ESP images are valid and equal-sized. Keep the first image's valid signature
+        # sector over the second image: only the image-to-block digest binding rejects it.
+        other = fake_sign(make_image("esp32c6", "1.2.4-test", app=True))
+        reject_signed(other[:-SIGNATURE_SECTOR] + signed.read_bytes()[-SIGNATURE_SECTOR:],
+                      "image digest mismatch")
 
         # A structurally self-consistent signature one whole alignment block later wastes OTA
         # capacity and makes the pre-sign projection dishonest. Only the exact minimal offset is
