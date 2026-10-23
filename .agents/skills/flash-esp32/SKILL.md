@@ -9,13 +9,16 @@ additional authorization. Canonical skills live under `.agents/skills/`; hooks e
 # flash-esp32 — build & USB-flash the firmware
 
 Builds the ESP-IDF project (in Docker) and, only from an explicitly verified **signed** app and
-after the user explicitly approves this physical-board mutation, flashes a connected ESP32 board (esp32 / esp32s3 / esp32c3 / esp32c6 — set `TARGET`, default
-esp32s3) over USB from the host. NVS is left untouched, so the stored pairing, private key, VIN
+after the user explicitly approves this physical-board mutation, flashes a connected ESP32 board (esp32 / esp32s3 / esp32c3 / esp32c6 — set `TARGET`;
+the compile block defaults to esp32s3, the operator-run local signing block needs the same TARGET set
+in its own shell, the signed-preview block requires it explicitly, and every flash path refuses a port
+whose detected chip differs) over USB from the host. NVS is left untouched, so the stored pairing, private key, VIN
 and WiFi survive the flash (no re-pair needed). Use it only when the user asks for a build or
 flash; editing anything under `main/` does not itself authorize hardware access —
 including the embedded web UI (`main/www/` — `index.html` + `style.css` + `app.js`, spliced into
-one page at build time), which is compiled into the app binary. A successful local compile is not
-a flashable artifact: `CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=n` by design.
+one page at build time, plus the separate captive-portal `setup.html`), which is compiled into the
+app binary. A successful local compile is not a flashable artifact:
+`CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=n` by design.
 
 > This flashes over **USB**. For a remote, no-cable update use OTA (**Check for updates**
 > in the web UI's **Firmware** row). USB flashing requires physical access and the board plugged in.
@@ -29,7 +32,9 @@ a flashable artifact: `CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=n` by design.
 
 Build with the pinned Docker wrapper; USB delivery runs on the host. Compile is not signing or
 flash approval. [Development](../../../docs/DEVELOPMENT.md#delivery) owns the shared build/delivery
-contract; the exact artifact/key/port checks below remain mandatory.
+contract; the exact artifact/key/port checks below remain mandatory. Run the multi-line blocks
+through a scratch script as [Development](../../../docs/DEVELOPMENT.md#running-workflow-shell-blocks)
+describes.
 
 Every app-only path below retains the installed bootloader. Before its write, collect a fresh
 `BOOT_IMAGE` for the explicitly identified board using the
@@ -63,11 +68,13 @@ fi
 
 To flash that local tree, the operator must provide an existing RSA-3072 development key. The
 skill must **not** generate one silently: changing the key changes the board's TOFU OTA trust
-anchor, so public Pages OTA will fail until a real CI-signed image is USB-flashed again.
+anchor, so public Pages OTA will fail until a real CI-signed image is USB-flashed again. The block
+takes a private-key path. Such a path never goes into an agent's scratch script, and the secret
+guard rejects key files (`*.pem`, `*.key`, …) in agent commands, so the operator runs this block.
 
 ```bash
 set -euo pipefail
-: "${TARGET:?run the compile block for the intended target first}"
+: "${TARGET:?set TARGET to the target the compile block built}"
 : "${DEV_SIGNING_KEY_FILE:?set DEV_SIGNING_KEY_FILE to an explicit RSA-3072 development key}"
 [ -f "$DEV_SIGNING_KEY_FILE" ] && [ ! -L "$DEV_SIGNING_KEY_FILE" ] || {
   echo "REFUSING: signing key is missing, non-regular or a symlink" >&2; exit 1;
@@ -163,7 +170,7 @@ did not complete successfully, **stop**; there is no signed PR image to flash.
 
 ```bash
 set -euo pipefail
-TARGET=esp32s3            # esp32 | esp32s3 | esp32c3 | esp32c6
+: "${TARGET:?set TARGET to esp32, esp32s3, esp32c3 or esp32c6}"
 : "${PR:?set PR to the pull-request number}"
 : "${RUNID:?set RUNID to the successful signed-pr-preview run for this PR}"
 [[ "$PR" =~ ^[1-9][0-9]*$ && "$RUNID" =~ ^[1-9][0-9]*$ ]] || {
@@ -256,9 +263,9 @@ if ! esptool --chip "$TARGET" -p "$PORT" --before no-reset --after hard-reset \
 fi
 ```
 
-- **Bonus:** the CI image carries the **CI-stamped version** (chosen by
-  `scripts/select-release-version.sh`), whereas a local build reports only the `version.txt`
-  **floor** — so the signed artifact makes the reported version match the release/manifest.
+- **Bonus:** the signed preview carries its **CI-stamped version** (`X.Y.Z-PR-<N>`, where
+  `scripts/select-release-version.sh` chooses `X.Y.Z`; checked against its metadata above), whereas
+  a local build reports only the `version.txt` **floor** (`cat version.txt`).
 - **Never flash `tesla-key-esp32<sfx>-<ver>-merged.bin`** to preserve NVS — the merged image is a
   single full-flash blob spanning `0x0` and **wipes `nvs@0x9000`** (forces a full re-pair).
 - After flashing, confirm the live device with the global `$tesla-key-e2e-evcc` skill.

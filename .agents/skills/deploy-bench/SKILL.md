@@ -1,6 +1,6 @@
 ---
 name: deploy-bench
-description: Identify the intended physical ESP32 bench among multiple USB boards, including benches currently running Tesla or Daikin firmware, delegate signed app-only USB flashing to flash-esp32, then test the implementation on that same board. Does not publish or merge repository changes.
+description: Identify the intended physical ESP32 bench among multiple USB boards, including benches currently running Tesla or Daikin firmware, delegate signed app-only USB flashing to flash-esp32 (or usb-recovery's steps for a published image), then test the implementation on that same board. Does not publish or merge repository changes.
 ---
 
 Invoke `$deploy-bench`. Read [AGENTS.md](../../../AGENTS.md) first; this workflow grants no
@@ -9,14 +9,17 @@ additional authorization. Canonical skills live under `.agents/skills/`.
 # deploy-bench — identify, USB-flash and test the bench
 
 Test the implementation on the intended physical bench, even when its current firmware belongs to
-`daikin-altherma-esp32`. Use [$flash-esp32](../flash-esp32/SKILL.md) for signed-image verification
-and the USB write. [$deploy](../deploy/SKILL.md) owns commit, push, PR and merge; this skill does
+`daikin-altherma-esp32`. For signed-image verification and the USB write, use
+[$flash-esp32](../flash-esp32/SKILL.md) for a signed PR preview or development-key image, or
+[$usb-recovery](../usb-recovery/SKILL.md) steps 1 and 3 for an already-published image. [$deploy](../deploy/SKILL.md) owns commit, push, PR and merge; this skill does
 not perform those steps or deploy to a production device.
 
 Require explicit user authorization for the selected bench's USB mutation and the named live tests.
 Reuse sufficient scope from the current session. Resolve missing scope once the board, image and
 test plan are concrete; do not repeat an already satisfied approval. Vehicle commands, pairing,
-charge toggles and cluster access each need their separate applicable scope.
+charge toggles and cluster access each need their separate applicable scope. Run multi-line shell
+blocks, here and in the delegated skills, through a scratch script as
+[Development](../../../docs/DEVELOPMENT.md#running-workflow-shell-blocks) describes.
 
 ## 1. Bind the implementation and test plan
 
@@ -30,11 +33,18 @@ the explicitly selected signed CI firmware revision separately. Exercise discove
 acceptance using that known firmware; do not claim it contains unrelated local firmware changes.
 The CI firmware-relevance classifier may correctly produce no new image for agent-only changes.
 
-Use the exact-head signed PR preview or another explicitly selected signed CI image through
-`$flash-esp32`. For a local tree, its compile-only build is not flashable: the local path requires an
-explicitly supplied development signing key and its approved trust lineage. Never access the offline
-production key. If no eligible signed image exists, report that prerequisite; do not silently publish,
-merge, use an unsigned app or substitute a different source revision.
+Select exactly one signed image source:
+
+- the exact-head signed PR preview, or a local tree signed with an explicitly supplied development
+  key and its approved trust lineage, both through `$flash-esp32`;
+- an already-published main-build or Release image, selected and verified by
+  [$usb-recovery](../usb-recovery/SKILL.md) step 1 (Option A or B, including the production
+  public-key pin), then written by its step-3 port probe, bootloader-compatibility check and
+  app-only write under this skill's bench approval.
+
+A compile-only local build is not flashable. Never access the offline production key. If no
+eligible signed image exists, report that prerequisite; do not silently publish, merge, use an
+unsigned app or substitute a different source revision.
 
 ## 2. Find the physical bench without probing every board
 
@@ -75,7 +85,7 @@ identify current firmware. Current Tesla/Daikin labels are observations, not phy
 layout proof. Resolve any post-flash HTTP address to the selected board before contacting it; never
 fall back to a production hostname or a cached address belonging to another board.
 
-`$flash-esp32`'s app-only path requires a compatible installed bootloader and partition table.
+Both app-only paths require a compatible installed bootloader and partition table.
 Verify these on the selected bench before writing, especially for Daikin, unknown firmware or stale
 layout evidence. Any necessary bounded flash reads must be separately in scope and exclude NVS.
 Check actual table integrity, chip/bootloader compatibility, app capacity and the exact permitted
@@ -83,12 +93,14 @@ app/otadata ranges. An unfamiliar project is not permission to rewrite its bootl
 NVS or interpret its stored data as Tesla pairing. If compatibility cannot be established, stop for
 an explicit project-conversion/recovery plan; do not silently change the flash procedure.
 
-## 4. Execute the flash skill on that board
+## 4. Execute the flash procedure on that board
 
-Read and execute the applicable [$flash-esp32](../flash-esp32/SKILL.md) procedure with the resolved
-`PORT`, detected `TARGET` and selected signed app. Pass the explicit port through every operation;
-do not use fallback port detection. Retain the exact-source, version, chip, size and signature/key
-checks. CI/preview images must match the production public-key pin.
+Read and execute the procedure for the selected source — [$flash-esp32](../flash-esp32/SKILL.md)
+for a PR preview or development-key image, [$usb-recovery](../usb-recovery/SKILL.md) steps 1 and 3
+for a published image — with the resolved `PORT`, detected `TARGET` and selected signed app. Pass
+the explicit port through every operation; do not use fallback port detection. Retain the
+exact-source, version, chip, size and signature/key checks. CI/preview images must match the
+production public-key pin.
 
 The only ordinary writes are the verified signed app at `0x20000`, then activation by erasing
 `otadata@0xf000/0x2000` last. Preserve NVS, the existing bootloader and partition table. Recheck

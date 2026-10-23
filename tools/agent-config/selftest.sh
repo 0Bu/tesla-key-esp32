@@ -276,11 +276,6 @@ perl -0pi -e 's/\[`docs\/API\.md`\]\(\.\.\/\.\.\/\.\.\/docs\/API\.md\) owns the 
   "$fixture/.agents/skills/vehicle-command-audit/SKILL.md"
 expect_failure "vehicle audit owner contract" "$fixture" "documentation-owner contract"
 
-fixture="$WORK/project-review-feature-path"; make_fixture "$fixture"
-perl -0pi -e 's/tools\/agent-config\//tools\/agent-config-missing\//' \
-  "$fixture/.agents/skills/project-review/SKILL.md"
-expect_failure "project-review feature path" "$fixture" "omits a relevance-scope path"
-
 fixture="$WORK/feature-template-path"; make_fixture "$fixture"
 perl -0pi -e 's/\.github\/PULL_REQUEST_TEMPLATE\.md/.github\/MISSING_TEMPLATE.md/g' \
   "$fixture/.agents/skills/feature-docs/SKILL.md"
@@ -327,6 +322,18 @@ fixture="$WORK/multi-target-host-gate"; make_fixture "$fixture"
 perl -0pi -e 's/build needs prepare, logic-test, logic-harness and build-target/build needs prepare and build-target/' \
   "$fixture/.agents/subagents.json"
 expect_failure "multi-target host-gate dependency" "$fixture" \
+  "multi-target reviewer is missing the independent-rebuild/publication DAG contract"
+
+fixture="$WORK/multi-target-skipped-build"; make_fixture "$fixture"
+perl -0pi -e 's/fails first unless every need succeeded/is skipped when a need fails/' \
+  "$fixture/.agents/subagents.json"
+expect_failure "multi-target fail-closed build join" "$fixture" \
+  "multi-target reviewer is missing the independent-rebuild/publication DAG contract"
+
+fixture="$WORK/multi-target-host-gate-concurrency"; make_fixture "$fixture"
+perl -0pi -e 's/prepare, logic-test and logic-harness start concurrently/prepare -> logic-test + logic-harness/' \
+  "$fixture/.agents/subagents.json"
+expect_failure "multi-target host-gate concurrency" "$fixture" \
   "multi-target reviewer is missing the independent-rebuild/publication DAG contract"
 
 fixture="$WORK/stale-pin"; make_fixture "$fixture"

@@ -12,6 +12,11 @@ Read task-specific contracts through the [documentation index](docs/README.md).
 - An implementation request permits scoped repository edits and proportionate local tests; it does
   not authorize commit, push, PR/stamp, merge, release, Pages, real-key signing or physical/live
   mutation. Obtain explicit authorization for each phase; one approval does not grant another.
+  One standing exception: the user's own invocation of `$ci-heal` (not an agent's or another
+  workflow's decision to run it) is the explicit authorization for its attested
+  PR-body record edits and its pushes of an already-committed fix to the active PR branch, up to
+  its iteration limit. It never authorizes a commit or a review; a merge still needs the user's
+  separate authorization for that exact PR.
 - A live read can wake the car. Default to collected/local evidence; require explicit user authorization
   for the target and live scope before contacting a board, vehicle or evcc endpoint. Command and charge-toggle scopes
   are separate. Never pair, wake, reboot, erase evidence or change identity from a review request.

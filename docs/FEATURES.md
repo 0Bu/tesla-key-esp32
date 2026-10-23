@@ -142,7 +142,7 @@ unresolved material findings prevent a clean verdict.
 | Shared app/bootloader version admission | `scripts/check-bootloader-compat.py`, `scripts/bootloader-references.json`, USB paths in `flash-esp32`, `ship` and `usb-recovery`; [retained bootloader](../.agents/skills/usb-recovery/SKILL.md#retained-bootloader-compatibility) | An app-only USB write admitting an older-IDF app, unknown bootloader provenance or chip mismatch. |
 | Resource-bounded build container with exact mounts | `scripts/idf-docker.sh`, `scripts/check-idf-container-mounts.py`, `scripts/check-build-gate-contract.py` | A compile starving shared services or a linked-worktree build modifying external Git metadata and primary source files through an overly broad mount. |
 | Fail-closed host verification | `scripts/run-mock-tests.sh --require-all`, `run-sanitizer-tests.sh`, `run-fuzz-smoke.sh`; [test scope](../test/README.md) | Skipped CI coverage, unsafe runtime boundaries, partial JSON, parser UB or browser-only failures. |
-| Split host gates and concurrent target builds | `.github/workflows/build.yml` (`logic-test`, `logic-harness`, `build-target`), `scripts/check-workflow-policy.py` | Serial host/firmware waits or an aggregate build that omits a host gate. |
+| Split host gates and concurrent target builds | `.github/workflows/build.yml` (`logic-test`, `logic-harness`, `build-target`; `build` runs with `if: always()` and fails unless every need succeeded), `scripts/check-workflow-policy.py` | Serial host/firmware waits, an aggregate build that omits a host gate, or a red gate that only skips the required `build` check, which GitHub counts as passed. |
 | Concurrent independent rebuild | `.github/workflows/build.yml` (`independent-rebuild-target`, `independent-rebuild`); [publication](SECURITY.md#release-pipeline-and-trust-boundaries) | Serial fresh builds or signing producer claims without comparing the complete independent inventories and payloads before key use. |
 | Linux-only browser execution and bounded startup | `test/web_ui_browser_gate.py`, `test/test_web_ui_browser_gate.py`, `scripts/run-browser-tests-linux.sh`, `tools/browser/Dockerfile`, `scripts/run-mock-tests.sh` | Native macOS browser startup crashes, claiming DOM coverage from mocked or skipped tests, or cold starts exceeding the outer deadline. |
 | Repository/workflow lint with mutation canaries | `scripts/repo-lint.sh`, `check-workflow-policy.py`, `check-host-gate-contract.py`, `check-markdown-links.py` | Malformed or unsafe workflows, broken links, invalid ownership and fail-open Stop hooks. |
@@ -163,7 +163,8 @@ unresolved material findings prevent a clean verdict.
 
 Native Codex registration is generated from canonical reviewers/hooks and checked for parity;
 current hook trust and primary-checkout declarations remain separate runtime conditions. Both host
-jobs are mandatory for the aggregate build, alongside concurrent producer/independent target legs.
+jobs are mandatory for the aggregate build, alongside concurrent producer/independent target legs:
+`build` fails, rather than being skipped, unless every need succeeded.
 The PSA harness verifies v6.2.0 peer admission, domain hash isolation, encrypted VCSEC denial
 before telemetry and message refusal when the RNG fails.
 Upstream v6.2.0's charging-power estimator is not used by the native controller; charge telemetry

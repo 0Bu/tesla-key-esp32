@@ -3,4 +3,5 @@
 set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 "$root/scripts/stamp-pr-gates.sh" --self-test
+"$root/scripts/ci-heal.sh" --self-test
 exec "$root/tools/agent-hooks/selftest.sh"
