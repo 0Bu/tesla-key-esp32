@@ -21,7 +21,7 @@ parameters, a serial session that can toggle reset, and any recovery need separa
 [`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md) owns pairing lifecycle and invalidation.
 [API](../../../docs/API.md#management) owns status fields/units/presence;
 [Architecture](../../../docs/ARCHITECTURE.md#sleep--link-state-the-single-source-of-truth) owns link proof.
-Set `HOST` to `tesla-key-esp32.local` or the explicitly approved board IP.
+Set `DEVICE_IP` to `tesla-key-esp32.local` or the explicitly approved board IP.
 
 ## 1. Status
 
@@ -30,7 +30,7 @@ rejects this multi-line filter inline; run it through a scratch script as
 [Development](../../../docs/DEVELOPMENT.md#running-workflow-shell-blocks) describes):
 
 ```bash
-curl -s "http://${HOST:?set HOST to the approved board address}/status" | jq '{
+curl -s "http://${DEVICE_IP:?set DEVICE_IP to the approved board address}/status" | jq '{
   version, paired, reauth, link, vcsec_sleep,
   wifi: {ssid: .wifi.ssid, rssi: .wifi.rssi},
   eth: .eth,

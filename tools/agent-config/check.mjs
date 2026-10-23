@@ -120,7 +120,7 @@ const reviewedSkillSha256 = new Map([
   ["ci-heal", "17cf30d3767f4bdb71f084ad30262545d6eee63e8d93939672dc6063dd8c061e"],
   ["deploy", "169d30f409d6a447752b5fc7f3b7579ee6e714df9ce33ecd51cb344dd0d877f0"],
   ["deploy-bench", "15d3f62be54f14e1f560ab8d711f0d2915d3e1ec20a0cf3f0f962d52a689e30e"],
-  ["device-diag", "35c1b3df6bc648f5e14babf02fcf4d1dd5aca058e54b07d07318774f8d756705"],
+  ["device-diag", "e07085f76423d48896d76a4730cb63125d993688ba2a81e0a6342438dd276940"],
   ["display-preview", "16c9a2040aef533bbecbd76159f3227d6a206bbf423055bc5f75a9f521a2151e"],
   ["feature-docs", "ec0d24372fb754fde7c91e9d6917b78a348e06addb93299ceb5412fca758dcdb"],
   ["flash-esp32", "b5128f9cca2784e6c073968a9e64671bd782a512156fca62bf4fedbc21f1f27b"],

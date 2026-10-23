@@ -126,7 +126,7 @@ blocks this way:
 1. Write the blocks approved for this call, unchanged and in document order, to one script in the
    session's scratch directory with the file-writing tool, not a shell redirect.
 2. Run it with one static command, `bash <script-path>`. Put inputs the blocks require (`PR`,
-   `TARGET`, `PORT`, `RUNID`, `HOST`, `DEVICE_IP`, …) in front as literal `NAME=value` assignments
+   `TARGET`, `PORT`, `RUNID`, `DEVICE_IP`, …) in front as literal `NAME=value` assignments
    so the hooks still see them.
 3. A later call that needs an earlier step's variables repeats that step's read-only blocks. Pass a
    value that only a completed write, erase or other mutation set (for example `DELIVERY` in

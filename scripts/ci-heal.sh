@@ -175,13 +175,16 @@ fetch_failed_runs() {
 
 # Prints one `<name>|<status>|<conclusion or state>` line per check or commit status. The rollup
 # keeps every earlier run of a check at the head (for example the records check that failed before
-# stamping), so only the latest run per workflow and check name counts.
+# stamping), so one run per workflow and check name counts: a run that has not completed wins (a
+# queued run may carry no start time, so sorting would hide it) and counts as not green; otherwise
+# the latest completed run counts.
 check_rollup() {
   local pr="$1"
   gh pr view "$pr" --json statusCheckRollup -q '
     [.statusCheckRollup[]?]
     | group_by([(.workflowName // ""), (.name // .context // "")])
-    | map(sort_by(.startedAt // .completedAt // "") | last)
+    | map((map(select((.status // "COMPLETED") != "COMPLETED")) | first)
+          // (sort_by(.startedAt // .completedAt // "") | last))
     | .[]
     | "\(.name // .context // "")|\(.status // "")|\((.conclusion // .state // "") | ascii_upcase)"
   '
@@ -879,6 +882,15 @@ self_test() {
   fi
   ( gh() { rollup_gh "$@"; }; ci_green_except_records 42 records ) \
     || { echo "self-test: a newest-failing records run was not treated as records pending" >&2; exit 1; }
+  # A queued newer run (no start time yet) must not be hidden behind an older completed one
+  printf '{"statusCheckRollup":[%s]}\n' \
+    "{\"name\":\"build\",\"workflowName\":\"build\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\",\"startedAt\":\"2026-10-22T10:05:00Z\"},
+     {\"name\":\"CodeQL\",\"workflowName\":\"CodeQL\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\",\"startedAt\":\"2026-10-22T10:00:00Z\"},
+     {\"name\":\"CodeQL\",\"workflowName\":\"CodeQL\",\"status\":\"QUEUED\",\"conclusion\":\"\",\"startedAt\":\"0001-01-01T00:00:00Z\"}" \
+    > "$T/rollup.json"
+  if ( gh() { rollup_gh "$@"; }; ci_green_except_records 42 all ); then
+    echo "self-test: a queued newer run was hidden behind an older completed one" >&2; exit 1
+  fi
 
   # ── scenario harness ──
   local LOG_STAMPS="$T/stamps" LOG_PUSH="$T/pushes" LOG_MERGE="$T/merges" LOG_VERIFY="$T/verify"
