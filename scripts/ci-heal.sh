@@ -1129,7 +1129,7 @@ self_test() {
   run_case sc_green_head_moved 1
   expect_out green_head_moved "moved"; expect_lines green_head_moved "$LOG_STAMPS" 0
 
-  # The head is re-read immediately before the body edit, after every earlier check passed
+  # The head moves after the readiness checks but before the body edit (third head read).
   sc_green_head_moved_before_stamp() { base_attest; STUB_HEAD_MOVE_AFTER=2; }
   run_case sc_green_head_moved_before_stamp 1
   expect_out green_head_moved_before_stamp "moved before stamping"
@@ -1263,6 +1263,10 @@ self_test() {
   run_case sc_head_moved_after_records 1
   expect_out head_moved_after_records "moved while $RECORDS_CHECK ran"
   expect_no_out head_moved_after_records "READY FOR MERGE"; expect_lines head_moved_after_records "$LOG_MERGE" 0
+
+  sc_bad_head_sha() { base_attest; STUB_HEAD="not-a-sha"; STUB_LOCAL="not-a-sha"; }
+  run_case sc_bad_head_sha 1
+  expect_out bad_head_sha "unreadable PR head SHA"; expect_lines bad_head_sha "$LOG_STAMPS" 0
 
   sc_green_files_unreadable() { base_attest; STUB_FILES_FAIL=1; }
   run_case sc_green_files_unreadable 1

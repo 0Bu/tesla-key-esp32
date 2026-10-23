@@ -116,22 +116,22 @@ const usbNoApprovalNeeded = /(?:live verification|HTTP requests?|(?:GET|POST|HTT
 const usbOtaNotStateChanging = /(?:GET|POST) \/ota\/check[^.!?]*(?:is not|isn't|not) state-changing/i;
 const usbAbsentApprovalProceeds = /(?:(?:approval|authorization)[^.!?]*(?:absent|missing|not obtained)|without (?:separate )?(?:approval|authorization))[^.!?]*(?:continue|proceed|run|contact|send|request)/i;
 const reviewedSkillSha256 = new Map([
-  ["add-logic-test", "b37264357f243110c29275fb9c4e19dcbaba692920fa248a2ba951632ee6f2ac"],
-  ["ci-heal", "818fc0ebcdec853872a7628e35060d78050046cdbd628ce9218bbce348b41113"],
+  ["add-logic-test", "564c0e171f99e6cb55117c55dcb272f9c07ac0342315b48199274c6c7f347b0a"],
+  ["ci-heal", "321db23cebca9a9f7bbf8de6718a9540810c60d610d01bb3ae7502d8550b6639"],
   ["deploy", "169d30f409d6a447752b5fc7f3b7579ee6e714df9ce33ecd51cb344dd0d877f0"],
   ["deploy-bench", "15d3f62be54f14e1f560ab8d711f0d2915d3e1ec20a0cf3f0f962d52a689e30e"],
-  ["device-diag", "e07085f76423d48896d76a4730cb63125d993688ba2a81e0a6342438dd276940"],
+  ["device-diag", "ca61876cf7f745dd8cf3014a3f2b5c5758959eede9bd81ee952c3accfeaaf733"],
   ["display-preview", "1b886d24a8d17c1f0c1fbdbd4302dee0fe44688dbba081c1de50a9d844b3979b"],
   ["feature-docs", "ec0d24372fb754fde7c91e9d6917b78a348e06addb93299ceb5412fca758dcdb"],
-  ["flash-esp32", "8d89ec3b8338258bdcedf801362f9e4a6a366472b3a7d6c018888c2170b5820e"],
-  ["mock-test", "394d21dc5b76e529089362f2346c434b0060dd05c0948bf520b1f411cd90f9d3"],
-  ["ota-release-verify", "71a2945dba07b351bb4e8cba2e02e6f89ac126c11eece1f5b75ee4534ed622a2"],
+  ["flash-esp32", "e73ea6e17000bb266979c71d8d27fa1289aba9cef96cdb8e105977dfd069dac7"],
+  ["mock-test", "f211408296d1e21018c37288eb7e6f51226ebb7c5f34e3d9b851b0874aabb17b"],
+  ["ota-release-verify", "7a223646746f6a6e22601b2259ec8b96811aff452036f1c5c8a37d3d188c36cc"],
   ["pr-hygiene", "4a56b16765c6fd3527df54e9c93faed61ca5bf0c0a083668bd6747915982a961"],
-  ["project-review", "43619828c19c33a000d2d2a75e189b59eaa65d6aaf57d1f69924d4dc55d6f940"],
-  ["ship", "38a5810d462aa05e234d680258f91553aa69a97f7b64e37048bff93a5792d80c"],
-  ["skill-audit", "0b8d2d4bf1221f38f131d1f4cd678b01e6c6ce54cfdd6ac125e694c8ebeec1a9"],
-  ["usb-recovery", "98e2ff88fe52f0736bcd80cc9c4bba8e4d8232e8b1bf7d4f58ee08486fc6c726"],
-  ["vehicle-command-audit", "568eb137f6652f827bddd28152d53c493c9f90a429f73031aaaa69ab72ae981a"],
+  ["project-review", "9bc089ca4273e84b298b6bfbf6e37c21ada215b7e6e9a2d297cf1340310ce080"],
+  ["ship", "c56efd4b5e47c57f0868645d9a84af3b3ec20cd69f9a6fcedde13cb1fd0ac9f1"],
+  ["skill-audit", "7b4eb1d796819827b56dc01fe012b5385c903db495b8d52f98d8facf725b81b5"],
+  ["usb-recovery", "98a8f493377c564d07cd9f5a2819f228f2b2714d01a383ad2b3f47646f0b13af"],
+  ["vehicle-command-audit", "c76fd109218ebf2969e1541930b472cc04cf42423d7193aded794ee62edd7c2d"],
 ]);
 const featureDocsScopeTokens = [
   "main/", "test/", "sdkconfig.defaults*", "partitions.csv", "AGENTS.md", ".agents/", ".codex/",

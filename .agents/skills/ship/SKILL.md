@@ -45,7 +45,8 @@ gh pr view "$PR" --json number,state,mergeable,headRefOid,body
   vehicle-command-relevant diff (`gate_vehicle_command_relevant` in
   [`pr-gate-lib.sh`](../../../tools/agent-hooks/pr-gate-lib.sh)) also requires
   `- [x] $vehicle-command-audit clean — merge gate @ <sha>`. The
-  command must carry that same full head SHA in `--match-head-commit`. If any record is missing or
+  command must carry that same full head SHA in `--match-head-commit`, and the hook also requires
+  local `HEAD` to equal that PR head, so check out the exact head first. If any record is missing or
   stale, run the corresponding read-only review/sync workflow and report that a separately
   authorized PR-body update is needed; `$project-review` does not establish `$pr-hygiene`
   readiness. Never stamp from this skill and never use a structured/MCP merge action; the neutral

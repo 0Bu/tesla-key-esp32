@@ -79,7 +79,7 @@ printf 'Release %s -> %s\n' "$RELEASE_TAG" "$SOURCE_SHA"
 
 `REL` is the version the manifest and every embedded app descriptor must report; `SOURCE_SHA` is
 the only acceptable `manifest.sourceSha`. A merely well-formed but different SHA is stale or
-unreconciled channel state and fails closed. `version.txt` = `1.5.0` here is only the **floor** —
+unreconciled channel state and fails closed. `version.txt` holds only the **floor** —
 do not expect it to equal the live version; CI stamps the real one uncommitted.
 
 `build.yml` keeps this invariant structurally: a firmware-relevant `main` push enters the
@@ -276,7 +276,7 @@ curl -s "http://$IP/status" | jq -r .version       # X.Y.Z  (no "-esp32"; must m
 curl -s -X POST "http://$IP/ota/check?ms=$(date +%s000)"
 sleep 3
 curl -s "http://$IP/ota/status" | jq
-#   {state, progress, message, available, update_available, current, channel} (+ pr when targeted)
+#   {state, progress, message, available, update_available, current, channel[, pr]}
 ```
 
 `update_available:true` + `available` == the release reports a channel offer. Download, image
@@ -302,9 +302,9 @@ describes the failure symptom; use the table below to investigate before retryin
 
 ## See also
 
-- [`$ship`](../ship/SKILL.md) — merge an authorized PR, follow its main build and deliver the
-  signed image to one board; it never cuts a release. This skill verifies the stable Release that
-  only a separately authorized manual `release: true` dispatch publishes.
+- [`$ship`](../ship/SKILL.md) — merge an authorized PR, watch its main build and deliver the signed
+  image. A merge publishes only the Dev channel; this skill verifies the stable Release channel
+  that a separately authorized `release: true` run leaves behind.
 - [`$usb-recovery`](../usb-recovery/SKILL.md) — no-build USB reflash of the published signed image
   + otadata erase, the recovery a "signature bad" device needs.
 - [`docs/SECURITY.md`](../../../docs/SECURITY.md) — signing key lifecycle, TOFU trust anchor, and

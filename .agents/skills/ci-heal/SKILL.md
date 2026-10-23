@@ -28,7 +28,9 @@ verifies that the PR reaches a mergeable state with current gate records.
 ## What the script guarantees (and what it refuses)
 
 `scripts/ci-heal.sh` is deliberately conservative; its self-test (run by `scripts/test-pr-gates.sh`)
-drives the real flow with stubbed `git`/`gh` and pins every refusal below.
+drives the real flow with stubbed `git`/`gh` and pins every refusal below. The start-up checks (a
+missing or incomplete `pr-gate-lib.sh`, a non-numeric PR number) run before any stub can apply, so
+the self-test exercises them on an isolated copy of the script and through its `main` function.
 
 - **It never commits.** A fix must already be committed by the operator (English message, no
   private identifiers). An uncommitted working tree stops the run. ci-heal only pushes when local

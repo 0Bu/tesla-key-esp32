@@ -62,7 +62,7 @@ together, which matters more here than in a normal flash since a wrong guess wri
 | **nvs**         | `0x9000`                       | `0x6000`  | **NEVER touch** — holds pairing / key / VIN / WiFi |
 | **otadata**     | `0xf000`                       | `0x2000`  | **ERASE** — a blank `otadata` cleanly boots `ota_0` |
 | phy_init        | `0x11000`                      | `0x1000`  | leave alone                                       |
-| coredump        | `0x12000`                      | `0xc000`  | leave alone (crash dump; older layouts lack it)   |
+| coredump        | `0x12000`                      | `0xc000`  | leave alone (absent on tables older than it)      |
 | **ota_0 (app)** | `0x20000`                      | `0x1f0000`| **write the signed app here**                     |
 | ota_1           | `0x210000`                     | `0x1f0000`| leave alone                                       |
 
@@ -102,7 +102,7 @@ set -euo pipefail
 : "${TARGET:?run the target-selection block first}"
 : "${FAMILY:?run the target-selection block first}"
 [ "${SFX+x}" = x ] || { echo "REFUSING: image suffix is unset" >&2; exit 1; }
-: "${RELEASE_TAG:?set RELEASE_TAG explicitly, for example v1.4.74}"
+: "${RELEASE_TAG:?set RELEASE_TAG explicitly to the stable vX.Y.Z release to recover}"
 [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
   echo "REFUSING: release tag is not canonical stable vX.Y.Z" >&2; exit 1;
 }
@@ -505,7 +505,8 @@ sleep 2
 curl -fsS "http://$DEVICE_IP/ota/status" | jq .
 ```
 
-- `version` / `platform` must read the flashed `VERSION` and `FAMILY`; the loop above requires both.
+- `version` / `platform` must read the flashed `VERSION` and `FAMILY` (not the `version.txt` floor
+  that an unstamped local build reports); the loop above requires both.
 - `paired:true` reports the firmware's VCSEC-session presence result. It does not prove private-key
   or other configuration preservation, complete NVS integrity, or a successful vehicle handshake.
   The prescribed app/otadata write ranges do not overlap NVS; assess this status field only as
