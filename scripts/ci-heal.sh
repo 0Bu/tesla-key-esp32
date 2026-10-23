@@ -496,7 +496,7 @@ only_records_check_failing() {
 # Succeeds only when the rollup is readable, a `build` check succeeded and no other check is
 # anything but SUCCESS, NEUTRAL or SKIPPED (queued, running, cancelled, failed and commit-status
 # entries all count as not green). Mode `records` allows the records check alone to be not green;
-# mode `all` allows nothing. A skipped `build` (its needs failed) is never green enough.
+# mode `all` allows nothing. A skipped or missing `build` is never green enough.
 ci_green_except_records() {
   local mode="$2" rows name status conclusion nongreen=""
   rows="$(check_rollup "$1")" || return 1
@@ -573,7 +573,9 @@ run_heal() {
 
     # The records check validates the gate records this run stamps, so it stays red until they
     # exist. Alone it is "records pending", not a CI failure; it is re-checked after stamping.
-    failed_info="$(fetch_failed_runs "$target_pr" || true)"
+    # The records check is not a fixable CI failure; without other failed checks this run cannot
+    # identify one (pending, cancelled or API error) and stops below.
+    failed_info="$(fetch_failed_runs "$target_pr" | grep -v "^$RECORDS_CHECK | " || true)"
     if ci_green_except_records "$target_pr" records; then
       echo "ci-heal: every check except $RECORDS_CHECK is green for $head_sha; that check waits"
       echo "ci-heal: for the gate records and must pass again after stamping."
@@ -892,12 +894,15 @@ self_test() {
     STUB_HEAD_MOVE_AFTER=0; STUB_HEAD_COUNTER="$T/head-counter"; echo 0 > "$STUB_HEAD_COUNTER"
     STUB_RECORDS_AFTER=SUCCESS; STUB_RECORDS_READ_FAIL=0
     STUB_BUILD=SUCCESS; STUB_ROLLUP_EXTRA=""; STUB_ROLLUP_AFTER_EXTRA=""; STUB_LAST_WATCH=""
-    STUB_STAMP_FAIL=0; STUB_MERGE_FAIL=0
+    STUB_STAMP_FAIL=0; STUB_MERGE_FAIL=0; STUB_PUSH_FAIL=0
     git_local_head()     { printf '%s' "$STUB_LOCAL"; }
     git_current_branch() { printf '%s' "$STUB_BRANCH"; }
     git_tree_dirty()     { [ "$STUB_DIRTY" = 1 ]; }
     git_is_ancestor()    { [ "$STUB_ANCESTOR" = 1 ]; }
-    git_push_branch()    { echo "push $1" >> "$LOG_PUSH"; STUB_HEAD="$STUB_LOCAL"; }
+    git_push_branch()    {
+      [ "$STUB_PUSH_FAIL" != 1 ] || return 1
+      echo "push $1" >> "$LOG_PUSH"; STUB_HEAD="$STUB_LOCAL"
+    }
     sleep_seconds()      { :; }
     stamp_gates()        { [ "$STUB_STAMP_FAIL" != 1 ] || return 1; echo "$*" >> "$LOG_STAMPS"; }
     merge_pr()           { [ "$STUB_MERGE_FAIL" != 1 ] || return 1; echo "$*" >> "$LOG_MERGE"; }
@@ -1109,10 +1114,12 @@ self_test() {
     STUB_FAILED="$RECORDS_CHECK | COMPLETED | FAILURE | u"
   }
   run_case sc_records_with_cancelled 1
+  expect_out records_with_cancelled "no failed check could be identified"
+  expect_lines records_with_cancelled "$LOG_VERIFY" 0
   expect_no_out records_with_cancelled "READY FOR MERGE"
   expect_lines records_with_cancelled "$LOG_STAMPS" 0; expect_lines records_with_cancelled "$LOG_MERGE" 0
 
-  # A failed host gate skips `build`; a skipped or missing build is never green enough
+  # A skipped or missing `build` is never green enough
   sc_records_build_skipped() {
     base_attest; STUB_SEQ="red"; STUB_BUILD=SKIPPED; STUB_FAILED="$RECORDS_CHECK | COMPLETED | FAILURE | u"
   }
@@ -1158,6 +1165,19 @@ self_test() {
   sc_merge_fails() { base_attest; auto_merge=1; STUB_MERGE_FAIL=1; }
   run_case sc_merge_fails 1
   expect_out merge_fails "squash merge of PR #42 failed"; expect_no_out merge_fails "successfully merged"
+
+  sc_push_fails() {
+    STUB_SEQ="red"; STUB_FAILED="build | COMPLETED | FAILURE | u"; STUB_LOCAL="$SHA_B"; STUB_ANCESTOR=1
+    attest_names=(skill-audit pr-hygiene); attest_evidence=("audit-a" "hygiene-c"); STUB_PUSH_FAIL=1
+  }
+  run_case sc_push_fails 1
+  expect_out push_fails "pushing 'feature' failed"
+
+  # The head is re-read after the new records-check run passed (the fourth head lookup)
+  sc_head_moved_after_records() { base_attest; auto_merge=1; STUB_HEAD_MOVE_AFTER=3; }
+  run_case sc_head_moved_after_records 1
+  expect_out head_moved_after_records "moved while $RECORDS_CHECK ran"
+  expect_no_out head_moved_after_records "READY FOR MERGE"; expect_lines head_moved_after_records "$LOG_MERGE" 0
 
   sc_green_files_unreadable() { base_attest; STUB_FILES_FAIL=1; }
   run_case sc_green_files_unreadable 1

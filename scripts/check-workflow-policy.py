@@ -442,11 +442,14 @@ def validate(root: Path) -> None:
     for need, variable in (("prepare", "NEEDS_PREPARE"), ("logic-test", "NEEDS_LOGIC_TEST"),
                            ("logic-harness", "NEEDS_LOGIC_HARNESS"),
                            ("build-target", "NEEDS_BUILD_TARGET")):
-        require(f"          {variable}: ${{{{ needs.{need}.result }}}}\n" in build["build"]
-                and f'"{need}=${variable}"' in build["build"],
+        require(f"          {variable}: ${{{{ needs.{need}.result }}}}\n" in gate_step
+                and f'"{need}=${variable}"' in gate_step,
                 f"build.yml:build must fail unless {need} succeeded")
-    require('            if [ "${pair#*=}" != success ]; then\n' in build["build"]
-            and '          [ "$failed" -eq 0 ]\n' in build["build"],
+    # The check lives in that first step itself and its last command is the verdict: a later
+    # `failed=0` or a body moved into another step would turn it into a no-op.
+    require('            if [ "${pair#*=}" != success ]; then\n' in gate_step
+            and gate_step.count("failed=0") == 1
+            and gate_step.rstrip().endswith('[ "$failed" -eq 0 ]'),
             "build.yml:build must fail unless every need succeeded")
     # The four independent legs only need the run mode/version (prepare), so they run concurrently
     # with the producer builds; the join needs both the producer's display version and every leg.
@@ -1309,6 +1312,15 @@ def self_test(root: Path) -> None:
          "      - name: Require every needed job to succeed\n        env:\n",
          "      - name: Require every needed job to succeed\n        continue-on-error: true\n        env:\n",
          "need-result check must be unconditional and fatal"),
+        ("build-needs-gate-noop", "build.yml",
+         '          [ "$failed" -eq 0 ]\n',
+         '          failed=0\n          [ "$failed" -eq 0 ]\n',
+         "fail unless every need succeeded"),
+        ("build-needs-gate-body-moved", "build.yml",
+         "        run: |\n          set -euo pipefail\n          failed=0\n",
+         "        run: \"true\"\n      - name: Check needs elsewhere\n        run: |\n"
+         "          set -euo pipefail\n          failed=0\n",
+         "must fail unless"),
         ("build-needs-gate-conditional", "build.yml",
          "      - name: Require every needed job to succeed\n        env:\n",
          "      - name: Require every needed job to succeed\n        if: ${{ false }}\n        env:\n",

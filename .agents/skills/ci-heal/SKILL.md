@@ -44,7 +44,7 @@ drives the real flow with stubbed `git`/`gh` and pins every refusal below.
   `MERGEABLE`, and an unchanged head immediately before the body edit. Green CI means, for the
   latest run of every check at that head (earlier runs, such as the records failure before
   stamping, are superseded), a successful `build` and no other check queued, running, cancelled or
-  failed (skipped and neutral checks are fine; a `build` skipped because a host gate failed is not).
+  failed (skipped and neutral checks are fine, but a skipped or missing `build` never counts).
   Any mismatch stops the run before any merge-readiness record is stamped. `pr-policy /
   current-head-records` validates the records this workflow stamps, so a failure of that check
   alone counts as "records pending", not as red CI; after stamping, `READY FOR MERGE` and

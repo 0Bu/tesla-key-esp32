@@ -10,7 +10,8 @@ additional authorization. Canonical skills live under `.agents/skills/`; hooks e
 
 Builds the ESP-IDF project (in Docker) and, only from an explicitly verified **signed** app and
 after the user explicitly approves this physical-board mutation, flashes a connected ESP32 board (esp32 / esp32s3 / esp32c3 / esp32c6 — set `TARGET`;
-only the compile block defaults to esp32s3, every flash path requires it explicitly) over USB from the host. NVS is left untouched, so the stored pairing, private key, VIN
+the compile block defaults to esp32s3 and the local signing block reuses that value, the signed-preview
+block requires it explicitly, and every flash path refuses a port whose detected chip differs) over USB from the host. NVS is left untouched, so the stored pairing, private key, VIN
 and WiFi survive the flash (no re-pair needed). Use it only when the user asks for a build or
 flash; editing anything under `main/` does not itself authorize hardware access —
 including the embedded web UI (`main/www/` — `index.html` + `style.css` + `app.js`, spliced into

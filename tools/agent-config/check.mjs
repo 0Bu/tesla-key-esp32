@@ -117,13 +117,13 @@ const usbOtaNotStateChanging = /(?:GET|POST) \/ota\/check[^.!?]*(?:is not|isn't|
 const usbAbsentApprovalProceeds = /(?:(?:approval|authorization)[^.!?]*(?:absent|missing|not obtained)|without (?:separate )?(?:approval|authorization))[^.!?]*(?:continue|proceed|run|contact|send|request)/i;
 const reviewedSkillSha256 = new Map([
   ["add-logic-test", "b37264357f243110c29275fb9c4e19dcbaba692920fa248a2ba951632ee6f2ac"],
-  ["ci-heal", "6baa7c3b8860089de0c9909decd24d976dff4efe47d9f63a3b4c98d9fe99e097"],
+  ["ci-heal", "17cf30d3767f4bdb71f084ad30262545d6eee63e8d93939672dc6063dd8c061e"],
   ["deploy", "169d30f409d6a447752b5fc7f3b7579ee6e714df9ce33ecd51cb344dd0d877f0"],
   ["deploy-bench", "15d3f62be54f14e1f560ab8d711f0d2915d3e1ec20a0cf3f0f962d52a689e30e"],
   ["device-diag", "35c1b3df6bc648f5e14babf02fcf4d1dd5aca058e54b07d07318774f8d756705"],
   ["display-preview", "16c9a2040aef533bbecbd76159f3227d6a206bbf423055bc5f75a9f521a2151e"],
   ["feature-docs", "ec0d24372fb754fde7c91e9d6917b78a348e06addb93299ceb5412fca758dcdb"],
-  ["flash-esp32", "317020278fa682efe7edb3db2310f5fbb2567722e138fe5e057eac9e8af64995"],
+  ["flash-esp32", "dcf6462f7aac0f5077f0620588b4acc0f8c75bef68d45865dbd8eda2baa505e4"],
   ["mock-test", "a440930b6ade485b1ca206a5cca56798deaa89a6606cc9eaee306b7f93042d9f"],
   ["ota-release-verify", "3ea56fa7b87e8b56bfdc1728b72ddb700f7e139a0d22bfe1bf225c1f34782730"],
   ["pr-hygiene", "4a56b16765c6fd3527df54e9c93faed61ca5bf0c0a083668bd6747915982a961"],
