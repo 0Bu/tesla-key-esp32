@@ -149,6 +149,10 @@
       "test": "test/test_logic.cpp",
       "evidence": "test_http_route("
     },
+    "iteration_fault.hpp": {
+      "test": "test/test_logic.cpp",
+      "evidence": "test_iteration_fault("
+    },
     "json_syntax.hpp": {
       "test": "test/test_logic.cpp",
       "evidence": "test_json_materialize("
@@ -156,6 +160,10 @@
     "key_rotation.hpp": {
       "test": "test/test_logic.cpp",
       "evidence": "test_key_rotation("
+    },
+    "led_driver.hpp": {
+      "test": "test/test_logic.cpp",
+      "evidence": "test_led_driver("
     },
     "led_status.hpp": {
       "test": "test/test_logic.cpp",

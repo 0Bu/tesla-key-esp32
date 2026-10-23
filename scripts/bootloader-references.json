@@ -1,0 +1,61 @@
+{
+  "kind": "tesla-key-esp32-reviewed-bootloaders-v1",
+  "references": [
+    {
+      "target": "esp32",
+      "imageBytes": 24832,
+      "imageSha256": "9a748963c3df8925b1450ce0db72b79adb7d4645550639bab0ba97d86bcc4998",
+      "idfToolchain": "v6.1@sha256:81893c71bb5e570088901f21def8684c25cd2a9020281bd01b843a7655edb18c",
+      "sourceSha": "e1c3197596575728f336bec9eee0eafc4a0793f6",
+      "workflowRunId": 39685199994,
+      "artifactId": 12386880308,
+      "artifactSha256": "05d0aaca1cd2f32dab3e5172097cbfd404687b38e99718a6f93fcb08d82517cb",
+      "artifactName": "firmware-target-esp32",
+      "artifactPath": "_unsigned/esp32/bootloader/bootloader.bin",
+      "localRebuildSourceSha256": "d531c6c3f857afbe06cd74c7b9714d261d6f2e811b2974a866ba2a1669f13f41",
+      "localRebuildReceiptSha256": "9b0662200907c9c0707f0f12ee3782ff08ec5d8de5d47568fb3f90efccfa8202"
+    },
+    {
+      "target": "esp32s3",
+      "imageBytes": 20112,
+      "imageSha256": "ba63e2175ec323455f2750f56c1836bf3a755e62e8905e274a8a0568d38f4c54",
+      "idfToolchain": "v6.1@sha256:81893c71bb5e570088901f21def8684c25cd2a9020281bd01b843a7655edb18c",
+      "sourceSha": "e1c3197596575728f336bec9eee0eafc4a0793f6",
+      "workflowRunId": 39685199994,
+      "artifactId": 12386885810,
+      "artifactSha256": "ca0f0e7c6d70cdf90871592bb108507cf0f9b564d462f66064bcbba5e97d7c13",
+      "artifactName": "firmware-target-esp32s3",
+      "artifactPath": "_unsigned/esp32s3/bootloader/bootloader.bin",
+      "localRebuildSourceSha256": "d531c6c3f857afbe06cd74c7b9714d261d6f2e811b2974a866ba2a1669f13f41",
+      "localRebuildReceiptSha256": "9b0662200907c9c0707f0f12ee3782ff08ec5d8de5d47568fb3f90efccfa8202"
+    },
+    {
+      "target": "esp32c3",
+      "imageBytes": 20304,
+      "imageSha256": "19d28338f1730670437a7d1d5254ef8cdab27690cd61b371c0a23bd60306b53b",
+      "idfToolchain": "v6.1@sha256:81893c71bb5e570088901f21def8684c25cd2a9020281bd01b843a7655edb18c",
+      "sourceSha": "e1c3197596575728f336bec9eee0eafc4a0793f6",
+      "workflowRunId": 39685199994,
+      "artifactId": 12385683448,
+      "artifactSha256": "8f9096a8af307e748f2ce1936a6f59c4626262e35b6f4b592a6c89679ea77747",
+      "artifactName": "firmware-target-esp32c3",
+      "artifactPath": "_unsigned/esp32c3/bootloader/bootloader.bin",
+      "localRebuildSourceSha256": "d531c6c3f857afbe06cd74c7b9714d261d6f2e811b2974a866ba2a1669f13f41",
+      "localRebuildReceiptSha256": "9b0662200907c9c0707f0f12ee3782ff08ec5d8de5d47568fb3f90efccfa8202"
+    },
+    {
+      "target": "esp32c6",
+      "imageBytes": 20880,
+      "imageSha256": "27716ffb8c5e19dee72ec41bce3f476cb9593b053d86526690665c8ba5f9241a",
+      "idfToolchain": "v6.1@sha256:81893c71bb5e570088901f21def8684c25cd2a9020281bd01b843a7655edb18c",
+      "sourceSha": "e1c3197596575728f336bec9eee0eafc4a0793f6",
+      "workflowRunId": 39685199994,
+      "artifactId": 12386556213,
+      "artifactSha256": "9781787c1f1d0b030fa0c4ace199342de62cc9514e8dbb121868295b668b9b98",
+      "artifactName": "firmware-target-esp32c6",
+      "artifactPath": "_unsigned/esp32c6/bootloader/bootloader.bin",
+      "localRebuildSourceSha256": "d531c6c3f857afbe06cd74c7b9714d261d6f2e811b2974a866ba2a1669f13f41",
+      "localRebuildReceiptSha256": "9b0662200907c9c0707f0f12ee3782ff08ec5d8de5d47568fb3f90efccfa8202"
+    }
+  ]
+}

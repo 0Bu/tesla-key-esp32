@@ -8,7 +8,9 @@
 #include <vector>
 
 #include "link_state.hpp"
+#include "health_gate.hpp"
 #include "session_availability.hpp"
+#include "runtime_admission.hpp"
 #include "vehicle_data.hpp"
 
 // Pure, hardware-free shaping of GET /status — the de-facto contract the web UI
@@ -60,6 +62,8 @@ struct Inputs {
     tk::SessionAvailability sessions;
     long long   paired_at{0};     // stored session first observed at NTP time; epoch s, same floor
     bool        reauth{false};
+    tk::OtaVerificationState ota_verification{tk::OtaVerificationState::Unknown}; // cached only
+    const char* pairing_block_reason{nullptr};  // static cached reason; absent during normal pairing
 
     // WiFi (STA link). wifi_connected false ⇒ the wifi object stays empty.
     bool        wifi_connected{false};
@@ -92,6 +96,7 @@ struct Inputs {
     std::string syslog_host;      // empty = omit host+port
     int         syslog_port{0};
     std::string syslog_error;     // empty = omit
+    uint32_t syslog_dropped_lines{0};
 
     // OTA update channel ("release" or "dev"). Empty = omitted.
     std::string ota_channel;
@@ -151,6 +156,8 @@ struct Inputs {
     uint32_t    wifi_reconnects{0};
     std::string reset_reason;          // logic/reset_reason.hpp slug for THIS boot
     bool        safe_mode{false};      // the latched boot-loop recovery state (safe_mode.cpp)
+    std::optional<tk::RuntimeAdmissionState> runtime_state;
+    uint32_t diag_dropped_lines{0};
     // Historical minimum free stack since boot, sampled by each owning task. nullopt means never
     // sampled and is omitted: safe mode intentionally never starts three of these tasks. An
     // engaged zero is a valid, critical measurement and must remain distinguishable from absence.
@@ -230,6 +237,7 @@ inline void emit_status(const Inputs& in, E& e) {
     e.obj_end();
     if (in.paired_at > kEpochPlausibleFloor) e.num("paired_at", (double)in.paired_at);
     e.boolean("reauth", in.reauth);
+    if (in.pairing_block_reason) e.str("pairing_blocked", in.pairing_block_reason);
 
     // ── wifi ──────────────────────────────────────────────────────────────────
     e.obj_begin("wifi");
@@ -271,6 +279,7 @@ inline void emit_status(const Inputs& in, E& e) {
     e.boolean("configured", in.syslog_configured);
     e.boolean("resolved",   in.syslog_resolved);
     e.boolean("reachable",  in.syslog_reachable);
+    if (in.syslog_dropped_lines) e.num("dropped_lines", in.syslog_dropped_lines);
     if (!in.syslog_host.empty()) {
         e.str("host", redacted_or(in.syslog_host, in.redact));
         e.num("port", in.syslog_port);
@@ -282,6 +291,7 @@ inline void emit_status(const Inputs& in, E& e) {
     if (!in.ota_channel.empty()) {
         e.obj_begin("ota");
         e.str("channel", in.ota_channel.c_str());
+        e.str("verification", tk::ota_verification_name(in.ota_verification));
         e.obj_end();
     }
 
@@ -417,6 +427,8 @@ inline void emit_status(const Inputs& in, E& e) {
     e.num("wifi_reconnects", (double)in.wifi_reconnects);
     e.str("reset_reason",    in.reset_reason.c_str());
     e.boolean("safe_mode",   in.safe_mode);
+    if (in.runtime_state) e.str("runtime_state", tk::runtime_admission_state_name(*in.runtime_state));
+    if (in.diag_dropped_lines) e.num("diag_dropped_lines", in.diag_dropped_lines);
     if (in.httpd_stack_min_free_bytes || in.vehicle_stack_min_free_bytes ||
         in.auto_pair_stack_min_free_bytes || in.mqtt_stack_min_free_bytes) {
         e.obj_begin("stack_min_free_bytes");

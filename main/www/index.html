@@ -32,7 +32,7 @@
     <header class="top">
       <div class="brand">
         <span class="logo top-logo" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#ic-bolt"/></svg></span>
-        <div class="ttl"><h1>tesla-key-esp32</h1><span class="host mono" id="ipline"></span></div>
+        <div class="ttl"><h1>tesla-key-esp32</h1><span class="host mono" id="ipline"></span><span class="feed-status hide" id="feedStatus" role="status"></span></div>
       </div>
       <span class="otastat" id="otaStat" aria-hidden="true"></span>
     </header>
@@ -47,7 +47,7 @@
 
       <!-- vehicle hero. Starts hidden: the first /status frame reveals it, so the empty
            skeleton never flashes on load. -->
-      <section class="pane pane-car hero hide" id="hero" aria-label="Vehicle status" onclick="heroCardTap(event)">
+      <section class="pane pane-car hero hide" id="hero" aria-label="Vehicle status">
         <div class="gauge" id="hicon"></div>
         <div class="hbody">
           <div class="htext" id="htext">

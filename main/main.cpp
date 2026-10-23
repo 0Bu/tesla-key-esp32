@@ -303,10 +303,7 @@ static void ota_health_gate_task(void*) {
         }
         const uint32_t elapsed_s =
             (uint32_t) (pdTICKS_TO_MS(xTaskGetTickCount() - start) / 1000);
-        const size_t largest = heap_caps_get_largest_free_block(
-            MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
-        const bool runtime_healthy = largest >= tk::kHeapCriticalBytes &&
-                                     ble_host_synced() && ble_host_reset_count() == 0;
+        const bool runtime_healthy = ota_runtime_health().healthy();
         const tk::HealthVerdict v =
             tk::health_gate_decide(elapsed_s, tk::kHealthGateBaseS, tk::kHealthGateCapS,
                                    s_ota_gate_link_expected, tk::net_is_up(), runtime_healthy);
@@ -319,18 +316,22 @@ static void ota_health_gate_task(void*) {
             // loses to this owner while the heap re-check can still veto the commit.
             OtaHealthCommitGuard commit_guard;
             if (!commit_guard) continue;
-            if (!tk::runtime_admission_vehicle_ready()) continue;
-            if (!ble_host_synced()) continue;
-            if (ble_host_reset_count() != 0) continue;
-            const size_t commit_largest = heap_caps_get_largest_free_block(
-                MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
-            if (commit_largest < tk::kHeapCriticalBytes) continue;
+            const auto commit_health = ota_runtime_health();
+            if (!commit_health.healthy()) continue;
+            const size_t commit_largest = commit_health.largest;
 
-            if (esp_ota_mark_app_valid_cancel_rollback() == ESP_OK) {
+            const esp_err_t mark_result = esp_ota_mark_app_valid_cancel_rollback();
+            // Refresh before fallible diagnostics: an SDK error may follow a durable effect.
+            ota_refresh_verification_cache();
+            if (mark_result == ESP_OK) {
                 ESP_LOGI(TAG, "OTA image healthy after %us on %s — marked valid (rollback "
                               "cancelled, largest block %u)",
                          (unsigned) elapsed_s, tk::net_link_str(tk::net_kind()),
                          (unsigned) commit_largest);
+            } else {
+                ESP_LOGE(TAG, "OTA mark-valid failed: %s (%d); verification is uncertain; "
+                              "health task stops without retry",
+                         esp_err_to_name(mark_result), (int) mark_result);
             }
         } else {
             // Report the unresolved gate through syslog and /diag. A later restart may roll
@@ -347,8 +348,8 @@ static void ota_health_gate_task(void*) {
     }
     vTaskDelete(nullptr);
   } catch (...) {
-    // Leave rollback armed. A health-gate exception is not evidence that this image is healthy.
-    ESP_LOGE(TAG, "OTA health-gate task threw; image remains pending and task stops");
+    // An exception after a mark attempt cannot prove that rollback remains armed.
+    ESP_LOGE(TAG, "OTA health-gate task threw; verification is uncertain and task stops");
     vTaskDelete(nullptr);
   }
 }
@@ -901,6 +902,9 @@ extern "C" void app_main() {
         ESP_LOGW(TAG, "SAFE MODE — NimBLE not started");
     }
 
+    // Seed diagnostic verification before HTTP/health/vehicle tasks can observe or change it.
+    ota_refresh_verification_cache();
+
     // Primary HTTP API (evcc + web UI + MCP). ESSENTIAL: it is the device's whole reason to
     // exist. http_server_start() unwinds a partial registration internally and returns false;
     // halt boot on that so we never announce a server that answers some routes and 404s others.
@@ -987,10 +991,9 @@ extern "C" void app_main() {
         }
     }
 
-    // Clear the crash-boot counter once THIS boot has proven it can stay up under load. A timer,
-    // not a line at the end of app_main: reaching here proves the device initialised, while the
-    // crashes this guards against happen minutes in — an end-of-init clear would have declared
-    // exactly those boots healthy and the counter would never reach its threshold.
+    // Arm the bounded kBootHealthyS (30 s) crash-counter window after initialization. The timer
+    // stays disabled in safe mode. This proves survival of that startup window, not long-term
+    // health; a later unrelated crash begins a new sequence after a successful counter clear.
     tk::safe_mode_arm_healthy_timer(config_store);
 
     if (safe_mode) {

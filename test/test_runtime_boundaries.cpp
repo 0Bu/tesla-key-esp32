@@ -4,6 +4,9 @@
 #include "ping_probe.hpp"
 #include "reboot_reason.hpp"
 #include "safe_mode.hpp"
+#include "runtime_fault_log.hpp"
+#include "vehicle_ctrl_internal.hpp"
+#include "stack_watch.hpp"
 #include "logic/redact.hpp"
 #include "logic/nimble_start_gate.hpp"
 #include "logic/runtime_admission.hpp"
@@ -25,6 +28,12 @@
 #include <vector>
 
 int test_coredump_hash();
+#ifdef TEST_OTA_ADMISSION_ADAPTER
+int test_ota_admission();
+#endif
+#ifdef TEST_BACKGROUND_POLL_ADAPTER
+int test_background_poll();
+#endif
 
 struct HostPingSession {
     esp_ping_callbacks_t callbacks{};
@@ -52,6 +61,7 @@ std::string captured_syslog;
 HostSemaphore* last_mutex = nullptr;
 bool fail_diag_mutex_create = false;
 unsigned log_hook_installs = 0;
+TickType_t last_mutex_wait = portMAX_DELAY;
 bool inject_hook_reentry = false;
 bool inject_mutex_reentry = false;
 unsigned hook_reentries = 0;
@@ -63,6 +73,8 @@ BaseType_t task_create_result = pdPASS;
 int deleted_tasks = 0;
 TickType_t last_delay = 0;
 TickType_t fake_ticks = 0;
+UBaseType_t fake_stack_free = 0;
+unsigned stack_queries = 0;
 
 enum class PingScenario {
     SetupFail,
@@ -215,6 +227,7 @@ extern "C" BaseType_t xSemaphoreTake(SemaphoreHandle_t sem, TickType_t ticks) {
         fake_ticks += ticks;
         return pdFALSE;
     }
+    last_mutex_wait = ticks;
     if (!sem || sem->held) return pdFALSE;
     sem->held = true;
     ++sem->takes;
@@ -235,6 +248,48 @@ extern "C" BaseType_t xSemaphoreGive(SemaphoreHandle_t sem) {
 }
 
 extern "C" void vSemaphoreDelete(SemaphoreHandle_t sem) { delete sem; }
+
+extern "C" UBaseType_t uxTaskGetStackHighWaterMark(TaskHandle_t task) {
+    CHECK(task==nullptr); ++stack_queries; return fake_stack_free;
+}
+
+static void test_actual_guard_unwind_and_stack_minima() {
+    // The real RAII types release both ordinary and non-standard exception paths.
+    for (int fault : {0,1,2}) {
+        HostSemaphore sem{};
+        std::atomic<bool> in_flight{false};
+        try {
+            tk::SemGuard guard(&sem,0); CHECK(guard.acquired()); CHECK(sem.held);
+            tk::InFlightGuard flight(in_flight); CHECK(in_flight.load());
+            if (fault==1) throw std::bad_alloc();
+            if (fault==2) throw 17;
+        } catch (...) {}
+        CHECK(!in_flight.load()); CHECK(!sem.held); CHECK(sem.takes==1 && sem.gives==1);
+    }
+    HostSemaphore occupied{}; occupied.held=true;
+    { tk::SemGuard guard(&occupied,0); CHECK(!guard); }
+    CHECK(occupied.held && occupied.gives==0);
+    { tk::SemGuard guard(nullptr,0); CHECK(!guard); }
+
+    // Compile stack_watch.cpp itself. A real zero remains sampled, rising observations do
+    // not increase the retained minimum, and an invalid index never queries another task.
+    const auto slot=tk::StackWatch::Httpd;
+    CHECK(!tk::stack_watch_min_free_bytes(slot).has_value());
+    CHECK(!tk::stack_watch_min_free_bytes(tk::StackWatch::Mqtt).has_value());
+    for (uint32_t value : {1000U,1200U,600U,900U,0U,2000U}) {
+        fake_stack_free=value; tk::stack_watch_sample(slot);
+        const uint32_t expected=value==1000U||value==1200U?1000U:value==600U||value==900U?600U:0U;
+        CHECK(tk::stack_watch_min_free_bytes(slot).has_value());
+        CHECK(*tk::stack_watch_min_free_bytes(slot)==expected);
+    }
+    fake_stack_free=456; tk::stack_watch_sample(tk::StackWatch::Vehicle);
+    CHECK(*tk::stack_watch_min_free_bytes(tk::StackWatch::Vehicle)==456);
+    CHECK(*tk::stack_watch_min_free_bytes(slot)==0);
+    const auto before=stack_queries;
+    tk::stack_watch_sample(tk::StackWatch::Count);
+    CHECK(!tk::stack_watch_min_free_bytes(tk::StackWatch::Count).has_value());
+    CHECK(stack_queries==before);
+}
 
 extern "C" BaseType_t xTaskCreate(TaskFunction_t task, const char*, uint32_t, void* arg,
                                     UBaseType_t, TaskHandle_t*) {
@@ -382,6 +437,34 @@ bool NvsStorageAdapter::save_str(const char*, const std::string& value) {
     if (throw_other_on_save) throw std::runtime_error("save fixture");
     saved_counts.push_back(value);
     return save_ok;
+}
+
+static void test_iteration_fault_sink_boundary() {
+    tk::IterationFaultLog state{};
+    unsigned attempts = 0;
+    uint32_t last_suppressed = 0;
+    auto failing_sink = [&](uint32_t suppressed) {
+        ++attempts;
+        last_suppressed = suppressed;
+        if (attempts == 1) throw std::bad_alloc();
+        throw 42;
+    };
+    tk::report_iteration_fault(state, 0, failing_sink);
+    CHECK(attempts == 1 && last_suppressed == 0);
+    for (uint64_t time = 50; time < 30000; time += 50) {
+        tk::report_iteration_fault(state, time, failing_sink);
+        CHECK(attempts == 1); // state must advance even when the actual sink throws
+    }
+    tk::report_iteration_fault(state, 30000, failing_sink);
+    CHECK(attempts == 2 && last_suppressed == 599);
+    tk::report_iteration_fault(state, 30001, failing_sink);
+    CHECK(attempts == 2);
+    bool recovered_sink = false;
+    tk::report_iteration_fault(state, 60000, [&](uint32_t suppressed) {
+        recovered_sink = true;
+        CHECK(suppressed == 1);
+    });
+    CHECK(recovered_sink);
 }
 
 static void test_runtime_admission_default_closed() {
@@ -1110,9 +1193,17 @@ static void test_diag_http_completion_matrix() {
 }
 
 int main() {
+    test_actual_guard_unwind_and_stack_minima();
     checks += test_coredump_hash();
+#ifdef TEST_OTA_ADMISSION_ADAPTER
+    checks += test_ota_admission();
+#endif
+#ifdef TEST_BACKGROUND_POLL_ADAPTER
+    checks += test_background_poll();
+#endif
     log_sink = discard_log;
 
+    test_iteration_fault_sink_boundary();
     test_runtime_admission_default_closed();
     test_ota_confirm_ready_only_after_health_owner();
     test_nimble_start_ack_runtime_matrix();
@@ -1155,7 +1246,16 @@ int main() {
     CHECK(log_hook_installs == previous_installs + 1);
     CHECK(last_mutex != nullptr);
     diag_log_clear();
+    const auto drops_before = diag_log_dropped_lines();
+    last_mutex->held = true;
+    emit_log("contended capture must not block\n");
+    CHECK(last_mutex_wait == 0);
+    CHECK(diag_log_dropped_lines() == drops_before + 1);
+    last_mutex->held = false;
+    diag_log_clear();
+    CHECK(diag_log_dropped_lines() == drops_before + 1);
     emit_log("first %d\n", 1);
+    CHECK(diag_log_dropped_lines() == drops_before + 1);
 
     std::string dump;
     const DiagDumpResult first_dump = diag_log_dump_chunks([&](const char* data, size_t len) {
@@ -1462,6 +1562,33 @@ int main() {
     CHECK(!tk::safe_mode_begin(storage, false));
     CHECK(saved_counts.size() == 1 && saved_counts[0] == "0");
     CHECK(!tk::safe_mode_active());
+
+    // An intentional reset cannot bypass failed counter storage or hide a malformed record.
+    reset_storage("3");
+    load_ok = false;
+    CHECK(tk::safe_mode_begin(storage, false));
+    CHECK(saved_counts.empty());
+    CHECK(tk::safe_mode_active());
+
+    reset_storage("broken");
+    stored_present = true;
+    CHECK(tk::safe_mode_begin(storage, false));
+    CHECK(saved_counts.empty());
+    CHECK(tk::safe_mode_active());
+
+    reset_storage("3");
+    save_ok = false;
+    CHECK(tk::safe_mode_begin(storage, false));
+    CHECK(saved_counts.size() == 1 && saved_counts[0] == "0");
+    CHECK(tk::safe_mode_active());
+
+    for (bool fail_read : {false, true}) {
+        reset_storage("3");
+        throw_on_load = fail_read;
+        throw_on_save = !fail_read;
+        CHECK(tk::safe_mode_begin(storage, false));
+        CHECK(tk::safe_mode_active());
+    }
 
     // Allocation failures at either NVS boundary fail closed into safe mode and never unwind
     // through app_main's boot decision.

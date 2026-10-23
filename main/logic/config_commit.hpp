@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include "logic/health_gate.hpp"
 
 // Pure configuration-commit results. ota_update.cpp maps the raw SDK state under the
 // request's held operation lease; HTTP/portal replies preserve that result after an effect.
@@ -11,6 +12,18 @@ enum class ConfigImageResult : uint8_t {
     None, Valid, Undefined, Confirmed, Pending, New, Unsupported, Unknown,
     NotReady, HostUnsynced, HostReset, CriticalHeap, MarkUnknown, WrongOwner, WrongClass
 };
+
+// None means the local health sample permits an attempt, never that SDK confirmation succeeded.
+constexpr ConfigImageResult config_health_failure(RuntimeHealthFailure failure) noexcept {
+    switch (failure) {
+        case RuntimeHealthFailure::None: return ConfigImageResult::None;
+        case RuntimeHealthFailure::NotReady: return ConfigImageResult::NotReady;
+        case RuntimeHealthFailure::HostUnsynced: return ConfigImageResult::HostUnsynced;
+        case RuntimeHealthFailure::HostReset: return ConfigImageResult::HostReset;
+        case RuntimeHealthFailure::CriticalHeap: return ConfigImageResult::CriticalHeap;
+    }
+    return ConfigImageResult::Unknown;
+}
 
 constexpr bool config_wifi_may_save(ConfigImageResult image) noexcept {
     return image == ConfigImageResult::Valid || image == ConfigImageResult::Undefined;

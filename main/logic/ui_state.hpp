@@ -5,11 +5,11 @@
 #include "logic/net_link.hpp"
 
 // Immutable, hardware-free snapshot of everything the on-device status indicators need
-// to decide what to show — the ST7735 status display (logic/display_model.hpp) and, in
-// future, the APA102 status LED (logic/led_status.hpp). It is the single INPUT CONTRACT
-// shared by every presenter, so the display and the LED can never disagree about the car's
-// state: they read ONE struct instead of each racing the controller's accessors
-// independently (which was the "4th/5th sink of link_state()" drift hazard). Pure data —
+// to decide what to show — the ST7735 status display (logic/display_model.hpp) and
+// the APA102 status LED (logic/led_status.hpp). Each presenter receives one coherent
+// vehicle snapshot rather than separately sampling controller accessors. Tasks can sample at
+// different times; sharing this input structure does not synchronize their rendered frames.
+// Pure data —
 // no IDF types, no std::string, no heap — so every presenter that consumes it is host-tested
 // in test/ without a board (the same reason logic/link_state.hpp exists).
 //

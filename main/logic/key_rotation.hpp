@@ -162,6 +162,17 @@ constexpr AutomaticKeyAction decide_automatic_key_action(bool probe_ok,
                         : AutomaticKeyAction::RebootRequired;
 }
 
+// Cached visibility only: no storage probe, identity change or new recovery action.
+constexpr const char* pairing_block_reason(bool key_reload, bool cleanup_pending,
+                                           bool vin_pending, AutomaticKeyAction action) noexcept {
+    if (key_reload) return "key_reload_required";
+    if (vin_pending) return "vin_transition_pending";
+    if (cleanup_pending) return "key_cleanup_pending";
+    if (action == AutomaticKeyAction::StorageUnavailable) return "key_storage_unavailable";
+    if (action == AutomaticKeyAction::RebootRequired) return "key_runtime_mismatch";
+    return nullptr;
+}
+
 constexpr KeyRotationMarkerProbe classify_key_rotation_marker_probe(bool probe_ok,
                                                                      bool marker_exists) {
     if (!probe_ok) return KeyRotationMarkerProbe::Error;

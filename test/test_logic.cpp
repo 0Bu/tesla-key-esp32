@@ -33,6 +33,7 @@
 #include "logic/ha_identity.hpp"
 #include "logic/units.hpp"
 #include "logic/uptime.hpp"
+#include "logic/iteration_fault.hpp"
 #include "logic/link_state.hpp"
 #include "logic/target.hpp"
 #include "logic/mcp.hpp"
@@ -46,6 +47,7 @@
 #include "logic/eth_board.hpp"
 #include "logic/soc_gradient.hpp"
 #include "logic/led_status.hpp"
+#include "logic/led_driver.hpp"
 #include "logic/syslog_policy.hpp"
 #include "logic/syslog_start_gate.hpp"
 #include "logic/connect_outcome.hpp"
@@ -1073,6 +1075,23 @@ static void test_ota_contract() {
     using Order = tk::OtaVersionOrder;
     using Read = tk::BoundedBodyReadResult;
 
+    static_assert(tk::ota_https_url("https://example.test/manifest.json"));
+    static_assert(!tk::ota_https_url("http://example.test/manifest.json"));
+    for (const auto url : {"https://example.test/manifest.json", "https://example.test:8443/"})
+        CHECK(tk::ota_https_url(url));
+    for (const auto url : {"", "http://example.test/", "HTTPS://example.test/", "//example.test/", " https://example.test/", "https://"})
+        CHECK(!tk::ota_https_url(url));
+    using Start = tk::OtaStartResult;
+    for (const auto result : {Start::Started, Start::Busy, Start::PendingVerification, Start::Unavailable, Start::InternalError}) {
+        CHECK(tk::ota_start_http_status(result) == (result == Start::Started ? 200 : result == Start::Busy || result == Start::PendingVerification ? 409 : result == Start::InternalError ? 500 : 503));
+        CHECK(std::strlen(tk::ota_start_reason(result, true)) > 0);
+        CHECK(std::strlen(tk::ota_start_reason(result, false)) > 0);
+    }
+    CHECK_STR(tk::ota_start_reason(Start::PendingVerification, false), "running firmware is still pending verification");
+    CHECK_STR(tk::ota_verification_name(tk::OtaVerificationState::Stable), "stable");
+    CHECK_STR(tk::ota_verification_name(tk::OtaVerificationState::PendingVerify), "pending_verify");
+    CHECK_STR(tk::ota_verification_name(tk::OtaVerificationState::Unknown), "unknown");
+
     CHECK(tk::canonical_ota_version("0.0.0"));
     CHECK(tk::canonical_ota_version("1.4.84"));
     CHECK(tk::canonical_ota_version("1.4.84-PR-123"));
@@ -1250,7 +1269,7 @@ static void test_ota_channel() {
     CHECK(tk::ota_channel_parse("unknown", OtaChannel::Release) == OtaChannel::Release);
     CHECK(tk::ota_channel_parse("unknown", OtaChannel::Dev) == OtaChannel::Dev);
 
-    // Int conversion for config blob v2
+    // Int conversion for the OTA flag bits in config blob v1
     CHECK(tk::ota_channel_to_int(OtaChannel::Release) == 0);
     CHECK(tk::ota_channel_to_int(OtaChannel::Dev) == 1);
     CHECK(tk::ota_channel_from_int(0) == OtaChannel::Release);
@@ -1475,6 +1494,20 @@ static void test_task_start_gate() {
 
 // ─── whole-runtime vehicle admission / partial-boot fault injection ──────────
 static void test_runtime_admission() {
+    CHECK(std::string(tk::runtime_admission_state_name(tk::RuntimeAdmissionState::Booting)) == "booting");
+    CHECK(std::string(tk::runtime_admission_state_name(tk::RuntimeAdmissionState::Ready)) == "ready");
+    CHECK(std::string(tk::runtime_admission_state_name(tk::RuntimeAdmissionState::SafeMode)) == "safe_mode");
+    CHECK(std::string(tk::runtime_admission_state_name(tk::RuntimeAdmissionState::Fatal)) == "fatal");
+    CHECK(std::string(tk::runtime_admission_state_name(static_cast<tk::RuntimeAdmissionState>(255))) == "fatal");
+    using AKA = tk::AutomaticKeyAction;
+    for(auto action : {AKA::Continue, AKA::Generate, AKA::RecoveryRequired})
+        CHECK(tk::pairing_block_reason(false, false, false, action) == nullptr);
+    CHECK(std::string(tk::pairing_block_reason(false, false, false, AKA::StorageUnavailable)) == "key_storage_unavailable");
+    CHECK(std::string(tk::pairing_block_reason(false, false, false, AKA::RebootRequired)) == "key_runtime_mismatch");
+    CHECK(std::string(tk::pairing_block_reason(true, true, true, AKA::StorageUnavailable)) == "key_reload_required");
+    CHECK(std::string(tk::pairing_block_reason(false, true, true, AKA::Continue)) == "vin_transition_pending");
+    CHECK(std::string(tk::pairing_block_reason(false, true, false, AKA::Continue)) == "key_cleanup_pending");
+
     using Action = tk::RuntimeAdmissionAction;
     using State = tk::RuntimeAdmissionState;
 
@@ -1874,7 +1907,7 @@ static void test_mcp() {
     CHECK_STR(sched->args[0].mcp_key, "enable");
     CHECK_STR(sched->args[0].api_key, "enable");
     CHECK(sched->args[0].type == tk::CmdArgType::Bool && sched->args[0].mcp_required);
-    CHECK(!sched->args[0].api_required);
+    CHECK(sched->args[0].api_required);
     CHECK_STR(sched->args[1].mcp_key, "start_minutes");
     CHECK(sched->args[1].type == tk::CmdArgType::Int && !sched->args[1].mcp_required);
     CHECK(sched->args[1].lo == 0 && sched->args[1].hi == 1439);
@@ -1917,8 +1950,9 @@ static void test_mcp() {
 
     // REST body compatibility. Empty bodies and objects retain the normal
     // TeslaBleHttpProxy contract for every command. evcc's generic boolean setter emits
-    // the scalar true for charge_start and false for charge_stop; admit only those exact
-    // command/value pairs, never a mismatched toggle or a scalar for another command.
+    // the scalar true for charge_start and wake_up and false for charge_stop; admit only
+    // those exact command/value pairs, never a mismatched toggle or a scalar for another
+    // command (an argument-bearing command would skip its object-key validation).
     using BS = tk::RestBodyShape;
     CHECK(tk::rest_body_allowed(tk::CmdKind::ChargeStart, BS::Empty));
     CHECK(tk::rest_body_allowed(tk::CmdKind::ChargeStart, BS::Object));
@@ -1927,9 +1961,26 @@ static void test_mcp() {
     CHECK(!tk::rest_body_allowed(tk::CmdKind::ChargeStart, BS::BoolFalse));
     CHECK(tk::rest_body_allowed(tk::CmdKind::ChargeStop, BS::BoolFalse));
     CHECK(!tk::rest_body_allowed(tk::CmdKind::ChargeStop, BS::BoolTrue));
-    CHECK(!tk::rest_body_allowed(tk::CmdKind::WakeUp, BS::BoolTrue));
+    CHECK(tk::rest_body_allowed(tk::CmdKind::WakeUp, BS::Empty));
+    CHECK(tk::rest_body_allowed(tk::CmdKind::WakeUp, BS::BoolTrue));
+    CHECK(!tk::rest_body_allowed(tk::CmdKind::WakeUp, BS::BoolFalse));
+    CHECK(!tk::rest_body_allowed(tk::CmdKind::WakeUp, BS::Other));
     CHECK(!tk::rest_body_allowed(tk::CmdKind::SetChargingAmps, BS::BoolFalse));
+    CHECK(!tk::rest_body_allowed(tk::CmdKind::SetChargingAmps, BS::BoolTrue));
+    CHECK(!tk::rest_body_allowed(tk::CmdKind::SetChargeLimit, BS::BoolTrue));
+    CHECK(!tk::rest_body_allowed(tk::CmdKind::SetScheduledCharging, BS::BoolTrue));
+    CHECK(!tk::rest_body_allowed(tk::CmdKind::SetScheduledCharging, BS::BoolFalse));
     CHECK(!tk::rest_body_allowed(tk::CmdKind::ChargeStart, BS::Other));
+    // Every command that takes a REST argument, present or future, stays object-only.
+    for (const auto& t : tk::kCommands) {
+        bool has_rest_arg = false;
+        for (const auto& a : t.args) has_rest_arg = has_rest_arg || a.api_key != nullptr;
+        if (!has_rest_arg) continue;
+        CHECK(tk::rest_body_allowed(t.kind, BS::Object));
+        CHECK(!tk::rest_body_allowed(t.kind, BS::BoolTrue));
+        CHECK(!tk::rest_body_allowed(t.kind, BS::BoolFalse));
+        CHECK(!tk::rest_body_allowed(t.kind, BS::Other));
+    }
 
     // tools/list wire order is table order — pin the 9 MCP rows exactly (a reorder
     // would change the serialized tools/list even with identical content).
@@ -2107,6 +2158,23 @@ struct CollectEmitter {
 };
 
 // Golden compare that prints the diff on mismatch (a bare CHECK only names the line).
+static void test_runtime_status_visibility() {
+    for(auto state : {tk::RuntimeAdmissionState::Booting, tk::RuntimeAdmissionState::Ready,
+                     tk::RuntimeAdmissionState::SafeMode, tk::RuntimeAdmissionState::Fatal}) {
+        tk::status::Inputs in;
+        in.runtime_state = state;
+        in.pairing_block_reason = "key_reload_required";
+        in.diag_dropped_lines = 17;
+        in.syslog_dropped_lines = 23;
+        CollectEmitter emitter;
+        tk::status::emit_status(in, emitter);
+        CHECK(emitter.out.find("sys.diag_dropped_lines=17\n") != std::string::npos);
+        CHECK(emitter.out.find("syslog.dropped_lines=23\n") != std::string::npos);
+        CHECK(emitter.out.find(std::string("sys.runtime_state=\"") + tk::runtime_admission_state_name(state) + "\"\n") != std::string::npos);
+        CHECK(emitter.out.find("pairing_blocked=\"key_reload_required\"\n") != std::string::npos);
+    }
+}
+
 static bool golden_eq(const std::string& got, const char* want) {
     if (got == want) return true;
     std::printf("---- golden mismatch: got ----\n%s---- want ----\n%s----\n", got.c_str(), want);
@@ -2602,9 +2670,11 @@ static void test_status_model() {
     Inputs ota_dev;
     ota_dev.vin = "UNKNOWN"; ota_dev.version = "1.4.2";
     ota_dev.ota_channel = "dev";
+    ota_dev.ota_verification = tk::OtaVerificationState::PendingVerify;
     CollectEmitter e_ota_dev;
     tk::status::emit_status(ota_dev, e_ota_dev);
     CHECK(e_ota_dev.out.find("ota{\nota.channel=\"dev\"\n") != std::string::npos);
+    CHECK(e_ota_dev.out.find("ota.verification=\"pending_verify\"\n") != std::string::npos);
 
     Inputs ota_none;
     ota_none.vin = "UNKNOWN"; ota_none.version = "1.4.2";
@@ -2959,6 +3029,27 @@ static void test_display_helpers() {
 static void test_display_model() {
     using LS = tk::LinkState;
 
+    // Recovery overrides every vehicle/connectivity combination without showing charge or
+    // pairing. It uses the full SSID row and only the existing marquee can animate it.
+    for (LS link : {LS::Unknown, LS::Idle, LS::Awake, LS::Asleep, LS::Unreachable})
+        for (auto net : {tk::NetLink::None, tk::NetLink::Wifi, tk::NetLink::Eth})
+            for (bool ble : {false, true}) for (bool paired : {false, true})
+                for (bool soc : {false, true}) for (bool eth : {false, true})
+                    for (auto orient : {dm::Orient::Landscape, dm::Orient::Portrait}) {
+                        auto s = us(link, true, ble, paired, soc, 55, true);
+                        s.net = net; s.eth_present = eth;
+                        const auto m = dm::compose(s, 0, orient, true);
+                        CHECK(m.hero == dm::Hero::SafeMode);
+                        CHECK(!m.show_ble && !m.ble_glyph_on && m.ble_bars == 0);
+                        CHECK(m.soc == 0 && !m.asleep && !m.show_bolt);
+                        CHECK(m.fill_r == 0 && m.fill_g == 0 && m.fill_b == 0);
+                        CHECK(m.show_wifi == (net == tk::NetLink::Wifi));
+                        CHECK(m.show_lan == (net == tk::NetLink::Eth));
+                        CHECK(m.animating == m.ssid_scrolling);
+                        if (net == tk::NetLink::Wifi)
+                            CHECK(m.ssid_avail == (orient == dm::Orient::Portrait ? 72 : 130));
+                    }
+
     // ── priority ladder: network search > pairing > BLE search > battery ──
     // No lease ⇒ NetSearch, whatever else is true.
     CHECK(dm::compose(us(LS::Awake, /*net*/false, /*ble*/true, /*paired*/true,
@@ -3019,6 +3110,11 @@ static void test_display_model() {
     std::strcpy(long_ssid.ssid, "AVeryLongNetworkNameXYZ");   // > 98 px at scale 2 ⇒ marquee
     dm::Model scr = dm::compose(long_ssid, 10);
     CHECK(scr.ssid_scrolling && scr.animating);
+    for (auto orient : {dm::Orient::Landscape, dm::Orient::Portrait}) {
+        const auto recovery = dm::compose(long_ssid, 10, orient, true);
+        CHECK(recovery.hero == dm::Hero::SafeMode && recovery.ssid_scrolling && recovery.animating);
+    }
+
 
     // ── portrait orientation (BOOT-rotated 80x160) — only the SSID geometry differs ──
     // The SSID gets its own header row, full width (72px) at scale 1, independent of the BLE cluster.
@@ -3065,7 +3161,19 @@ static void test_led() {
     { auto s = led_snap(); s.link_state = tk::LinkState::Awake; CHECK(tk::led_pattern(s, none).color == C::SocGradient); }
 
     // Charging outranks the static SoC display (green swell).
-    { auto s = led_snap(); s.charging = true; CHECK(tk::led_pattern(s, none) == (tk::LedPattern{C::Green, A::Breathe, false})); }
+    { auto s = led_snap(); s.link_state = tk::LinkState::Awake; s.charging = true; CHECK(tk::led_pattern(s, none) == (tk::LedPattern{C::Green, A::Breathe, false})); }
+
+    // Cached charging never promotes a sleeping, uncertain or merely reachable vehicle.
+    for (auto link : {tk::LinkState::Asleep, tk::LinkState::Unknown,
+                      tk::LinkState::Unreachable, tk::LinkState::Idle}) {
+        auto snapshot = led_snap(); snapshot.link_state = link;
+        const auto resting = tk::led_pattern(snapshot, none);
+        snapshot.charging = true;
+        CHECK(tk::led_pattern(snapshot, none) == resting);
+    }
+    { auto snapshot = led_snap(); snapshot.link_state = tk::LinkState::Awake;
+      snapshot.have_soc = false; snapshot.charging = true;
+      CHECK(tk::led_pattern(snapshot, none).color == C::Teal); }
 
     // Asleep → LED off entirely.
     { auto s = led_snap(); s.link_state = tk::LinkState::Asleep; s.have_soc = false;
@@ -3099,6 +3207,87 @@ static void test_led() {
     // Error is the top of the ladder — beats OTA, warn, charging, everything.
     { auto s = led_snap(); s.charging = true; tk::LedAlerts a; a.error = true; a.ota_downloading = true; a.warn = true;
       CHECK(tk::led_pattern(s, a) == (tk::LedPattern{C::Red, A::Blink, false})); }
+}
+
+static void test_led_driver() {
+    using namespace tk;
+    for (bool ota : {false, true}) for (auto net : {NetLink::None, NetLink::Wifi, NetLink::Eth}) {
+        LedLatches recovery{};
+        const auto alerts = led_sample_alerts(recovery, 100, false, false, ota, 0, true);
+        CHECK(alerts.error && !alerts.warn);
+        auto snapshot = us(LinkState::Awake, true, true, true, true, 55, true);
+        snapshot.net = net;
+        const auto pattern = led_pattern(snapshot, alerts);
+        CHECK(pattern.color == LedColor::Red && pattern.anim == LedAnim::Blink && !pattern.dim);
+        CHECK(led_sample_alerts(recovery, 15'000'099, false, false, false, 0).error);
+        CHECK(!led_sample_alerts(recovery, 15'000'100, false, false, false, 0).error);
+        CHECK(led_sample_alerts(recovery, UINT64_MAX, false, false, false, 0, true).error);
+    }
+    LedLatches state{};
+    CHECK(!led_sample_alerts(state, 0, false, false, false, 2).error);
+    CHECK(!led_sample_alerts(state, 0, false, false, false, 2).warn);
+    // Normal-mode error causes refresh the same 15s hold; warnings have an independent 10s hold.
+    for (const bool ota_error : {false, true}) {
+        state = {};
+        auto alerts = led_sample_alerts(state, 100, !ota_error, ota_error, false, 3);
+        CHECK(alerts.error && alerts.warn && !alerts.ota_downloading);
+        alerts = led_sample_alerts(state, 10'000'099, false, false, true, 2);
+        CHECK(alerts.error && alerts.warn && alerts.ota_downloading);
+        alerts = led_sample_alerts(state, 10'000'100, false, false, false, 0);
+        CHECK(alerts.error && !alerts.warn && !alerts.ota_downloading);
+        CHECK(led_sample_alerts(state, 15'000'099, false, false, false, 0).error);
+        CHECK(!led_sample_alerts(state, 15'000'100, false, false, false, 0).error);
+    }
+    // Repeated faults extend the hold; intervening healthy samples do not clear it early.
+    for (uint64_t cycle = 0; cycle < 3; ++cycle) {
+        const uint64_t start = 20'000'000 + cycle * 40'000'000;
+        CHECK(led_sample_alerts(state, start, true, false, false, 3).error);
+        CHECK(led_sample_alerts(state, start + 5'000'000, true, false, false, 3).warn);
+        CHECK(led_sample_alerts(state, start + 15'000'000, false, false, false, 0).error);
+        CHECK(!led_sample_alerts(state, start + 15'000'000, false, false, false, 0).warn);
+        CHECK(!led_sample_alerts(state, start + 20'000'000, false, false, false, 0).error);
+    }
+    state = {};
+    CHECK(led_sample_alerts(state, UINT64_MAX, true, false, false, UINT32_MAX).error);
+    CHECK(state.error_until == UINT64_MAX && state.warn_until == UINT64_MAX);
+
+    const LedRgb red = led_color_rgb(LedColor::Red, 55);
+    CHECK(red.r == 255 && red.g == 0 && red.b == 0);
+    const auto low = led_color_rgb(LedColor::SocGradient, -100);
+    const auto high = led_color_rgb(LedColor::SocGradient, 200);
+    CHECK(low.r == 231 && low.g == 76 && low.b == 60);
+    CHECK(high.r == 30 && high.g == 140 && high.b == 60);
+    const auto dim = led_frame_rgb({LedColor::Green, LedAnim::Solid, true}, 55, 0);
+    CHECK(dim.r == 0 && dim.g == 66 && dim.b == 12);
+    const auto off = led_frame_rgb({LedColor::Red, LedAnim::Off, false}, 55, 0);
+    CHECK(off.r == 0 && off.g == 0 && off.b == 0);
+    CHECK(led_animation_factor(LedAnim::Blink, 0.0f) == 1.0f);
+    CHECK(led_animation_factor(LedAnim::Blink, 0.449f) == 1.0f);
+    CHECK(led_animation_factor(LedAnim::Blink, 0.45f) == 0.0f);
+    CHECK(led_animation_factor(LedAnim::Blink, 0.9f) == 1.0f);
+    CHECK(std::fabs(led_animation_factor(LedAnim::Breathe, 0.65f) - 1.0f) < 0.00001f);
+    CHECK(std::fabs(led_animation_factor(LedAnim::Breathe, 1.95f) - 0.15f) < 0.00001f);
+    CHECK(std::fabs(led_animation_factor(LedAnim::Pulse, 0.0f) - 0.08f) < 0.00001f);
+    CHECK(std::fabs(led_animation_factor(LedAnim::Pulse, 0.132f) - 1.0f) < 0.00001f);
+    CHECK(std::fabs(led_animation_factor(LedAnim::Pulse, 0.66f) - 0.08f) < 0.00001f);
+    for (const auto animation : {LedAnim::Off, LedAnim::Solid, LedAnim::Breathe,
+                                  LedAnim::Pulse, LedAnim::Blink}) {
+        for (int tick = 0; tick < 10'000; ++tick) {
+            const float factor = led_animation_factor(animation, tick * 0.033f);
+            CHECK(std::isfinite(factor) && factor >= 0 && factor <= 1);
+        }
+    }
+    for (const int brightness : {-100, 0, 1, 8, 31, 32, 100}) {
+        for (int channel = 0; channel < 256; ++channel) {
+            const LedRgb rgb{static_cast<uint8_t>(channel), 0x65, 0xa7};
+            const auto frame = led_apa102_frame(rgb, brightness);
+            CHECK(frame.size() == 12);
+            CHECK(frame[0] == 0 && frame[1] == 0 && frame[2] == 0 && frame[3] == 0);
+            CHECK(frame[4] == (brightness < 1 ? 0xe1 : brightness > 31 ? 0xff : 0xe0 | brightness));
+            CHECK(frame[5] == 0xa7 && frame[6] == 0x65 && frame[7] == channel);
+            CHECK(frame[8] == 0xff && frame[9] == 0xff && frame[10] == 0xff && frame[11] == 0xff);
+        }
+    }
 }
 
 // ── heap-exhaustion watchdog (logic/heap_watchdog.hpp) ────────────────────────────────────────
@@ -3220,8 +3409,8 @@ static void test_heap_watchdog() {
     CHECK_STR(heap_reason_format(12).text,  "heap:12");
     CHECK_STR(heap_reason_format(255).text, "heap:255");
 
-    // Anything that is not one of ours counts as zero, so an unreadable breadcrumb can only
-    // UNDER-count — it can never wrongly suppress a restart the device actually needs.
+    // These are numeric-parser cases only. The storage consumer separately maps present-invalid
+    // values and read/clear errors to the restart cap; parser zero is not NVS error authority.
     CHECK(heap_reason_parse(nullptr)     == 0);
     CHECK(heap_reason_parse("")          == 0);
     CHECK(heap_reason_parse("heap")      == 0);   // no separator/count at all
@@ -5316,6 +5505,35 @@ static void test_heap_persist() {
 
 // ─── OTA rollback health gate (logic/health_gate.hpp) ──────────────────────────────────────────
 static void test_health_gate() {
+    using F = tk::RuntimeHealthFailure;
+    for (bool ready : {false, true}) for (bool synced : {false, true})
+    for (unsigned resets : {0U, 1U, UINT32_MAX}) for (size_t heap : {size_t(0), size_t(4095), size_t(4096), SIZE_MAX}) {
+        std::string calls;
+        const auto sample = tk::sample_runtime_health(
+            [&] { calls += 'R'; return ready; }, [&] { calls += 'S'; return synced; },
+            [&] { calls += 'C'; return resets; }, [&] { calls += 'H'; return heap; }, 4096);
+        const F expected = !ready ? F::NotReady : !synced ? F::HostUnsynced : resets ? F::HostReset
+                           : heap < 4096 ? F::CriticalHeap : F::None;
+        CHECK(sample.failure == expected && sample.healthy() == (expected == F::None));
+        CHECK(calls == (!ready ? "R" : !synced ? "RS" : resets ? "RSC" : "RSCH"));
+        CHECK(sample.largest == (ready && synced && !resets ? heap : 0));
+    }
+    for (int fault = 0; fault != 4; ++fault) {
+        int calls = 0;
+        auto probe = [&] { if (calls++ == fault) throw fault; return true; };
+        bool caught = false;
+        try { (void)tk::sample_runtime_health(probe, probe, [&] { probe(); return 0; },
+                                            [&] { probe(); return size_t(4096); }, 4096); }
+        catch (int value) { caught = value == fault; }
+        CHECK(caught && calls == fault + 1);
+    }
+    size_t fresh_heap = 4096;
+    auto sample = [&] { return tk::sample_runtime_health([] { return true; }, [] { return true; },
+        [] { return 0; }, [&] { return fresh_heap; }, 4096); };
+    CHECK(sample().healthy());
+    fresh_heap = 4095;
+    CHECK(!sample().healthy());
+
     using V = tk::HealthVerdict;
     using O = tk::OtaVerificationState;
     using E = tk::IdentityMutationEntry;
@@ -6207,6 +6425,8 @@ static void test_redact() {
     CHECK(tk::diag_capture_byte('\n', 10, 0) == '\n');
     static_assert(tk::diag_redacted_capacity(288) == 288 + 18 * tk::kRedactedLength);
     const char* library_lines[] = {
+        "V (1) TeslaBLE::Peer: Tesla key data: 04 01 02 03 synthetic-key-canary",
+        "V (1) TeslaBLE::Peer: [Encrypt] Nonce: synthetic-nonce, Ciphertext: synthetic-packet, Tag: synthetic-tag",
         "I (1) esp_netif_handlers: sta ip: 192.0.2.4, mask: 255.255.255.0, gw: 192.0.2.1",
         "I (2) esp_netif_handlers: eth ip: 192.0.2.4, mask: 255.255.255.0, gw: 192.0.2.1",
         "I (3) esp_netif_lwip: DHCP server started on interface EXAMPLE_AP with IP: 192.0.2.4",
@@ -6241,7 +6461,10 @@ static void test_redact() {
             "E (2) mqtt_client: Error transport connect",
             "E (3) esp_netif_handlers: invalid static ip",
             "I (4) wifi: state: init -> auth",
-            "I (5) unrelated: inspect before sharing"}) {
+            "I (5) unrelated: inspect before sharing",
+            "E (1) TeslaBLE::Peer: [DecryptResponse] Decryption or authentication failed: -1",
+            "I (2) TeslaBLE::Peer: Resetting session counter",
+            "V (3) OtherLibrary: [Encrypt] Nonce: synthetic-unrelated"}) {
         CHECK(!tk::diag_library_identifier_line(line));
         CHECK(tk::redact_diag_line(line) == line);
     }
@@ -9324,6 +9547,13 @@ static void test_json_request_value_budget() {
 }
 
 static void test_config_commit() {
+    CHECK(tk::config_health_failure(tk::RuntimeHealthFailure::None) == tk::ConfigImageResult::None);
+    CHECK(tk::config_health_failure(tk::RuntimeHealthFailure::NotReady) == tk::ConfigImageResult::NotReady);
+    CHECK(tk::config_health_failure(tk::RuntimeHealthFailure::HostUnsynced) == tk::ConfigImageResult::HostUnsynced);
+    CHECK(tk::config_health_failure(tk::RuntimeHealthFailure::HostReset) == tk::ConfigImageResult::HostReset);
+    CHECK(tk::config_health_failure(tk::RuntimeHealthFailure::CriticalHeap) == tk::ConfigImageResult::CriticalHeap);
+    CHECK(tk::config_health_failure(static_cast<tk::RuntimeHealthFailure>(255)) == tk::ConfigImageResult::Unknown);
+
     using Image = tk::ConfigImageResult;
     const Image images[] = {Image::None, Image::Valid, Image::Undefined, Image::Confirmed,
         Image::Pending, Image::New, Image::Unsupported, Image::Unknown, Image::NotReady,
@@ -9818,7 +10048,53 @@ static void test_coredump_image() {
     CHECK(!admission_once.admit().readable && admission_once.failed() && calls == 1);
 }
 
+static void test_iteration_fault() {
+    tk::IterationFaultLog state{};
+    auto report = tk::iteration_fault_note(state, 0);
+    CHECK(report.emit && report.suppressed == 0);
+    CHECK(!tk::iteration_fault_note(state, 0).emit);
+    CHECK(!tk::iteration_fault_note(state, 29999).emit);
+    report = tk::iteration_fault_note(state, 30000);
+    CHECK(report.emit && report.suppressed == 2);
+    CHECK(state.suppressed == 0);
+    CHECK(tk::iteration_fault_note(state, 90000).emit); // a quiet interval has no replay burst
+
+    state.suppressed = UINT32_MAX;
+    CHECK(!tk::iteration_fault_note(state, 90001).emit);
+    CHECK(state.suppressed == UINT32_MAX);
+    report = tk::iteration_fault_note(state, 120000);
+    CHECK(report.emit && report.suppressed == UINT32_MAX);
+    tk::IterationFaultLog independent{};
+    CHECK(tk::iteration_fault_note(independent, 120001).emit);
+    CHECK(!tk::iteration_fault_note(state, 120001).emit);
+
+    constexpr uint64_t wide_clock = uint64_t{1} << 40;
+    CHECK(tk::iteration_fault_note(state, wide_clock).emit);
+    CHECK(!tk::iteration_fault_note(state, wide_clock + 29999).emit);
+    CHECK(tk::iteration_fault_note(state, wide_clock + 30000).emit);
+
+    // Fifteen minutes at the actual fault cadences; successful intervening iterations must not
+    // make alternating errors produce a fresh first-error report on every cycle.
+    for (const uint64_t step : {50, 200}) {
+        for (const bool alternating : {false, true}) {
+            tk::IterationFaultLog stream{};
+            unsigned emitted = 0;
+            for (uint64_t time = 0; time <= 900000; time += step) {
+                if (alternating && (time / step) % 2 != 0) continue;
+                const auto current = tk::iteration_fault_note(stream, time);
+                CHECK(current.emit == (time % 30000 == 0));
+                if (current.emit) {
+                    CHECK(current.suppressed == (time == 0 ? 0 : 30000 / (step * (alternating ? 2 : 1)) - 1));
+                    ++emitted;
+                }
+            }
+            CHECK(emitted == 31);
+        }
+    }
+}
+
 int main() {
+    test_iteration_fault();
     test_coredump_image();
     test_uptime_rollovers();
     test_config_commit();
@@ -9857,6 +10133,7 @@ int main() {
     test_ota_changelog_range();
     test_task_start_gate();
     test_runtime_admission();
+    test_runtime_status_visibility();
     test_ota_confirm_runtime_admission_matrix();
     test_nimble_start_gate();
     test_syslog_start_gate();
@@ -9870,6 +10147,7 @@ int main() {
     test_display_helpers();
     test_display_model();
     test_led();
+    test_led_driver();
     test_heap_watchdog();
     test_charge_control();
     test_active_window();

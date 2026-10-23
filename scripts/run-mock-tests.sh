@@ -71,12 +71,22 @@ if [ "$REQUIRE_ALL" = 1 ]; then
         test/test_log_origin_contract.py \
         test/test_diagnostic_export_guidance.py \
         test/test_runtime_boundary_contract.py \
+        test/generate_ota_admission_adapter.py \
+        test/generate_mqtt_discovery_adapter.py \
+        test/test_ota_admission.cpp \
         test/run-cjson-oom-tests.sh \
         test/test_codex_setup.py \
         scripts/test-build-contracts.sh \
         scripts/check-dependency-contract.py \
+        scripts/check-bootloader-compat.py \
+        scripts/bootloader-references.json \
+        test/test_bootloader_preflight.py \
         scripts/check-otadata-contract.py \
         scripts/apply-tesla-ble-patches.sh \
+        scripts/apply-tesla-ble-patches.py \
+        scripts/tesla-ble-patch-state.json \
+        test/test_patch_incremental.py \
+        test/test_dependency_guards.py \
         scripts/reconcile-pr-previews.sh \
         scripts/verify-vendored-esptool-js.sh \
         scripts/check-bench-acceptance.py \
@@ -93,6 +103,12 @@ if [ "$REQUIRE_ALL" = 1 ]; then
         test/web_ui_http.test.mjs \
         test/tesla_protocol_vectors.test.mjs \
         scripts/check-ble-row-parity.sh \
+        test/ble_row_golden_dump.cpp \
+        test/display_golden_dump.cpp \
+        test/test_display_parity_contract.py \
+        test/test_led_driver_contract.py \
+        main/display_font.h \
+        tools/ble_row_parity.js \
         scripts/run-browser-tests-linux.sh \
         tools/browser/Dockerfile \
         test/test_web_ui_browser_gate.py \
@@ -124,10 +140,14 @@ else
         -pthread -o "$BUILD_DIR/nvs_storage_tests" \
         test/test_nvs_storage.cpp main/nvs_storage.cpp main/config_blob.cpp
     run_gate "execute NVS adapter tests" 120 "$BUILD_DIR/nvs_storage_tests"
+    run_gate "generate background enqueue adapter" 120 python3 test/generate_background_poll_adapter.py \
+        "$BUILD_DIR/background_poll_adapter.generated.hpp"
+    run_gate "generate OTA admission adapter" 120 python3 test/generate_ota_admission_adapter.py \
+        "$BUILD_DIR/ota_admission_adapter.generated.hpp"
     run_gate "compile runtime boundary tests" 120 "$CXX" -std=c++17 -Wall -Wextra -Werror \
-        -Itest/stubs -Itest/coredump_stubs -Imain \
+        -Itest/stubs -Itest/coredump_stubs -Imain -I"$BUILD_DIR" -DTEST_BACKGROUND_POLL_ADAPTER=1 -DTEST_OTA_ADMISSION_ADAPTER=1 \
         -o "$BUILD_DIR/runtime_boundary_tests" \
-        test/test_runtime_boundaries.cpp test/test_coredump_hash.cpp main/diag_log.cpp main/safe_mode.cpp
+        test/test_runtime_boundaries.cpp test/test_background_poll.cpp test/test_ota_admission.cpp test/test_coredump_hash.cpp main/diag_log.cpp main/stack_watch.cpp main/safe_mode.cpp
     run_gate "execute runtime boundary tests" 120 "$BUILD_DIR/runtime_boundary_tests"
     run_gate "generate clock shell adapters" 120 python3 test/generate_clock_adapters.py \
         "$BUILD_DIR/clock_adapters.generated.hpp"
@@ -167,14 +187,17 @@ if command -v python3 >/dev/null 2>&1; then
     run_gate "log origin contract" 120 python3 test/test_log_origin_contract.py
     run_gate "diagnostic export guidance" 120 python3 test/test_diagnostic_export_guidance.py
     run_gate "runtime C-boundary inventory" 120 python3 test/test_runtime_boundary_contract.py
+    run_gate "optional LED driver decisions and GPIO" 120 python3 test/test_led_driver_contract.py
     run_gate "locked cJSON intake and OOM" 120 bash test/run-cjson-oom-tests.sh
     run_gate "native Codex hook payload contract" 120 python3 test/test_codex_setup.py
     run_gate "build contract tests" 120 scripts/test-build-contracts.sh
+    run_gate "retained bootloader compatibility and USB consumers" 120 python3 test/test_bootloader_preflight.py
     run_gate "exact pinned dependency contract" 120 \
         python3 scripts/check-dependency-contract.py --self-test
     run_gate "erased initial otadata contract" 120 \
         python3 scripts/check-otadata-contract.py --self-test
     run_gate "tesla-ble patch applicability" 120 scripts/apply-tesla-ble-patches.sh --self-test
+    run_gate "tesla-ble incremental source admission" 120 python3 test/test_patch_incremental.py
     run_gate "preview reconciliation contract" 120 scripts/reconcile-pr-previews.sh --self-test
     run_gate "vendored esptool-js contract" 120 scripts/verify-vendored-esptool-js.sh
     run_gate "bench acceptance validator contract" 120 \

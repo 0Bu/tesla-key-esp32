@@ -335,8 +335,8 @@ REVIEWED_DELEGATED_HELPERS = {
     "diag_vprintf_": {
         "diag_mqtt_uri_error_": {"diag_mqtt_uri_error"},
         "diag_forward_fixed_": {"va_start", "previous", "load", "vprintf", "va_end"},
-        "diag_append_": {"g", "pdMS_TO_TICKS", "diag_library_capture_content_end", "diag_capture_byte", "load"},
-        "syslog_send": {"sv", "find", "memcpy", "load", "xQueueSend"},
+        "diag_append_": {"g", "diag_library_capture_content_end", "diag_capture_byte", "load", "fetch_add"},
+        "syslog_send": {"sv", "find", "memcpy", "load", "xQueueSend", "fetch_add"},
     },
     "ble_link_event_cb_": {
         "enqueue_ble_link_event_": {"store", "xQueueSend"},
@@ -586,7 +586,7 @@ def callback_inventory(text: str) -> set[str]:
 
 def function_body_in(text: str, name: str) -> str:
     definition = re.compile(
-        rf"^[ \t]*(?:extern\s+\"C\"\s+)?(?:static\s+)?"
+        rf"^[ \t]*(?:\[\[gnu::noinline\]\][ \t]+)?(?:extern\s+\"C\"\s+)?(?:static\s+)?"
         rf"(?:[A-Za-z_]\w*(?:::\w+)*(?:[<>,*&]+)?[ \t]+)+"
         rf"(?:[A-Za-z_]\w*::)*{re.escape(name)}\s*\([^;{{}}]*\)\s*"
         rf"(?:const\s*)?(?:noexcept\s*)?\{{",
@@ -609,7 +609,7 @@ def function_body_in(text: str, name: str) -> str:
 def function_definition_names(text: str) -> set[str]:
     """Discover ordinary free/static and qualified definitions in one reviewed source file."""
     definition = re.compile(
-        r"^[ \t]*(?:extern\s+\"C\"\s+)?(?:static\s+)?"
+        r"^[ \t]*(?:\[\[gnu::noinline\]\][ \t]+)?(?:extern\s+\"C\"\s+)?(?:static\s+)?"
         r"(?:[A-Za-z_]\w*(?:::\w+)*(?:[<>,*&]+)?[ \t]+)+"
         r"(?:[A-Za-z_]\w*::)*([A-Za-z_]\w*)\s*\([^;{}]*\)\s*"
         r"(?:const\s*)?(?:noexcept\s*)?\{",
@@ -1395,7 +1395,7 @@ def require_climate_publication_stamp(telemetry_source: str) -> None:
             raise AssertionError(f"climate freshness stamp {token} outside the guarded epoch branch")
 
 
-def require_wake_companion_drive_poll(loop_source: str) -> None:
+def require_wake_companion_drive_poll(loop_source: str, rotation_source: str) -> None:
     """Wake/bootstrap one-shot refreshes drive only under the seam; rising edge restarts rotation."""
     layout = scrub_cpp_preserving_layout(loop_source)   # offsets match loop_source
     fire = layout.find("tk::charge_poll_should_fire(")
@@ -1418,9 +1418,10 @@ def require_wake_companion_drive_poll(loop_source: str) -> None:
         raise AssertionError("drive companion gate does not enqueue a background poll")
     require_before("charge poll before its drive companion", block,
                    '"Charge State Poll"', '"Drive State Poll"')
-    shared = re.findall(
-        r'"Drive State Poll",\s*tk::BleDomain::Infotainment,\s*build_drive_state_poll\)', loop_source)
-    if len(shared) != 2:
+    shared_pattern = r'"Drive State Poll",\s*tk::BleDomain::Infotainment,\s*build_drive_state_poll\)'
+    shared_loop = re.findall(shared_pattern, strip_cpp_comments(loop_source))
+    shared_rotation = re.findall(shared_pattern, strip_cpp_comments(rotation_source))
+    if len(shared_loop) != 1 or len(shared_rotation) != 1:
         raise AssertionError("rotation and wake one-shot must share build_drive_state_poll")
 
     edge = layout.find("if (paired && !prev_window && window) {")
@@ -1445,8 +1446,17 @@ def require_telemetry_poll_schedule(telemetry_source: str) -> None:
         raise AssertionError("telemetry must delegate all active-window/cadence gates to the tested scheduler")
     start = gate.end() - 1
     end = balanced_end(layout, start, "{", "}", "telemetry schedule")
-    block = loop[start:end + 1]
-    code = layout[start:end + 1]
+    schedule = layout[start:end + 1]
+    expected = "{telemetry_poll.begin_attempt(now_ticks);self->enqueue_telemetry_round_(telemetry_poll);}"
+    if "".join(schedule.split()) != expected or loop.count("self->enqueue_telemetry_round_(") != 1:
+        raise AssertionError("telemetry round must run once under its unchanged scheduler gate, after the attempt stamp")
+    if "[[gnu::noinline]] void VehicleController::enqueue_telemetry_round_(" not in telemetry_source:
+        raise AssertionError("optional telemetry round must retain its separate frame")
+    round_body = function_body_in(telemetry_source, "enqueue_telemetry_round_")
+    if "auto* self = this;" not in strip_cpp_comments(round_body):
+        raise AssertionError("telemetry round must use its owning controller")
+    block = "{telemetry_poll.begin_attempt(now_ticks);" + round_body + "}"
+    code = scrub_cpp_preserving_layout(block)
     require_before("telemetry attempt throttled before fallible work", code,
                    "telemetry_poll.begin_attempt(now_ticks);", "self->get_vehicle_climate(climate)")
     require_before("climate snapshot before vehicle lock", code,
@@ -1475,7 +1485,7 @@ def require_telemetry_poll_schedule(telemetry_source: str) -> None:
         if selector and f"CarServer_GetVehicleData_{selector}_tag" not in tail:
             raise AssertionError(f"{domain} requests the wrong protobuf selector")
     enqueue = scrub_cpp(function_body_in(telemetry_source, "enqueue_background_poll_"))
-    for rejection in ("if (!command_identity_ready_()) return false;",
+    for rejection in ("if (cmd_in_flight_.load()) return false;", "if (!command_identity_ready_()) return false;",
                       "if (command_runner_.is_queue_full()) return false;"):
         if rejection not in enqueue:
             raise AssertionError("background admission must report identity/queue refusal")
@@ -1499,6 +1509,7 @@ def require_unlocked_diagnostic_logging(heap: str, telemetry: str) -> None:
     # Locate the lexical scope owning each guard, including nested try/catch blocks.
     for source, name, marker in ((heap, "heap_trend_record", "SemGuard g(m);"),
                                  (heap, "heap_trend_snapshot", "SemGuard g(m);"),
+                                 (telemetry, "enqueue_telemetry_round_", "tk::SemGuard g(self->vehicle_mutex_);"),
                                  (telemetry, "loop_task_fn_", "tk::SemGuard g(self->vehicle_mutex_);")):
         body = scrub_cpp_preserving_layout(function_body_in(source, name))
         at = body.index(marker)
@@ -1630,6 +1641,12 @@ def require_diag_redaction_stream_contract(
         if body.count(f"{handle}.load(std::memory_order_acquire)") != 1 or len(re.findall(rf"\b{handle}\b", body)) != 1:
             raise AssertionError(f"{name}: load published handle once into a local snapshot")
     append = function_body_in(diag_source, "diag_append_")
+    append_code = scrub_cpp(append)
+    if "tk::SemGuard g(mtx, 0);" not in append_code:
+        raise AssertionError("diagnostic producer capture must not wait for the ring mutex")
+    if append_code.count("s_dropped_lines.fetch_add(1, std::memory_order_relaxed)") != 2:
+        raise AssertionError("diagnostic producer must count unavailable and busy capture losses")
+
     require_before("library record classification before ring lock", append,
                    "tk::diag_library_capture_content_end", "tk::SemGuard")
     if "if (diag_library_identifier_line(line)) return collapse();" not in redactor_header:
@@ -1804,17 +1821,16 @@ def require_operation_wrapper_contract(ota_source: str) -> None:
                   "default: return Result::Unsupported;", "catch (...) { return Result::Unknown; }"):
         if token not in query: raise AssertionError("raw config image query missing " + token)
     require_before("config query owner before SDK", query, "owner.owns_gate()", "esp_ota_get_running_partition()")
+    require_runtime_health_sampler_contract(code)
     confirm = function_body_in(code, "ota_confirm_pending_image")
     ordered = (
         "if (!owner.owns_gate()) return Result::WrongOwner;",
         "if (!tk::ota_reboot_confirms_pending_image(reboot_class)) return Result::WrongClass;",
         "Result result = ota_config_image_state(owner);",
         "if (result != Result::Pending) return result;",
-        "if (!tk::runtime_admission_vehicle_ready()) return Result::NotReady;",
-        "if (!ble_host_synced()) return Result::HostUnsynced;",
-        "if (ble_host_reset_count() != 0) return Result::HostReset;",
-        "MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL",
-        "if (commit_largest < tk::kHeapCriticalBytes) return Result::CriticalHeap;",
+        "const auto health = ota_runtime_health();",
+        "result = tk::config_health_failure(health.failure);",
+        "if (result != Result::None) return result;",
         "result = Result::MarkUnknown;",
         "esp_ota_mark_app_valid_cancel_rollback()",
         "result = Result::Confirmed;",
@@ -1850,78 +1866,40 @@ def require_operation_wrapper_contract(ota_source: str) -> None:
             raise AssertionError(f"OTA Ready-only executable boundary matrix missing {token!r}")
 
 
-def require_health_commit_contract(health_task: str) -> None:
-    for token in (
-        "MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL",
-        "largest >= tk::kHeapCriticalBytes",
-        "runtime_healthy",
-        "OtaHealthCommitGuard commit_guard;",
-        "if (!commit_guard) continue;",
-        "commit_largest < tk::kHeapCriticalBytes",
-        "esp_ota_mark_app_valid_cancel_rollback()",
-    ):
-        if token not in health_task:
-            raise AssertionError(f"OTA health commit contract missing {token!r}")
-    commit_branch = health_task[health_task.find("if (v == tk::HealthVerdict::Commit)") :]
-    require_before("health heap verdict", commit_branch,
-                   "OtaHealthCommitGuard commit_guard;", "commit_largest")
-    require_before("health owner before mark-valid", commit_branch,
-                   "OtaHealthCommitGuard commit_guard;",
-                   "esp_ota_mark_app_valid_cancel_rollback()")
-    require_before("health heap recheck before mark-valid", commit_branch,
-                   "commit_largest < tk::kHeapCriticalBytes",
-                   "esp_ota_mark_app_valid_cancel_rollback()")
+def require_runtime_health_sampler_contract(ota_source: str) -> None:
+    sampler = function_body_in(ota_source, "ota_runtime_health")
+    ordered = ("return tk::sample_runtime_health(",
+               "[] { return tk::runtime_admission_vehicle_ready(); }",
+               "[] { return ble_host_synced(); }",
+               "[] { return ble_host_reset_count(); }",
+               "[] { return heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL); }",
+               "tk::kHeapCriticalBytes")
+    for token in ordered:
+        if token not in sampler: raise AssertionError("shared OTA runtime sampler missing " + token)
+    for first, second in zip(ordered, ordered[1:]):
+        require_before("shared OTA runtime reader order", sampler, first, second)
 
-    # Connectivity and heap are insufficient while app_main is still Booting, has latched Safe
-    # Mode, or has hit a late essential failure. Runtime admission is checked both before forming
-    # the verdict and again after acquiring the irreversible HealthCommit owner.
-    for token in (
-        "switch (tk::runtime_admission_action())",
-        "case tk::RuntimeAdmissionAction::Wait:",
-        "case tk::RuntimeAdmissionAction::Stop:",
-        "case tk::RuntimeAdmissionAction::Run:",
-        "if (!tk::runtime_admission_vehicle_ready()) continue;",
-        "if (!ble_host_synced()) continue;",
-        "if (ble_host_reset_count() != 0) continue;",
-    ):
-        if token not in health_task:
-            raise AssertionError(f"OTA health runtime-admission contract missing {token!r}")
-    pre_verdict = health_task[:health_task.find("tk::health_gate_decide")]
-    if not re.search(
-        r"largest\s*>=\s*tk::kHeapCriticalBytes\s*&&\s*"
-        r"ble_host_synced\s*\(\s*\)\s*&&\s*"
-        r"ble_host_reset_count\s*\(\s*\)\s*==\s*0",
-        pre_verdict,
-    ):
-        raise AssertionError(
-            "OTA health verdict is not gated by current sync and sticky zero-reset evidence"
-        )
-    require_before("health admission before verdict", health_task,
-                   "switch (tk::runtime_admission_action())", "tk::health_gate_decide")
-    require_before("health current BLE state before verdict", health_task,
-                   "ble_host_synced()", "tk::health_gate_decide")
-    require_before("health Ready recheck after owner", commit_branch,
-                   "OtaHealthCommitGuard commit_guard;",
-                   "if (!tk::runtime_admission_vehicle_ready()) continue;")
-    require_before("health Ready recheck before mark-valid", commit_branch,
-                   "if (!tk::runtime_admission_vehicle_ready()) continue;",
-                   "esp_ota_mark_app_valid_cancel_rollback()")
-    require_before("health Ready before BLE recheck", commit_branch,
-                   "if (!tk::runtime_admission_vehicle_ready()) continue;",
-                   "if (!ble_host_synced()) continue;")
-    require_before("health BLE recheck before heap", commit_branch,
-                   "if (!ble_host_synced()) continue;", "commit_largest")
-    require_before("health BLE recheck before mark-valid", commit_branch,
-                   "if (!ble_host_synced()) continue;",
-                   "esp_ota_mark_app_valid_cancel_rollback()")
-    require_before("health BLE sync before sticky reset evidence", commit_branch,
-                   "if (!ble_host_synced()) continue;",
-                   "if (ble_host_reset_count() != 0) continue;")
-    require_before("health reset evidence before heap", commit_branch,
-                   "if (ble_host_reset_count() != 0) continue;", "commit_largest")
-    require_before("health reset evidence before mark-valid", commit_branch,
-                   "if (ble_host_reset_count() != 0) continue;",
-                   "esp_ota_mark_app_valid_cancel_rollback()")
+
+def require_health_commit_contract(health_task: str) -> None:
+    ordered = ("switch (tk::runtime_admission_action())",
+               "const bool runtime_healthy = ota_runtime_health().healthy();",
+               "tk::health_gate_decide", "if (v == tk::HealthVerdict::Commit)",
+               "OtaHealthCommitGuard commit_guard;", "if (!commit_guard) continue;",
+               "const auto commit_health = ota_runtime_health();",
+               "if (!commit_health.healthy()) continue;",
+               "const size_t commit_largest = commit_health.largest;",
+               "const esp_err_t mark_result = esp_ota_mark_app_valid_cancel_rollback();",
+               "ota_refresh_verification_cache();", "if (mark_result == ESP_OK)",
+               "esp_err_to_name(mark_result)")
+    for token in ordered:
+        if token not in health_task: raise AssertionError("OTA health commit contract missing " + token)
+    for first, second in zip(ordered, ordered[1:]):
+        require_before("OTA fresh health owner/mark/cache/diagnostic ordering", health_task, first, second)
+    for token in ("case tk::RuntimeAdmissionAction::Wait:", "case tk::RuntimeAdmissionAction::Stop:",
+                  "case tk::RuntimeAdmissionAction::Run:", "verification is uncertain", "without retry"):
+        if token not in health_task: raise AssertionError("OTA health admission/error diagnostic missing " + token)
+    if health_task.count("ota_runtime_health()") != 2 or health_task.count("esp_ota_mark_app_valid_cancel_rollback()") != 1:
+        raise AssertionError("OTA health requires distinct pre/post-owner samples and one mark call site")
 
 
 def require_vehicle_task_start_contract(vehicle_source: str, telemetry_source: str,
@@ -2973,6 +2951,10 @@ def require_syslog_start_lifetime_contract(syslog_source: str, gate_header: str,
         raise AssertionError("Syslog consumer re-reads sender publication")
 
     send = function_body_in(syslog_source, "syslog_send")
+    if "if (xQueueSend(queue, &m, 0) != pdPASS)" not in scrub_cpp(send) or \
+       "s_dropped_lines.fetch_add(1, std::memory_order_relaxed)" not in scrub_cpp(send):
+        raise AssertionError("Syslog producer must count queue-full loss without waiting or logging")
+
     for token in (
         "s_queue.load(std::memory_order_acquire)", "if (!queue) return;",
         "xQueueSend(queue, &m, 0)",
@@ -4006,8 +3988,34 @@ def require_safe_mode_source_contract(source: str) -> None:
         raise AssertionError("safe-mode glue bypasses the fail-closed counter parser")
     if "Clears itself after a boot that stays up" in source:
         raise AssertionError("safe-mode operator text still promises an unarmed auto-clear timer")
-    if "The latch remains until a non-fault reset" not in source:
-        raise AssertionError("safe-mode operator text no longer describes the real latch")
+    operator_text = "".join(re.findall(r'"([^"\\]*(?:\\.[^"\\]*)*)"', strip_cpp_comments(source)))
+    for phrase in ("Exit needs a non-fault boot and a successful counter read/reset.",
+                   "a clean boot exits only if counter storage is healthy."):
+        if phrase not in operator_text:
+            raise AssertionError("safe-mode operator text lost the storage condition for leaving recovery")
+
+
+ITERATION_FAULT_TASKS = (
+    ("vehicle_telemetry.cpp", "loop_task_fn_", "while (true)", 50),
+    ("display.cpp", "display_task", "for (;;)", 200),
+    ("led_status.cpp", "led_task", "for (int frame = 0;; ++frame)", 200),
+)
+
+
+def require_iteration_fault_contract(source: str, task: str, loop: str, delay: int) -> None:
+    body = strip_cpp_comments(function_body_in(source, task))
+    declaration = "tk::IterationFaultLog fault_log{};"
+    declarations = list(re.finditer(r"(?:^|[;{}])\s*(tk::IterationFaultLog\s+fault_log\s*\{\s*\}\s*;)", body))
+    if len(declarations) != 1 or body.count(declaration) != 1 or declarations[0].start(1) > body.index(loop):
+        raise AssertionError("iteration fault log state must be task-owned outside the loop")
+    if body.count("tk::report_iteration_fault(") != 1:
+        raise AssertionError("iteration catch must use the shared bounded sink helper once")
+    code = " ".join(body.split())
+    clock = "tk::report_iteration_fault(fault_log, static_cast<uint64_t>(esp_timer_get_time()) / 1000,"
+    if clock not in code:
+        raise AssertionError("iteration fault reporting lost its monotonic 64-bit clock")
+    if f"vTaskDelay(pdMS_TO_TICKS({delay}));" not in body:
+        raise AssertionError("iteration fault handling lost its existing task delay")
 
 
 def require_provisioning_body_contract(
@@ -4174,7 +4182,8 @@ def require_runtime_source_contracts() -> None:
     require_charge_state_getter_seam(SOURCES["vehicle_telemetry.cpp"])
     require_active_window_seam(SOURCES["vehicle_telemetry.cpp"])
     require_climate_publication_stamp(SOURCES["vehicle_telemetry.cpp"])
-    require_wake_companion_drive_poll(function_body_in(SOURCES["vehicle_telemetry.cpp"], "loop_task_fn_"))
+    require_wake_companion_drive_poll(function_body_in(SOURCES["vehicle_telemetry.cpp"], "loop_task_fn_"),
+                                      function_body_in(SOURCES["vehicle_telemetry.cpp"], "enqueue_telemetry_round_"))
     require_telemetry_poll_schedule(SOURCES["vehicle_telemetry.cpp"])
     require_drive_poll_builder(SOURCES["vehicle_telemetry.cpp"])
     require_unlocked_diagnostic_logging(SOURCES["heap_trend.cpp"], SOURCES["vehicle_telemetry.cpp"])
@@ -4331,6 +4340,8 @@ def require_runtime_source_contracts() -> None:
     require_heap_restart_gate_contract(telemetry)
 
     require_safe_mode_source_contract(SOURCES["safe_mode.cpp"])
+    for filename, task, loop, delay in ITERATION_FAULT_TASKS:
+        require_iteration_fault_contract(SOURCES[filename], task, loop, delay)
     require_provisioning_body_contract(
         function_body("save_post_impl"),
         function_body("url_decode"),
@@ -4360,6 +4371,11 @@ def check_contract(tasks: set[str], callbacks: set[str]) -> None:
 
 
 def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
+    attributed = "[[gnu::noinline]] void Fixture::round() { if (true) { return; } }\n"
+    if function_body_in(attributed, "round") != "{ if (true) { return; } }":
+        raise AssertionError("noinline function body discovery is ineffective")
+    if function_definition_names(attributed) != {"round"}:
+        raise AssertionError("noinline function inventory discovery is ineffective")
     # Source discovery follows the actual IDF SRCS list, including nested .cc/.cxx files. A
     # filename glob over main/*.cpp would miss this registered task entirely.
     with tempfile.TemporaryDirectory(prefix="runtime-cmake-inventory-") as directory:
@@ -5166,21 +5182,22 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
         "            if (poll_cadence) last_poll_ticks = now_ticks;\n"
         '            self->enqueue_background_poll_("Drive State Poll", tk::BleDomain::Infotainment, build_drive_state_poll);\n', 1)
     no_edge_reset = wake_loop.replace("            telemetry_poll.reset();\n", "", 1)
-    lambda_rotation = wake_loop.replace(
-        '"Drive State Poll", tk::BleDomain::Infotainment, build_drive_state_poll);\n                        break;',
-        '"Drive State Poll", tk::BleDomain::Infotainment, [](TeslaBLE::Client*, uint8_t*, size_t*) { return 0; });\n                        break;', 1)
-    for label, mutated in (
-        ("wake gate removed", ungated_drive),
-        ("drive enqueue replaced", no_drive_enqueue),
-        ("drive enqueue outside the gate", drive_outside_gate),
-        ("rising-edge telemetry reset removed", no_edge_reset),
-        ("rotation stops sharing the builder", lambda_rotation),
+    rotation = function_body_in(climate_telemetry, "enqueue_telemetry_round_")
+    lambda_rotation = rotation.replace(
+        '"Drive State Poll", tk::BleDomain::Infotainment, build_drive_state_poll)',
+        '"Drive State Poll", tk::BleDomain::Infotainment, [](TeslaBLE::Client*, uint8_t*, size_t*) { return 0; })', 1)
+    for label, mutated, rotated in (
+        ("wake gate removed", ungated_drive, rotation),
+        ("drive enqueue replaced", no_drive_enqueue, rotation),
+        ("drive enqueue outside the gate", drive_outside_gate, rotation),
+        ("rising-edge telemetry reset removed", no_edge_reset, rotation),
+        ("rotation stops sharing the builder", wake_loop, lambda_rotation),
     ):
-        if mutated == wake_loop:
+        if mutated == wake_loop and rotated == rotation:
             raise AssertionError(f"wake companion mutation did not apply: {label}")
         require_mutation_rejected(
             f"wake companion {label}",
-            lambda mutated=mutated: require_wake_companion_drive_poll(mutated),
+            lambda mutated=mutated, rotated=rotated: require_wake_companion_drive_poll(mutated, rotated),
         )
     require_mutation_rejected(
         "drive poll builder no longer requests DriveState",
@@ -5192,10 +5209,12 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
         ("window gate removed", "telemetry_poll.due({paired, window,", "telemetry_poll.due({paired, true,"),
         ("priority ignored", "telemetry_poll.next(climate_usable)", "telemetry_poll.next(true)"),
         ("attempt throttle removed", "telemetry_poll.begin_attempt(now_ticks);", ""),
+        ("round call removed", "self->enqueue_telemetry_round_(telemetry_poll);", ""),
+        ("round may inline", "[[gnu::noinline]] void VehicleController::enqueue_telemetry_round_", "void VehicleController::enqueue_telemetry_round_"),
         ("queue refusal ignored", "note_admission(climate_usable, enqueued)",
          "note_admission(climate_usable, true)"),
-        ("climate admission lost", 'enqueued = self->enqueue_background_poll_(\n                            "Climate State Poll"',
-         'self->enqueue_background_poll_(\n                            "Climate State Poll"'),
+        ("climate admission lost", 'enqueued = self->enqueue_background_poll_(',
+         'self->enqueue_background_poll_('),
         ("background wake enabled", "tk::WakePolicy::NoWakeSkip, 10000", "tk::WakePolicy::AutoWake, 10000"),
         ("wrong climate selector", "CarServer_GetVehicleData_getClimateState_tag",
          "CarServer_GetVehicleData_getChargeState_tag"),
@@ -5214,12 +5233,17 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
 
     heap = SOURCES["heap_trend.cpp"]
     telemetry = SOURCES["vehicle_telemetry.cpp"]
+    loop = function_body_in(telemetry, "loop_task_fn_")
+    locked_loop_log = loop.replace("tk::SemGuard g(self->vehicle_mutex_);",
+                                  'tk::SemGuard g(self->vehicle_mutex_); ESP_LOGW(TAG, "canary");', 1)
+    assert locked_loop_log != loop
     for source, replacement, is_heap in (
         (heap, heap.replace("SemGuard g(m);", 'SemGuard g(m); ESP_LOGW(TAG, "canary");', 1), True),
         (heap, heap.replace("if (s_ready) return Adoption::None;",
            'ESP_LOGW(TAG, "canary"); if (s_ready) return Adoption::None;', 1), True),
         (telemetry, telemetry.replace("tk::SemGuard g(self->vehicle_mutex_);",
            'tk::SemGuard g(self->vehicle_mutex_); ESP_LOGW(TAG, "canary");', 1), False),
+        (telemetry, telemetry.replace(loop, locked_loop_log, 1), False),
     ):
         assert source != replacement
         try:
@@ -5380,6 +5404,38 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
         pass
     else:
         raise AssertionError("safe-mode counter-parser bypass mutation passed unexpectedly")
+    for phrase in ("and a successful counter read/reset.",
+                   "a clean boot exits only if counter storage is healthy."):
+        mutated_safe_mode = SOURCES["safe_mode.cpp"].replace(phrase, "reboot to recover", 1)
+        mutated_safe_mode += "\n// " + phrase + "\n"
+        try:
+            require_safe_mode_source_contract(mutated_safe_mode)
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError("safe-mode operator storage condition/comment-decoy mutation passed")
+    for filename, task, loop, delay in ITERATION_FAULT_TASKS:
+        source = SOURCES[filename]
+        declaration = "tk::IterationFaultLog fault_log{};"
+        clock = "tk::report_iteration_fault(fault_log, static_cast<uint64_t>(esp_timer_get_time()) / 1000,"
+        mutations = (
+            source.replace(declaration, "", 1),
+            source.replace(declaration, "static " + declaration, 1),
+            source.replace(declaration, "static\n    " + declaration, 1),
+            source.replace(declaration, "thread_local " + declaration, 1),
+            source.replace(declaration, "thread_local\n    " + declaration, 1),
+            source.replace(declaration, "", 1).replace(loop + " {", loop + " { " + declaration, 1),
+            source.replace("tk::report_iteration_fault(", "ignored_iteration_fault(", 1)
+            + "\n// tk::report_iteration_fault(\n",
+            source.replace(clock, clock.replace("uint64_t", "uint32_t"), 1),
+        )
+        for mutant in mutations:
+            try:
+                require_iteration_fault_contract(mutant, task, loop, delay)
+            except AssertionError:
+                pass
+            else:
+                raise AssertionError("iteration fault lifetime/dispatch/clock mutation passed")
 
     provisioning_save = function_body("save_post_impl")
     provisioning_decode = function_body("url_decode")
@@ -5782,19 +5838,19 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
         (
             "OTA health reset evidence at verdict",
             ble_header, ble_source,
-            main_source.replace("ble_host_reset_count() == 0", "true", 1),
+            main_source.replace("ota_runtime_health().healthy()", "true", 1),
             ota_source,
         ),
         (
             "OTA health reset evidence after owner",
             ble_header, ble_source,
-            main_source.replace("if (ble_host_reset_count() != 0) continue;", "", 1),
+            main_source.replace("const auto commit_health = ota_runtime_health();", "const auto commit_health = tk::RuntimeHealthSample{};", 1),
             ota_source,
         ),
         (
             "explicit OTA reset evidence after owner",
             ble_header, ble_source, main_source,
-            ota_source.replace("if (ble_host_reset_count() != 0)", "if (false)", 1),
+            ota_source.replace("[] { return ble_host_reset_count(); }", "[] { return 0; }", 1),
         ),
     ):
         require_mutation_rejected(
@@ -5809,8 +5865,8 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
     for token, replacement, label in (
         ("switch (tk::runtime_admission_action())", "switch (tk::RuntimeAdmissionAction::Run)",
          "OTA health initial admission"),
-        ("if (!tk::runtime_admission_vehicle_ready()) continue;", "",
-         "OTA health post-owner Ready recheck"),
+        ("if (!commit_health.healthy()) continue;", "",
+         "OTA health post-owner shared-health refusal"),
     ):
         mutated_health = health_task.replace(token, replacement, 1)
         if mutated_health == health_task:
@@ -6654,10 +6710,10 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
         ("return held_ && s_operation_gate.state() == tk::OtaIdentityGateState::ConfigRestart;", "return true;", "guard identity"),
         ("case ESP_OTA_IMG_NEW: return Result::New;", "case ESP_OTA_IMG_NEW: return Result::Pending;", "NEW raw state"),
         ("if (result != Result::Pending) return result;", "", "only raw Pending may mark"),
-        ("if (!tk::runtime_admission_vehicle_ready()) return Result::NotReady;", "", "Ready refusal"),
-        ("if (!ble_host_synced()) return Result::HostUnsynced;", "", "NimBLE sync refusal"),
-        ("if (ble_host_reset_count() != 0) return Result::HostReset;", "", "NimBLE reset refusal"),
-        ("if (commit_largest < tk::kHeapCriticalBytes) return Result::CriticalHeap;", "", "heap refusal"),
+        ("[] { return tk::runtime_admission_vehicle_ready(); }", "[] { return true; }", "shared Ready reader"),
+        ("[] { return ble_host_synced(); }", "[] { return true; }", "shared NimBLE sync reader"),
+        ("[] { return ble_host_reset_count(); }", "[] { return 0; }", "shared NimBLE reset reader"),
+        ("[] { return heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL); }", "[] { return 4096; }", "shared fresh heap reader"),
         ("result = Result::MarkUnknown;", "result = Result::Pending;", "uncertain SDK effect"),
         ("result = Result::Confirmed;", "result = Result::Pending;", "confirmed result before logging"),
     ):
@@ -6667,9 +6723,9 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
 
     health_task = function_body("ota_health_gate_task")
     for old, replacement, label in (
-        ("largest >= tk::kHeapCriticalBytes", "true", "heap verdict"),
+        ("ota_runtime_health().healthy()", "true", "shared health verdict"),
         ("OtaHealthCommitGuard commit_guard;", "bool commit_guard = true;", "operation owner"),
-        ("commit_largest < tk::kHeapCriticalBytes", "false", "heap CAS recheck"),
+        ("if (!commit_health.healthy()) continue;", "", "shared health CAS recheck"),
     ):
         mutated_health = health_task.replace(old, replacement, 1)
         if mutated_health == health_task:
@@ -7789,12 +7845,229 @@ def self_test_long_uptime_clocks() -> None:
         )
 
 
+def require_ota_download_chain(source: str) -> None:
+    """Pin the actual SDK download shell's refusal/ownership order, not SDK execution."""
+    layout = scrub_cpp_preserving_layout(function_body_in(source, "ota_task_impl"))
+    if re.search(r"^\s*(?:#|%:)", layout, re.M):
+        raise AssertionError("OTA download task must not conditionally preprocess its reviewed trust chain")
+    code = "".join(layout.split())
+    for call in ("esp_https_ota_begin(", "esp_https_ota_get_img_desc(", "esp_https_ota_perform(",
+                 "esp_https_ota_finish(", "esp_restart("):
+        if code.count(call) != 1:
+            raise AssertionError("OTA download shell must retain one reviewed SDK operation: " + call)
+    perform = code.index("esp_https_ota_perform(")
+
+    def refusal(condition: str, before: int, error_state: bool = True) -> None:
+        marker = "if(" + condition + "){"
+        at = code.find(marker)
+        if at < 0:
+            raise AssertionError("OTA download refusal missing: " + condition)
+        if code[:at].count("{") - code[:at].count("}") != 1:
+            raise AssertionError("OTA download refusal must execute directly in the task body: " + condition)
+        opening = at + len(marker) - 1
+        end = balanced_end(code, opening, "{", "}", "OTA refusal")
+        block = code[opening:end + 1]
+        if (end >= before or not re.search(r"(?:^|[;{}])return;$", block[1:-1]) or
+                (error_state and "set_state(OtaState::Error," not in block)):
+            raise AssertionError("OTA download must refuse before proceeding: " + condition)
+
+    refusal("!precheck_manifest_for_update(target_pr,expected_version,sizeof(expected_version))",
+            code.index("esp_https_ota_begin("), False)
+    refusal("err!=ESP_OK||handle==nullptr", code.index("structOtaHandleGuard"))
+    refusal("err!=ESP_OK", perform)
+    refusal("!tk::canonical_ota_version(new_version)||!tk::canonical_ota_version(current_version)", perform)
+    refusal("!tk::is_ota_update_available(new_version,current_version,target_pr,channel)", perform)
+    refusal("std::string_view(expected_version)!=new_version", perform)
+    for expected in ("char expected_version[32] = {};",):
+        if "".join(expected.split()) not in code:
+            raise AssertionError("OTA manifest version must retain bounded storage")
+    for first, second in (("precheck_manifest_for_update(", "resolve_firmware_url("),
+                          ("esp_https_ota_get_img_desc(", "tk::bounded_c_string_view(new_app.version)"),
+                          ("tk::bounded_c_string_view(new_app.version)", "if(!tk::canonical_ota_version(")):
+        require_before("OTA download trust order", code, first, second)
+    for token in ("http_cfg.crt_bundle_attach=esp_crt_bundle_attach;", "http_cfg.timeout_ms=20000;",
+                  "~OtaHandleGuard(){if(handle)esp_https_ota_abort(handle);}",
+                  "esp_https_ota_handle_trelease(){autoh=handle;handle=nullptr;returnh;}",
+                  "}handle_guard{handle};"):
+        if token not in code:
+            raise AssertionError("OTA download lost TLS/bounded ownership: " + token)
+    if code.count("handle_guard.release()") != 1 or len(re.findall(r"\bhandle_guard\b", code)) != 2:
+        raise AssertionError("OTA handle ownership may transfer only once, to finish")
+    marker = "if(err==ESP_OK&&esp_https_ota_is_complete_data_received(handle)){"
+    opening = code.find(marker)
+    if opening < 0:
+        raise AssertionError("OTA finish requires complete successful download")
+    opening += len(marker) - 1
+    end = balanced_end(code, opening, "{", "}", "OTA complete download")
+    complete = code[opening + 1:end]
+    prefix = "err=esp_https_ota_finish(handle_guard.release());if(err==ESP_OK){"
+    if not complete.startswith(prefix):
+        raise AssertionError("OTA restart must require a successful owned finish")
+    success_end = balanced_end(complete, len(prefix) - 1, "{", "}", "OTA finish success")
+    success = complete[len(prefix):success_end]
+    if not re.search(r"(?:^|[;{}])esp_restart\(\);$", success) or perform >= opening:
+        raise AssertionError("OTA restart escaped its successful finish branch")
+    require_before("OTA success state before restart", success, "set_state(OtaState::Done,100,", "esp_restart();")
+    if "set_state(OtaState::Error," not in complete[success_end + 1:] or not code[end + 1:].startswith("else{"):
+        raise AssertionError("OTA incomplete/failed finish must publish its failure")
+    error_end = balanced_end(code, end + len("else{"), "{", "}", "OTA incomplete error")
+    if "set_state(OtaState::Error," not in code[end + 1:error_end]:
+        raise AssertionError("OTA incomplete download must publish its failure")
+
+
+def require_ota_https_configuration(source: str) -> None:
+    code = strip_cpp_comments(source)
+    depth = 0
+    assertions = set()
+    for line in code.splitlines():
+        directive = re.match(r"\s*#\s*(if|ifdef|ifndef|endif)\b", line)
+        if directive:
+            depth += -1 if directive[1] == "endif" else 1
+        if depth == 0:
+            match = re.fullmatch(r"\s*static_assert\(tk::ota_https_url\((CONFIG_TESLA_OTA_(?:MANIFEST_URL|FIRMWARE_BASE_URL))\),\s*", line)
+            if match:assertions.add(match[1])
+    if assertions != {"CONFIG_TESLA_OTA_MANIFEST_URL", "CONFIG_TESLA_OTA_FIRMWARE_BASE_URL"}:
+        raise AssertionError("both configured OTA URLs require unconditional compile-time HTTPS assertions")
+
+
+def self_test_ota_download_chain(source: str) -> None:
+    for label, old, new in (
+        ("manifest recheck removed", "if (!precheck_manifest_for_update(", "if (false && !precheck_manifest_for_update("),
+        ("image descriptor read removed", "err = esp_https_ota_get_img_desc(handle, &new_app);", "err = ESP_OK;"),
+        ("invalid header admitted", "if (err != ESP_OK) {\n        ESP_LOGE(TAG, \"esp_https_ota_get_img_desc", "if (false) {\n        ESP_LOGE(TAG, \"esp_https_ota_get_img_desc"),
+        ("version syntax ignored", "if (!tk::canonical_ota_version(new_version)", "if (false && !tk::canonical_ota_version(new_version)"),
+        ("downgrade admitted", "if (!tk::is_ota_update_available(new_version", "if (false && !tk::is_ota_update_available(new_version"),
+        ("manifest image mismatch admitted A13-G4", "if (std::string_view(expected_version) != new_version)", "if (false)"),
+        ("abort owner removed", "if (handle) esp_https_ota_abort(handle);", "if (handle) ignored_abort(handle);"),
+        ("guard owns wrong handle", "handle_guard{handle};", "handle_guard{nullptr};"),
+        ("guard released before header", "int image_size = esp_https_ota_get_image_size(handle);", "(void)handle_guard.release(); int image_size = esp_https_ota_get_image_size(handle);"),
+        ("guard cleared before header", "int image_size = esp_https_ota_get_image_size(handle);", "handle_guard.handle=nullptr; int image_size = esp_https_ota_get_image_size(handle);"),
+        ("guard aliased before header", "int image_size = esp_https_ota_get_image_size(handle);", "auto& escaped_owner=handle_guard; escaped_owner.release(); int image_size = esp_https_ota_get_image_size(handle);"),
+        ("finish without completeness", "err == ESP_OK && esp_https_ota_is_complete_data_received(handle)", "err == ESP_OK"),
+        ("finish releases wrong owner", "esp_https_ota_finish(handle_guard.release())", "esp_https_ota_finish(handle)"),
+        ("restart without successful finish", "if (err == ESP_OK) {\n            ESP_LOGI(TAG, \"OTA complete", "if (true) {\n            ESP_LOGI(TAG, \"OTA complete"),
+        ("completed image not restarted", "esp_restart();   // does not return", "if (false) esp_restart();   // does not return"),
+        ("download failure not reported", 'set_state(OtaState::Error, 0, "download failed");', 'ignored_state(OtaState::Error, 0, "download failed");'),
+    ):
+        mutated = source.replace(old, new, 1)
+        if mutated == source:raise AssertionError("OTA download mutation did not apply: " + label)
+        require_mutation_rejected(label, lambda changed=mutated: require_ota_download_chain(changed))
+    body = function_body_in(source, "ota_task_impl")
+    conditional_return = source.replace(body, body.replace("return;", "if (false) return;", 1), 1)
+    require_mutation_rejected("OTA precheck refusal has only conditional return", lambda: require_ota_download_chain(conditional_return))
+    start = source.index("if (std::string_view(expected_version) != new_version)")
+    opening = source.index("{", start)
+    end = balanced_end(scrub_cpp_preserving_layout(source), opening, "{", "}", "OTA mismatch mutant")
+    block = source[start:end + 1]
+    nested = source[:start] + "if (false) {\n" + block + "\n}" + source[end + 1:]
+    require_mutation_rejected("OTA mismatch refusal hidden in unreachable block", lambda: require_ota_download_chain(nested))
+    for directive in ("#", "%:"):
+        disabled = source[:start] + directive + "if 0\n" + block + "\n" + directive + "endif\n" + source[end + 1:]
+        require_mutation_rejected("OTA mismatch refusal removed by preprocessor", lambda changed=disabled: require_ota_download_chain(changed))
+    for macro in ("CONFIG_TESLA_OTA_MANIFEST_URL", "CONFIG_TESLA_OTA_FIRMWARE_BASE_URL"):
+        assertion = f"static_assert(tk::ota_https_url({macro}),"
+        statement = re.search(re.escape(assertion) + r'\s*"[^"\n]*"\);', source)
+        if not statement:raise AssertionError("OTA HTTPS assertion statement missing")
+        for mutated in (source.replace(assertion, "static_assert(true,", 1),
+                        source.replace(statement[0], "#if 0\n" + statement[0] + "\n#endif", 1)):
+            if mutated == source:raise AssertionError("OTA HTTPS assertion mutation did not apply")
+            require_mutation_rejected("OTA HTTPS assertion disabled", lambda changed=mutated: require_ota_https_configuration(changed))
+
+
+def require_concurrency_regression_contract(parts: dict[str, str]) -> None:
+    """Pin reviewed shell seams; this lexical contract is not a concurrency/stack proof."""
+    common = scrub_cpp(parts["common"])
+    if not re.search(r"static\s+constexpr\s+size_t\s+MAX_BODY_LEN\s*=\s*2048\s*;", common):
+        raise AssertionError("HTTP shell body allocation cap must remain 2048")
+    registrations = [args for args in call_arguments(scrub_cpp(parts["ctrl"]), "xTaskCreate")
+                     if args and args[0].strip() == "loop_task_fn_"]
+    if len(registrations) != 1 or registrations[0][2].strip() != "10240":
+        raise AssertionError("vehicle loop stack allocation must remain reviewed 10240 bytes")
+
+    for owner, name in (("header", "copy_locked_"), ("commands", "set_last_command_error"),
+                        ("commands", "publish_command_outcome_")):
+        if owner == "header":
+            code = scrub_cpp_preserving_layout(parts[owner])
+            matches = list(re.finditer(r"\bcopy_locked_\s*\([^{};]*\)\s*\{", code))
+            if len(matches) != 1: raise AssertionError("cache copy template definition is ambiguous")
+            opening = code.index("{", matches[0].start())
+            body = code[opening:balanced_end(code, opening, "{", "}", name) + 1]
+        else:
+            body = scrub_cpp(function_body_in(parts[owner], name))
+        if re.search(r"\bESP_LOG[A-Z]*\s*\(", body):
+            raise AssertionError(f"leaf result/cache helper {name} may not log")
+
+    for owner, name in (("commands", "send_vcsec_locked_"),
+                        ("commands", "send_infotainment_locked_"),
+                        ("commands", "await_completion_"),
+                        ("telemetry", "get_vehicle_status")):
+        body = scrub_cpp_preserving_layout(function_body_in(parts[owner], name))
+        for match in re.finditer(r"\btk::(?:SemGuard|MutexGuard)\s+\w+\s*\(\s*vehicle_mutex_\s*[,)]", body):
+            opened = []
+            for index, char in enumerate(body[:match.start()]):
+                if char == "{": opened.append(index)
+                elif char == "}": opened.pop()
+            if not opened: raise AssertionError("Vehicle guard lost its enclosing scope")
+            closing = balanced_end(body, opened[-1], "{", "}", name)
+            tail = body[match.end():closing]
+            if re.search(r"\bawait_completion_\s*\(|\bxSemaphoreTake\s*\(\s*completion->sem", tail):
+                raise AssertionError(f"{name} waits for completion under Vehicle ownership")
+        if re.search(r"\bxSemaphoreTake\s*\(\s*vehicle_mutex_", body):
+            raise AssertionError(f"{name} bypasses reviewed Vehicle RAII ownership")
+
+    events = scrub_cpp_preserving_layout(function_body_in(parts["telemetry"], "process_ble_host_events_"))
+    prefix = (r"while\s*\(\s*xQueueReceive\(ble_event_queue_,\s*&event,\s*0\)\s*==\s*pdTRUE\s*\)\s*\{\s*"
+              r"const\s+uint32_t\s+current_generation\s*=\s*ble_->lifecycle_generation\(\)\s*;\s*"
+              r"if\s*\(\s*!tk::ble_deferred_event_may_apply\(event.kind,\s*event.generation,\s*current_generation\)\s*\)\s*\{\s*continue\s*;\s*\}")
+    if not re.search(prefix, events):
+        raise AssertionError("deferred BLE event must reject stale generation first in each queue iteration")
+    status = scrub_cpp(function_body_in(parts["telemetry"], "get_vehicle_status"))
+    if not re.search(r"if\s*\(\s*cmd\s*&&\s*cmd->id\s*==\s*completion->cmd_id\s*\)\s*\{[^{}]*command_runner_\.pop_current\(\);", status):
+        raise AssertionError("status cleanup must pop only its own command")
+    callback = scrub_cpp(function_body_in(parts["commands"], "make_result_cb_"))
+    if not re.search(r"return\s*\[[^\]]+\]\s*\([^)]*\)\s*\{\s*if\s*\(\s*command_generation_\.load\(\)\s*!=\s*generation\s*\)\s*return\s*;", callback):
+        raise AssertionError("result callback must reject stale generation before state changes")
+
+
+def self_test_concurrency_regression_contract(parts: dict[str, str]) -> None:
+    cases = (
+        ("HTTP body cap increase", "common", "MAX_BODY_LEN = 2048", "MAX_BODY_LEN = 16777216"),
+        ("vehicle stack decrease", "ctrl", '"vehicle_loop", 10240', '"vehicle_loop", 8192'),
+        ("logging under cache lock", "header", "tk::SemGuard g(cache_mutex_);\n        return src;",
+         'tk::SemGuard g(cache_mutex_);\n        ESP_LOGW(TAG, "mutant"); return src;'),
+        ("logging under result lock", "commands", "tk::SemGuard g(result_mutex_);\n    last_error_ = err;",
+         'tk::SemGuard g(result_mutex_);\n    ESP_LOGW(TAG, "mutant"); last_error_ = err;'),
+        ("completion wait under Vehicle lock", "commands",
+         "out = await_completion_(completion, generation, deadline, name.c_str(), timeout_policy);",
+         "tk::SemGuard regression(vehicle_mutex_);\n    out = await_completion_(completion, generation, deadline, name.c_str(), timeout_policy);"),
+        ("waiter directly owns Vehicle while waiting", "commands", "    const bool signalled =",
+         "    tk::SemGuard regression(vehicle_mutex_);\n    const bool signalled ="),
+        ("stale BLE event applied", "telemetry", "if (!tk::ble_deferred_event_may_apply(event.kind, event.generation,",
+         "if (false && !tk::ble_deferred_event_may_apply(event.kind, event.generation,"),
+        ("status pops unrelated command", "telemetry", "if (cmd && cmd->id == completion->cmd_id)", "if (cmd)"),
+        ("late result mutates newer request", "commands", "      if (command_generation_.load() != generation) return;",
+         "      if (false && command_generation_.load() != generation) return;"),
+    )
+    for label, owner, old, new in cases:
+        if parts[owner].count(old) != 1: raise AssertionError(f"{label} mutation does not bind exactly once")
+        changed = {**parts, owner: parts[owner].replace(old, new, 1)}
+        require_mutation_rejected(label, lambda mutated=changed: require_concurrency_regression_contract(mutated))
+
+
 def main() -> int:
     tasks = task_inventory(ALL_CODE)
     callbacks = callback_inventory(ALL_CODE)
     check_contract(tasks, callbacks)
     self_test_canaries(tasks, callbacks)
     self_test_long_uptime_clocks()
+    concurrency_parts = {"common": SOURCES["http_common.cpp"], "ctrl": SOURCES["vehicle_ctrl.cpp"],
+                         "commands": SOURCES["vehicle_commands.cpp"], "telemetry": SOURCES["vehicle_telemetry.cpp"],
+                         "header": (MAIN / "vehicle_ctrl.hpp").read_text()}
+    require_concurrency_regression_contract(concurrency_parts)
+    self_test_concurrency_regression_contract(concurrency_parts)
+    require_ota_download_chain(SOURCES["ota_update.cpp"])
+    require_ota_https_configuration(SOURCES["ota_update.cpp"])
+    self_test_ota_download_chain(SOURCES["ota_update.cpp"])
     recovery_sources = {
         "pairing": SOURCES["vehicle_pairing.cpp"],
         "boot": SOURCES["vehicle_ctrl.cpp"],

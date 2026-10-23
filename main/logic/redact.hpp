@@ -197,7 +197,7 @@ inline bool diag_mqtt_uri_error(std::string_view record) noexcept {
     return record.size() - pos >= message.size() && record.compare(pos, message.size(), message) == 0;
 }
 
-// Identifier-bearing formats linked from pinned ESP-IDF/netif, esp-tls, esp-mqtt and WiFi.
+// Identifier-bearing formats linked from pinned IDF libraries and Tesla BLE.
 // Collapse these complete lines: SSIDs and URIs are arbitrary text, so a delimiter inside a
 // value cannot safely identify its end. This separate path does not enlarge the HTTP output
 // buffer's per-rule expansion allowance. It is not a sanitizer for arbitrary library output.
@@ -206,6 +206,10 @@ struct DiagLibraryIdentifier {
     const char* message;
 };
 inline constexpr DiagLibraryIdentifier kDiagLibraryIdentifiers[] = {
+    // Peer DEBUG/VERBOSE calls are compiled out. Retain a redacted-export guard for
+    // their known public-key and packet material if an already captured line is exported.
+    {"TeslaBLE::Peer:", "Tesla key data: "},
+    {"TeslaBLE::Peer:", "[Encrypt] Nonce: "},
     {"esp_netif_handlers:", " ip: "},
     {"esp_netif_lwip:", "DHCP server started on interface "},
     {"esp-tls:", "couldn't get hostname for :"},

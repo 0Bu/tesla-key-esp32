@@ -61,9 +61,11 @@ run_nvs() {
 
 run_boundary() {
   echo "== compiling and running runtime boundary tests =="
-  "$CXX" -std=c++17 -Wall -Wextra -Werror -Itest/stubs -Itest/coredump_stubs -Imain \
+  python3 test/generate_background_poll_adapter.py "$BUILD_DIR/background_poll_adapter.generated.hpp"
+  python3 test/generate_ota_admission_adapter.py "$BUILD_DIR/ota_admission_adapter.generated.hpp"
+  "$CXX" -std=c++17 -Wall -Wextra -Werror -Itest/stubs -Itest/coredump_stubs -Imain -I"$BUILD_DIR" -DTEST_BACKGROUND_POLL_ADAPTER=1 -DTEST_OTA_ADMISSION_ADAPTER=1 \
     -o "$BUILD_DIR/runtime_boundary_tests" \
-    test/test_runtime_boundaries.cpp test/test_coredump_hash.cpp main/diag_log.cpp main/safe_mode.cpp
+    test/test_runtime_boundaries.cpp test/test_background_poll.cpp test/test_ota_admission.cpp test/test_coredump_hash.cpp main/diag_log.cpp main/stack_watch.cpp main/safe_mode.cpp
   "$BUILD_DIR/runtime_boundary_tests"
   python3 test/generate_syslog_adapters.py "$BUILD_DIR/syslog_adapters.generated.hpp"
   "$CXX" -std=c++17 -Wall -Wextra -Werror -Imain -I"$BUILD_DIR" \

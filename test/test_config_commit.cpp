@@ -9,6 +9,8 @@
 #include "logic/http_body.hpp"
 #include "logic/wifi_credentials.hpp"
 #include "logic/vin.hpp"
+#include "logic/runtime_admission.hpp"
+#include <vector>
 #include <array>
 #include <algorithm>
 #include <cstring>
@@ -21,7 +23,7 @@
 #include <string_view>
 #include <type_traits>
 
-static int checks;
+static int checks, timed_fixture_runs, config_fixture_runs;
 #define CHECK(x) do { ++checks; if (!(x)) { std::cerr << "FAIL " << __LINE__ << ": " << #x << '\n'; std::exit(1); } } while (0)
 using Image = tk::ConfigImageResult;
 using Owner = tk::OtaIdentityGateState;
@@ -33,7 +35,23 @@ static bool partition_missing, read_failure, ready, synced, throw_log;
 static unsigned resets;
 static size_t largest;
 static int app_count, reads, marks, logs, mark_failure;
-static bool mark_throw;
+static bool mark_throw, throw_after_mark;
+static Owner expected_mark_owner = Owner::ConfigRestart;
+static int refreshes, polls, max_polls = 121, post_refusal = -1;
+static uint32_t ticks;
+static bool timed_fixture = false, network_up = true;
+static int wait_polls = 0, throw_health_field = -1;
+static uint32_t refreshed_raw_state;
+static tk::RuntimeAdmissionAction admission_action = tk::RuntimeAdmissionAction::Run;
+static std::vector<std::pair<char, Owner>> health_reads;
+static std::vector<std::string> messages;
+static bool post_fault(int field) {
+    const auto owner = s_operation_gate.state();
+    if ((owner == Owner::HealthCommit || owner == Owner::ConfigRestart) && throw_health_field == field)
+        throw std::bad_alloc();
+    return owner == Owner::HealthCommit && post_refusal == field;
+}
+
 static const char* TAG="offline-config";
 extern "C" const esp_partition_t* read_otadata(esp_ota_select_entry_t* out) {
     ++reads; if (read_failure) return nullptr;
@@ -45,25 +63,66 @@ extern "C" bool is_ota_partition(const esp_partition_t* p) {
            p->subtype<ESP_PARTITION_SUBTYPE_APP_OTA_MIN+16;
 }
 static const esp_partition_t* esp_ota_get_running_partition() { return partition_missing?nullptr:&running; }
-namespace tk { static bool runtime_admission_vehicle_ready() { return ready; } }
-static bool ble_host_synced() { return synced; }
-static unsigned ble_host_reset_count() { return resets; }
+namespace tk {
+static bool runtime_admission_vehicle_ready() {
+    health_reads.emplace_back('R', s_operation_gate.state()); return ready && !post_fault(0);
+}
+static RuntimeAdmissionAction runtime_admission_action() { return polls <= wait_polls ? RuntimeAdmissionAction::Wait : admission_action; }
+static bool net_is_up() { return network_up; }
+static const char* net_link_str(int) { return "test"; }
+static int net_kind() { return 0; }
+}
+static bool ble_host_synced() {
+    health_reads.emplace_back('S', s_operation_gate.state()); return synced && !post_fault(1);
+}
+static unsigned ble_host_reset_count() {
+    health_reads.emplace_back('C', s_operation_gate.state()); return post_fault(2) ? 1 : resets;
+}
 constexpr int MALLOC_CAP_8BIT=1, MALLOC_CAP_INTERNAL=2;
 static size_t heap_caps_get_largest_free_block(int caps) {
-    CHECK(caps==(MALLOC_CAP_8BIT|MALLOC_CAP_INTERNAL)); return largest;
+    CHECK(caps==(MALLOC_CAP_8BIT|MALLOC_CAP_INTERNAL));
+    health_reads.emplace_back('H', s_operation_gate.state()); return post_fault(3) ? 4095 : largest;
 }
 static int esp_ota_mark_app_valid_cancel_rollback() {
-    ++marks; CHECK(s_operation_gate.state()==Owner::ConfigRestart);
+    ++marks; CHECK(s_operation_gate.state()==expected_mark_owner);
     if (mark_failure==1) return ESP_FAIL;
     headers[0].ota_state=ESP_OTA_IMG_VALID; // model a durable effect before error/throw
     if (mark_throw) throw std::bad_alloc();
     return mark_failure==2?ESP_FAIL:ESP_OK;
 }
-template<typename... Args> static void offline_log(Args...) {
-    ++logs; if (throw_log) throw std::bad_alloc();
+template<typename... Args> static void offline_log(const char*, const char* format, Args... args) {
+    ++logs;
+    if (timed_fixture && (std::strstr(format, "OTA image healthy") || std::strstr(format, "OTA mark-valid failed")))
+        CHECK(refreshes == 1 && s_operation_gate.state() == Owner::HealthCommit);
+    char text[1024];
+    if constexpr (sizeof...(args)) std::snprintf(text, sizeof(text), format, args...);
+    else std::snprintf(text, sizeof(text), "%s", format);
+    messages.emplace_back(text);
+    if (throw_log || (throw_after_mark && marks)) throw std::bad_alloc();
 }
 #define ESP_LOGI(...) offline_log(__VA_ARGS__)
+#define ESP_LOGE(...) offline_log(__VA_ARGS__)
+// Refresh is a passive spy; separate admission/cache tests execute its actual body.
+static tk::OtaVerificationState ota_refresh_verification_cache() noexcept {
+    ++refreshes; CHECK(s_operation_gate.state()==expected_mark_owner);
+    refreshed_raw_state=headers[0].ota_state;
+    return tk::OtaVerificationState::Unknown;
+}
+using TickType_t = uint32_t;
+#define pdMS_TO_TICKS(x) (x)
+#define pdTICKS_TO_MS(x) (x)
+struct TaskEnd {};
+static TickType_t xTaskGetTickCount() { return ticks; }
+static void vTaskDelay(uint32_t delay) {
+    CHECK(timed_fixture && delay == 5000); ticks += delay;
+    if (++polls > max_polls) throw TaskEnd{};
+}
+static void vTaskDelete(void*) { throw TaskEnd{}; }
+static const char* esp_err_to_name(esp_err_t code) { CHECK(code == ESP_FAIL); return "ESP_FAIL"; }
+static bool s_ota_gate_link_expected = true;
+
 #include "config_commit_runtime.generated.hpp"
+#include "ota_health_task.generated.hpp"
 
 static void reset_state(uint32_t state=ESP_OTA_IMG_PENDING_VERIFY) {
     CHECK(s_operation_gate.state()==Owner::Idle);
@@ -73,11 +132,98 @@ static void reset_state(uint32_t state=ESP_OTA_IMG_PENDING_VERIFY) {
     running={ESP_PARTITION_TYPE_APP,ESP_PARTITION_SUBTYPE_APP_OTA_MIN};
     partition_missing=false; read_failure=false; ready=true; synced=true; throw_log=false;
     resets=0; largest=4096; app_count=2; reads=marks=logs=mark_failure=0; mark_throw=false;
+    expected_mark_owner=Owner::ConfigRestart; refreshes=polls=0; max_polls=121; post_refusal=-1;
+    throw_after_mark=false; network_up=true; wait_polls=0; throw_health_field=-1; refreshed_raw_state=99;
+    ticks=0; timed_fixture=false; admission_action=tk::RuntimeAdmissionAction::Run;
+    health_reads.clear(); messages.clear();
+
 }
 static Image confirm(const OtaConfigRestartGuard& guard) {
     return ota_confirm_pending_image(guard,tk::OtaRebootClass::SuccessfulUserConfigCommit);
 }
+static void timed_health_tests() {
+    ++timed_fixture_runs;
+    for (int failure = 0; failure != 3; ++failure) {
+        reset_state(); timed_fixture=true; expected_mark_owner=Owner::HealthCommit;
+        mark_failure=failure;
+        try { ota_health_gate_task(nullptr); } catch (const TaskEnd&) {}
+        CHECK(marks==1 && refreshes==1 && polls==18);
+        CHECK(refreshed_raw_state==headers[0].ota_state);
+        CHECK(s_operation_gate.state()==Owner::Idle);
+        std::string owned;
+        for (auto read : health_reads) if (read.second==Owner::HealthCommit) owned += read.first;
+        CHECK(owned=="RSCH");
+        if (failure) {
+            CHECK(std::any_of(messages.begin(),messages.end(),[](const std::string& line) {
+                return line.find("OTA mark-valid failed: ESP_FAIL (-1); verification is uncertain")!=std::string::npos;
+            }));
+            CHECK(headers[0].ota_state==(failure==1 ? ESP_OTA_IMG_PENDING_VERIFY : ESP_OTA_IMG_VALID));
+        }
+    }
+    for (int fault=0; fault!=4; ++fault) {
+        reset_state(); timed_fixture=true; expected_mark_owner=Owner::HealthCommit;
+        if (fault==0) ready=false;
+        if (fault==1) synced=false;
+        if (fault==2) resets=1;
+        if (fault==3) largest=4095;
+        try { ota_health_gate_task(nullptr); } catch (const TaskEnd&) {}
+        CHECK(marks==0 && refreshes==0 && polls==120 && s_operation_gate.state()==Owner::Idle);
+        CHECK(std::all_of(health_reads.begin(),health_reads.end(),[](auto read) { return read.second==Owner::Idle; }));
+    }
+    for (int fault=0; fault!=4; ++fault) {
+        reset_state(); timed_fixture=true; expected_mark_owner=Owner::HealthCommit;
+        max_polls=18; post_refusal=fault;
+        try { ota_health_gate_task(nullptr); } catch (const TaskEnd&) {}
+        CHECK(marks==0 && refreshes==0 && polls==19 && s_operation_gate.state()==Owner::Idle);
+        std::string owned;
+        for (auto read : health_reads) if (read.second==Owner::HealthCommit) owned += read.first;
+        CHECK(owned==std::string("RSCH").substr(0,fault+1));
+    }
+    for (int failure : {0, 1}) {
+        reset_state(); timed_fixture=true; expected_mark_owner=Owner::HealthCommit;
+        mark_failure=failure; throw_after_mark=true;
+        try { ota_health_gate_task(nullptr); } catch (...) {}
+        CHECK(marks==1 && refreshes==1 && s_operation_gate.state()==Owner::Idle);
+    }
+    reset_state(); timed_fixture=true; expected_mark_owner=Owner::HealthCommit;
+    mark_throw=true;
+    try { ota_health_gate_task(nullptr); } catch (const TaskEnd&) {}
+    CHECK(marks==1 && refreshes==0 && headers[0].ota_state==ESP_OTA_IMG_VALID);
+    CHECK(s_operation_gate.state()==Owner::Idle); // exceptional SDK return preserves no refresh promise
+    for (auto state : {ESP_OTA_IMG_VALID, ESP_OTA_IMG_UNDEFINED, ESP_OTA_IMG_NEW,
+                       ESP_OTA_IMG_INVALID, ESP_OTA_IMG_ABORTED}) {
+        reset_state(state); timed_fixture=true;
+        try { ota_health_gate_task(nullptr); } catch (const TaskEnd&) {}
+        CHECK(marks==0 && polls==0 && health_reads.empty());
+    }
+    reset_state(); timed_fixture=true; read_failure=true;
+    try { ota_health_gate_task(nullptr); } catch (const TaskEnd&) {}
+    CHECK(marks==0 && polls==0 && health_reads.empty());
+    reset_state(); timed_fixture=true; wait_polls=3; admission_action=tk::RuntimeAdmissionAction::Stop;
+    try { ota_health_gate_task(nullptr); } catch (const TaskEnd&) {}
+    CHECK(polls==4 && marks==0 && health_reads.empty());
+    reset_state(); timed_fixture=true; network_up=false;
+    try { ota_health_gate_task(nullptr); } catch (const TaskEnd&) {}
+    CHECK(polls==120 && marks==0 && refreshes==0);
+    CHECK(std::any_of(messages.begin(),messages.end(),[](const std::string& line) {
+        return line.find("never proved link")!=std::string::npos;
+    }));
+    for (auto owner : {Owner::Ota,Owner::IdentityMutation,Owner::FaultRestart,Owner::HealthCommit,Owner::ConfigRestart}) {
+        reset_state(); timed_fixture=true; expected_mark_owner=Owner::HealthCommit; max_polls=18;
+        CHECK(s_operation_gate.try_begin(owner));
+        try { ota_health_gate_task(nullptr); } catch (const TaskEnd&) {}
+        CHECK(polls==19 && marks==0 && refreshes==0 && s_operation_gate.state()==owner);
+        CHECK(s_operation_gate.finish(owner));
+    }
+    for (int field=0; field!=4; ++field) {
+        reset_state(); timed_fixture=true; expected_mark_owner=Owner::HealthCommit; throw_health_field=field;
+        try { ota_health_gate_task(nullptr); } catch (const TaskEnd&) {}
+        CHECK(marks==0 && refreshes==0 && polls==18 && s_operation_gate.state()==Owner::Idle);
+    }
+}
+
 static void sdk_and_owner_tests() {
+    ++config_fixture_runs;
     static_assert(sizeof(esp_ota_select_entry_t)==32,"exact public OTA header layout");
     static_assert(ESP_OTA_IMG_UNDEFINED==UINT32_MAX,"raw SDK UNDEFINED is not zero");
     static_assert(std::is_nothrow_default_constructible<OtaConfigRestartGuard>::value &&
@@ -88,7 +234,7 @@ static void sdk_and_owner_tests() {
         reset_state(); CHECK(s_operation_gate.try_begin(owner));
         { OtaConfigRestartGuard denied; CHECK(!denied.try_begin()); CHECK(!denied.owns_gate());
           CHECK(confirm(denied)==Image::WrongOwner);
-          CHECK(ota_config_image_state(denied)==Image::WrongOwner); CHECK(reads==0 && marks==0); }
+          CHECK(ota_config_image_state(denied)==Image::WrongOwner); CHECK(reads==0 && marks==0 && health_reads.empty()); }
         CHECK(s_operation_gate.state()==owner); CHECK(s_operation_gate.finish(owner));
     }
     const uint32_t raw[]={ESP_OTA_IMG_VALID,ESP_OTA_IMG_UNDEFINED,ESP_OTA_IMG_NEW,
@@ -102,7 +248,9 @@ static void sdk_and_owner_tests() {
           for (auto owner : {Owner::Ota,Owner::IdentityMutation,Owner::FaultRestart,Owner::HealthCommit,Owner::ConfigRestart})
               CHECK(!s_operation_gate.try_begin(owner));
           CHECK(confirm(guard)==(raw[i]==ESP_OTA_IMG_PENDING_VERIFY?Image::Confirmed:expected[i]));
-          CHECK(marks==int(raw[i]==ESP_OTA_IMG_PENDING_VERIFY)); }
+          CHECK(marks==int(raw[i]==ESP_OTA_IMG_PENDING_VERIFY));
+          CHECK(health_reads.empty() == (raw[i]!=ESP_OTA_IMG_PENDING_VERIFY));
+          for (auto read : health_reads) CHECK(read.second==Owner::ConfigRestart); }
         CHECK(s_operation_gate.state()==Owner::Idle);
     }
     // Actual pinned query and CRC reject blank/CRC-invalid storage; no NOT_FOUND->Stable exception.
@@ -133,12 +281,20 @@ static void sdk_and_owner_tests() {
     for (auto klass : {tk::OtaRebootClass::AutomaticIdentityRecovery,tk::OtaRebootClass::AutomaticWifiRollback,
                        tk::OtaRebootClass::AutomaticFaultRecovery}) {
         reset_state(); OtaConfigRestartGuard guard; CHECK(guard.try_begin());
-        CHECK(ota_confirm_pending_image(guard,klass)==Image::WrongClass); CHECK(reads==0 && marks==0);
+        CHECK(ota_confirm_pending_image(guard,klass)==Image::WrongClass); CHECK(reads==0 && marks==0 && health_reads.empty());
     }
     for (int failure=0;failure<3;++failure) {
         reset_state(); mark_failure=failure==0?1:2; mark_throw=failure==2;
         { OtaConfigRestartGuard guard; CHECK(guard.try_begin()); CHECK(confirm(guard)==Image::MarkUnknown);
           CHECK(marks==1); CHECK(headers[0].ota_state==(failure==0?ESP_OTA_IMG_PENDING_VERIFY:ESP_OTA_IMG_VALID)); }
+    }
+    reset_state(); network_up=false;
+    { OtaConfigRestartGuard guard; CHECK(guard.try_begin()); CHECK(confirm(guard)==Image::Confirmed); }
+    CHECK(marks==1 && refreshes==1); // user-save confirmation does not add a link requirement
+    for (int field=0; field!=4; ++field) {
+        reset_state(); throw_health_field=field;
+        { OtaConfigRestartGuard guard; CHECK(guard.try_begin()); CHECK(confirm(guard)==Image::Pending); }
+        CHECK(marks==0 && refreshes==0 && s_operation_gate.state()==Owner::Idle);
     }
     reset_state(); throw_log=true;
     { OtaConfigRestartGuard guard; CHECK(guard.try_begin()); CHECK(confirm(guard)==Image::Confirmed);
@@ -272,6 +428,8 @@ static void portal_tests() {
 
 int main() {
     sdk_and_owner_tests();
+    timed_health_tests();
+    CHECK(config_fixture_runs==1 && timed_fixture_runs==1);
     portal_tests();
-    std::cout << "OK " << checks << " actual config owner/SDK-query/confirmation/portal checks\n";
+    std::cout << "OK " << checks << " actual config/timed-health owner/SDK-query/confirmation/portal checks\n";
 }

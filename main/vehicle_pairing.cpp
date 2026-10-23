@@ -123,6 +123,7 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
         const bool recovery_hint = self->pairing_recovery_hint_.load();
         const tk::AutomaticKeyAction key_action = tk::decide_automatic_key_action(
             key_probe_ok, stored_key_present, self->key_runtime_safe_.load(), recovery_hint);
+        self->automatic_key_action_.store(key_action);
         if (key_action == tk::AutomaticKeyAction::StorageUnavailable) {
             self->key_runtime_safe_.store(false);
             self->believed_paired_.store(false);

@@ -123,6 +123,24 @@ Identity mutations require Stable (`OtaIdentityMutationGuard`); pending/unknown/
 `503` before journals or keys change. VIN/key recovery, credential rollback, watchdogs and brownouts
 never confirm an image. Already-valid confirmation is a no-op.
 
+Both confirmation paths use `ota_runtime_health()` and the ordered pure sampler in
+`logic/health_gate.hpp`: Ready, current host sync, sticky zero-reset evidence, then fresh INTERNAL
+largest block. The timed path samples again after acquiring `HealthCommit`; an earlier observation
+never authorizes the mark. These sequential reads are not an atomic snapshot with the SDK call.
+A returned SDK error refreshes the diagnostic cache before fallible logging and stops the timed
+task without retry, reporting the code and uncertain outcome. An SDK exception retains the existing
+exception path and does not promise a cache refresh or unchanged metadata.
+
+Update admission queries the running image state while holding the same operation gate, before
+creating a worker or starting HTTPS. NEW/PENDING_VERIFY refuses with `409`; unknown/error state
+refuses with `503`. A manifest-only check can still run during probation. Busy owners return
+`409`, service initialization failures `503`, and worker startup failures `500`. Worker-creation
+failures attempt to publish their terminal error before releasing the owner, so a delayed
+publication cannot overwrite a later worker's status.
+`/status.ota.verification` reads an atomic last-observed cache only. Startup seeds it before HTTP;
+update admission and health/config confirmation refresh it under their owner. This diagnostic
+cache neither authorizes an update nor records whether an earlier firmware rolled back.
+
 The app sits at `0x20000` in two `0x1f0000` slots. Layout and projected/actual signing budgets are
 [build contracts](DEVELOPMENT.md#build-and-evidence-contracts), not independently chosen OTA values.
 Signed previews and the browser installer share the [publication trust boundary](SECURITY.md#release-pipeline-and-trust-boundaries).
@@ -187,19 +205,55 @@ VIN transitions use
 
 The optional T-Dongle-S3 ST7735 uses the shared cache-only `UiSnapshot` and pure `display_model.hpp`
 presenter. BOOT rotates landscape 160×80/portrait 80×160 and their flips; `disp_rot` persists and
-migrates legacy `disp_flip`. Layout, RSSI bars, scroll and SoC decisions have Python-simulator parity.
+migrates legacy `disp_flip`. The parity gate compares all 18 presenter fields across 14,114 cases,
+including signal bars/glyph state, both layouts and integer SoC/RSSI sweeps. It also compares
+98 native font/bitmap records and byte-checks the generated font header against the simulator
+source. Another 840 cases execute the actual native text primitives against the simulator,
+including clipped/outlined text, all byte values and UTF-8 byte widths. The panel has a printable
+ASCII font; each unsupported UTF-8 byte becomes a blank cell. Both preview montages include
+LAN, setup/search and punctuation examples with complete captions. These checks do not establish
+complete-frame pixel equality, physical animation or glyph legibility. A further 820 cases execute
+the actual frame-assembly/layout bodies with passive cache/drawing doubles, including SafeMode
+cache bypass and number/outline bounds for all integer percentages. The portrait battery interior
+leaves room for those outlines.
+
+Once the display has started, SafeMode overrides connection, pairing and charge heroes, hides the
+BLE header and shows "SAFE MODE" with "Open web UI" or, without a network lease, "Check network". Its latched input comes from `safe_mode_active()`;
+frame assembly bypasses the vehicle cache in recovery. Network header and SSID scrolling remain
+available; recovery itself is static. This presentation does not alter the boot latch, start vehicle
+work, issue a command or provide an initial-portal screen before display startup.
 Landscape geometry is hardware verified; portrait orientation still needs on-device confirmation.
 
 Auto-detection requires ≥4 of 6 TF-socket pull-up pins high; other S3 boards do not allocate the
 ~25 KiB framebuffer or drive display pins. SPI is 40 MHz, BOOT GPIO0, backlight active-low.
-The optional APA102 (DI40/CI39) uses the same snapshot, shared SoC gradient and latched alerts;
-it is heap-free and disabled by default. Neither renderer wakes the car.
+The optional APA102 (DI40/CI39) uses the same snapshot, shared SoC gradient and latched alerts.
+Charging requires Awake plus a known SoC; a retained charging flag cannot override Asleep or
+an uncertain link. This is not a charge-domain age guarantee. A failed current WiFi signal read
+uses the same network-search downgrade as the panel. Independent sampling and alert priorities
+can still produce different frames.
+
+Once the LED task has started, latched SafeMode takes priority over network, charging and OTA
+indications and blinks red. Recovery sampling reads the latch without consulting the vehicle cache,
+durable sessions or the OTA status mutex. It uses the existing error hold; this does not change
+startup order, enable the optional LED by default or provide a signal before that task starts.
+
+`logic/led_driver.hpp` owns the 15 s error/10 s warning holds, animation factors and 12-byte
+APA102 frame. The task samples alerts about once a second and sends frames about 30 times a
+second. Pixel transport is heap-free and disabled by default. The LED's OTA read copies only a
+state enum; initial mutex creation and session-presence probes can still allocate. Neither
+renderer wakes the car. The sampling helper isolates its snapshot temporary from the persistent
+render-loop frame; this does not prove composed stack headroom. The S3 primary CI leg additionally compiles the enabled
+LED task in isolation; that unsigned variant never enters publication artifacts or changes defaults.
 
 ## Home Assistant MQTT bridge
 
 `mqtt_ha.cpp` reads caches in its own task and subscribes to no command topics. Configuration is in
 [User guide](USER_GUIDE.md#home-assistant-mqtt); topics/fields are in [API](API.md#mqtt-topics).
 The lowercase VIN-derived node identity survives board replacement.
+Each discovery round snapshots the current active interface's IPv4 address once for its
+configuration link. A missing/zero address, failed query or different active interface at the
+recheck omits the link instead of reusing the boot address. Later rounds refresh it; identity and state
+topics stay unchanged. This snapshot does not promise that a lease survives the broker publish.
 
 An explicit scheme is honored. Without one, credentials select `mqtts://`, otherwise `mqtt://`.
 TLS verifies bundled CA roots and never falls back to cleartext; status exposes credential-free
@@ -240,7 +294,9 @@ owns export modes and response classes; no crash data belongs in public evidence
 
 ## Syslog forwarder
 
-The log hook mirrors console lines into the RAM ring and a fixed 24×256 B forwarding queue.
+The log hook mirrors console lines into the RAM ring and a fixed 24-item forwarding queue.
+Each `SyslogMsg` has 256 payload bytes plus a two-byte length (258 bytes per item); FreeRTOS
+queue-control storage is additional.
 RFC5424 facility user severity follows E/W/I/D/V (3/4/6/7), skipping ANSI prefixes; unrecognized
 lines remain info. Firmware boot replay explicitly marks BOOT as INFO and CRASH as ERROR;
 message text alone cannot acquire either replay type. Replay snapshots the live crash report, so
@@ -559,32 +615,93 @@ telemetry is omitted. The shared admission/exception fallbacks are not JSON-RPC 
 
 New code must fit this contract or revise it with implementation and evidence in the same change.
 
+Vehicle, display and LED iteration catches retain task-owned fault-report state across successful
+iterations. The first fault logs immediately; later reports are at least 30 monotonic seconds apart
+and include a saturating suppressed-error count. The shared helper advances state before calling
+the sink and contains sink exceptions. This changes reporting only; task delays and arbitration stay
+unchanged, and an outer terminal catch still reports its once-only task exit. Each task keeps its
+16-byte reporting state locally, outside the iteration, without increasing controller storage. The optional
+telemetry round keeps its snapshot and builders in a separate non-inlined frame; the loop retains
+its scheduling/attempt timestamp and exception boundary. Compiler frames do not bound composed
+runtime call depth.
+
 ### Lock hierarchy (`VehicleController`)
 
 | Primitive | Kind | Protects |
 |---|---|---|
 | `command_mutex_` | mutex, RAII | one whole command/query transaction and command FIFO generation; for `set_charging_amps`, the action and the verifying ChargeState poll are one transaction |
-| `vehicle_mutex_` | mutex, RAII (`SemGuard`) | **every** call into `client_` and command-runner state (payload build/dispatch, `drive_command_runner_`, `process_rx_frame_`) |
+| `vehicle_mutex_` | mutex, RAII (`SemGuard`) | runtime `client_` and command-runner access (payload build/dispatch, `drive_command_runner_`, `process_rx_frame_`); exclusive pre-publication initialization is described below |
 | `cache_mutex_` | mutex, RAII, leaf | the `last_known_*` caches (`std::string` members ⇒ an unlocked copy is torn-read UB) |
 | `result_mutex_` | mutex, RAII, leaf | the externally visible `last_error_` snapshot HTTP/MCP read after a foreground command |
-| `CommandCompletion::sem` | per-request binary semaphore, shared ownership | signals one request-local fixed completion record; a timed-out callback cannot address stack storage or a later request's semaphore |
+| `CommandCompletion::sem` | per-request binary semaphore, shared ownership | fixed callback result/error record and generation-checked completion, signalled even after its catch-all |
+| `StatusCompletion::sem` | per-request binary semaphore, shared ownership | fixed status-success fields; the C++ runner failure callback may allocate its request-owned `std::string error` before signalling |
+| `ble_event_queue_` | static FreeRTOS queue | bounded Link/RX records handed from zero-wait NimBLE callbacks to the vehicle task; the consumer checks generation before Client/runner use |
 | `telemetry_pending_mux_` | `portMUX`, innermost, POD only | the fixed latest-value nanopb mailboxes, pending mask and charging-amps feedback generation written synchronously by tesla-ble callbacks |
 
-Order: `command_mutex_` → `vehicle_mutex_`. Cache/result locks are independent leaves.
+Order for identity/OTA-coordinated transactions: shared operation-gate admission →
+`command_mutex_` → `vehicle_mutex_`. The operation gate is an atomic exclusive owner, not a
+mutex held while waiting. Ordinary commands start at command ownership. Cache/result locks are
+independent leaves. `client_` has no public raw-pointer accessor; only controller-owned paths use it.
+`init()` constructs the Client and sets/loads/probes its identity before publishing BLE callbacks
+or starting controller tasks; those exclusive startup calls need no Vehicle lock. After publication,
+controller-owned runtime Client/runner access requires Vehicle ownership.
 The pending mux is innermost and permits bounded POD copies only: no semaphore, allocation, logging,
 parsing or callbacks. Use `tk::SemGuard`/`MutexGuard` and `InFlightGuard` for unwind-safe ownership.
 
 - Hold Vehicle lock only for Client/runner access, never across completion-semaphore wait.
+- Vehicle ownership includes synchronous BLE chunk writes (with 10 ms inter-chunk delays) and
+  best-effort session persistence after verified peer/tracker establishment. These operations can
+  delay another Vehicle-lock owner; the lock is not a bounded-latency cache lock. No completion
+  semaphore wait is permitted there.
+- Background enqueue rechecks `cmd_in_flight_` under Vehicle ownership after the scheduler's earlier
+  snapshot, so a foreground start in that gap prevents admission.
 - Cache snapshots are copied without calls out; parse/publish after releasing Vehicle lock.
 - `clear_session_and_cache_()` acquires Vehicle internally; do not call it while holding that lock.
 - Request-local shared completion survives timeout; generation invalidation prevents late completion
-  of another request. Callback writes fixed fields and signals even after catch-all, without logging.
+  of another request. `CommandCompletion` callbacks write fixed fields and signal even after their
+  catch-all, without logging. `StatusCompletion` has a separate allocatable runner-error path; its
+  success callback copies fixed fields. Runner callbacks execute synchronously under Vehicle
+  ownership: normally on the Vehicle task, or in the controller caller during cancellation/clear.
+  They are not NimBLE-host or SDK C callbacks.
 - Command task publishes result text after waiting. `cmd_in_flight_` is set under command ownership;
   it pauses background work but orders no other fields.
 
+### Other synchronization owners
+
+These are separate subsystem owners, not a single global nesting order. Keep diagnostic/cache
+snapshots as leaves; do not call network, storage, logging or an external sink under their locks.
+
+| Primitive | Protects / permitted context |
+|---|---|
+| `BleClient::scan_mutex_` | fixed nearby/primary-advertisement caches; host callbacks try with zero wait, task readers use bounded waits |
+| `BleClient::intent_mutex_` | connect/cancel, discovery and CCCD readiness transitions; host callbacks try with zero wait and fail/drop/retry on contention |
+| `BleClient::write_mutex_` | outbound BLE chunk sequence; task-side bounded acquisition, including calls made under Vehicle ownership |
+| `BleClient::client_mutex_` | peer-address metadata; zero-wait callback publication and bounded task snapshots |
+| diagnostic `s_mtx` | ring bytes, append/clear generation and sink snapshots; capture uses zero wait and counts dropped lines, sinks run after unlock |
+| Syslog `s_status_mtx` | resolved/reachable/error snapshot; error strings may allocate, so RAII releases on failure |
+| Syslog queue and `s_ping` | the boot-published fixed queue lives until reboot; persistent generation-owned ping completion is not deleted/reused until its exact end acknowledgement |
+| OTA `s_lock` | bounded `OtaStatusPod` copy/update; string conversion and SDK/network/storage work run after unlock |
+| OTA shared operation gate | mutually exclusive Ota, IdentityMutation, FaultRestart, HealthCommit or ConfigRestart owner; refusals do not acquire another owner's operation |
+| heap-trend `mutex()` | retained ring adoption, carry, seal and bounded snapshots; adoption logging runs after unlock, with no NVS or network operation under this lock |
+
+The diagnostic/OTA mutex handles are atomically published; each consumer takes one handle
+snapshot. Boot-owned handles and fixed queues are not deleted after publication. Shared completion
+records and the ping end acknowledgement separately own their asynchronous lifetime.
+
+### HTTP request serialization
+
+One `esp_http_server` task runs the synchronous handlers. A command can occupy it for its command
+budget (normally up to 20 seconds), and automatic enrollment uses a separate background task.
+Status, diagnostics, UI fetches and other clients wait while that worker is occupied. Identity
+operations can also wait for command ownership, so the command budget is not a universal upper
+bound on every HTTP response. Client timeouts must allow queueing plus the requested operation;
+a client timeout does not prove a vehicle command failed and must not trigger automatic replay.
+These are source-level scheduling limits, not measured worst-case hardware latency.
+
 ### Task inventory
 
-Priorities come only from `task_config.hpp`; stacks remain at creation sites.
+Project-created task priorities come from `task_config.hpp`; stacks remain at creation sites.
+The narrative inventory requires review alongside source changes; it is not generated evidence.
 
 | Task | Priority | Stack | Created in | Purpose |
 |---|---|---|---|---|
@@ -605,9 +722,26 @@ Vehicle/auto-pair creation uses Creating→Running/Cancelled with acknowledgemen
 entries only wait one tick; on second-create failure the first self-deletes, never external deletion
 across cores. Both then wait for global runtime admission; TWDT ownership unwinds before self-delete.
 
-IDF owns NimBLE/httpd/timer/network tasks. NimBLE Link/RX adapters copy bounded records into a static
-queue; the vehicle task parses them and publishes ready state. Remaining lifecycle callbacks use
-zero-wait mutexes and fail/drop/retry rather than block the host.
+IDF/library tasks also execute project code. Sizes below are configuration/creation values, not
+measured headroom. The listed SDK stack settings are shared by the pinned four-target defaults;
+review generated `sdkconfig` when changing the SDK or target configuration.
+
+| Context | Stack source | Project work |
+|---|---|---|
+| `app_main` | `CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192` | startup and ownership publication |
+| NimBLE host | `CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=8192` | GAP/GATT/lifecycle callbacks; Link/RX adapters copy bounded records into the static queue, remaining callbacks use zero-wait locks |
+| primary HTTP server | `http_server.cpp`: `config.stack_size=8192` | synchronous REST/MCP/UI/diagnostic handlers |
+| setup HTTP server | `provisioning.cpp`: unchanged `HTTPD_DEFAULT_CONFIG()` stack | setup form handlers, while the vehicle stack is down |
+| ESP timer task | `CONFIG_ESP_TIMER_TASK_STACK_SIZE=3584` | `ble_scan` timeout callback (not an ISR or the FreeRTOS timer service) |
+| default event loop | `CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=2304` | WiFi/IP/Ethernet lifecycle callbacks |
+| ESP-MQTT client tasks | locked component `MQTT_TASK_STACK`, default 6144; project does not override | publisher events and the transient configuration broker-probe callback in `http_config.cpp` |
+| ping session task | project leaves `ESP_PING_DEFAULT_CONFIG()` task settings unchanged | network-watchdog and Syslog ping completion callbacks |
+| lwIP task | `CONFIG_LWIP_TCPIP_TASK_STACK_SIZE=3072` | SNTP time-sync callback, including time formatting and the guarded timestamp save |
+
+The SDK also owns the FreeRTOS timer-service (`CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH=2048`)
+and driver tasks. A configured stack allocation
+does not prove callback headroom. The runtime-boundary inventory checks registrations/containment;
+it does not generate this table or establish maximum composed stack use.
 
 ### Live stack-headroom evidence
 
@@ -620,12 +754,17 @@ and compiler frame baselines prove different things. Bench policy floors are des
 
 Use atomics for independent cross-task scalars; multi-field snapshots and strings need a mutex.
 `volatile` creates no happens-before edge. Transport, diagnostic, BLE and MQTT scalar flags follow
-this rule; flags do not make surrounding mutable state safe.
+this rule; flags do not make surrounding mutable state safe. Default operations use sequential
+consistency. Explicit acquire/release pairs must name the ownership/publication edge they establish;
+relaxed counters/independent scalar samples must not order another field's publication or lifetime.
+A change in memory order requires review of both producer and consumer.
 
 ### Exception containment (normative)
 
-Exceptions cannot escape C/RTOS frames. Long-running tasks catch at each iteration, preserve RAII
-invariants, delay and continue. One-shot OTA jobs publish terminal error. Callbacks catch locally or
+Exceptions cannot escape C/RTOS frames. Vehicle, MQTT, display and LED loops contain expected
+iteration failures with RAII cleanup and retry delays; their outer task boundaries may still stop.
+The network watchdog has an outer terminal catch and deletes its task after an unexpected
+exception; it does not automatically resume. One-shot OTA jobs publish terminal error. Callbacks catch locally or
 have a mechanical fixed-buffer/C/atomic audit and return valid API results. Every throwing boundary
 has terminal `catch (...)`; standard-exception detail may precede it. Catching does not prevent a
 blocked callback, so host/timer locks remain zero-wait. `app_main` contains fatal startup failures.
@@ -647,14 +786,20 @@ registration and OTA gate task. Fatal PendingVerify marks invalid and reboots to
 fatal stable boot halts with diagnostics rather than looping. Optional MQTT/Syslog/display/LED
 contain start failures, unwind partial resources and report disabled status.
 
+Fatal diagnostics use only the sinks already started: an NVS failure can halt before networking,
+Syslog or HTTP exists. Retain the serial boot record and its failed component; a missing web UI
+does not distinguish that halt from a network fault. See [recovery steps](USER_GUIDE.md#safe-mode-and-fatal-startup).
+
 ### Boot-loop safe mode
 
 Four consecutive fault boots latch recovery mode: networking, web UI and OTA remain, while BLE,
 vehicle, auto-pair and MQTT stay down. NVS read/write/malformed-value/exception failures enter safe
 mode conservatively. The 30 s healthy counter-clear timer runs only under the full normal workload,
 never while latched; recovery uptime is not proof the faulty subsystem works. A non-fault intentional
-configuration/OTA/power/reset reboot clears the sequence. `boot_guard.hpp` and `safe_mode.cpp` own
-this policy; preserving OTA rollback alone cannot recover bad shared NVS configuration.
+configuration/OTA/power/reset reboot clears the sequence only after a valid counter read and a
+successful zero write. Persistent storage failure or a malformed counter keeps safe mode active;
+repeated resets and firmware rollback do not repair shared NVS. `boot_guard.hpp` and `safe_mode.cpp`
+own this policy. Preserve the failure evidence and follow the [recovery steps](USER_GUIDE.md#safe-mode-and-fatal-startup).
 
 ### Deferred: owned BLE-ops queue
 

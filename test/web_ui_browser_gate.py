@@ -75,7 +75,44 @@ console.error = function() {
 ;(async function browserGate() {
   const failures = [];
   const check = (condition, message) => { if (!condition) failures.push(message); };
+  const pixel = document.createElement("canvas").getContext("2d", {willReadFrequently:true});
+  function luminance(color) {
+    pixel.clearRect(0,0,1,1); pixel.fillStyle=color; pixel.fillRect(0,0,1,1);
+    const rgba=pixel.getImageData(0,0,1,1).data;
+    check(rgba[3]===255,"contrast fixture requires opaque computed colors");
+    return [0.2126,0.7152,0.0722].reduce((sum,weight,i)=>{
+      const c=rgba[i]/255;
+      return sum+weight*(c<=0.04045?c/12.92:Math.pow((c+0.055)/1.055,2.4));
+    },0);
+  }
+  function contrast(foreground,background) {
+    const a=luminance(foreground), b=luminance(background);
+    return (Math.max(a,b)+0.05)/(Math.min(a,b)+0.05);
+  }
+  function textContrast(element,label) {
+    const style=getComputedStyle(element);
+    check(style.filter==="none",label+" contrast requires unfiltered colors");
+    check(contrast(style.color,style.backgroundColor)>=4.5,label+" contrast >=4.5");
+  }
   try {
+    const dark=location.search.includes("profile=mobile");
+    check(matchMedia("(prefers-color-scheme: dark)").matches===dark,"isolated browser color scheme");
+    // dump-dom may deactivate its window. Exercise the actual CSS cascade deterministically:
+    // attributes have the same specificity as these pseudo-classes; declarations stay unchanged.
+    const stateRules=[];
+    function emulateStates(rules){
+      for(const rule of rules){
+        if(rule.selectorText && /:(focus-visible|focus|hover)(?![-\w])/.test(rule.selectorText)){
+          const original=rule.selectorText;
+          stateRules.push([rule,original]);
+          rule.selectorText=original.replace(/:(focus-visible|focus|hover)(?![-\w])/g,
+            (_,state)=>":is(:"+state+",[data-ui-"+state+"])");
+        }
+        if(rule.cssRules) emulateStates(rule.cssRules);
+      }
+    }
+    for(const sheet of document.styleSheets) emulateStates(sheet.cssRules);
+    check(stateRules.length>0,"actual interactive CSS rules are available");
     check(document.documentElement.lang === "en", "document language");
     check(!!document.querySelector('meta[name="viewport"]'), "viewport metadata");
     const ids = Array.from(document.querySelectorAll("[id]"), element => element.id);
@@ -109,15 +146,51 @@ console.error = function() {
     await poll();
     check(feedOk === false, "status poll marks the live feed unavailable after transport failure");
     check(window.__browserGateFetchCalls === 2, "browser request-failure fixture call count");
+    const feedStatus = document.getElementById("feedStatus");
+    check(feedStatus && !feedStatus.classList.contains("hide") && feedStatus.textContent.includes("Device unavailable"),
+          "failed status feed has a visible accessible notice");
+
 
     toast('<img src=x onerror="console.error(1)">', "err");
     const toastRegion = document.getElementById("toasts");
     check(!toastRegion.querySelector("img"), "toast content remains escaped");
     check(toastRegion.textContent.includes("<img"), "escaped toast remains readable");
+    for(const kind of ["info","ok","err"]){
+      const notification=toast("Contrast fixture",kind,"contrast");
+      textContrast(notification.querySelector(".ic"),kind+" toast icon");
+    }
+    for(const kind of ["btn primary","ib avail"]){
+      const control=document.createElement("button"); control.className=kind; control.textContent="Fixture";
+      document.body.appendChild(control); textContrast(control,kind);
+      control.setAttribute("data-ui-hover",""); textContrast(control,kind+" hover"); control.remove();
+    }
 
     render({paired: true, last_seen_s: 0,
       vehicle: {status: "Stopped", actual_amps: 16, volts: 230, phases: 2},
       tele: {climate: {cop: "FanOnly", front_defrost: true, rear_defrost: true, defrost_mode: "Max"}}});
+    let primaryClicks = 0;
+    const actualHeroAction = heroActFn;
+    heroActFn = function(){ primaryClicks++; };
+    document.getElementById("hero").click();
+    document.getElementById("hlabel").click();
+    document.getElementById("hstats").click();
+    check(primaryClicks === 0, "informational hero clicks never dispatch a vehicle action");
+    const primaryButton = document.querySelector("#hicon button");
+    check(primaryButton && primaryButton.getAttribute("aria-label"), "primary action is a named button");
+    primaryButton.focus();
+    check(document.activeElement===primaryButton,"primary action receives DOM focus");
+    primaryButton.setAttribute("data-ui-focus","");
+    primaryButton.setAttribute("data-ui-focus-visible","");
+    const primaryStyle=getComputedStyle(primaryButton);
+    check(primaryStyle.outlineStyle!=="none" && parseFloat(primaryStyle.outlineWidth)>=2,
+          "primary action has a visible focus ring in the emulated keyboard state");
+    check(contrast(primaryStyle.outlineColor,getComputedStyle(document.getElementById("hero")).backgroundColor)>=3,
+          "primary action focus ring contrast >=3");
+    primaryButton.removeAttribute("data-ui-focus"); primaryButton.removeAttribute("data-ui-focus-visible");
+    for(const [rule,original] of stateRules) rule.selectorText=original;
+    primaryButton.click();
+    check(primaryClicks === 1, "only the gauge button invokes the primary action once");
+    heroActFn = actualHeroAction;
     const climateChips = document.getElementById("hstats");
     check(climateChips.textContent.includes("Overheat setting"), "COP is a setting");
     check(climateChips.textContent.includes("Fan only"), "COP setting is readable");
@@ -209,6 +282,32 @@ console.error = function() {
     closeOtaModal(false);
     check(window.__browserGateFetchCalls === 2, "reading notes does not contact the device");
 
+    const offlineFetch = window.fetch, originalPoll = poll;
+    poll = function() {};
+    for (const status of ["Stopped", "Charging"]) {
+      for (const cause of ["vehicle not reachable", "response timed out", "already_set"]) {
+        const requests = [];
+        const reason = "command outcome unknown; command may have executed; " + cause;
+        state = {vin: "TESTVIN0000000001", vehicle: {status, soc: 40}};
+        window.fetch = async function(url, options) {
+          requests.push({url, options});
+          return {ok: false, status: 502, json: async function() {
+            return {response: {result: false, reason}};
+          }};
+        };
+        await toggleCharge();
+        const message = toastRegion.querySelector('[data-key="charge"]');
+        check(message && message.lastElementChild.textContent === reason,
+              "HTTP 502 charging uncertainty remains visible: " + status + "/" + cause);
+        check(message && message.classList.contains("err"), "uncertain charge is not informational success");
+        check(requests.length === 1 && requests[0].options.method === "POST",
+              "uncertain charge sends exactly one command request");
+        check(!chgBusy, "uncertain charge releases its UI busy state");
+      }
+    }
+    window.fetch = offlineFetch;
+    poll = originalPoll;
+
     check(getComputedStyle(document.body).display !== "none", "body is rendered");
     check(document.querySelector(".wrap").getBoundingClientRect().width > 0, "main layout has width");
     check(document.documentElement.scrollWidth <= window.innerWidth + 1, "no horizontal overflow");
@@ -259,6 +358,8 @@ def run_profile(browser: str, html: Path, profile: str, size: str, user_data: Pa
     ]
     if hasattr(os, "geteuid") and os.geteuid() == 0:
         command.insert(1, "--no-sandbox")
+    if profile == "mobile":
+        command.insert(1, "--force-dark-mode")
     timed_out = False
     with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as stdout_file, \
             tempfile.TemporaryFile(mode="w+", encoding="utf-8") as stderr_file:
@@ -336,7 +437,7 @@ def main() -> int:
     except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
         print(f"web-ui-browser: {exc}", file=sys.stderr)
         return 1
-    print("web-ui-browser: PASS (real DOM, console, keyboard, live regions, desktop/mobile layout)")
+    print("web-ui-browser: PASS (real DOM, console, emulated focus/hover CSS, light/dark contrast, live regions, desktop/mobile layout)")
     return 0
 
 

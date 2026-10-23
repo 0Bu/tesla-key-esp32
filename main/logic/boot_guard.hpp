@@ -1,27 +1,28 @@
 #pragma once
 // The boot-loop safe-mode decision: count CRASH-ONLY boots and, past a threshold, latch a
-// degraded-but-STABLE mode. Pure, IDF-free, host-testable.
+// degraded recovery mode. Pure, IDF-free, host-testable.
 //
-// WHY THIS EXISTS. Everything this device is configured with lives in NVS and is reachable only
-// over the network: the VIN (/set_vin), the MQTT broker (/set_mqtt), the syslog server
-// (/set_syslog), the WiFi credentials, the key material. There is no auth and no console — the
-// whole recovery story is "open the web UI and fix it". A setting that crashes a task at start-up
-// breaks exactly that: the device reboots before the HTTP server is up, so the one interface that
-// could undo the setting is never reachable, and the only remaining exit is `esptool erase_flash`
-// over USB — which also destroys the private key and the pairing, i.e. a trip to the car.
+// WHY THIS EXISTS. Configuration and private pairing material live in NVS. A startup fault can
+// prevent the network/HTTP recovery surface from coming up before the next crash. Safe mode
+// disables vehicle work so supported configuration repair or signed OTA can remain reachable
+// when their own initialization succeeds. Identity mutation stays blocked while recovery is
+// active; the web UI is not a general VIN/key repair tool in that state.
+// If networking cannot start, use an identified, signed app-only USB recovery that preserves
+// NVS. A whole-flash erase is not the default exit: it destroys keys/configuration and needs its
+// own backup/recovery authorization. See docs/USER_GUIDE.md and docs/SECURITY.md.
 //
 // So: count boots that ended in a CRASH, and once enough of them have accumulated with no healthy
 // run in between, come up MINIMALLY — WiFi + web UI + OTA only, with the risky subsystems (the BLE
-// client / VehicleController, the auto-pair task, the MQTT bridge) skipped. A device in safe mode
+// client, vehicle tasks, auto-pair and MQTT bridge) disabled; the controller is inert. Safe mode
 // is useless as an evcc proxy and that is the point: it is reachable, it says why, and the setting
-// or the image that wedged it can be replaced from a browser.
+// or firmware cause can be investigated through the supported recovery procedures.
 //
 // WHY THE CONSEQUENCE IS SHARPER HERE THAN ON A BOARD THAT ONLY LOSES ITS OWN SERVICE. A reboot
 // re-opens the active vehicle-polling window (vehicle_ctrl seeds it at boot), so a device that
-// reboots in a loop keeps opening an infotainment session on a PARKED car. The car never reaches
-// sleep and its battery drains — the firmware damages the thing it exists to manage, silently, for
-// as long as the loop runs. logic/heap_watchdog.hpp already refuses to seed that window on its own
-// restarts for this reason; the same argument applies with more force to a loop nobody chose. A
+// reboots in a loop can repeatedly contact a parked car, delay sleep and increase battery use.
+// That physical effect depends on reachability and the failure timing; it is not proved for every
+// boot loop. vehicle_ctrl.cpp suppresses its boot activity window after a recorded
+// heap-watchdog restart; the same argument applies to a loop nobody chose. A
 // latched, boring safe mode is therefore strictly better than continuing to crash: it stops the
 // cycling, and the car gets to sleep while the operator works out what happened.
 //

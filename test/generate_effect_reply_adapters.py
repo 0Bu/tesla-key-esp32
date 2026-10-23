@@ -53,11 +53,13 @@ if hashlib.sha256((root / "esp-idf-toolchain.txt").read_bytes()).hexdigest() != 
 
 output = pathlib.Path(sys.argv[1])
 owner = (root / "main/ota_update.hpp").read_text()
-owner = owner[owner.index("class OtaConfigRestartGuard {"):]
+owner = owner[owner.index("class OtaHealthCommitGuard {"):]
 output.with_name("config_commit_owner.generated.hpp").write_text(owner)
 runtime = (root / "main/ota_update.cpp").read_text()
-runtime = runtime[runtime.index("OtaConfigRestartGuard::~OtaConfigRestartGuard()"):
+runtime = runtime[runtime.index("OtaHealthCommitGuard::OtaHealthCommitGuard()"):
                   runtime.index("// Short per-target image suffix")]
+runtime = function("ota_update.cpp", "finish_operation") + "\n" + runtime
+output.with_name("ota_health_task.generated.hpp").write_text(function("main.cpp", "ota_health_gate_task") + "\n")
 output.with_name("config_commit_runtime.generated.hpp").write_text(runtime)
 
 portal = [structure("provisioning.cpp", "PortalSaveContext")]
@@ -84,7 +86,7 @@ for name in ("apply_browser_time_query_", "parse_pr_param_", "handle_ota_check",
     parts.append(function("http_ota.cpp", name))
 for name in ("coredump_error", "coredump_erase_reply", "handle_coredump", "handle_crash_dismiss"):
     parts.append(function("http_status.cpp", name))
-for name in ("send_command_result", "handle_command"):
+for name in ("request_vin_matches", "json_bool_arg", "send_command_result", "handle_command"):
     parts.append(function("http_api.cpp", name))
 parts.append(function("mcp_server.cpp", "handle_tools_call_"))
 parts.append(function("http_server.cpp", "handle_all"))

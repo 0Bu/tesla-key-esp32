@@ -81,13 +81,15 @@ esp_err_t handle_ota_check(GuardedReq rq) {
     }
     const unsigned pr = parse_pr_param_(req);
     rq.reply()->state.attempting(tk::RequestEffect::OtaStart);
-    bool started = ota_check_start(pr);
+    const auto result = ota_check_start(pr);
+    const bool started = result == tk::OtaStartResult::Started;
     if (started) rq.reply()->state.succeeded();
+    else rq.reply()->state.refused(tk::RequestEffect::OtaStart);
     tk::JsonBuilder json;
     json.boolean(json.root(), "started", started);
     if (!started)
-        json.string(json.root(), "reason", "a check or update is already in progress");
-    return send_effect_json(rq, started ? 200 : 409, json.release());
+        json.string(json.root(), "reason", tk::ota_start_reason(result, true));
+    return send_effect_json(rq, tk::ota_start_http_status(result), json.release());
 }
 
 // POST /ota/update[?pr=<N>] — start the background download+install, return immediately.
@@ -99,14 +101,14 @@ esp_err_t handle_ota_update(GuardedReq rq) {
     const unsigned pr = parse_pr_param_(req);
     rq.reply()->state.shape = tk::ReplyShape::FlatResult;
     rq.reply()->state.attempting(tk::RequestEffect::OtaStart);
-    bool started = ota_start(pr);
+    const auto result = ota_start(pr);
+    const bool started = result == tk::OtaStartResult::Started;
     if (started) rq.reply()->state.succeeded();
+    else rq.reply()->state.refused(tk::RequestEffect::OtaStart);
     tk::JsonBuilder json;
     json.boolean(json.root(), "result", started);
-    json.string(json.root(), "reason",
-        started ? "update started — the device will reboot when done"
-                : "an update is already in progress");
-    return send_effect_json(rq, started ? 200 : 409, json.release());
+    json.string(json.root(), "reason", tk::ota_start_reason(result, false));
+    return send_effect_json(rq, tk::ota_start_http_status(result), json.release());
 }
 
 // GET /ota/status — poll download progress.

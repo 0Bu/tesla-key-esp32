@@ -14,6 +14,7 @@
 #include "diag_crash.hpp"
 #include "heap_trend.hpp"
 #include "safe_mode.hpp"
+#include "runtime_admission.hpp"
 #include "mqtt_ha.hpp"
 #include "logic/status_model.hpp"
 #include "logic/redact.hpp"
@@ -98,6 +99,7 @@ static cJSON* build_status_object(bool redact) {
     in.sessions        = g_vehicle->session_availability();
     in.paired_at       = (long long)g_vehicle->paired_at();
     in.reauth          = g_vehicle->reauth_required();
+    in.pairing_block_reason = g_vehicle->pairing_block_reason();
 
     // WiFi: SSID + live signal strength (dBm) of the station link, both from the transport
     // seam, which owns the mid-association guard. All three stay unset on a wired device, so
@@ -119,6 +121,7 @@ static cJSON* build_status_object(bool redact) {
     // fallible mirroring or reply work. Polling never reads or allocates an NVS blob.
     in.wifi_rolled_back = tk::cfg_wifi_rolled_back();
     in.ota_channel = tk::ota_channel_name(ota_get_channel());
+    in.ota_verification = ota_cached_verification_state();
 
     in.mqtt_configured = mqtt_ha_configured();
     in.mqtt_connected  = mqtt_ha_connected();
@@ -133,6 +136,7 @@ static cJSON* build_status_object(bool redact) {
         in.syslog_configured = sy.configured;
         in.syslog_resolved   = sy.resolved;
         in.syslog_reachable  = sy.reachable;
+        in.syslog_dropped_lines = sy.dropped_lines;
         in.syslog_host       = sy.host;
         in.syslog_port       = sy.port;
         in.syslog_error      = sy.error;
@@ -193,6 +197,8 @@ static cJSON* build_status_object(bool redact) {
     in.uptime_s        = (uint32_t)(esp_timer_get_time() / 1000000);
     in.wifi_reconnects = tk::net_reconnect_count();
     in.safe_mode       = tk::safe_mode_active();
+    in.runtime_state   = tk::runtime_admission_state();
+    in.diag_dropped_lines = diag_log_dropped_lines();
     in.httpd_stack_min_free_bytes =
         tk::stack_watch_min_free_bytes(tk::StackWatch::Httpd);
     in.vehicle_stack_min_free_bytes =

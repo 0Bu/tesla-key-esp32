@@ -2,7 +2,7 @@
 :root{
   --bg:#f6f7f9; --card:#fff; --soft:#f1f3f5; --border:#e6e8ec; --fg:#1a1d21; --muted:#5b626b;
   --faint:#c3c9d2;
-  --accent:#e82127; --accent-text:#c3151b; --ok:#16a34a; --ok-text:#127a37;
+  --accent:#e51f25; --accent-text:#c3151b; --ok:#16a34a; --ok-text:#106b30;
   --warn:#d97706; --warn-text:#9a5204; --info:#2563eb; --info-text:#1d4fc4; --focus:#2563eb;
   --warn-base:#f59e0b; --warn-lite:#fdba74;
   --scrim:rgba(16,20,28,.4);
@@ -42,6 +42,7 @@ svg{display:block}
 .brand{display:flex; align-items:center; gap:14px; min-width:0; flex:1}
 .ttl{display:flex; flex-direction:column; line-height:1.2; min-width:0; flex:1}
 .ttl h1{margin:0; font-size:clamp(22px, 5.5vw, 28px); font-weight:700; letter-spacing:-.5px}
+.feed-status{font-size:13px; color:var(--warn-text); margin-top:3px}
 .host{font-size:13px; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; margin-top:3px}
 .logo{display:grid; place-items:center; flex:none; width:46px; height:46px; border-radius:14px; background:var(--accent);
   box-shadow:0 3px 12px rgba(232,33,39,.35)}
@@ -102,19 +103,17 @@ svg{display:block}
 .ib svg{width:18px; height:18px}
 .btn{min-height:50px; border-radius:999px; font-weight:650; border:1px solid var(--border); background:none}
 .btn.primary{border:0; background:var(--accent); color:#fff}
-.btn.primary:hover{filter:brightness(1.05)}
+.btn.primary:hover{background:#c3151b}
 
 /* hero */
 .hero{flex-direction:column; align-items:center; justify-content:center; gap:12px; padding:20px 16px;
   text-align:center; min-width:0; background:var(--card); border:1px solid var(--border);
   border-radius:var(--r-card); box-shadow:var(--shadow); transition:transform .12s ease}
-.hero.has-act{cursor:pointer}
-.hero.has-act:active{transform:scale(.99)}
 .hbody{display:contents}
 .gauge{position:relative; width:var(--gs); height:var(--gs); flex:none; overflow:visible}
 .gauge>svg,.gauge .gbtn>svg{position:absolute; inset:0; width:100%; height:100%}
 .gauge .gbtn{position:absolute; inset:0; padding:0; border:0; border-radius:50%; background:none; -webkit-tap-highlight-color:transparent;
-  transition:transform .12s ease; outline:none}
+  transition:transform .12s ease}
 .gauge .gbtn:not(:disabled){cursor:pointer}
 .gauge .gbtn:not(:disabled):hover{transform:scale(1.025)}
 .gauge .gbtn:active{transform:scale(.97)}
@@ -196,7 +195,7 @@ svg{display:block}
 .ver-btn:active{transform:scale(.98); background:var(--soft)}
 .ver-btn:disabled,.ver-btn.disabled{cursor:default; pointer-events:none}
 .ver-btn:disabled .rv,.ver-btn.disabled .rv{text-decoration:none; color:var(--muted)}
-.ib.avail{color:var(--ok); background:color-mix(in srgb,var(--ok) 12%,var(--soft))}
+.ib.avail{color:var(--ok-text); background:color-mix(in srgb,var(--ok) 12%,var(--soft))}
 .ib.avail:hover{background:color-mix(in srgb,var(--ok) 20%,var(--soft))}
 .chan-options{display:flex; flex-direction:column; gap:10px}
 .chan-opt{width:100%; border:1px solid var(--border); border-radius:14px; background:var(--soft); padding:14px 16px;
@@ -255,8 +254,9 @@ svg{display:block}
   display:flex; flex-direction:column; align-items:center; gap:8px; padding:0 16px; pointer-events:none}
 .toast{display:flex; align-items:center; gap:10px; width:100%; max-width:420px; background:var(--fg); color:var(--bg);
   border-radius:14px; padding:11px 14px; font-size:15px; font-weight:600; box-shadow:0 8px 24px rgba(0,0,0,.2); animation:tin .24s var(--ease)}
-.toast .ic{width:24px; height:24px; border-radius:50%; flex:none; display:grid; place-items:center; color:#fff; font-size:13px; font-weight:700; background:var(--muted)}
-.toast.ok .ic{background:var(--ok)} .toast.err .ic{background:var(--accent)}
+/* Opaque icon backgrounds keep white glyphs readable in both themes. */
+.toast .ic{width:24px; height:24px; border-radius:50%; flex:none; display:grid; place-items:center; color:#fff; font-size:13px; font-weight:700; background:#5b626b}
+.toast.ok .ic{background:#127a37} .toast.err .ic{background:#c3151b}
 .toast.leaving{opacity:0; transform:translateY(8px); transition:opacity .22s ease,transform .22s ease}
 
 @keyframes spin{to{transform:rotate(360deg)}}
@@ -300,8 +300,6 @@ svg{display:block}
     padding:24px 20px 22px;
     cursor:default;
   }
-  .hero.has-act{cursor:default}
-  .hero.has-act:active{transform:none}
   .hlabel{
     font-size:24px;
   }

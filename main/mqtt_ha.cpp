@@ -25,6 +25,7 @@
 #include <array>
 #include <string>
 #include <ctime>
+#include <cstring>
 #include <exception>
 
 #include "freertos/FreeRTOS.h"
@@ -70,7 +71,6 @@ static std::string s_node;                     // vehicle-stable node id (teslak
 static std::string s_base;                     // state-topic base (<base_prefix>/<node>)
 static std::string s_avail;                    // availability (LWT) topic
 static std::string s_devname;                  // HA device display name
-static std::string s_cfgurl;                   // device configuration_url (http://<ip>)
 static std::string s_broker_disp;              // "host:port" for the web UI
 static int         s_interval_s = 15;
 static bool        s_client_started = false;
@@ -132,7 +132,18 @@ static void commit_domain(tk::mqtt::StateDomain domain,
 }
 
 // ─── HA discovery ─────────────────────────────────────────────────────────────
-static bool publish_discovery() {
+static void current_configuration_url(char* out, size_t capacity) {
+    if (!out || capacity < 8) return;
+    out[0] = '\0';
+    esp_netif_t* netif = tk::net_active_netif();
+    esp_netif_ip_info_t ip{};
+    if (!netif || esp_netif_get_ip_info(netif, &ip) != ESP_OK ||
+        ip.ip.addr == 0 || tk::net_active_netif() != netif) return;
+    std::memcpy(out, "http://", 7);
+    if (!esp_ip4addr_ntoa(&ip.ip, out + 7, capacity - 7)) out[0] = '\0';
+}
+
+[[gnu::noinline]] static bool publish_discovery_rows(const char* cfgurl) {
     for (const tk::mqtt::DiscoveryEntry& entry : tk::mqtt::kDiscoveryEntries) {
         const std::string uid = tk::mqtt::discovery_unique_id(s_node, entry);
         const std::string value_template = tk::mqtt::discovery_value_template(entry);
@@ -157,7 +168,7 @@ static bool publish_discovery() {
             s_devname.c_str(),
             TK_PLATFORM,
             esp_app_get_description()->version,
-            s_cfgurl.empty() ? nullptr : s_cfgurl.c_str(),
+            cfgurl[0] ? cfgurl : nullptr,
         };
 
         // Retained so HA recreates entities after a restart. A failed builder, print, or broker
@@ -167,6 +178,13 @@ static bool publish_discovery() {
     ESP_LOGI(TAG, "published %d HA-discovery configs under %s/",
              static_cast<int>(tk::mqtt::kDiscoveryEntries.size()), s_prefix.c_str());
     return true;
+}
+
+static bool publish_discovery() {
+    // One bounded address snapshot per round; keep it outside the row builder's frame.
+    char cfgurl[24] = {};
+    current_configuration_url(cfgurl, sizeof(cfgurl));
+    return publish_discovery_rows(cfgurl);
 }
 
 // ─── State publish ────────────────────────────────────────────────────────────
@@ -638,12 +656,6 @@ static bool mqtt_ha_start_impl(VehicleController& vehicle,
     // Device display name + a clickable link back to this device's web UI.
     s_devname = "Tesla Key";
     if (vin.size() == 17) s_devname += " (" + vin + ")";
-    esp_netif_t* netif = tk::net_active_netif();
-    esp_netif_ip_info_t ip{};
-    if (netif && esp_netif_get_ip_info(netif, &ip) == ESP_OK) {
-        char ipbuf[16]; esp_ip4addr_ntoa(&ip.ip, ipbuf, sizeof(ipbuf));
-        s_cfgurl = std::string("http://") + ipbuf;
-    }
 
     // esp-mqtt v5 nested config struct. LWT marks us "offline" if the link drops.
     esp_mqtt_client_config_t cfg = {};

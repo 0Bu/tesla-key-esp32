@@ -109,7 +109,7 @@ else
 fi
 
 echo "[harness] Applying repository patches to tesla-ble ($TB_DIR)..."
-TESLA_BLE_COMPONENT_DIR="$TB_DIR" "$ROOT_DIR/scripts/apply-tesla-ble-patches.sh"
+"$ROOT_DIR/scripts/apply-tesla-ble-patches.sh" --component "$TB_DIR"
 
 NANOPB_DIR="$ROOT_DIR/build/_deps/nanopb-src"
 if [ ! -d "$NANOPB_DIR" ]; then
@@ -158,7 +158,9 @@ for f in "$NANOPB_DIR"/pb_common.c "$NANOPB_DIR"/pb_decode.c "$NANOPB_DIR"/pb_en
     fi
 done
 # tesla-ble objects depend on both the library version and the Mbed TLS headers they compiled against.
-OBJ_KEY="$EXPECTED_TB_VER mbedtls-$MBEDTLS_REF"
+TB_LOG_FLAGS="-DTESLA_BLE_LOG_LEVEL=2"
+PATCH_STATE_SHA="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$ROOT_DIR/scripts/tesla-ble-patch-state.json")"
+OBJ_KEY="$EXPECTED_TB_VER mbedtls-$MBEDTLS_REF patches-$PATCH_STATE_SHA loglevel-2"
 if [ -f "$BUILD_DIR/obj/tb/.version" ]; then
     CACHED_OBJ_VER="$(cat "$BUILD_DIR/obj/tb/.version" 2>/dev/null || true)"
     if [ "$CACHED_OBJ_VER" != "$OBJ_KEY" ]; then
@@ -185,7 +187,7 @@ for f in "$TB_DIR"/src/*.cpp; do
     if [ -f "$f" ] && [ "$(basename "$f")" != "vehicle.cpp" ]; then
         obj="$BUILD_DIR/obj/tb/$(basename "$f" .cpp).o"
         if [ ! -f "$obj" ] || [ "$f" -nt "$obj" ]; then
-            "$CXX" -std=c++20 -O2 -w -c "$f" $INC -o "$obj"
+            "$CXX" -std=c++20 -O2 -w "$TB_LOG_FLAGS" -c "$f" $INC -o "$obj"
         fi
     fi
 done
@@ -311,11 +313,18 @@ for result, name in (("uint32_t", "deadline_in_"), ("TickType_t", "ticks_until_"
 (out / "wake-clock.inc").write_text("\n".join(clocks) + "\n")
 PY_COMPLETION
 # tests/test_constants.h carries the official vehicle-command protocol test keys (never production).
-"$CXX" -std=c++20 -O2 -Wall -Wextra \
+"$CXX" -std=c++20 -O2 -Wall -Wextra "$TB_LOG_FLAGS" \
     "$ROOT_DIR/test/test_tesla_ble_harness.cpp" \
     $INC -I "$TB_DIR/tests" -I "$BUILD_DIR" -I "$ROOT_DIR/test/stubs" "$BUILD_DIR/libtb.a" "$MBEDTLS_LIB" \
     -o "$BUILD_DIR/test_tesla_ble_harness"
 
 echo "[harness] Executing integration harness..."
 "$BUILD_DIR/test_tesla_ble_harness"
+echo "[harness] Executing dependency failure/logging guards..."
+CXX="$CXX" python3 "$ROOT_DIR/test/test_dependency_guards.py" --component "$TB_DIR"
+if [ "$(uname -s)" = Linux ]; then
+    ASAN_OPTIONS=detect_leaks=1:halt_on_error=1:abort_on_error=1 \
+    UBSAN_OPTIONS=halt_on_error=1 LSAN_OPTIONS=exitcode=97 CXX="$CXX" \
+        python3 "$ROOT_DIR/test/test_dependency_guards.py" --component "$TB_DIR" --sanitize
+fi
 echo "[harness] PASS: tesla-ble integration harness verified successfully"

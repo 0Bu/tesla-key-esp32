@@ -91,6 +91,8 @@ struct SyslogStartResources {
     }
 };
 
+static std::atomic<uint32_t> s_dropped_lines{0};
+
 static void set_status(bool resolved, bool reachable, const std::string& error) {
     // RAII give — the s_status.error = error assignment can throw bad_alloc.
     tk::SemGuard g(s_status_mtx);
@@ -103,6 +105,7 @@ static void set_status(bool resolved, bool reachable, const std::string& error) 
 SyslogStatus syslog_status() {
     SyslogStatus copy;
     copy.configured = s_configured;
+    copy.dropped_lines = s_dropped_lines.load(std::memory_order_relaxed);
     copy.host        = s_cfg_host;
     copy.port        = s_cfg_port;
     copy.resolved    = false;
@@ -529,6 +532,7 @@ bool syslog_start(NvsStorageAdapter& config_store) {
 }
 
 void syslog_send(const char* msg, size_t len) {
+    if (!msg || len == 0) return;
     QueueHandle_t const queue = s_queue.load(std::memory_order_acquire);
     if (!queue) return;
 
@@ -552,5 +556,6 @@ void syslog_send(const char* msg, size_t len) {
     std::memcpy(m.text, msg, len);
     m.text[len] = '\0';
     m.len = static_cast<uint16_t>(len);
-    xQueueSend(queue, &m, 0); // non-blocking
+    if (xQueueSend(queue, &m, 0) != pdPASS)
+        s_dropped_lines.fetch_add(1, std::memory_order_relaxed);  // never log from this log sink
 }

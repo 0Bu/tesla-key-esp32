@@ -735,7 +735,7 @@ esp_err_t handle_set_wifi(GuardedReq rq) {
 
 // ─── POST /set_ota — update the OTA update channel (live, no reboot) ─────────────
 // Body: {"channel":"release"|"dev"}
-// Persists the channel selection in NVS (ConfigBlob v2) and updates the active channel.
+// Persists the channel in ConfigBlob v1 reserved flag bits and updates the active channel.
 esp_err_t handle_set_ota(GuardedReq rq) {
     httpd_req_t* req = rq.req();
     if (tk::http_route_blocks_during_ota_update_409(tk::HttpRoute::SetOta) &&

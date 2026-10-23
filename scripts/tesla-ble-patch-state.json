@@ -1,0 +1,69 @@
+{
+  "schema": 1,
+  "sourceCommit": "a00f3872bf4ed166e1c81100ad33a072b126efa1",
+  "patches": [
+    {
+      "name": "0004-drop-unused-parental-controls-actions.patch",
+      "sha256": "6984321d34bdafe900244d0fe18052cc015a5b42ba0cf4e12e8ed9fb08791743"
+    },
+    {
+      "name": "0005-align-session-counter-replay-with-signer-go.patch",
+      "sha256": "60fe7ee4533d89c160a7a757692bec51aba8b82f312d5352d9c720d2057f36b0"
+    },
+    {
+      "name": "0006-port-crypto-bindings-to-psa.patch",
+      "sha256": "7347b694ec9b8232aa6546748f5013ce80a4252317436b64054051114194c148"
+    },
+    {
+      "name": "0007-fail-closed-on-request-entropy-errors.patch",
+      "sha256": "eb4c6dc7f653eb73f98a8609e3a350c6d9beeea63766a4dfcf8fce9cc9256c92"
+    }
+  ],
+  "files": [
+    {
+      "path": "generated/include/car_server.pb.h",
+      "beforeSha256": "3ddb45673683094b8b3184cf68dac72fdeb3c84414508fd0cec001108a88bf6e",
+      "afterSha256": "ae606afdde2e34b9bb21ff1005bc4961def12b0294bc049ca0f9dbd33eb8477c"
+    },
+    {
+      "path": "generated/src/car_server.pb.c",
+      "beforeSha256": "fca07cba2928de5c3127e4524e1e6bbfcdab946fbfde3fcb2cdcd8712e26e6da",
+      "afterSha256": "04f2caeddc6a19117bfce07c8128b3ac7469ab9b37a8f4e0dee3728e19091a39"
+    },
+    {
+      "path": "include/client.h",
+      "beforeSha256": "c64b04197b6fb171478089ac60285d67490b2924623d60ea503ec2f324dbfc4b",
+      "afterSha256": "b4d08d6b3ab8b60b0ca911d5b6e72a9f8c6c56ae05fdb034ee09767dae6c1921"
+    },
+    {
+      "path": "include/crypto_context.h",
+      "beforeSha256": "1ad57b7fe58df16e389d8f206816605b69c6f32d964a5611850ccba33661866e",
+      "afterSha256": "1b50380aaa82238dc1a205af96a14cd9a0b5c12f90c4f2117e94433b93712cb2"
+    },
+    {
+      "path": "include/peer.h",
+      "beforeSha256": "35c2ced3c6ed921d1b7613d48fbac86b54a1d1695408a2736e6090edb283ac82",
+      "afterSha256": "f64d139da06287aa7b0258975fe0a4292f189769adb204dee348067d15c83735"
+    },
+    {
+      "path": "src/client.cpp",
+      "beforeSha256": "1e5a61595a0c3a073297493adfbfaed22ab04e2e21715f17a4205f9c9761abf7",
+      "afterSha256": "21bda492e2c683cd336b421082586197b905956239664eccafcdc968e842053a"
+    },
+    {
+      "path": "src/crypto_context.cpp",
+      "beforeSha256": "37bd6b6e0cde6a6e2f6a39141ba3c0f1dfb3129c224defb985f03beee2317e19",
+      "afterSha256": "9f05a2c8decbb62ceef7096d5f9cff5c8f5ef6746edb8d894e184da624dbee0d"
+    },
+    {
+      "path": "src/peer.cpp",
+      "beforeSha256": "7153ced9e9401d1265d0b7493211083b7d544d2626940e1913b701990f951299",
+      "afterSha256": "bf8ef6c4f9ded033837e9b840955f6a62d0e50c1d80bc3b1cfd851c74154552f"
+    },
+    {
+      "path": "src/vin_utils.cpp",
+      "beforeSha256": "46bd90108346fdb6a03b2cc5d8c2161506eb4654f795ce0b2eac1911417935d8",
+      "afterSha256": "77470ee2aec1cb1ac299ef33666a967b6e47b180b83cf15eb0845d153404d249"
+    }
+  ]
+}

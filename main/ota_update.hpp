@@ -9,7 +9,8 @@
 // Pull-based OTA self-update. The device fetches manifest.json from a fixed HTTPS
 // URL (CONFIG_TESLA_OTA_MANIFEST_URL), compares its "version" to the running
 // firmware, and — when asked — downloads its per-target app image
-// (CONFIG_TESLA_OTA_FIRMWARE_BASE_URL + "tesla-key-esp32-<target>.bin") straight into
+// (CONFIG_TESLA_OTA_FIRMWARE_BASE_URL + "tesla-key-esp32<suffix>.bin", where suffix is
+// empty, "-s3", "-c3" or "-c6") straight into
 // the inactive OTA slot via esp_https_ota, then reboots. esp_https_ota verifies the
 // image chip-id, so a wrong-target image is refused rather than flashed.
 
@@ -40,15 +41,19 @@ struct OtaCheckResult {
 // pr_number == 0 checks main channel; pr_number > 0 checks PR preview channel.
 OtaCheckResult ota_check(unsigned pr_number = 0);
 
-// Kick off a background version check (HTTPS manifest fetch). Returns false if a
-// check or update is already running. Poll ota_get_status(): state goes Checking →
+// Kick off a background version check (HTTPS manifest fetch). Typed refusal separates busy,
+// unavailable service and task/startup failure. Poll ota_get_status(): state goes Checking →
 // Idle (then read update_available/available/current) or Error. Keeps the slow TLS
 // fetch off the HTTP server task so the UI and evcc stay responsive.
-bool ota_check_start(unsigned pr_number = 0);
+tk::OtaStartResult ota_check_start(unsigned pr_number = 0);
 
-// Kick off a background download+install task. Returns false if one is already
-// running. On success the device reboots into the new image.
-bool ota_start(unsigned pr_number = 0);
+// Kick off a background download+install task. Refuse pending/unknown image verification before
+// creating a worker or starting HTTPS; inspect the SDK state under the operation gate.
+tk::OtaStartResult ota_start(unsigned pr_number = 0);
+
+// State-only snapshot for cosmetic indicators; no OtaStatus/string materialization.
+// The shared status mutex may be created on first use. Unavailable locking reports Error.
+OtaState ota_get_state();
 
 // Snapshot of the current OTA state (for GET /ota/status polling).
 OtaStatus ota_get_status();
@@ -77,6 +82,11 @@ bool ota_is_updating();
 // for UI/status decisions only; mutation paths must hold OtaIdentityMutationGuard for their full
 // transaction so OTA startup is excluded atomically in the opposite direction too.
 tk::OtaVerificationState ota_verification_state();
+// Status reads the cache only. Refresh once before HTTP/tasks start and after a verification
+// transition while the caller still owns the OTA/HealthCommit/ConfigRestart operation gate.
+// This is diagnostic evidence; mutation admission always queries fresh SDK state.
+tk::OtaVerificationState ota_cached_verification_state() noexcept;
+tk::OtaVerificationState ota_refresh_verification_cache() noexcept;
 bool ota_identity_mutation_allowed(tk::IdentityMutationEntry entry);
 
 class OtaIdentityMutationGuard {
@@ -142,6 +152,10 @@ private:
 // Query raw image state under this request's lease. VALID and UNDEFINED are distinct;
 // errors are unknown, never an inferred blank/Stable state. This does not confirm anything.
 tk::ConfigImageResult ota_config_image_state(const OtaConfigRestartGuard& owner) noexcept;
+
+// Local Ready/sync/sticky-reset/INTERNAL-largest-block sample, ordered and allocation-free.
+// Only a fresh call under the caller's proper operation owner can precede an SDK mark attempt.
+tk::RuntimeHealthSample ota_runtime_health();
 
 // Only a raw PENDING_VERIFY image after a successful user configuration save may be
 // confirmed, subject to Ready, current NimBLE sync/reset and fresh INTERNAL-largest-block

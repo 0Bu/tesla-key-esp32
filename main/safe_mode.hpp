@@ -4,28 +4,12 @@
 
 class NvsStorageAdapter;
 
-// Boot-loop safe mode — the escalation for a device that keeps CRASHING, as distinct from one that
-// has run out of heap.
-//
-// This firmware already had one restart ladder: logic/heap_watchdog.hpp counts the restarts IT
-// chooses (breadcrumb `reboot_why=heap:<n>`) and stops after five. That counter is deliberately
-// narrow — it only ever sees a restart the firmware decided on. A PANIC loop, a brownout loop, a
-// task-watchdog loop: none of them are counted, none of them are bounded, and each boot costs more
-// than it looks like, because on THIS device a boot re-opens the vehicle polling window. A board
-// that crashes every 40 seconds therefore keeps a parked car awake indefinitely and drains its
-// traction battery while appearing, from the outside, merely offline.
-//
-// So: count crash-only boots in NVS. Past the threshold, latch SAFE MODE — app_main brings up WiFi,
-// the web UI and OTA, and SKIPS the BLE/vehicle stack and the MQTT bridge. That inverts the failure:
-// a bad state that crashes the vehicle path becomes a device you can still reach in a browser and
-// fix (or OTA past) instead of one that needs a USB cable and physical access. It also, by
-// construction, stops the polling window from re-opening.
-//
-// A clean or intentional reboot resets the count, and a boot that stays up past kBootHealthyS
-// clears it — so a single crash, or a burst that resolves, leaves nothing behind.
-//
-// The DECISIONS (what counts, saturating increment, the threshold, the healthy-uptime bound) live
-// in the pure, host-tested logic/boot_guard.hpp. This file is the NVS glue and the latch.
+// Boot-loop escalation: count fault boots and disable BLE/vehicle/MQTT at the threshold.
+// Network/UI/OTA recovery remains available if its own startup succeeds. A non-fault boot
+// clears the sequence only if the persisted counter is readable, valid and successfully reset.
+// The healthy timer is never armed while recovery is latched.
+// Decisions live in logic/boot_guard.hpp; this adapter owns storage and the boot-local latch.
+// Recovery contract: docs/ARCHITECTURE.md#boot-loop-safe-mode.
 
 namespace tk {
 

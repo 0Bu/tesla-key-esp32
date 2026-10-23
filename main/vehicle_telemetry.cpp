@@ -5,6 +5,7 @@
 
 #include "vehicle_ctrl.hpp"
 #include "runtime_admission.hpp"
+#include "runtime_fault_log.hpp"
 #include "vehicle_ctrl_internal.hpp"
 #include "logic/units.hpp"
 #include "logic/active_window.hpp"
@@ -18,6 +19,7 @@
 #include <esp_log.h>
 #include <esp_heap_caps.h>
 #include <esp_system.h>
+#include <esp_timer.h>
 #include <esp_task_wdt.h>
 #include <cstdio>
 #include <exception>
@@ -662,6 +664,9 @@ void VehicleController::process_ble_host_events_() {
 }
 
 bool VehicleController::enqueue_background_poll_(const std::string& name, tk::BleDomain domain, Builder builder) {
+    // Caller holds vehicle_mutex_. Recheck after acquiring it: a foreground transaction may
+    // have started since the scheduler's earlier snapshot, while this task waited for the lock.
+    if (cmd_in_flight_.load()) return false;
     if (!command_identity_ready_()) return false;
     if (command_runner_.is_queue_full()) return false;
     const uint32_t now_ms = static_cast<uint32_t>(pdTICKS_TO_MS(xTaskGetTickCount()));
@@ -673,6 +678,50 @@ bool VehicleController::enqueue_background_poll_(const std::string& name, tk::Bl
         return true;
     }
     return false;
+}
+
+// Keep optional telemetry snapshots/builders in their own bounded frame. Scheduling and the
+// attempt timestamp remain in vehicle_loop; its outer catch contains exceptions from this call.
+[[gnu::noinline]] void VehicleController::enqueue_telemetry_round_(tk::TelemetryPollState& telemetry_poll) {
+    auto* self = this;
+    tk::VehicleClimateData climate{};
+    const bool climate_usable = self->get_vehicle_climate(climate);
+    const auto domain = telemetry_poll.next(climate_usable);
+    bool enqueued = false;
+    {
+        tk::SemGuard g(self->vehicle_mutex_);
+        switch (domain) {
+            case tk::TelemetryPollDomain::Climate:
+                enqueued = self->enqueue_background_poll_(
+                    "Climate State Poll", tk::BleDomain::Infotainment,
+                    [](TeslaBLE::Client* client, uint8_t* buff, size_t* len) {
+                        return client->build_car_server_get_vehicle_data_message(
+                            buff, len, CarServer_GetVehicleData_getClimateState_tag);
+                    });
+                break;
+            case tk::TelemetryPollDomain::Drive:
+                enqueued = self->enqueue_background_poll_(
+                    "Drive State Poll", tk::BleDomain::Infotainment, build_drive_state_poll);
+                break;
+            case tk::TelemetryPollDomain::Tires:
+                enqueued = self->enqueue_background_poll_(
+                    "Tire Pressure Poll", tk::BleDomain::Infotainment,
+                    [](TeslaBLE::Client* client, uint8_t* buff, size_t* len) {
+                        return client->build_car_server_get_vehicle_data_message(
+                            buff, len, CarServer_GetVehicleData_getTirePressureState_tag);
+                    });
+                break;
+            case tk::TelemetryPollDomain::Closures:
+                enqueued = self->enqueue_background_poll_(
+                    "Closures State Poll", tk::BleDomain::Infotainment,
+                    [](TeslaBLE::Client* client, uint8_t* buff, size_t* len) {
+                        return client->build_car_server_get_vehicle_data_message(
+                            buff, len, CarServer_GetVehicleData_getClosuresState_tag);
+                    });
+                break;
+        }
+    }
+    telemetry_poll.note_admission(climate_usable, enqueued);
 }
 
 tk::SessionRuntimeState VehicleController::runtime_session_observation_locked_(
@@ -1553,6 +1602,7 @@ void VehicleController::loop_task_fn_(void* arg) {
     bool     prev_window        = false;  // edge-detect the active window
     auto     prev_sleep         = tk::SleepState::Unknown;  // edge-detect VCSEC sleep flag
     tk::WakePollState wake_poll{};         // one-shot charge poll on the VCSEC wake edge (#264)
+    tk::IterationFaultLog fault_log{};
     while (true) {
       // Feed the task watchdog FIRST and UNCONDITIONALLY, before anything that can block or throw.
       // Gating it on the work below would make a long-but-legitimate command look like a hang; put
@@ -1908,49 +1958,11 @@ void VehicleController::loop_task_fn_(void* arg) {
         if (telemetry_poll.due({paired, window, self->ble_connected(), self->cmd_in_flight_.load(),
                                 now_ticks, pdMS_TO_TICKS(30000)})) {
             telemetry_poll.begin_attempt(now_ticks);
-            tk::VehicleClimateData climate{};
-            const bool climate_usable = self->get_vehicle_climate(climate);
-            const auto domain = telemetry_poll.next(climate_usable);
-            bool enqueued = false;
-            {
-                tk::SemGuard g(self->vehicle_mutex_);
-                switch (domain) {
-                    case tk::TelemetryPollDomain::Climate:
-                        enqueued = self->enqueue_background_poll_(
-                            "Climate State Poll", tk::BleDomain::Infotainment,
-                            [](TeslaBLE::Client* client, uint8_t* buff, size_t* len) {
-                                return client->build_car_server_get_vehicle_data_message(
-                                    buff, len, CarServer_GetVehicleData_getClimateState_tag);
-                            });
-                        break;
-                    case tk::TelemetryPollDomain::Drive:
-                        enqueued = self->enqueue_background_poll_(
-                            "Drive State Poll", tk::BleDomain::Infotainment, build_drive_state_poll);
-                        break;
-                    case tk::TelemetryPollDomain::Tires:
-                        enqueued = self->enqueue_background_poll_(
-                            "Tire Pressure Poll", tk::BleDomain::Infotainment,
-                            [](TeslaBLE::Client* client, uint8_t* buff, size_t* len) {
-                                return client->build_car_server_get_vehicle_data_message(
-                                    buff, len, CarServer_GetVehicleData_getTirePressureState_tag);
-                            });
-                        break;
-                    case tk::TelemetryPollDomain::Closures:
-                        enqueued = self->enqueue_background_poll_(
-                            "Closures State Poll", tk::BleDomain::Infotainment,
-                            [](TeslaBLE::Client* client, uint8_t* buff, size_t* len) {
-                                return client->build_car_server_get_vehicle_data_message(
-                                    buff, len, CarServer_GetVehicleData_getClosuresState_tag);
-                            });
-                        break;
-                }
-            }
-            telemetry_poll.note_admission(climate_usable, enqueued);
+            self->enqueue_telemetry_round_(telemetry_poll);
         }
-      } catch (const std::exception& e) {
-          ESP_LOGE(TAG, "vehicle loop iteration threw (%s) — continuing", e.what());
       } catch (...) {
-          ESP_LOGE(TAG, "vehicle loop iteration threw (unknown) — continuing");
+          tk::report_iteration_fault(fault_log, static_cast<uint64_t>(esp_timer_get_time()) / 1000,
+              [](uint32_t suppressed) { ESP_LOGE(TAG, "iteration fault; %u suppressed", (unsigned)suppressed); });
       }
 
       vTaskDelay(pdMS_TO_TICKS(50));

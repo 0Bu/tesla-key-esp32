@@ -87,6 +87,7 @@ class BrowserLaunchPolicyTests(unittest.TestCase):
         def process(command, **kwargs):
             self.assertIn("--headless", command)
             self.assertIn("--dump-dom", command)
+            self.assertEqual("--force-dark-mode" in command, command[-1].endswith("?profile=mobile"))
             self.assertTrue(command[-1].startswith("file://"))
             self.assertTrue(kwargs["start_new_session"])
             kwargs["stdout"].write('<html><div id="browser-gate-result" data-result="pass"></div></html>')
@@ -95,7 +96,8 @@ class BrowserLaunchPolicyTests(unittest.TestCase):
         with mock.patch.object(gate.sys, "platform", "linux"), tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             gate.run_profile("/usr/bin/chromium", root / "page.html", "desktop", "1200,900", root / "profile")
-        self.spawn.assert_called_once()
+            gate.run_profile("/usr/bin/chromium", root / "page.html", "mobile", "390,844", root / "mobile-profile")
+        self.assertEqual(self.spawn.call_count, 2)
 
     def test_linux_timeout_terminates_only_its_own_process_group(self):
         process = mock.Mock(pid=24680)

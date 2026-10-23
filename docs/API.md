@@ -18,6 +18,10 @@ This does not replace the trusted-LAN boundary.
 POST /api/1/vehicles/{VIN}/command/{command}   Content-Type: application/json
 ```
 
+The `{VIN}` path segment must exactly match the configured VIN reported by `/status.vin`,
+including case (normally uppercase). A different or lowercased VIN returns `404` before command
+dispatch; the same rule applies to vehicle-data routes.
+
 | Command | Body |
 |---------|------|
 | `wake_up` | — |
@@ -31,10 +35,12 @@ POST /api/1/vehicles/{VIN}/command/{command}   Content-Type: application/json
 | `auto_conditioning_start` / `auto_conditioning_stop` | — |
 | `set_scheduled_charging` | `{"enable": true, "start_minutes": 1380}` (0–1439 minutes after local midnight; 1380 = 23:00) |
 
-- **evcc boolean bodies:** `charge_start` also accepts the JSON scalar `true` and `charge_stop`
-  `false` (evcc's generic setter); mismatched booleans and all other non-object bodies are `400`.
+- **evcc boolean bodies:** `charge_start` and `wake_up` also accept the JSON scalar `true`, and
+  `charge_stop` accepts `false` (evcc's generic setter); mismatched booleans and all other
+  non-object bodies are `400`.
 - **Validation:** supplied integers must be integral and in range, else `400` — nothing is silently
-  clamped. Absent REST fields default to percent=80, enable=false, start_minutes=0 and sentry on=false;
+  clamped. Scheduled charging requires an explicit boolean `enable`; omitting it returns `400`
+  before dispatch. Other absent REST fields default to percent=80, start_minutes=0 and sentry on=false;
   supplied fields are still validated. MCP has its own required-argument rules.
   Numeric strings must use canonical decimal integer notation (`"16"`); whitespace, plus signs,
   leading zeroes, negative zero, hexadecimal, exponent and fractional string forms are rejected.
@@ -61,6 +67,9 @@ POST /api/1/vehicles/{VIN}/command/{command}   Content-Type: application/json
   waiting within the same deadline without resending; if no confirmation arrives, its original
   uncertain reason is retained. Successful local transmission alone reports an uncertain
   confirmation timeout when the deadline expires and does not prove BLE reachability.
+  The default firmware budget is 20 s. In evcc's [stock template](https://github.com/evcc-io/evcc/blob/79b4a8b415859383c28c33e422c21cedbee79566/templates/definition/vehicle/tesla-ble.yaml),
+  `timeout` applies only to reads; setters retain the [10 s client default](https://github.com/evcc-io/evcc/blob/79b4a8b415859383c28c33e422c21cedbee79566/util/request/helper.go#L16)
+  and can time out before wake confirmation.
 
 > A **Charging-Manager** key may only run charging actions + wake. The car therefore **rejects**
 > `door_lock`/`door_unlock`, `flash_lights`/`honk_horn`, `set_sentry_mode` and
@@ -168,8 +177,11 @@ All of `/set_time`, `/set_mqtt`, `/set_syslog`, `/set_wifi` and `/set_ota` retur
 `/gen_keys` also returns `409` during a pending VIN transition, `503` when existing-key storage
 cannot be verified, and `500` when rotation is incomplete. Not-committed or ambiguous commits
 trigger a recovery reboot; a committed key with pending cleanup uses the supervisor retry path.
-`/ota/check` and `/ota/update` return `409` when their operation is not started, including
-busy, state/lock and task-start failures.
+`/ota/check` and `/ota/update` return `409` while another device operation owns their shared gate,
+`503` when the service is unavailable and `500` when worker startup fails. `/ota/update` also
+returns `409` while the running image is NEW/PENDING_VERIFY, or `503` if its state cannot be
+verified. These refusals create no OTA worker. A manifest check remains available during probation.
+The web UI preserves the device's refusal reason; a failed start does not trigger polling or retry.
 
 New MQTT and Syslog submissions accept at most 64 UTF-8 bytes; an unchanged stored value remains
 a no-write acknowledgement. Existing targets up to 120 bytes survive unrelated saves. When either
@@ -199,7 +211,7 @@ the uncertainty contract below.
 | `vehicle_data` | Wrapped `response`; `200` when all selected caches are usable; unusable required caches return `503`/`result:false`. Invalid URI/query/selectors retain `400`, VIN mismatch `404`. |
 | `body_controller_state` | Wrapped `response`; a completed retrieval attempt returns `200`; inspect `response.result` for its outcome. |
 | Configuration | Wrapped `response` for time/VIN/MQTT/Syslog/WiFi. Key generation is flat `{result,reason}`. Channel success is flat `{ok,result,channel}`; channel errors are wrapped. Invalid intake is `400`/`413`, unavailable resources `503`, failed persistence `500`. |
-| OTA start | Flat `{started,reason?}` for a check and `{result,reason}` for an update; `200` on start; `409` if not started, including busy, state/lock and task-start failures. |
+| OTA start | Flat `{started,reason?}` for a check and `{result,reason}` for an update; `200` on start; `409` for busy/probation, `503` for unavailable service or unknown image state, `500` for worker startup failure. |
 | Pre-effect REST OOM fallback | Flat `{result:false,reason:"out of memory"}`, `503`, even for routes whose normal envelope is wrapped. |
 | Degraded mutation reply | HTTP `200` with explicit application outcome, as described below; this status alone does not establish success. |
 
@@ -314,12 +326,19 @@ gate refuses the request before any save.
 | `vehicle` | `{soc, usable_soc, status, charge_limit, power, amps, actual_amps, volts, phases}` — cached, only when `link=="awake"`, each field only when reported. |
 | `last`, `last_seen_s` | Last-known `{soc, usable_soc, status}` for the asleep card; seconds since last contact. |
 | `mqtt` | `{configured, connected, tls, broker, error?}`; `broker` is the credential-free `host:port` even if the saved URI has userinfo. |
-| `syslog` | `{configured, resolved, reachable, host?, port?, error?}`; `reachable` is an advisory ping hint, never a delivery gate. |
-| `ota` | `{channel}` (`"release"\|"dev"`). |
+| `syslog` | `{configured, resolved, reachable, host?, port?, error?, dropped_lines?}`; `reachable` is an advisory ping hint, never a delivery gate. |
+| `ota` | `{channel, verification}`; channel is `"release"\|"dev"`. Verification is the cached last observed running-image state: `stable`, `pending_verify` or `unknown`. Status performs no SDK/flash query for this field; it does not identify an earlier rollback. |
 | `tele` | `{climate, drive, tires, closures}` read-only telemetry, emitted only while the BLE link is up. |
 | `last_reboot` | `"heap:<n>"` — only when the heap watchdog ended the previous boot (`n` = consecutive such restarts); absent on ordinary boots. |
-| `sys` | Always present: `{board_mac, free_heap, min_free_heap, largest_block, uptime_s, wifi_reconnects, reset_reason, safe_mode, stack_min_free_bytes?:{httpd?,vehicle?,auto_pair?,mqtt?}}`. |
+| `pairing_blocked` | Optional cached reason: `key_reload_required`, `key_runtime_mismatch`, `key_storage_unavailable`, `key_cleanup_pending` or `vin_transition_pending`. Absent during normal pairing. Reading it does not probe storage or change identity. |
+| `sys` | Always present: `{board_mac, free_heap, min_free_heap, largest_block, uptime_s, wifi_reconnects, reset_reason, safe_mode, runtime_state, diag_dropped_lines?, stack_min_free_bytes?:{httpd?,vehicle?,auto_pair?,mqtt?}}`. |
 | `last_crash` | Reset/report facts plus `artifact_present`, `raw_available`, `query_error`, `foreign_dump`, `checksum_verified`, `dump_identity` (`current`/`foreign`/`unverified`), and `summary_available`. A summary emits numeric `pc` (including zero), optional `task`/hex-string `backtrace`, and `corrupted`/`truncated`/`isr`; `elf_sha256` and `dump_elf_sha256` distinguish running and dump builds. Present for undismissed faults, artifacts or query errors. |
+
+`sys.runtime_state` is `booting`, `ready`, `safe_mode` or `fatal`. Fatal services remain stopped for this process; a status endpoint exists only if HTTP startup succeeded.
+
+`sys.diag_dropped_lines` counts capture attempts lost to an unavailable or busy diagnostic ring;
+`syslog.dropped_lines` counts full-queue losses. Both are boot-local unsigned counters modulo 2^32,
+omitted at zero. Clearing the ring does not reset the loss counter. Neither proves UDP delivery.
 
 `ble.rssi` appears only when a live-link RSSI sample is available.
 `ble.phase` and `phase_s` appear together: `connecting` counts down to giving up, `waiting` to a
@@ -333,10 +352,21 @@ backtrace; downloaded dumps unwind offline on every target.
 `/api/proxy/1/version` appends the fixed `-esp32` suffix on every target. Strip it when
 comparing to `/status.version`; `platform` identifies the actual chip.
 
+A synchronous command occupies the shared HTTP worker; concurrent status/UI requests wait behind
+it. See [HTTP serialization](ARCHITECTURE.md#http-request-serialization) when setting client timeouts.
+
 ## MQTT topics
 
 **Topics** (node id `teslakey_<vin>` from the lowercase VIN, stable across board changes; changing the
-configured vehicle intentionally creates a different HA device):
+configured vehicle intentionally creates a different HA device). Before a valid VIN is configured,
+MQTT uses a temporary board-derived node. Setting a VIN replaces that temporary identity after
+reboot. Neither this transition nor a later VIN change deletes the old retained topics. Remove the
+old Home Assistant device and its retained discovery entries under
+`homeassistant/<sensor|binary_sensor>/<old-node>/`, plus retained state/availability under
+`tesla-key/<old-node>/`, using your broker administration tool. Adapt these prefixes if configured
+otherwise; clear only the obsolete node. Leaving them retained can recreate stale entities.
+
+Topics:
 
 ```
 tesla-key/<node>/availability                 online | offline   (LWT, retained)
@@ -358,6 +388,10 @@ tesla-key/<node>/device      {wifi_rssi?,ble_rssi?,ble_connected,paired,session_
                               mqtt_stack_min_free_bytes?}
 homeassistant/<sensor|binary_sensor>/<node>/<object>/config   (discovery, retained)
 ```
+
+The compatibility field `wifi_reconnects` counts network re-establishments after an outage, including
+Ethernet; live WiFi/Ethernet handovers do not increment it. Its discovery label is **Network reconnects**;
+the field and entity IDs stay stable.
 
 All state topics are retained JSON. Numeric fields appear only when the car reported them, so an
 unseen value shows as *unknown* in HA, not a phantom `0`; range, rate and odometer are converted to

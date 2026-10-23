@@ -58,6 +58,8 @@ over 15 bytes.
 | `tesla_ble/key_rotate` | key rotation | recovery journal |
 
 OTA, verified signed app-only USB delivery and installer **Keep configuration** preserve NVS.
+The installer defaults to Keep. Each deliberate **Erase everything** selection requires a separate
+confirmation with a secret-NVS backup reminder before any flash work starts.
 **Erase everything**, merged-image writes and full flash erases destroy it. NVS remains at
 `0x9000` for `0x6000` bytes. Firmware rollback does not restore keys/configuration. Destructive or
 identity work needs explicit authorization and a backup/rollback plan.
@@ -115,14 +117,18 @@ intentional dismissal/deletion.
 ## OTA self-update
 
 Fixed compile-time HTTPS URLs, bundled-CA verification, target checks and RSA signatures protect
-OTA intake. A LAN peer cannot select arbitrary firmware but can initiate expensive fetch/reboot
-work. Signatures authenticate bytes, not freshness; app-descriptor/channel checks enforce versions.
+OTA intake. A LAN peer can choose Release, Dev or an available signed PR preview through the
+channel and PR selectors, subject to the device's intake/version rules, and can initiate expensive
+fetch/reboot work. A peer cannot supply a custom download URL through the API. Signatures
+authenticate bytes, not freshness; app-descriptor/channel checks enforce versions.
 No eFuse anti-rollback is burned. Pending images retain rollback until runtime health is proven;
 [Architecture](ARCHITECTURE.md#ota-self-update) owns confirmation rules and allowed channel transitions.
 
-The USB installer verifies schema-v2 manifest source SHA, exact four-target roles/offsets, byte lengths
-and all SHA-256 hashes **before erasing/writing**; otadata activation is last. These hashes detect
-mixed/corrupt deployments, but USB still trusts the chosen Pages origin. Vendored hash-pinned
+The USB installer validates the schema-v2 source SHA's format and the four-target roles/offsets.
+It verifies byte lengths and SHA-256 hashes for the detected chip's four parts **before erasing/writing**;
+otadata activation is last. The manifest is unsigned: the browser does not authenticate its claimed
+source commit or inspect the other three chips' bytes. These checks detect mixed/corrupt downloads,
+but USB still trusts the chosen Pages origin. Vendored hash-pinned
 `esptool-js@0.6.1` runs under `script-src 'self'`, with no CDN execution.
 
 ## Signed OTA images
@@ -183,17 +189,21 @@ compiles run concurrently before protected publication.
 | Phase | Required proof and authority |
 |---|---|
 | Unprivileged build | Exact source SHA/fingerprint, four target graphs, size/stack/layout/effective-build checks and unsigned inventory; no signing key or write token. PRs build exact head. |
-| Independent rebuild | Fresh cache-free exact-source target legs run concurrently with producer legs; secret-free join binds the unsigned comparison before any key. |
+| Independent rebuild | Fresh cache-free exact-source target legs run concurrently with producer legs; the secret-free join assembles their inventory. The signer compares both complete inventories and payloads before key use. |
 | Protected publish | `firmware-signing` Environment; stage regular single-link files with O_NOFOLLOW, rehash, sign, remove key, verify RSA-PSS pin and minimal signed size. Emit only SHA/version-bound artifact. |
 | Deploy | No signing Environment/key/OIDC. Consume only named artifact, revalidate inventory/layout/site bytes and channel authority, then write branch-backed Pages and check live bytes. |
 
 The unsigned inventory is a producer claim, not an attestation. Toolchain/build closure is in
 [Development](DEVELOPMENT.md#build-and-evidence-contracts); signing runs in the pinned image too.
-Every display version obeys the canonical grammar and 31-byte bound.
+CI display-version intake requires a numeric `X.Y.Z` core without leading zeroes, an optional
+nonempty ASCII alphanumeric/dot/hyphen suffix, and at most 31 bytes. This is not a full SemVer
+identifier check. Stable selection requires exactly `X.Y.Z`; device channel/version admission has
+its own narrower rules described in [Architecture](ARCHITECTURE.md#ota-self-update).
 
 Stable publication has two fail-closed modes:
 
-- **Create:** prove tag/Release absent before key use; upload exact assets to a draft; verify aliases,
+- **Create:** bind the current main/tag candidate and prove the Release API returns 404 before
+  key use (an existing matching tag is allowed); upload exact assets to a draft; verify aliases,
   ELF checksums and full merged layout, including erased gaps/NVS and exact EOF. Address drafts by
   numeric Release ID. Recheck candidate immediately before making public; require a fresh immutable
   response before accepting it as authority.
@@ -203,12 +213,29 @@ Stable publication has two fail-closed modes:
   Emit a new verified SHA-bound recovery artifact from the snapshot.
 
 Before any upload or mutation, bind all 16 local Pages parts to the four merged images. The artifact
-carries the exact 12 root files plus 16 signer-owned layout inputs. Stable deploy rechecks these and all Release assets, then revalidates authority immediately before
-branch writes. Dev deploy instead binds current main and the exact staged snapshot without Release
-metadata; every push attempt or unchanged-byte build request rechecks staged SOURCE_SHA against
-fresh remote main. Conflict retries cannot restore superseded Dev bytes. Cumulative
-release relevance starts from a branch/live snapshot whose manifest SHA, immutable Release/tag and
-assets agree; a docs-only or stale run must not replace unrepresented firmware.
+carries the exact 12 root files, 16 signer-owned layout inputs, `dist/` diagnostics/inventory and
+`_site/` Pages content. Stable deploy rechecks the root/site binding and Release assets, then
+revalidates authority before invoking the branch publisher. Dev deploy binds current main and the
+exact staged snapshot without Release metadata and rechecks Pages source before invoking its
+publisher. Each Dev push attempt or unchanged-byte build request also rechecks staged SOURCE_SHA
+against fresh remote main. Root publication does not repeat Release-candidate authority inside each
+publisher retry. Cumulative stable relevance uses a branch/live snapshot bound to an immutable
+Release/tag. Dev relevance checks branch/live manifest byte identity and every served part against
+its declared size/hash, without requiring a Release; absent authority falls back to the stable
+baseline, while mismatched served bytes keep reconciliation open.
+
+Stable and Dev acceptance first observe the latest Pages build with up to eight status reads and
+exponential delays capped at 60 seconds (310 seconds of default waiting). Queued/building, failed
+builds and unavailable status have distinct diagnostics before byte acceptance starts. This latest
+build observation is a readiness hint, not provenance for a particular firmware snapshot.
+Post-publication byte acceptance then retries the complete manifest and all 16 Pages parts with
+exponential delays capped at 60 seconds (190 seconds of default waiting). Each attempt uses a fresh
+cache key and must independently pass all
+identity, size, hash and byte-binding checks. Results from incomplete attempts are never combined.
+Invalid staged Dev bytes or immutable Release metadata/assets fail before Pages polling. This
+handles delayed CDN propagation; it does not establish an atomic CDN snapshot.
+A docs-only or stale run must not replace unrepresented firmware. Published Markdown-only edits
+are not themselves release-relevant and wait for the next relevant publication.
 
 `main` pushes publish signed **Dev** bytes to `dev/` without a GitHub Release; retries may sign fresh
 RSA-PSS bytes. Official stable releases use manual `workflow_dispatch` with `release: true`, publishing
@@ -216,12 +243,16 @@ an immutable tagged Release and root Pages. Dispatch without that flag is test-o
 
 Signed previews require an open labelled same-repository PR, exact live head/label after approval,
 byte-identical source/version-bound trusted rebuilds and production signature verification. Version
-is derived from the newest complete immutable stable Release. Refetch default-branch head before key,
+uses GitHub's `releases/latest` entry, requiring a canonical immutable stable tag and the four
+uniquely named digest/size-bearing merged assets; it does not scan for a newer eligible Release or
+byte-validate that numeric base's assets. Refetch default-branch head before key,
 upload and Pages boundaries; main advancement retires stale runs. Per-PR concurrency couples publisher
 and trusted-base cleanup on close/force-push/unlabel; daily reconciliation removes stale manifests.
 
 The only serving authority is branch-backed `gh-pages:/`: root Release, `dev/`, `PR/<N>/`.
-Check API Pages mode/source/URL before signing, every branch write/delete and live acceptance.
+Check API Pages mode/source/URL before signing, before invoking branch publication/deletion and
+at live acceptance. These workflow checks do not hold a lock on repository Pages settings and are
+not repeated inside every branch-push retry.
 Environment reviewer configuration and required PR-policy checks are repository settings; code cannot
 install them. Green provenance proves source-to-bytes relationships, not source safety, runner trust
 or physical operation. Independent review, Environment approval and bench acceptance remain separate.

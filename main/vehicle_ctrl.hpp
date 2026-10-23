@@ -6,6 +6,7 @@
 #include "logic/session_availability.hpp"
 #include "logic/command_runner.hpp"
 #include "logic/auto_enrollment.hpp"
+#include "logic/key_rotation.hpp"
 #include <string>
 #include <functional>
 #include <memory>
@@ -33,6 +34,8 @@
 #include "freertos/queue.h"
 
 #include "logic/vehicle_data.hpp"
+
+namespace tk { struct TelemetryPollState; }
 
 class VehicleController {
 public:
@@ -227,7 +230,6 @@ public:
     bool key_rotation_recovered_at_boot() const {
         return key_rotation_recovered_at_boot_;
     }
-    TeslaBLE::Client* client() { return client_.get(); }
 
     // Status accessors (for /status and the web UI)
     bool ble_connected() const { return ble_ && ble_->is_connected(); }
@@ -256,6 +258,11 @@ public:
     // True when the vehicle connection needs attention. It is a hint, not proof of key deletion;
     // the hero shows automatic reconnection/pairing while an NVS session may still exist.
     bool reauth_required() const { return repair_notice_; }
+    const char* pairing_block_reason() const noexcept {
+        return tk::pairing_block_reason(key_reload_required_.load(), pairing_cleanup_pending_.load(),
+                                        vin_transition_pending_.load(), automatic_key_action_.load());
+    }
+
     // Tesla public-key id of the stored key (SHA-1(pubkey)[:4], "AB:CD:EF:01"),
     // matching the key list shown on the vehicle. Empty if no key is present.
     std::string key_fingerprint();
@@ -556,6 +563,7 @@ private:
         const UniversalMessage_RoutableMessage_session_info_t& payload);
     bool regenerate_key_native_();
     bool enqueue_background_poll_(const std::string& name, tk::BleDomain domain, Builder builder);
+    void enqueue_telemetry_round_(tk::TelemetryPollState& telemetry_poll);
 
     SemaphoreHandle_t vehicle_mutex_{nullptr};
     // Serializes a whole command/query cycle so concurrent HTTP requests and the automatic
@@ -587,6 +595,7 @@ private:
     // fingerprint is now unknowable from this controller instance (which may have restored the old
     // RAM key), so block signing AND all further rotations until boot reloads storage.
     std::atomic<bool> key_reload_required_{false};
+    std::atomic<tk::AutomaticKeyAction> automatic_key_action_{tk::AutomaticKeyAction::Continue};
     // Set only when this boot consumed a persisted key_rotate marker. main uses it to prevent
     // an absent durable key from entering an automatic CommitUnknown reboot loop.
     bool key_rotation_recovered_at_boot_{false};

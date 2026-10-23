@@ -50,6 +50,7 @@ static int transport_calls, fail_transport, response_attempts, response_status, 
 static BrowserClockStatus clock_status;
 static bool updating;
 static int check_starts, query_read_error;
+static tk::OtaStartResult ota_result;
 static std::string query;
 static char wire[4096]; static size_t wire_size;
 static tk::KeyRotationResult rotation;
@@ -143,6 +144,8 @@ static int esp_ota_mark_app_valid_cancel_rollback() {
     if (throw_confirmation) throw std::bad_alloc();
     return ESP_OK;
 }
+// This fixture observes config reply effects; actual cache/admission methods are tested separately.
+static tk::OtaVerificationState ota_refresh_verification_cache() noexcept { return tk::OtaVerificationState::Unknown; }
 #include "config_commit_runtime.generated.hpp"
 static void esp_restart() {
     if (require_config_owner) CHECK(s_operation_gate.state()==tk::OtaIdentityGateState::ConfigRestart);
@@ -204,8 +207,8 @@ static int httpd_query_key_value(const char* raw,const char* key,char* out,size_
     return ESP_ERR_NOT_FOUND;
 }
 static bool ota_is_updating() { return updating; }
-static bool ota_check_start(unsigned) { ++check_starts; effect_done(); return start_ok; }
-static bool ota_start(unsigned) { effect_done(); return start_ok; }
+static tk::OtaStartResult ota_check_start(unsigned) { ++check_starts; if (ota_result==tk::OtaStartResult::Started) effect_done(); return ota_result; }
+static tk::OtaStartResult ota_start(unsigned) { if (ota_result==tk::OtaStartResult::Started) effect_done(); return ota_result; }
 static void ota_set_channel(tk::OtaChannel) { effect_done(); }
 struct OtaIdentityMutationGuard {
     explicit OtaIdentityMutationGuard(tk::IdentityMutationEntry) {}
@@ -233,6 +236,9 @@ struct VehicleController {
     struct KeyGenerationResult { tk::KeyRotationResult rotation; bool key_probe_failed{},existing_key_refused{},transition_blocked{}; };
     struct NewVehicleResetResult { tk::VinTransitionApply state; };
     static bool vin_is_plausible(const std::string&) { return true; }
+    const std::string& vin() const {
+        static const std::string configured="TESTVIN0000000001"; return configured;
+    }
     KeyGenerationResult generate_key_result(bool) {
         if (key_refused) return {rotation,false,true,false};
         effect_done(); return {rotation};
@@ -253,11 +259,17 @@ struct VehicleController {
 static VehicleController vehicle;
 static VehicleController* g_vehicle=&vehicle;
 static bool execute_vehicle_command(VehicleController&,tk::CmdKind,const int*,const bool*) { effect_done(); return start_ok; }
-static bool request_vin_matches(const char*) { return true; }
-static bool parse_uri(const char*,char* vin,size_t nv,char* cmd,size_t nc) { std::snprintf(vin,nv,"TESTVIN0000000001"); std::snprintf(cmd,nc,"charge_start"); return true; }
+static const char* api_command_name="charge_start";
+static const char* api_path_vin="TESTVIN0000000001";
+static const char* api_body=nullptr;
+static bool parse_uri(const char*,char* vin,size_t nv,char* cmd,size_t nc) { std::snprintf(vin,nv,"%s",api_path_vin); std::snprintf(cmd,nc,"%s",api_command_name); return true; }
 static bool json_int_arg(const cJSON*,const tk::CmdArg&,int&,const char*&) { return true; }
-static bool json_bool_arg(const cJSON*,const tk::CmdArg&,bool&,const char*&) { return true; }
-static tk::BodyReadResult read_body_result(httpd_req_t*) { return {nullptr,tk::BodyReadStatus::Empty}; }
+static tk::BodyReadResult read_body_result(httpd_req_t*) {
+    if (!api_body) return {nullptr,tk::BodyReadStatus::Empty};
+    char* data=static_cast<char*>(std::malloc(std::strlen(api_body)+1));
+    CHECK(data); std::strcpy(data,api_body);
+    return {data,tk::BodyReadStatus::Ok};
+}
 static tk::JsonOwner vehicle_state_result_() { return tk::JsonBuilder().finish(); }
 static tk::MqttProbeResult mqtt_probe_broker(const std::string&) { ++mqtt_probes; return tk::MqttProbeResult::Ok; }
 struct ParsedJsonBody {
@@ -289,7 +301,9 @@ static void reset(Handler handler) {
     image_state=ESP_OTA_IMG_VALID; image_query_failure=false; image_queries=0; runtime_ready=true; host_synced=true; host_resets=0; commit_heap=4096;
     throw_confirmation=false; allocation_fault_armed=false; allocation_fault_index=0; effect_allocations=0;
     clock_status=BrowserClockStatus::Applied; updating=false; check_starts=0;
+    ota_result=tk::OtaStartResult::Started;
     query="ms=1800000000000"; query_read_error=0;
+    api_command_name="charge_start"; api_body=nullptr; api_path_vin="TESTVIN0000000001";
     selected=handler; fail_json=false; throw_error=false; throw_remove=false; throw_effect=false;
     fail_json_after_effect=false; save_ok=true; start_ok=true; ntp_synced=true; guard_ok=true;
     key_refused=false; effects=0; saves=0; removes=0; restarts=0; confirms=0;
@@ -314,6 +328,8 @@ static esp_err_t mcp_command(GuardedReq rq) {
     tk::mcp_json::RpcId id; id.kind=tk::mcp_json::RpcIdKind::Number; id.number=-9007199254740991LL;
     return handle_tools_call_(rq,id,std::move(request));
 }
+static esp_err_t shell_standard_fault_before_effect(GuardedReq) { throw std::bad_alloc(); }
+static esp_err_t shell_unknown_fault_before_effect(GuardedReq) { throw 17; }
 // Explicit shell fault after the real handler's single complete response. IDF C calls do not throw.
 static esp_err_t shell_throw_after_reply(GuardedReq rq) {
     (void)handle_command(rq);
@@ -339,6 +355,52 @@ static esp_err_t observe_wifi_reply(GuardedReq rq) {
 int main() {
     cJSON_Hooks hooks{gate_malloc,gate_free}; cJSON_InitHooks(&hooks);
     httpd_req_t req;
+    for (auto handler : {shell_standard_fault_before_effect,shell_unknown_fault_before_effect}) {
+        reset(handler); CHECK(handle_all(&req)==ESP_OK);
+        CHECK(response_status==503 && response_attempts==1 && effects==0);
+        CHECK(std::strcmp(wire,"out of memory")==0);
+    }
+    // Compile the production VIN matcher, not a permissive fixture. URI tokenization stays a
+    // passive platform seam; these handler cases prove refusal before command dispatch.
+    CHECK(request_vin_matches("TESTVIN0000000001"));
+    for (const char* vin : {"testvin0000000001", "TestVIN0000000001", "OTHERVIN000000001", "", static_cast<const char*>(nullptr)}) {
+        CHECK(!request_vin_matches(vin));
+    }
+    g_vehicle=nullptr;
+    CHECK(!request_vin_matches("TESTVIN0000000001"));
+    g_vehicle=&vehicle;
+    for (const char* vin : {"testvin0000000001", "TestVIN0000000001", "OTHERVIN000000001", ""}) {
+        reset(handle_command); api_path_vin=vin;
+        CHECK(handle_all(&req)==ESP_OK); CHECK(response_status==404); CHECK(effects==0);
+    }
+    reset(handle_command);
+    CHECK(handle_all(&req)==ESP_OK); CHECK(response_status==200); CHECK(effects==1);
+    for (const char* body : {static_cast<const char*>(nullptr), "{}", "{\"start_minutes\":1380}",
+                             "{\"enable\":null}", "{\"enable\":0}", "{\"enable\":\"false\"}"}) {
+        reset(handle_command); api_command_name="set_scheduled_charging"; api_body=body;
+        req.content_len=body?static_cast<int>(std::strlen(body)):0;
+        CHECK(handle_all(&req)==ESP_OK); CHECK(response_status==400); CHECK(effects==0);
+        CHECK(std::strstr(wire,"enable"));
+    }
+    for (const char* body : {"{\"enable\":true}", "{\"enable\":false}"}) {
+        reset(handle_command); api_command_name="set_scheduled_charging"; api_body=body;
+        req.content_len=body?static_cast<int>(std::strlen(body)):0;
+        CHECK(handle_all(&req)==ESP_OK); CHECK(effects==1);
+        const auto json=reply_json(); CHECK(json);
+        CHECK(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(payload(json),"result")));
+    }
+    // Body-bearing requests first set Connection: close. Failure there must prevent dispatch;
+    // later failures must stop after the effect without starting another response.
+    for (int failure=1; failure<=4; ++failure) {
+        reset(handle_command); api_command_name="set_scheduled_charging";
+        api_body="{\"enable\":true}"; req.content_len=static_cast<int>(std::strlen(api_body));
+        fail_transport=failure;
+        CHECK(handle_all(&req)==-7);
+        CHECK(effects==int(failure>1));
+        CHECK(transport_calls==failure);
+        CHECK(response_attempts==int(failure>1));
+    }
+    req.content_len=0; // restore the shared fixture for unrelated empty-body transport tests
     for (auto owner : {tk::OtaIdentityGateState::Ota,tk::OtaIdentityGateState::IdentityMutation,
                        tk::OtaIdentityGateState::FaultRestart,tk::OtaIdentityGateState::HealthCommit,
                        tk::OtaIdentityGateState::ConfigRestart}) {
@@ -477,7 +539,13 @@ int main() {
             reset(handler); ntp_synced=false; clock_status=BrowserClockStatus::SetFailed;
             fail_json_after_effect=allocation_failure; fail_transport=failure;
             req.input="{\"ms\":1800000000000}";
-            CHECK(handle_all(&req)==-7 && clock_calls==1 && effects==1 && check_starts==0);
+            const auto result=handle_all(&req);
+            if (result!=-7 || clock_calls!=1 || effects!=1 || check_starts!=0)
+                std::cerr << "clock transport: result=" << result << " calls=" << clock_calls
+                          << " effects=" << effects << " checks=" << check_starts
+                          << " transport=" << transport_calls << " failure=" << failure
+                          << " allocation=" << allocation_failure << " wire=" << wire << '\n';
+            CHECK(result==-7 && clock_calls==1 && effects==1 && check_starts==0);
             CHECK(response_attempts==1 && transport_calls==failure); // terminal; never retry
         }
     }
@@ -560,17 +628,33 @@ int main() {
     reset(handle_gen_keys); throw_effect=true;
     CHECK(handle_all(&req)==0); check_outcome("unknown",false); CHECK(restarts==0); // no guessed continuation
     for (auto handler : {handle_ota_check,handle_ota_update}) {
-        for (bool started : {false,true}) {
-            reset(handler); ntp_synced=false; start_ok=started; fail_json_after_effect=true;
-            CHECK(handle_all(&req)==0); check_outcome(started?"succeeded":"unknown",started);
-            CHECK(effects==(handler==handle_ota_check?2:1)); CHECK(clock_calls==(handler==handle_ota_check?1:0));
-            if (handler==handle_ota_check) {
-                const auto json=reply_json(); const auto* value=cJSON_GetObjectItemCaseSensitive(json.get(),"started");
-                CHECK(started?cJSON_IsTrue(value):cJSON_IsNull(value));
+        for (auto result : {tk::OtaStartResult::Started,tk::OtaStartResult::Busy,
+                            tk::OtaStartResult::PendingVerification,tk::OtaStartResult::Unavailable,
+                            tk::OtaStartResult::InternalError}) {
+            reset(handler); ota_result=result;
+            CHECK(handle_all(&req)==0); CHECK(response_status==tk::ota_start_http_status(result));
+            CHECK(response_attempts==1); CHECK(effects==int(result==tk::OtaStartResult::Started));
+            const auto json=reply_json(); CHECK(json);
+            const auto* value=cJSON_GetObjectItemCaseSensitive(json.get(),handler==handle_ota_check?"started":"result");
+            CHECK(bool(cJSON_IsTrue(value))==(result==tk::OtaStartResult::Started));
+            if (result!=tk::OtaStartResult::Started)
+                CHECK(std::strstr(wire,tk::ota_start_reason(result,handler==handle_ota_check))!=nullptr);
+            if (result!=tk::OtaStartResult::Started) {
+                // No prior clock effect: a definite refusal must not become outcome_unknown.
+                reset(handler); ota_result=result; fail_json=true;
+                CHECK(handle_all(&req)==0);
+                CHECK(response_status==503 && response_attempts==1 && effects==0 && clock_calls==0);
             }
         }
-        reset(handler); start_ok=false; CHECK(handle_all(&req)==0); CHECK(response_status==409); CHECK(response_attempts==1);
+        reset(handler); ntp_synced=false; fail_json_after_effect=true;
+        CHECK(handle_all(&req)==0); check_outcome("succeeded",true);
+        CHECK(effects==(handler==handle_ota_check?2:1));
+        CHECK(clock_calls==int(handler==handle_ota_check));
     }
+    // A typed OTA refusal clears only that effect; a preceding clock change stays uncertain.
+    reset(handle_ota_check); ntp_synced=false; ota_result=tk::OtaStartResult::Busy; fail_json_after_effect=true;
+    CHECK(handle_all(&req)==0); check_outcome("unknown",false); CHECK(effects==1 && clock_calls==1);
+    CHECK(cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(reply_json().get(),"started")));
     reset(handle_set_time); ntp_synced=false; fail_json_after_effect=true; req.input="{\"ms\":1800000000000}";
     CHECK(handle_all(&req)==0); check_outcome("unknown",false); CHECK(clock_calls==1); CHECK(restarts==0);
     reset(handle_set_ota); fail_json_after_effect=true; req.input="{\"channel\":\"dev\"}";

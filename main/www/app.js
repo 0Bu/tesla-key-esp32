@@ -1,10 +1,6 @@
 "use strict";
 var $=function(id){return document.getElementById(id)};
-// Write html into el only when it actually changed (cached on el.__h). The status
-// poll re-renders every 4 s; blindly reassigning innerHTML would destroy and recreate
-// the child nodes, restarting any CSS animation on them from 0% — making looping
-// animations (hero ring, "searching" signal bars, pulsing dot) visibly jump. Skipping
-// the write when nothing changed keeps the same nodes alive so the animation runs on.
+// Preserve DOM nodes and animation phase when polled markup is unchanged.
 function setHTML(el,html){ if(el && el.__h!==html){ el.__h=html; el.innerHTML=html; } }
 var state=null, otaTimer=null, otaAvail=null, waking=false, wakeTimeout=null, chgBusy=false, feedOk=false;
 var otaBusy=false, otaPhase=null, otaPollState=null, otaDeadline=0, otaExpectedVersion=null, otaChannel='release', otaChannelInitialSet=false;
@@ -19,19 +15,13 @@ function isOtaRunning(){
 function isOtaBusy(){
   return !!(otaBusy || isOtaRunning() || otaChannelInFlight || otaPhase === 'check');
 }
-// Entry points of the firmware flows (check, channel change, update prompt). otaPrompting spans "an
-// update was found" until the install dialog is answered, changelog fetch included, so a second tap
-// cannot start a second flow; the controls stay enabled (so a dismissed dialog can hand focus back to
-// them) and the entry points simply ignore the tap. The other settings stay usable as well: an open
-// sheet and the update dialog may coexist by design (see syncModal).
+// Serialize firmware flows through the update dialog's answer.
 function isOtaFlowBusy(){ return isOtaBusy() || otaPrompting; }
 
 // Quotes are escaped too so esc() is safe in attribute values (title="…"), not just element content.
 function esc(s){return String(s).replace(/[&<>"']/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
-// Numeric fields from the /status JSON are coerced before they touch any HTML string —
-// a finite number in, the number out; anything else null. Keeps radio-sourced JSON
-// (RSSI, SOC, progress) from ever reaching innerHTML as text.
-function num(x){ if(x==null||x==='') return null; x=+x; return isFinite(x)?x:null; }   // absent/null/'' stay absent (+null is 0)
+// Admit finite numeric fields before inserting radio data into HTML.
+function num(x){ if(typeof x!=='number' && typeof x!=='string') return null; if(typeof x==='string' && !x.trim()) return null; x=+x; return isFinite(x)?x:null; }   // absent/null/'' stay absent (+null is 0)
 
 function requestJson(url,options){
   var opts=Object.assign({},options||{});
@@ -50,8 +40,7 @@ function requestJsonResult(url,options){
     });
   });
 }
-// send is requestJson or requestJsonResult; either way a request that never settles is aborted
-// and rejected after timeoutMs, so a hung device cannot leave the UI waiting forever.
+// Bound the entire request, including its body; abort and reject on expiry.
 function timedRequest(send,url,options,timeoutMs){
   var ctl=typeof AbortController!=='undefined'?new AbortController():null;
   var opts=Object.assign({},options||{}); if(ctl)opts.signal=ctl.signal;
@@ -164,18 +153,28 @@ function toast(msg, type, key){
 }
 
 /* ---------- net ----------
-   The live feed is an interval poll of GET /status (boot() sets it up), and poll() is also called
-   directly after a user action so the UI refreshes now instead of on the next tick. A failed fetch
-   deliberately changes nothing on screen — the last frame stays and the optimistic local state
-   carries the UI — but it clears feedOk, which parks the Bluetooth countdown (see boot()).
-   waitReboot() GETs /status too; that's post-OTA reboot detection, a different concern. */
+   Keep the last received frame on transport failure, but label it as unavailable. One bounded
+   request is shared by interval and action refreshes so a stalled device cannot accumulate polls.
+   waitReboot() has a separate post-OTA reboot detection path. */
+var statusPoll=null;
 function poll(){
-  // Cache-bust + no-store: the live page polls forever, so a stale/cached /status would
-  // freeze the hero on an old state (e.g. a transient orange "Unreachable") until a manual
-  // reload — the very bug a fresh document hides. Same guard waitReboot() already uses.
-  return requestJson('/status?ms='+Date.now(),{cache:'no-store'})
-    .then(function(s){ feedOk=true; render(s); settleWakeToast(); })
-    .catch(function(){ feedOk=false; });
+  if(statusPoll) return statusPoll;
+  statusPoll=requestJsonWithTimeout('/status?ms='+Date.now(),{cache:'no-store'},8000)
+    .then(function(s){
+      render(s); feedOk=true;
+      var status=$("feedStatus"); if(status) status.classList.add('hide');
+      settleWakeToast();
+    })
+    .catch(function(){
+      feedOk=false;
+      var status=$("feedStatus");
+      if(status){
+        status.textContent=state?'Device unavailable. Showing last received values.':'Device unavailable. Reconnecting…';
+        status.classList.remove('hide');
+      }
+    })
+    .then(function(){ statusPoll=null; });
+  return statusPoll;
 }
 // render() ends `waking` once the car reports data; the sticky "waiting for the car" toast is
 // resolved here, in the poll path, so the renderer stays a pure state→DOM function.
@@ -189,29 +188,40 @@ function settleWakeToast(){
 }
 
 /* ---------- signal glyph ---------- */
+/* WEB_PRESENTERS_BEGIN */
+// Mirror the native display/LED SoC ramp and display RSSI thresholds; the host parity gate
+// checks all integer SoC values and the signed-byte RSSI range against the actual C++ helpers.
+function signalBars(rssi){ return rssi>=-55?4:rssi>=-65?3:rssi>=-75?2:rssi>=-85?1:0; }
+function socColor(soc){
+  var f=Math.fround, p=soc<=0?0:soc>=100?1:f(soc/100);
+  var stops=[[0,231,76,60],[f(0.18),240,190,40],[f(0.45),120,200,90],[f(0.80),60,175,80],[1,30,140,60]];
+  for(var i=0;i<stops.length-1;i++){
+    var a=stops[i],b=stops[i+1];
+    if(p<=b[0]){
+      var span=f(b[0]-a[0]),t=span<=0?0:f(f(p-a[0])/span);
+      // C++ lroundf rounds half away from zero; preserve its float32 intermediate steps.
+      var ch=function(j){var d=f((b[j]-a[j])*t);return a[j]+(d<0?-Math.round(-d):Math.round(d));};
+      return 'rgb('+ch(1)+','+ch(2)+','+ch(3)+')';
+    }
+  }
+  return 'rgb(30,140,60)';
+}
 function barsHTML(rssi){
-  // rssi==null → no link (e.g. BLE disconnected): draw the glyph with every bar faded so
-  // the row still shows a signal placeholder instead of jumping to text-only.
+  // Missing RSSI keeps the faded signal placeholder stable.
   rssi=num(rssi);
-  var n = rssi==null ? 0 : (rssi>=-55?4 : rssi>=-67?3 : rssi>=-78?2 : rssi>=-90?1:0);
+  var n = rssi==null ? 0 : signalBars(rssi);
   var H=[4,7,10,13], s='<svg class="bars" width="24" height="15" viewBox="0 0 21 13" fill="currentColor"><title>'+(rssi==null?'No signal':rssi+' dBm')+'</title>';
   for(var i=0;i<4;i++) s+='<rect x="'+(i*5.3)+'" y="'+(13-H[i])+'" width="3.3" height="'+H[i]+'" rx="1" opacity="'+(i<n?1:0.25)+'"/>';
   return s+'</svg>';
 }
-// animated "searching…" glyph — same geometry as barsHTML, but each bar carries an
-// .sbN class whose @keyframes light it in turn (cumulative fill), looping until the link
-// is up. Opacity is driven entirely by CSS, so no opacity attr here. `warm` switches the
-// fill to the amber the UI already uses for "link up but nothing known yet", so hunting
-// for the car reads as the same in-between state on the BLE row while Wi-Fi's own search
-// stays green.
+/* WEB_PRESENTERS_END */
+// Animated signal bars share RSSI geometry; CSS owns their phase.
 function searchBarsHTML(warm){
   var H=[4,7,10,13], s='<svg class="bars search'+(warm?' warm':'')+'" width="24" height="15" viewBox="0 0 21 13" fill="currentColor"><title>Searching…</title>';
   for(var i=0;i<4;i++) s+='<rect class="sb'+(i+1)+'" x="'+(i*5.3)+'" y="'+(13-H[i])+'" width="3.3" height="'+H[i]+'" rx="1"/>';
   return s+'</svg>';
 }
-// "no link" glyph — the same four bars drawn as empty OUTLINES (light stroke, pale fill)
-// rather than faded solids, so a disconnected row reads as an unfilled gauge instead of a
-// dimmed reading, and sits visibly lighter than the "Disconnected" label next to it.
+// Outline bars distinguish a disconnected radio from a faded reading.
 function emptyBarsHTML(){
   // Same envelope as barsHTML — inset by half a stroke so the outlined bar occupies exactly
   // the footprint the filled one would, and the row doesn't visibly change size or weight
@@ -231,22 +241,16 @@ function emptyBarsHTML(){
    the rest of the row, since rewriting the row's innerHTML every second would re-create the
    bar <rect>s and restart their CSS fill animation on every tick. */
 var cdKind=null, cdEndMs=0;
-// Constant markup — only the node's text changes per tick. data-p names the ONE countdown this
-// row will render, so a row can never show a number belonging to a different one.
+// data-p binds a row to exactly one countdown; only its text changes each tick.
 function cdHTML(kind){ return '<span class="cd" data-p="'+kind+'"></span>'; }
-// Resync the local clock from a poll. A change of countdown always resyncs; within one, only a
-// real disagreement (≥2 s) does, so the 4 s poll cadence and the 1 s local tick can't fight
-// each other into a number that jitters back up.
+// Resync on a new countdown or a discrepancy of at least two seconds.
 function cdSync(kind,secs){
   if(kind!=='givesup'&&kind!=='retries'){ cdKind=null; cdEndMs=0; return; }
   if(secs==null) secs=0;
   if(kind!==cdKind||Math.abs(cdLeft()-secs)>=2){ cdKind=kind; cdEndMs=Date.now()+secs*1000; }
 }
 function cdLeft(){ return Math.max(0,Math.ceil((cdEndMs-Date.now())/1000)); }
-// Paint into the row's .cd node if the current row has one. The node declares (data-p) the one
-// countdown it renders and a mismatch paints nothing. At 0 the phase is over but the next push
-// hasn't landed yet, so say what is about to happen rather than dropping the text and leaving
-// the status line cut off for a beat.
+// Paint only the matching countdown; at zero, describe the pending phase transition.
 function paintCd(){
   var el=document.querySelector('#bleConn .cd'); if(!el) return;
   var on=cdKind&&el.getAttribute('data-p')===cdKind;
@@ -269,11 +273,7 @@ function paintCd(){
    is what made the two disagree for three rounds. Leaving it out makes that unrepresentable.  */
 /* BLE_ROW_BEGIN */
 var BLE_CONNECT_FAIL_WARN = 2;
-// Takes the /status object as it arrives and returns the row decision. The DERIVATIONS live in
-// here on purpose — "is there a VIN", "is the link known" — because an earlier cut computed them
-// at the call site, outside the fence, which is the one step no gate could see. That is exactly
-// where the `paired &&` factoring lives: drop it and an unpaired cold-start board renders the
-// linked row amber instead of green, with every golden vector still passing.
+// Browser mirror of logic/ble_row.hpp; parity tests pin its row decisions.
 function bleRowFromStatus(s){
   var ble = s.ble || {};
   var vin = s.vin;
@@ -296,22 +296,10 @@ function waveBarsHTML(){
   for(var i=0;i<4;i++) s+='<rect class="wb'+(i+1)+'" x="'+(i*5.3)+'" y="'+(13-H[i])+'" width="3.3" height="'+H[i]+'" rx="1"/>';
   return s+'</svg>';
 }
-// continuous SOC colour: red → amber → light green → signal-bar green, interpolated
-// so the ring fades smoothly as it charges instead of jumping between bands. The top
-// stop is --ok (#16a34a = rgb(22,163,74)), the same green as the Wi-Fi/BLE signal bars,
-// so a full battery reads as a lighter, less-intense green rather than a dark forest green.
-function socColor(p){
-  p=Math.max(0,Math.min(100,p));
-  var stops=[[0,232,33,39],[10,217,164,6],[50,101,196,102],[100,22,163,74]];
-  var a=stops[0],b=stops[stops.length-1];
-  for(var i=0;i<stops.length-1;i++){ if(p>=stops[i][0] && p<=stops[i+1][0]){ a=stops[i]; b=stops[i+1]; break; } }
-  var t=(p-a[0])/((b[0]-a[0])||1);
-  var ch=function(j){ return Math.round(a[j]+(b[j]-a[j])*t); };
-  return 'rgb('+ch(1)+','+ch(2)+','+ch(3)+')';
-}
 /* ---------- icons (2px outline shapes; stroke styling lives in CSS) ---------- */
 var ICON={
   bolt:'<use href="#ic-bolt"/>',
+  warn:'<use href="#ic-warn"/>',
   moon:'<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>',
   car:'<use href="#ic-car"/>',
   alarm:'<circle cx="12" cy="13" r="8"/><path d="M12 9v4l2 2"/><path d="M5 3 2 6"/><path d="m22 6-3-3"/>',
@@ -426,19 +414,10 @@ function scrollToKey(){
   if(btn && typeof btn.focus === 'function') btn.focus();
 }
 
-// The hero's one primary action, picked by render(); the gauge calls heroTap(),
-// and mobile taps on the card body also trigger the action when active.
+// Only the named gauge button invokes the primary action. The surrounding card is informational.
 var heroActFn=null;
 function heroTap(){ if(heroActFn) return heroActFn(); }
-function heroCardTap(e){
-  if(e && e.target && e.target.closest && e.target.closest('button, a')) return;
-  if(typeof window !== 'undefined' && window.innerWidth <= 860 && heroActFn) return heroActFn();
-}
-function setHeroAct(label,icon,fn,busyText){
-  heroActFn=busyText?null:fn;
-  var hero=$("hero");
-  if(hero) hero.classList.toggle('has-act',!!heroActFn);
-}
+function setHeroAct(label,icon,fn,busyText){ heroActFn=busyText?null:fn; }
 
 /* ---------- render ---------- */
 // Connection row: tone ('ok' | 'warn' | '') colours the icon dot, status line and signal glyph.
@@ -449,7 +428,10 @@ function setRow(key,tone,valueHTML,statusHTML,barsMarkup){
   var b=$(key+'Bars'); if(b){ b.className='rbar'+(tone?' '+tone:''); setHTML(b,barsMarkup||''); }
 }
 function lastChips(s){
-  var ls=s.last||{}, lsoc=(ls.usable_soc!=null)?Math.round(ls.usable_soc):((ls.soc!=null)?Math.round(ls.soc):null), ago=fmtAgo(s.last_seen_s), chips=[];
+  var ls=s.last||{}, lsoc=num(ls.usable_soc), chips=[];
+  if(lsoc==null) lsoc=num(ls.soc);
+  if(lsoc!=null) lsoc=Math.round(Math.max(0,Math.min(100,lsoc)));
+  var ago=fmtAgo(num(s.last_seen_s));
   if(lsoc!=null) chips.push(stat('Battery','<span style="color:'+socColor(lsoc)+'">'+lsoc+'</span>','%'));
   if(ago)        chips.push(stat('Idle', ago, ''));
   return {html:chips.join(''), soc:lsoc};
@@ -491,14 +473,24 @@ function render(s){
     setHTML(rb.querySelector('.bt'),'<b>Safe Mode active</b> — Vehicle Bluetooth, commands, and telemetry are stopped. Use this recovery dashboard to inspect diagnostics or update firmware.');
   } else { rb.classList.remove('show'); }
 
-  // hero — single source of overall status. The gauge markup is written only when it actually
-  // changes (setHTML), so a running pulse/flow/spinner keeps its phase instead of restarting
-  // every poll.
+  // setHTML preserves the hero animation phase between unchanged polls.
   var hic=$("hicon"), hl=$("hlabel"), hs=$("hsub"), hst=$("hstats");
   var g={mode:'neutral', pct:null, glyph:null, busy:false, limit:null}, head='', sub='', chips='';
   var act=null, actLabel='', actIcon='bolt', busyText=null;
   $("hero").classList.remove('hide');
-  if(configured && paired && s.reauth && !safe){
+  var blocked=s.pairing_blocked;
+  if(s.sys && s.sys.runtime_state==='fatal'){
+    g={mode:'empty', glyph:'warn'};
+    head='Device recovery required'; sub='Vehicle services are stopped. Inspect diagnostics and resolve the fault before restarting the device.';
+  } else if(blocked){
+    g={mode:'empty', glyph:'key'};
+    head='Pairing paused';
+    sub=blocked==='key_storage_unavailable'
+      ? 'Key storage is unavailable. The device will check again automatically.'
+      : blocked==='key_cleanup_pending'
+      ? 'Saved-key cleanup is pending. The device will retry automatically.'
+      : 'The saved identity must be reloaded. Restart the device; inspect diagnostics if this condition returns.';
+  } else if(configured && paired && s.reauth && !safe){
     g={mode:'neutral', glyph:'link'};
     head='Reconnecting…'; sub='Reconnecting automatically with your existing key.';
   } else if(paired&&v){
@@ -533,7 +525,7 @@ function render(s){
       g={mode:'sleep', pct:lk.soc, glyph:'car'};
       head='Parked'; sub='No live reading — tap the icon to wake the car.'; chips=lk.html;
       act=wakeCar; actLabel='Wake the car'; actIcon='alarm';
-    } else if((s.ble&&s.ble.connect_fail)>=2){
+    } else if((s.ble&&s.ble.connect_fail)>=BLE_CONNECT_FAIL_WARN){
       // Paired, but the BLE link won't come up despite repeated attempts. Surface WHY.
       // car_connectable===false ⇒ the car is at its ~3-device BLE limit (no slot for us).
       g={mode:'empty', glyph:'bluetooth'};
@@ -561,7 +553,7 @@ function render(s){
   } else if(linked){
     g={mode:'neutral', glyph:'link'};
     head='Ready to pair'; sub='Your key is sent automatically. Place your Tesla keycard on the console reader and approve on the touchscreen.';
-  } else if((s.ble&&s.ble.connect_fail)>=2){
+  } else if((s.ble&&s.ble.connect_fail)>=BLE_CONNECT_FAIL_WARN){
     // The car WAS found (advert heard, name matches the VIN) but every connection attempt times
     // out. Don't blame range. car_connectable===false → the car is at its BLE connection limit;
     // otherwise → weak signal or another proxy contending for the link.
@@ -593,11 +585,7 @@ function render(s){
   var vinTx=hasVin?'Change VIN':'Add VIN';
   var vb=$("vinBtn"); if(vb){ vb.setAttribute('aria-label',vinTx); vb.setAttribute('title',vinTx); }
 
-  // bluetooth — link to the car. WHICH state to show is decided by bleRowFromStatus() above (the
-  // JS half of main/logic/ble_row.hpp, kept honest by scripts/check-ble-row-parity.sh); this
-  // block only renders the decision. Note what is NOT consulted here: ble.scanning. The radio
-  // scans for reasons with no deadline, and keying the label off that flag while the countdown
-  // came from the phase is what used to make the two disagree.
+  // Render the parity-tested BLE presenter; raw scan state carries no deadline.
   var ble=s.ble||{};
   // Presenter input may use usable RAM; the public durable paired field stays unchanged.
   var d=bleRowFromStatus(Object.assign({},s,{paired:paired}));
@@ -633,8 +621,7 @@ function render(s){
     // Link down, next attempt scheduled (or none). Outlined empty bars hold the row's shape.
     setRow('ble','','Disconnected', d.cd==='retries'?'Waiting · '+cdHTML(d.cd):'Idle', emptyBarsHTML());
   }
-  // Countdown clock from this push, then paint immediately: setHTML may have just replaced the
-  // row, leaving a fresh, empty .cd the 1 s ticker wouldn't fill until its next tick.
+  // Paint immediately after a push so replaced countdown nodes are never blank.
   cdSync(d.cd,num(ble.phase_s));
   paintCd();
 
@@ -775,6 +762,8 @@ function toggleCharge(){
 // (e.g. "complete") is not a connectivity problem, so don't blame the BLE range.
 function chargeFailMsg(reason,isCharging){
   var r=String(reason).toLowerCase();
+  if(r.indexOf('command outcome unknown')===0)
+    return {msg:String(reason), type:'err'};
   if(r.indexOf('not reachable')>=0||r.indexOf('timed out')>=0||r.indexOf('unreachable')>=0)
     return {msg:'Car not reachable — is it in range?', type:'err'};
   if(r.indexOf('complete')>=0)        return {msg:'Charging is already complete', type:'info'};
@@ -793,12 +782,7 @@ function chargeFailMsg(reason,isCharging){
    askText → Promise<string|null>, askConfirm → Promise<boolean>. One sheet at a time; opening
    another settles the first as cancelled. */
 var askResolve=null, askCancelValue=null, askReturnFocus=null, askHintFn=null, askValidateFn=null;
-// While a sheet or the OTA dialog is open the page behind it is inert: aria-modal alone neither
-// stops Tab from walking into the rest of the page nor keeps screen readers inside the dialog.
-// Derived from all three dialogs, so closing one while another is still up keeps the page locked.
-// Call it after showing/hiding a dialog and before moving focus back: an inert node can't take it.
-// Both can be open at once (an OTA check finishing while a sheet is up). The sheet is always the
-// top layer (CSS z-index), so Escape closes it first, and the OTA dialog never takes its focus.
+// Make the background inert while a modal is open.
 function isOpen(id){
   var m=$(id);
   return !!(m && m.classList && !m.classList.contains('hide'));
@@ -862,9 +846,7 @@ function askOpen(o,cancelValue){
   }
   var m=$("askModal"); if(m&&m.classList) m.classList.remove('hide');
   syncModal();
-  // Adaptive focus: on desktop (pointer: fine), focus the input immediately and select text
-  // so typing and Enter work right away. On mobile/touch, focus the card container so
-  // the virtual keyboard does not jump.
+  // Desktop focuses/selects input; touch focuses the card to avoid opening the keyboard.
   if(text){
     var isDesktop = typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia('(pointer: fine)').matches;
     if(isDesktop && inp && typeof inp.focus === 'function'){
@@ -1338,7 +1320,7 @@ function openFwUpdate(){
     otaPrompting = true; fwFocusId = 'fwCheckBtn';
     if(typeof syncOtaUi === 'function') syncOtaUi();
     return loadOtaChangelog().then(function(notes){
-      return askOtaInstall({ current: curVer, available: ver }, notes);
+      return askOtaInstall({ current: curVer, available: ver, pr: Number(otaPrSelection()), channel: otaChannel }, notes);
     }).then(function(installed){
       if(installed){
         return startOtaUpdate(ver);
@@ -1350,6 +1332,17 @@ function openFwUpdate(){
     }).catch(function(){ otaReset(); });
   }
   return otaCheck();
+}
+
+// Read refusal details under the same deadline as successful start replies.
+function requestOtaStart(url,options){
+  return requestJsonResultWithTimeout(url,options,OTA_HTTP_TIMEOUT_MS).then(function(r){
+    if(!r.ok){
+      var reason=r.json&&typeof r.json.reason==='string'?r.json.reason:'';
+      throw new Error(reason||'HTTP '+r.status);
+    }
+    return r.json;
+  });
 }
 
 function startOtaUpdate(availVer){
@@ -1366,7 +1359,7 @@ function startOtaUpdate(availVer){
   otaInline(otaMiniRing(0, true, 'currentColor') + '<span>starting…</span>', '', 'indet');
   if(typeof syncOtaUi === 'function') syncOtaUi();
   var updatePr=otaPrSelection();
-  return requestJsonWithTimeout('/ota/update'+(updatePr?'?pr='+updatePr:''), { method: 'POST' }, OTA_HTTP_TIMEOUT_MS).then(function(j){
+  return requestOtaStart('/ota/update'+(updatePr?'?pr='+updatePr:''), { method: 'POST' }).then(function(j){
     if(!j || j.result !== true){
       var reason = (j && j.reason) || 'update did not start';
       throw new Error(reason);
@@ -1378,9 +1371,7 @@ function startOtaUpdate(availVer){
 }
 
 function loadOtaChangelog(){
-  // The notes are optional, but the OTA dialog stays locked (otaPrompting) until this settles. So the
-  // deadline must cover the WHOLE exchange — headers AND body: a device that sends the headers and
-  // then stalls would otherwise keep the flow locked until a network error or a page reload.
+  // The notes deadline covers headers and body while the OTA prompt remains locked.
   return timedRequest(function(url,opts){
     return fetch(url,opts).then(function(r){
       if(!r || !r.ok || r.status === 204) return '';
@@ -1497,10 +1488,7 @@ if(typeof document!=='undefined' && typeof document.addEventListener==='function
   if(askIn) askIn.oninput = askValidate;
 }
 
-// The documented `?pr=<N>` page entry point selects a PR preview build for the check and the
-// update. The grammar is the device's own (tk::parse_pr_query): 1-7 digits, no leading zero, and
-// only the FIRST `pr` key counts. Anything else selects the regular channel. Read per call so a
-// navigation is never served from a stale value.
+// Match tk::parse_pr_query: first pr key only, 1–7 digits, no leading zero. Read per call.
 function otaPrSelection(){
   var q=(typeof location!=='undefined'&&typeof location.search==='string')?location.search:'';
   var parts=q.replace(/^\?/,'').split('&');
@@ -1521,7 +1509,7 @@ function otaCheck(){
   otaInline(otaMiniRing(0,true,'currentColor'),'','indet');   // checking — spinning ring only, no label
   var prSel=otaPrSelection();
   var checkUrl='/ota/check?'+(prSel?'pr='+prSel+'&':'')+'ms='+Date.now();
-  return requestJsonWithTimeout(checkUrl,{},OTA_HTTP_TIMEOUT_MS).then(function(j){
+  return requestOtaStart(checkUrl,{}).then(function(j){
     if(!j||j.started!==true) throw new Error((j&&j.reason)||'check did not start');
     return otaCheckPoll();
   }).catch(function(err){ otaFail((err && err.message) || 'check failed'); });
@@ -1609,10 +1597,7 @@ function resumeOta(){
     }
   }).catch(function(){});
 }
-// After "done" the device reboots ~1.2s later. Poll /status in the background and
-// reload only after /status reports the exact target version. We can't rely on seeing the device
-// go down — by the time polling starts it may already be online again — and a different version is
-// not success. Per-request and overall deadlines keep an unreachable device from wedging the UI.
+// After reboot, reload only on the exact target version, within request and overall deadlines.
 function waitReboot(expectedVer){
   if(!otaVersion(expectedVer)){ otaFail('update target version is missing'); return; }
   var started=Date.now();
@@ -1682,9 +1667,7 @@ function syncOtaUi(){
     }
   }
 }
-// Disabling the control that started a check or channel change drops keyboard focus to <body>.
-// Called where a flow ends (otaReset, a refused channel change): with the UI idle and no dialog up,
-// put focus back where the user was.
+// Restore the initiating control's focus after the OTA flow becomes idle.
 function fwRefocus(){
   var id = fwFocusId;
   if(!id || isOtaFlowBusy() || isOpen('askModal') || isOpen('otaModal') || isOpen('chanModal')) return;

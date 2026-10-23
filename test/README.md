@@ -31,10 +31,35 @@ faults. Pure clock/window/parser/checkpoint decisions and key-date stamp-or-reti
 registered logic ownership; the latter also runs through the real NVS adapter fault matrix. These
 checks do not emulate SDK timekeeping, flash durability, RTC behavior, NTP networking or hardware.
 
-`config_commit_tests` compiles the shipped request lease, raw-state/confirmation functions and
-setup portal, plus unmodified pinned SDK CRC/query fragments through an explicit passive type/I/O
-bridge. It exercises five occupied owners, raw NEW/PENDING/VALID/UNDEFINED, blank/CRC/query errors,
-refused/uncertain/confirmed marks, diagnostic throws, portal outer catches and partial replies.
+Native runtime tests compile the actual `SemGuard`, `InFlightGuard` and stack-watch shell. They
+check normal/standard/unknown-exception unwinding, failed acquisition, independent sampled slots,
+monotonic minimum retention and visible zero through passive semaphore/high-water-mark doubles.
+These tests do not measure physical task margins or prove scheduler/RTOS timing.
+
+The real-library harness also runs `test_dependency_guards.py` over the exact patched Peer
+decrypt body and pinned logging macros/formatter. Synthetic PSA drivers write before returning
+update/verify errors with zero reported length; capacity and guard-byte checks reject partial or
+removed wipes while preserving successful output. INFO retains ERROR/WARN/INFO and avoids
+DEBUG/VERBOSE formatting and argument evaluation; default/debug-enabled controls fail this oracle.
+Linux repeats these probes with ASan/UBSan/LSan. This is driver-failure modeling, separate from
+the real V1 crypto vectors, ESP-driver behavior and physical key/session preservation.
+The runtime source contract pins the 2 KiB shell cap, reviewed vehicle-task allocation, leaf-helper
+logging exclusions, lexical Vehicle-lock/wait scopes, and generation/command-owned completion
+branches. Mutation canaries test each seam; this is not a general C++ dataflow or interleaving proof.
+
+Iteration-fault tests simulate 15 minutes at vehicle/display error cadences, including alternating
+successful iterations. The shipped sink helper runs against throwing/passive sinks; source controls
+bind all three catches to task-owned state and a 64-bit monotonic clock. This does not induce a
+firmware exception or exercise the physical scheduler and logging transport.
+
+`config_commit_tests` compiles the shipped request and health-commit leases, shared runtime sampler,
+raw-state/config confirmation, full timed health task and setup portal, plus unmodified pinned SDK
+CRC/query fragments through an explicit passive type/I/O bridge. It exercises five occupied owners,
+raw NEW/PENDING/VALID/UNDEFINED, blank/CRC/query errors, timed Wait/Stop/GiveUp, fresh post-owner
+refusals, returned/exceptional SDK effects, cache-before-diagnostic ordering, portal outer catches
+and partial replies. Controlled timers and task-deletion doubles bound these scenarios; neither
+executes the physical scheduler. Pure sampler tests check reader order, short circuits and heap
+boundaries; the configuration path keeps its existing offline confirmation policy.
 Locked-cJSON tests run actual HTTP handlers across matching/different WiFi submissions and preserve
 known image results in normal/degraded responses. The C and C++ objects both run under Linux
 sanitizers. The fixture is bound to the toolchain-file hash; a migration requires a fresh SDK review.
@@ -92,9 +117,10 @@ behavior claims. Mirrored C++/Python/JS presenters need parity checks, not merel
 
 | Area | Evidence |
 |---|---|
+| Optional status LED | `test_logic.cpp` tests charge/link/SafeMode priorities, repeated error/warning holds, animation bounds, dimming and APA102 bytes; `test_led_driver_contract.py` compiles actual GPIO/task/OTA-state bodies against passive doubles and checks 256 GPIO frames, 20 OTA-state cases and 16 first task frames, including recovery on/off/on phases with controlled timers, vehicle/session probes forbidden and no OTA status read. It also executes the real CI selection branch with a compiler stub. Linux runs the native probe with sanitizers. `ci-build-all.sh` also builds an isolated enabled S3 variant after its primary gates; physical LED timing/brightness and task margins remain hardware evidence. |
 | Decisions/state machines | `test_logic.cpp`: VIN/identity, units, link/sleep, active window/wake retry, automatic same-key enrollment cadence/admission, commands, OTA versions/intake, config/storage, watchdog, admission, asynchronous generations, presenters |
 | Real tesla-ble/PSA seam | `scripts/test-tesla-ble-harness.sh --require-all`: pinned library/patches, Nanopb and pinned Mbed TLS4/TF-PSA-Crypto; production frame/key helpers, compiled native CarServer response and identity-cleanup methods, and V1 crypto vectors |
-| Presenter mirrors | `check-display-sim-parity.sh`, `check-ble-row-parity.sh`: golden C++ decisions against simulator and shipped JavaScript |
+| Presenter mirrors | `check-display-sim-parity.sh`: all 18 native model fields over 14,114 cases, 98 glyph/bitmap records, generated-font provenance, 840 actual native text-primitive pixel/width cases, 820 actual assembly/layout cases with passive drawing/cache doubles, and malformed/empty-golden controls; layout probes check WiFi/LAN search and SafeMode labels as well as signal consumers. `check-ble-row-parity.sh`: actual shipped JavaScript against native BLE/SoC/RSSI rules. Neither proves complete-frame pixel/animation equality, glyph legibility or physical panels. Linux sanitizers also execute the two native display probes. |
 | Public protocol vectors | `tesla_protocol_vectors.test.mjs`: VIN, ECDH/HMAC/AES-GCM and patch contracts, public test keys only |
 | External JSON contract | Golden status output, command registry/bounds, MQTT registry/fields/presence and exact MCP IDs |
 
@@ -143,12 +169,22 @@ stamp and ten-minute no-resend controls. They do not establish physical wake or 
 
 ## Beyond the pure-logic binary
 
+The effect/reply suite compiles the actual REST VIN matcher and command handler. It checks exact
+case-sensitive configured-VIN acceptance, null/mismatched VIN refusal, and `404` before dispatch.
+VIN tokenization is a passive fixture here; these cases do not validate the real URI parser or
+contact a vehicle.
+
 Provisioning fixtures derive their wrapper and field keys from the actual straight-line
 `http_common.cpp` `make_response` producer and fail closed if its shape changes. LAN WiFi/VIN
 successes must read the nested boolean; refusals, misleading flat success and wrong-typed values
 never trigger a second request. Success output distinguishes accepted configuration from an
 immediate reboot and does not claim a changed VIN preserves pairing. These tests mock HTTP
 and perform no provisioning or NVS writes.
+
+The BLE/browser parity gate also compares the actual web SoC function, rendered RSSI glyph counts
+and warning constant with native helpers: all integer SoC values, clamp cases, signed-byte RSSI
+and integer extrema. It preserves float32 intermediates and native rounding ties. Hero tests pin
+both consumers of the warning threshold. It does not measure physical display pixels or live RSSI.
 
 The mock runner compiles the locked cJSON intake/OOM matrix when Python is available; strict
 mode requires it. A cold cache needs network access to the Espressif registry and archive host.
@@ -183,14 +219,15 @@ WiFi-driver callback framing, a physical exported log or complete sanitation.
 | `test_diagnostic_export_guidance.py` | Actual bug-form diagnostic description, owned export URL, manual/serial sanitation and nine negative wording mutations |
 | HTTP security contract and UI request tests | Actual POST gate ordering, bounded provenance headers, socket/live-mDNS ownership, diagnostic Host checks, redaction selectors, exact UI proof header, no CORS grant and both anti-framing headers; 16 source mutations must fail. IPv6 enablement is rejected; these checks do not establish live network/browser attack behavior. |
 | `test_runtime_boundary_contract.py` | Shipped CMake source closure and actual task/callback registration; contained or mechanically bounded C boundaries; fixed mailbox/completion ownership, no forbidden work under locks, production JSON/OTA/MQTT wiring and closed source/flag surface |
+| `test_patch_incremental.py` | Shipped CMake admission block and unchanged validator functions with synthetic digest constants; ordinary incremental input/inventory changes stop before the forced compiler, while valid revalidation proceeds. Does not compile tesla-ble or establish real dependency bytes. |
 | `run-cjson-oom-tests.sh` | Rehashed pinned cJSON; real producers/parser, every allocation failpoint, exact IDs, ownership and early input release. Effect-aware reply renderer and extracted real handlers/outer catch exercise degraded outcomes, clock-plus-refused-OTA, typed identity recovery, original restart admission and terminal transport failures. |
-| `run-mqtt-json-publish-tests.sh` | Every production discovery/state factory, full/minimal branches and all registry rows; build/print/publish faults cannot replace retained data and rearm discovery |
+| `run-mqtt-json-publish-tests.sh` | Every production discovery/state factory, full/minimal branches and all registry rows; build/print/publish faults cannot replace retained data and rearm discovery. Extracted real discovery rounds refresh the configuration address without changing identity/state topics; missing/racing/failed address reads omit it. Network and broker adapters remain passive. |
 | `scripts/check-nvs-contract.py` | Exact registered namespace/key/API/owner/retention/secrecy surface, session aliases and direct NVS calls; wrong-name/API/collision/missing-record mutations |
 | `scripts/repo-lint.sh` | Syntax/local links, workflow-policy and host-gate mutation canaries, logic ownership and protocol wiring |
 | `tools/agent-config/selftest.sh` / `test_codex_setup.py` | Canonical skills/reviewers/hooks, native adapter parity/trust boundaries, read-only scopes, owner contracts, exact content and approval/artifact canaries |
-| `scripts/test-build-contracts.sh` | Targets, pins, partitions, generated artifacts, size/stack/effective-build and publication contracts; no real signing key |
+| `scripts/test-build-contracts.sh` | Targets, pins, partitions, generated artifacts, size/stack/effective-build and publication contracts; validator self-tests isolate offsets, digest syntax, unsigned-prefix/size reuse, production pins, signed padding/image binding and complete Release/Pages bytes with deterministic disposable fixtures. Pages controls cover build-state/CLI consumption, bounded backoff beyond 50 seconds, delayed size/hash/404 failures for each of 16 parts, independent complete retries, bounded persistent failures, separate manifest/Release-byte delegation and immutable-input rejection before polling; no real signing key |
 | `scripts/test-pr-gates.sh` | Exact-head review records, relevance and canonical Git command boundaries using fixtures |
-| `web_ui_browser_gate.py` / `test_web_ui_browser_gate.py` | Linux-only browser launch policy plus the actual assembled page in Chrome/Chromium: console/request failures, degraded poller, escaping, keyboard/accessibility and desktop/mobile layout |
+| `web_ui_browser_gate.py` / `test_web_ui_browser_gate.py` | Linux-only browser launch policy plus the actual assembled page in Chrome/Chromium: console/request failures, degraded poller, escaping, DOM focus, actual CSS focus/hover rules under deterministic pseudo-state emulation, computed unfiltered control/icon contrast in light/dark themes, and desktop/mobile layout |
 
 Automatic browser processes run only on Linux. macOS is refused before binary lookup or process
 creation, including an explicit `BROWSER_BIN`. Optional local mode reports a skip; `--require-all`
@@ -215,6 +252,12 @@ latch. A separately named shell injection throws after a real handler response t
 actual outer catch. These tests do not claim a C IDF function throws. Browser/CLI regressions keep
 received uncertainty visible and forbid automatic follow-up mutations on a degraded channel reply.
 
+`test_ota_admission.cpp` compiles the extracted production OTA start/cache functions in the runtime
+boundary target. Passive SDK/task counters cover busy owners, pending and unknown image states,
+unavailable locking, task/publication failure cleanup, and fresh admission despite a stale cache.
+They never execute an OTA worker. Effect-reply tests separately exercise all typed HTTP outcomes
+and preserve an earlier clock effect when OTA is definitely refused.
+
 Host stubs do not exercise actual esp_http_server, NimBLE, flash/NVS, device scheduling, OTA rollback
 or the car. Pinned cJSON tests use real emitters but deterministic transport/publish seams.
 Four-target IDF build, disposable signing, remote CI, bench/USB, OTA and vehicle E2E are separate
@@ -238,3 +281,26 @@ policy margins, not hardware-derived alarm thresholds.
 5. Update the owning documentation and [feature catalog](../docs/FEATURES.md) for a changed contract.
 
 Use `$add-logic-test` for the detailed workflow. Integration-shell changes still need pinned IDF.
+
+The runtime boundary binary also compiles the shipped background-enqueue method with the real
+bounded command runner. A staged foreground-start interleaving must leave its queue and builders
+untouched; accepted polls retain read-only, no-wake admission. Passive clock/identity inputs do not
+exercise FreeRTOS scheduling, BLE transmission or hardware.
+
+`test_bootloader_preflight.py` executes the shared compatibility CLI and the shipped flash guard
+against passive esptool metadata/write adapters for all four targets. Older, unknown, unreadable
+or wrong-chip metadata must stop before a stubbed write. Consumer-omission controls pin the local,
+preview, ship and recovery paths. These tests do not inspect a board, validate a signature or prove
+that a collected bootloader belongs to the chosen port; the delivery plan owns that binding.
+Descriptorless-reference cases copy the actual checker and use explicitly synthetic catalog
+digests. Exact image/full-region positives and byte, padding, provenance-shape and downgrade
+negatives exercise CLI admission. Real catalog bytes require separate provenance verification;
+fixture success does not establish it. See [reference maintenance](../docs/DEVELOPMENT.md#retained-bootloader-references).
+
+The runtime source contract pins the shipped OTA download chain: fresh manifest precheck,
+bounded image-descriptor versions, channel eligibility and exact manifest/image equality precede
+bulk download; the abort owner is released only to finish, and reboot requires a successful,
+complete finish. Mutation controls include removal of the manifest/image check. This is source
+integration evidence, not execution of ESP-IDF's TLS, flash writer or rollback machinery.
+Both configurable OTA URLs have unconditional compile-time HTTPS assertions tied to the
+host-tested scheme predicate. The predicate does not validate a complete URL or TLS peer.

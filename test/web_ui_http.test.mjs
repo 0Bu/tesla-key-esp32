@@ -2291,7 +2291,7 @@ test("hero vehicle actions are not blocked by a firmware check or channel change
   context.otaPhase = "update";
 });
 
-test("desktop and mobile layout styles maintain 1/3-2/3 proportions and heroCardTap behavior", () => {
+test("desktop and mobile layout styles retain proportions and only the gauge button dispatches", () => {
   const css = fs.readFileSync(new URL("../main/www/style.css", import.meta.url), "utf8");
   // Proportions: 1/3 to 2/3 desktop grid with stretch align and height 100%
   assert.match(css, /grid-template-columns:\s*380px\s+minmax\(0,\s*1fr\)/);
@@ -2303,26 +2303,19 @@ test("desktop and mobile layout styles maintain 1/3-2/3 proportions and heroCard
   // Full text wrapping without ellipsis in hero subtext
   assert.match(css, /\.hsub\s*\{[^}]*white-space:\s*normal;\s*overflow-wrap:\s*break-word/);
 
-  // heroCardTap behavior on mobile vs desktop
-  const { context } = loadUi();
-  let heroCalls = 0;
-  context.heroActFn = () => { heroCalls++; };
-  context.window.innerWidth = 400;
+  const html = fs.readFileSync(new URL("../main/www/index.html", import.meta.url), "utf8");
+  const heroTag = html.match(/<section[^>]*id="hero"[^>]*>/)[0];
+  assert.doesNotMatch(heroTag, /onclick=|role="button"|tabindex=/);
+  const { context, element } = loadUi();
+  context.render({paired: true, key_present: true, vin: "5YJ3E1EB8NF123456", link: "asleep"});
+  assert.match(element("hicon").innerHTML, /<button[^>]*onclick="heroTap\(\)"[^>]*aria-label="Wake the car/);
+  let calls = 0;
+  context.heroActFn = () => { calls++; };
+  context.heroTap();
+  assert.equal(calls, 1);
+  assert.equal(context.heroCardTap, undefined);
+  assert.doesNotMatch(css, /\.hero\.has-act/);
 
-  // Click on card directly
-  context.heroCardTap({ target: {} });
-  assert.equal(heroCalls, 1, "tapping hero card on mobile triggers hero action");
-
-  // Click on inner button should be ignored by heroCardTap (handled by button onclick)
-  context.heroCardTap({
-    target: { closest: (sel) => sel.includes("button") ? {} : null }
-  });
-  assert.equal(heroCalls, 1, "tapping inner button in card does not double-trigger action");
-
-  // Desktop (> 860px) should not trigger action from card body tap
-  context.window.innerWidth = 1024;
-  context.heroCardTap({ target: {} });
-  assert.equal(heroCalls, 1, "tapping hero card on desktop does not trigger action");
 });
 
 test("num() keeps absent readings absent instead of turning them into 0", () => {
@@ -2500,6 +2493,115 @@ test("uncertain OTA starts preserve their reason and never start polling or retr
   }
 });
 
+test("OTA start refusals retain device reasons without polling or retrying", async () => {
+  for (const action of ['otaCheck','startOtaUpdate']) {
+    for (const status of [409,500,503]) {
+      const {context,element}=loadUi(); const calls=[];
+      const reason='running firmware is still pending verification <&>';
+      context.fetch=async (url,options)=>{
+        calls.push({url,options});
+        return {ok:false,status,async json(){return {result:false,started:false,reason};}};
+      };
+      await context[action]();
+      assert.equal(calls.length,1);
+      assert.equal(calls[0].options.headers['X-Requested-With'],'XMLHttpRequest');
+      assert.match(element('otaStat').innerHTML,/pending verification &lt;&amp;&gt;/);
+      assert.equal(context.otaBusy,false);
+    }
+    for (const body of [null,{reason:42},'unreadable']) {
+      const {context,element}=loadUi(); const calls=[];
+      context.fetch=async (url)=>{ calls.push(url); return {ok:false,status:503,async json(){
+        if(body==='unreadable') throw new Error('invalid JSON'); return body;
+      }}; };
+      await context[action]();
+      assert.equal(calls.length,1);
+      assert.match(element('otaStat').innerHTML,/HTTP 503/);
+    }
+  }
+});
+
+test("reopening an available PR update retains its preview badge", async () => {
+  for (const [search,label] of [
+    ['?pr=42','PR preview #42'], ['?x=1&pr=42','PR preview #42'],
+    ['?pr=42&pr=garbage','PR preview #42'], ['?pr=42junk','Release'],
+    ['?pr=042','Release'], ['?pr=0','Release'], ['?pr=garbage&pr=42','Release'],
+    ['?xpr=42','Release'], ['?pr=12345678','Release'],
+  ]) {
+    const {context,element}=loadUi();
+    context.location.search=search; context.otaAvail=label==='Release'?'1.6.0':'1.6.0-PR-42';
+    context.fetch=async()=>({ok:false,status:409,async json(){return {result:false,reason:'still pending verification'};}});
+    await context.startOtaUpdate(context.otaAvail);
+    assert.equal(context.otaBusy,false);
+    context.fetch=async()=>({ok:true,status:200,async text(){return 'Preview change';}});
+    const opened=context.openFwUpdate();
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(element('otaChannel').textContent,label,search);
+    context.closeOtaModal(false); await opened;
+  }
+});
+
+test("OTA refusal bodies share the start deadline and cannot leave the UI locked", async () => {
+  for (const action of ['otaCheck','startOtaUpdate']) {
+    const {context,element}=loadUi(); let expire,body=false,aborted=false,calls=0;
+    context.AbortController=class {constructor(){this.signal={};} abort(){aborted=true;}};
+    context.setTimeout=(callback,ms)=>{if(ms===context.OTA_HTTP_TIMEOUT_MS) expire=callback; return 1;};
+    context.fetch=async()=>{++calls;return {ok:false,status:409,json(){body=true;return new Promise(()=>{});}};};
+    const pending=context[action](); await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(body,true); assert.equal(typeof expire,'function');
+    expire(); await pending;
+    assert.equal(aborted,true); assert.equal(calls,1); assert.equal(context.otaBusy,false);
+    assert.match(element('otaStat').innerHTML,/request timed out/);
+  }
+});
+
+test("ordinary HTTP 502 charging uncertainty preserves its reason without retrying", async () => {
+  for (const status of ["Stopped", "Charging"]) {
+    for (const cause of ["vehicle not reachable", "response timed out", "unreachable", "already_set"]) {
+      const { context } = loadUi();
+      const calls = [], messages = [];
+      const reason = "command outcome unknown; command may have executed; " + cause;
+      context.state = { vin: "TESTVIN0000000001", vehicle: { status, soc: 40 } };
+      context.poll = () => {};
+      context.toast = (message, kind) => messages.push({ message, kind });
+      context.fetch = async (url, options) => {
+        calls.push({ url, options });
+        return { ok: false, status: 502, async json() {
+          return { response: { result: false, reason } };
+        } };
+      };
+      await context.toggleCharge();
+      assert.equal(calls.length, 1, "an uncertain result must not resend a charging command");
+      assert.match(calls[0].url, status === "Charging" ? /command\/charge_stop$/ : /command\/charge_start$/);
+      assert.equal(messages.at(-1).message, reason);
+      assert.equal(messages.at(-1).kind, "err");
+      assert.equal(context.chgBusy, false);
+    }
+  }
+});
+
+test("ordinary HTTP 502 definite charging failures retain their existing presentation", async () => {
+  for (const [reason, message, kind] of [
+    ["vehicle not reachable", "Car not reachable — is it in range?", "err"],
+    ["already_set", "Setting already active on vehicle", "info"],
+    ["complete", "Charging is already complete", "info"],
+  ]) {
+    const { context } = loadUi();
+    const messages = [], calls = [];
+    context.state = { vin: "TESTVIN0000000001", vehicle: { status: "Stopped", soc: 40 } };
+    context.poll = () => {};
+    context.toast = (text, type) => messages.push({ text, type });
+    context.fetch = async (url) => {
+      calls.push(url);
+      return { ok: false, status: 502, async json() {
+        return { response: { result: false, reason } };
+      } };
+    };
+    await context.toggleCharge();
+    assert.equal(calls.length, 1);
+    assert.deepEqual(messages.at(-1), { text: message, type: kind });
+  }
+});
+
 test("degraded command outcomes are not rewritten as vehicle success or range failure", async () => {
   for (const action of ['toggleCharge','wakeCar','genKey']) {
     const {context}=loadUi(); const messages=[],calls=[];
@@ -2567,5 +2669,79 @@ test("config saves preserve server firmware-verification reasons without retry",
     assert.equal(messages.at(-1).message, reason);
     assert.equal(messages.at(-1).kind, "info");
     assert.equal(calls.length, 1);
+  }
+});
+
+
+test("failed and stalled status polls label cached values and recover without overlapping requests", async () => {
+  const { context, element } = loadUi();
+  const frame = {paired: true, key_present: true, vin: "5YJ3E1EB8NF123456", vehicle: {status: "Idle", soc: 64}};
+  context.render(frame);
+  const oldGauge = element("hicon").innerHTML;
+  context.fetch = async () => { throw new TypeError("offline"); };
+  await context.poll();
+  assert.equal(context.feedOk, false);
+  assert.equal(element("feedStatus").classList.contains("hide"), false);
+  assert.match(element("feedStatus").textContent, /unavailable.*last received/i);
+  assert.equal(element("hicon").innerHTML, oldGauge);
+  let requests = 0, deadline;
+  context.setTimeout = fn => { deadline = fn; return 1; };
+  context.fetch = async () => { requests++; return new Promise(() => {}); };
+  const first = context.poll();
+  assert.equal(context.poll(), first);
+  assert.equal(requests, 1);
+  deadline();
+  await first;
+  assert.equal(context.feedOk, false);
+  assert.equal(context.statusPoll, null);
+  context.fetch = async () => ({ok: true, json: async () => frame});
+  await context.poll();
+  assert.equal(context.feedOk, true);
+  assert.equal(element("feedStatus").classList.contains("hide"), true);
+});
+
+test("cached battery and elapsed fields reject nonnumeric values and preserve zero", () => {
+  const {context} = loadUi();
+  for(const value of [null, undefined, "", " ", "no", NaN, Infinity, {}, [], true, false]) {
+    const result = context.lastChips({last: {usable_soc: value, soc: value}, last_seen_s: value});
+    assert.equal(result.soc, null, String(value));
+    assert.equal(result.html, "", String(value));
+  }
+  assert.equal(context.lastChips({last: {usable_soc: "bad", soc: 0}, last_seen_s: 0}).soc, 0);
+  assert.equal(context.lastChips({last: {soc: "64.6"}}).soc, 65);
+  assert.equal(context.lastChips({last: {soc: 200}}).soc, 100);
+  assert.equal(context.lastChips({last: {soc: -9}}).soc, 0);
+});
+
+
+test("terminal runtime and cached key recovery reasons replace automatic-pairing optimism", () => {
+  const {context, element} = loadUi();
+  const base = {paired: true, key_present: true, vin: "5YJ3E1EB8NF123456", reauth: true,
+                vehicle: {status: "Charging", soc: 70}};
+  context.render({...base, sys: {runtime_state: "fatal"}});
+  assert.match(element("hlabel").innerHTML, /Device recovery required/);
+  assert.equal(context.heroActFn, null);
+  assert.doesNotMatch(element("hicon").innerHTML, /onclick=/);
+  for(const reason of ["key_reload_required", "key_runtime_mismatch", "vin_transition_pending",
+                       "key_cleanup_pending", "key_storage_unavailable"]) {
+    context.render({...base, pairing_blocked: reason});
+    assert.match(element("hlabel").innerHTML, /Pairing paused/);
+    assert.equal(context.heroActFn, null);
+    assert.doesNotMatch(element("hsub").textContent, /sent automatically|Reconnecting automatically/);
+  }
+  context.render({...base, paired: false, reauth: false, vehicle: null, ble: {connected: true}});
+  assert.match(element("hsub").textContent, /key is sent automatically/);
+});
+
+
+test("both hero failure branches consume the parity-checked warning threshold", () => {
+  for (const paired of [false,true]) {
+    const {context,element}=loadUi();
+    context.BLE_CONNECT_FAIL_WARN=7;
+    for(const failures of [6,7]){
+      context.render({paired,key_present:true,vin:"5YJ3E1EA7KF000316",link:"unreachable",
+                      ble:{connected:false,connect_fail:failures,devices:[]}});
+      assert.equal(/Connection failed/.test(element("hlabel").innerHTML),failures===7);
+    }
   }
 });

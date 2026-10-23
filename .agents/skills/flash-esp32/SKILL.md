@@ -31,6 +31,16 @@ Build with the pinned Docker wrapper; USB delivery runs on the host. Compile is 
 flash approval. [Development](../../../docs/DEVELOPMENT.md#delivery) owns the shared build/delivery
 contract; the exact artifact/key/port checks below remain mandatory.
 
+Every app-only path below retains the installed bootloader. Before its write, collect a fresh
+`BOOT_IMAGE` for the explicitly identified board using the
+[retained-bootloader preflight](../usb-recovery/SKILL.md#retained-bootloader-compatibility).
+The read must be in the approved target/port plan, with the project layout established first;
+keep the collected file local. For a local build set `APP="$SIGNED_APP"` for that preflight;
+leave `BOOTLOADER` unset because these paths do not replace it. Descriptorless images need the
+shared preflight's exact reviewed reference match. Unknown/unreadable metadata,
+a wrong chip or an older-IDF app stops before writing; broader recovery needs separate scope.
+The checks below repeat the shared offline comparison against those collected bytes.
+
 ## Local tree: compile first; signing is an explicit flash gate
 
 Run from the **repo root** (where `CMakeLists.txt` lives). This command deliberately stops after
@@ -107,6 +117,7 @@ case "$CHIP_RAW" in ESP32-S3*) DETECTED=esp32s3 ;; ESP32-C3*) DETECTED=esp32c3 ;
 [ "$DETECTED" = "$TARGET" ] || {
   echo "REFUSING: selected port is $DETECTED, requested target is $TARGET" >&2; exit 1;
 }
+python3 scripts/check-bootloader-compat.py --target "$TARGET" --bootloader "${BOOT_IMAGE:?collect the retained bootloader for this board first}" --app "$SIGNED_APP"
 if ! esptool --chip "$TARGET" -p "$PORT" -b 460800 --before default-reset --after no-reset \
     write-flash 0x20000 "$SIGNED_APP"; then
   echo "REFUSING: signed app write failed; otadata was not activated" >&2; exit 1
@@ -234,6 +245,7 @@ case "$CHIP_RAW" in ESP32-S3*) DETECTED=esp32s3 ;; ESP32-C3*) DETECTED=esp32c3 ;
   echo "REFUSING: selected port is $DETECTED, requested target is $TARGET" >&2; exit 1;
 }
 esptool image-info "$APP" || exit 1
+python3 scripts/check-bootloader-compat.py --target "$TARGET" --bootloader "${BOOT_IMAGE:?collect the retained bootloader for this board first}" --app "$APP"
 if ! esptool --chip "$TARGET" -p "$PORT" -b 460800 --before default-reset --after no-reset \
     write-flash 0x20000 "$APP"; then
   echo "REFUSING: signed preview app write failed; otadata was not activated" >&2; exit 1

@@ -47,13 +47,15 @@ static const char*       TAG       = "diag_log";
 // atomic (not volatile): written by the /diag HTTP handler, read by the capture hook on
 // whichever task logged the line. A cross-task scalar — atomic gives it a defined value.
 static std::atomic<bool> s_verbose{false};
+static std::atomic<uint32_t> s_dropped_lines{0};  // boot counter, wraps modulo 2^32
 
 static void diag_append_(const char* data, size_t len) {
     const auto mtx = s_mtx.load(std::memory_order_acquire);
-    if (!mtx || len == 0) return;
+    if (len == 0) return;
+    if (!mtx) { s_dropped_lines.fetch_add(1, std::memory_order_relaxed); return; }
     const size_t library_end = tk::diag_library_capture_content_end({data, len});
-    tk::SemGuard g(mtx, pdMS_TO_TICKS(20));  // bounded: never stall the logging task
-    if (!g) return;
+    tk::SemGuard g(mtx, 0);  // capture is best-effort; never wait in a producer's log callback
+    if (!g) { s_dropped_lines.fetch_add(1, std::memory_order_relaxed); return; }
     for (size_t i = 0; i < len; i++) {
         s_buf[s_head++] = tk::diag_capture_byte(data[i], i, library_end);
         ++s_written;
@@ -103,6 +105,10 @@ static int diag_vprintf_(const char* fmt, va_list ap) {
     }
     const auto previous = s_prev.load(std::memory_order_acquire);
     return previous ? previous(fmt, ap) : vprintf(fmt, ap);
+}
+
+uint32_t diag_log_dropped_lines() noexcept {
+    return s_dropped_lines.load(std::memory_order_relaxed);
 }
 
 void diag_log_init() {

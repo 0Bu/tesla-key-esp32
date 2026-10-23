@@ -41,6 +41,7 @@ static const char* TAG = "ota";
 // fault restart owns FaultRestart from before reboot_why is persisted until restart (or releases
 // it when persistence fails).
 static tk::OtaIdentityOperationGate s_operation_gate;
+static std::atomic<tk::OtaVerificationState> s_verification{tk::OtaVerificationState::Unknown};
 
 static bool try_begin_ota_operation() {
     return s_operation_gate.try_begin(tk::OtaIdentityGateState::Ota);
@@ -137,6 +138,15 @@ bool OtaConfigRestartGuard::owns_gate() const noexcept {
     return held_ && s_operation_gate.state() == tk::OtaIdentityGateState::ConfigRestart;
 }
 
+tk::RuntimeHealthSample ota_runtime_health() {
+    return tk::sample_runtime_health(
+        [] { return tk::runtime_admission_vehicle_ready(); },
+        [] { return ble_host_synced(); },
+        [] { return ble_host_reset_count(); },
+        [] { return heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL); },
+        tk::kHeapCriticalBytes);
+}
+
 tk::ConfigImageResult ota_config_image_state(const OtaConfigRestartGuard& owner) noexcept {
     using Result = tk::ConfigImageResult;
     if (!owner.owns_gate()) return Result::WrongOwner;
@@ -163,15 +173,15 @@ tk::ConfigImageResult ota_confirm_pending_image(
     Result result = ota_config_image_state(owner);
     if (result != Result::Pending) return result;
     try {
-        if (!tk::runtime_admission_vehicle_ready()) return Result::NotReady;
-        if (!ble_host_synced()) return Result::HostUnsynced;
-        if (ble_host_reset_count() != 0) return Result::HostReset;
-        const size_t commit_largest = heap_caps_get_largest_free_block(
-            MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
-        if (commit_largest < tk::kHeapCriticalBytes) return Result::CriticalHeap;
+        const auto health = ota_runtime_health();
+        result = tk::config_health_failure(health.failure);
+        if (result != Result::None) return result;
         result = Result::MarkUnknown;
         if (esp_ota_mark_app_valid_cancel_rollback() == ESP_OK) {
             result = Result::Confirmed;
+        }
+        ota_refresh_verification_cache();
+        if (result == Result::Confirmed) {
             ESP_LOGI(TAG, "OTA image confirmed before user configuration restart");
         }
     } catch (...) {
@@ -202,6 +212,10 @@ tk::ConfigImageResult ota_confirm_pending_image(
 #endif
 static_assert(std::string_view{TESLA_OTA_IMG_SUFFIX} == tk::image_suffix(TK_TARGET),
               "OTA image suffix macro drifted from tk::image_suffix()");
+static_assert(tk::ota_https_url(CONFIG_TESLA_OTA_MANIFEST_URL),
+              "OTA manifest URL must use HTTPS");
+static_assert(tk::ota_https_url(CONFIG_TESLA_OTA_FIRMWARE_BASE_URL),
+              "OTA firmware base URL must use HTTPS");
 
 // ─── Shared status (written by the OTA task, read by HTTP handlers) ────────────
 
@@ -254,6 +268,17 @@ static SemaphoreHandle_t ensure_lock() {
     return candidate;
 }
 
+tk::OtaVerificationState ota_cached_verification_state() noexcept {
+    return s_verification.load(std::memory_order_acquire);
+}
+
+tk::OtaVerificationState ota_refresh_verification_cache() noexcept {
+    tk::OtaVerificationState state = tk::OtaVerificationState::Unknown;
+    try { state = ota_verification_state(); } catch (...) {}
+    s_verification.store(state, std::memory_order_release);
+    return state;
+}
+
 static void set_state(OtaState st, int pct, const char* msg) {
     std::array<char, kOtaStatusMessageCapacity> message{};
     copy_status_text(message, msg);
@@ -282,6 +307,14 @@ tk::OtaChannel ota_get_channel() {
 
 void ota_set_channel(tk::OtaChannel channel) {
     s_ota_channel.store(channel, std::memory_order_release);
+}
+
+OtaState ota_get_state() {
+    SemaphoreHandle_t lock = ensure_lock();
+    if (!lock) return OtaState::Error;
+    tk::SemGuard guard(lock);
+    if (!guard) return OtaState::Error;
+    return s_status.state;
 }
 
 OtaStatus ota_get_status() {
@@ -583,14 +616,15 @@ static void ota_check_task(void* pvParameters) {
     }
 }
 
-bool ota_check_start(unsigned pr_number) {
-    if (!ensure_lock()) return false;
+tk::OtaStartResult ota_check_start(unsigned pr_number) {
+    using Result = tk::OtaStartResult;
+    if (!ensure_lock()) return Result::Unavailable;
     // Acquire the cross-domain gate before publishing/starting the worker. This atomically loses
     // to an in-flight key/VIN transaction instead of sampling a separate busy flag and racing it.
-    if (!try_begin_ota_operation()) return false;
+    if (!try_begin_ota_operation()) return Result::Busy;
     if (s_running.exchange(true, std::memory_order_acq_rel)) {
         finish_operation(tk::OtaIdentityGateState::Ota);
-        return false;
+        return Result::Busy;
     }
     s_target_pr.store(pr_number, std::memory_order_release);
     try {
@@ -598,19 +632,19 @@ bool ota_check_start(unsigned pr_number) {
     } catch (...) {
         s_running.store(false, std::memory_order_release);
         finish_operation(tk::OtaIdentityGateState::Ota);
-        return false;
+        return Result::InternalError;
     }
 
     // mbedTLS handshake + manifest fetch run here; same generous stack as ota_task.
     if (xTaskCreate(ota_check_task, "ota_chk", 8192,
                     reinterpret_cast<void*>(static_cast<uintptr_t>(pr_number)),
                     tk::kPrioOtaCheck, nullptr) != pdPASS) {
+        set_check_error("could not start check task");
         s_running.store(false, std::memory_order_release);
         finish_operation(tk::OtaIdentityGateState::Ota);
-        set_check_error("could not start check task");
-        return false;
+        return Result::InternalError;
     }
-    return true;
+    return Result::Started;
 }
 
 // ─── Background download + install ──────────────────────────────────────────────
@@ -804,15 +838,22 @@ static void ota_task(void* pvParameters) {
     }
 }
 
-bool ota_start(unsigned pr_number) {
-    if (!ensure_lock()) return false;
+tk::OtaStartResult ota_start(unsigned pr_number) {
+    using Result = tk::OtaStartResult;
+    if (!ensure_lock()) return Result::Unavailable;
     // The same owner word excludes both a second OTA and every identity transaction. On a
     // successful install it remains owned until esp_restart(); on every returning path the task
     // releases it below.
-    if (!try_begin_ota_operation()) return false;
+    if (!try_begin_ota_operation()) return Result::Busy;
+    const auto verification = ota_refresh_verification_cache();
+    if (verification != tk::OtaVerificationState::Stable) {
+        finish_operation(tk::OtaIdentityGateState::Ota);
+        return verification == tk::OtaVerificationState::PendingVerify
+            ? Result::PendingVerification : Result::Unavailable;
+    }
     if (s_running.exchange(true, std::memory_order_acq_rel)) {
         finish_operation(tk::OtaIdentityGateState::Ota);
-        return false;
+        return Result::Busy;
     }
     s_updating.store(true, std::memory_order_release);
     s_target_pr.store(pr_number, std::memory_order_release);
@@ -822,18 +863,18 @@ bool ota_start(unsigned pr_number) {
         s_updating.store(false, std::memory_order_release);
         s_running.store(false, std::memory_order_release);
         finish_operation(tk::OtaIdentityGateState::Ota);
-        return false;
+        return Result::InternalError;
     }
 
     // A generous stack: mbedTLS record processing + esp_https_ota run here.
     if (xTaskCreate(ota_task, "ota", 8192,
                     reinterpret_cast<void*>(static_cast<uintptr_t>(pr_number)),
                     tk::kPrioOta, nullptr) != pdPASS) {
+        try { set_state(OtaState::Error, 0, "could not start OTA task"); } catch (...) {}
         s_updating.store(false, std::memory_order_release);
         s_running.store(false, std::memory_order_release);
         finish_operation(tk::OtaIdentityGateState::Ota);
-        try { set_state(OtaState::Error, 0, "could not start OTA task"); } catch (...) {}
-        return false;
+        return Result::InternalError;
     }
-    return true;
+    return Result::Started;
 }

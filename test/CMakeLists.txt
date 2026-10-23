@@ -45,6 +45,7 @@ add_executable(runtime_boundary_tests
     test_runtime_boundaries.cpp
     test_coredump_hash.cpp
     ../main/diag_log.cpp
+    ../main/stack_watch.cpp
     ../main/safe_mode.cpp
 )
 target_include_directories(runtime_boundary_tests PRIVATE
@@ -55,6 +56,34 @@ target_include_directories(runtime_boundary_tests PRIVATE
 add_test(NAME runtime_boundary_tests COMMAND runtime_boundary_tests)
 
 find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    add_custom_command(
+        OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/ota_admission_adapter.generated.hpp
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/generate_ota_admission_adapter.py
+                ${CMAKE_CURRENT_BINARY_DIR}/ota_admission_adapter.generated.hpp
+        DEPENDS generate_ota_admission_adapter.py test_runtime_boundary_contract.py
+                ../main/ota_update.cpp
+        VERBATIM)
+    target_sources(runtime_boundary_tests PRIVATE test_ota_admission.cpp
+                   ${CMAKE_CURRENT_BINARY_DIR}/ota_admission_adapter.generated.hpp)
+    target_include_directories(runtime_boundary_tests PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+    target_compile_definitions(runtime_boundary_tests PRIVATE TEST_OTA_ADMISSION_ADAPTER=1)
+endif()
+
+if(Python3_Interpreter_FOUND)
+    add_custom_command(
+        OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/background_poll_adapter.generated.hpp
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/generate_background_poll_adapter.py
+                ${CMAKE_CURRENT_BINARY_DIR}/background_poll_adapter.generated.hpp
+        DEPENDS generate_background_poll_adapter.py test_runtime_boundary_contract.py
+                ../main/vehicle_telemetry.cpp
+        VERBATIM)
+    target_sources(runtime_boundary_tests PRIVATE test_background_poll.cpp
+                   ${CMAKE_CURRENT_BINARY_DIR}/background_poll_adapter.generated.hpp)
+    target_include_directories(runtime_boundary_tests PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+    target_compile_definitions(runtime_boundary_tests PRIVATE TEST_BACKGROUND_POLL_ADAPTER=1)
+endif()
+
 if(Python3_Interpreter_FOUND)
     add_custom_command(
         OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/clock_adapters.generated.hpp
@@ -76,19 +105,22 @@ if(Python3_Interpreter_FOUND)
     add_custom_command(
         OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/config_commit_runtime.generated.hpp
                ${CMAKE_CURRENT_BINARY_DIR}/config_commit_owner.generated.hpp
+               ${CMAKE_CURRENT_BINARY_DIR}/ota_health_task.generated.hpp
                ${CMAKE_CURRENT_BINARY_DIR}/config_portal.generated.hpp
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/generate_effect_reply_adapters.py
                 ${CMAKE_CURRENT_BINARY_DIR}/effect_reply_adapters.generated.hpp
         DEPENDS generate_effect_reply_adapters.py test_runtime_boundary_contract.py
                 fixtures/idf_ota_state_query.c fixtures/idf_ota_state_query.json
-                ../esp-idf-toolchain.txt ../main/ota_update.hpp ../main/ota_update.cpp
+                ../esp-idf-toolchain.txt ../main/ota_update.hpp ../main/ota_update.cpp ../main/main.cpp
+                ../main/logic/health_gate.hpp ../main/logic/config_commit.hpp
                 ../main/http_common.cpp ../main/http_handlers.hpp ../main/http_config.cpp
                 ../main/http_ota.cpp ../main/http_api.cpp ../main/http_server.cpp ../main/mcp_server.cpp
                 ../main/provisioning.cpp ../main/http_status.cpp ../main/diag_crash.hpp
         VERBATIM)
     add_executable(config_commit_tests test_config_commit.cpp fixtures/idf_ota_state_query.c
                    ${CMAKE_CURRENT_BINARY_DIR}/config_commit_runtime.generated.hpp
-                   ${CMAKE_CURRENT_BINARY_DIR}/config_commit_owner.generated.hpp)
+                   ${CMAKE_CURRENT_BINARY_DIR}/config_commit_owner.generated.hpp
+                   ${CMAKE_CURRENT_BINARY_DIR}/ota_health_task.generated.hpp)
     target_include_directories(config_commit_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/../main ${CMAKE_CURRENT_BINARY_DIR})
     add_test(NAME config_commit_tests COMMAND config_commit_tests)

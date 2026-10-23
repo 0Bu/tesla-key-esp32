@@ -225,7 +225,10 @@ static esp_err_t handle_all(httpd_req_t* req) {
                 if (req->content_len > 0) (void)shutdown(httpd_req_to_sockfd(req), SHUT_RD);
             }
         } retire_body_connection{req};
-        if (req->content_len > 0) (void)httpd_resp_set_hdr(req, "Connection", "close");
+        if (req->content_len > 0) {
+            result = httpd_resp_set_hdr(req, "Connection", "close");
+            if (result != ESP_OK) return result; // refuse before dispatch; no effect was attempted
+        }
         // Sample on every exit, including the exception fallbacks. The request that came closest to
         // the limit is exactly the one most likely to throw; a destructor also covers every early
         // return without duplicating the measurement at each route. Construct it inside the outer

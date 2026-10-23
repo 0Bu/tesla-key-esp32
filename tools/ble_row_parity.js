@@ -8,15 +8,15 @@
 // offending row printed, because a silent divergence here is precisely the bug class this
 // pair of files exists to make impossible.
 //
-// Usage: node tools/ble_row_parity.js <golden.tsv>   (run by scripts/check-ble-row-parity.sh)
+// Usage: node tools/ble_row_parity.js <golden.tsv> <web-presenter.tsv>   (run by scripts/check-ble-row-parity.sh)
 
 'use strict';
 const fs = require('fs');
 const path = require('path');
 
-const goldenPath = process.argv[2];
-if (!goldenPath) {
-  console.error('usage: ble_row_parity.js <golden.tsv>');
+const goldenPath = process.argv[2], webGoldenPath = process.argv[3];
+if (!goldenPath || !webGoldenPath) {
+  console.error('usage: ble_row_parity.js <golden.tsv> <web-presenter.tsv>');
   process.exit(2);
 }
 
@@ -38,10 +38,11 @@ if (!/function\s+bleRowFromStatus\s*\(/.test(region)) {
   process.exit(1);
 }
 
-let bleRowFromStatus;
+let bleRowFromStatus, bleFailWarn;
 try {
   // eslint-disable-next-line no-eval
-  bleRowFromStatus = eval(region + '\n; bleRowFromStatus');
+  const exported = eval(region + '\n; ({bleRowFromStatus, BLE_CONNECT_FAIL_WARN})');
+  bleRowFromStatus = exported.bleRowFromStatus; bleFailWarn = exported.BLE_CONNECT_FAIL_WARN;
 } catch (e) {
   console.error('ble-row parity: could not evaluate the BLE_ROW region:', e.message);
   process.exit(1);
@@ -99,3 +100,38 @@ if (mismatches.length) {
 }
 
 console.log(`OK  app.js bleRowFromStatus() matches the C++ presenter on ${checked} golden vectors`);
+
+// The second golden comes from the actual native SoC/RSSI helpers, not another JS table.
+const webBegin='/* WEB_PRESENTERS_BEGIN */', webEnd='/* WEB_PRESENTERS_END */';
+if (app.split(webBegin).length!==2 || app.split(webEnd).length!==2 || app.indexOf(webBegin)>=app.indexOf(webEnd))
+  throw new Error('web presenter parity markers missing or ambiguous');
+const webRegion=app.slice(app.indexOf(webBegin),app.indexOf(webEnd));
+const actualNum=app.match(/^function num\(x\)\{.*\}[^\n]*$/m);
+if (!actualNum) throw new Error('actual numeric adapter shape changed');
+const web=eval(actualNum[0]+'\n'+webRegion+'\n; ({socColor,signalBars,barsHTML})');
+const webLines=fs.readFileSync(webGoldenPath,'utf8').trim().split('\n');
+if (webLines.shift()!=='kind\tinput\tr\tg\tb') throw new Error('invalid web presenter golden header');
+const counts={soc:0,rssi:0,warn:0};
+for(const line of webLines){
+  const fields=line.split('\t');
+  if(fields.length!==5 || !fields.slice(1).every(x=>/^-?(0|[1-9][0-9]*)$/.test(x)))
+    throw new Error('invalid web presenter golden row: '+line);
+  const [kind,raw,...channels]=fields, input=Number(raw), expected=channels.map(Number);
+  let actual;
+  if(kind==='soc'){
+    const rgb=web.socColor(input).match(/^rgb\(([0-9]+),([0-9]+),([0-9]+)\)$/);
+    if(!rgb) throw new Error('invalid SoC color');
+    actual=rgb.slice(1).map(Number);
+  }else if(kind==='rssi'){
+    actual=[web.signalBars(input),0,0];
+    const lit=(web.barsHTML(input).match(/opacity="1"/g)||[]).length;
+    if(lit!==actual[0]) throw new Error('rendered signal bars bypass presenter: '+line);
+  }else if(kind==='warn') actual=[bleFailWarn,0,0];
+  else throw new Error('unknown web presenter vector: '+kind);
+  counts[kind]++;
+  if(actual.some((value,i)=>value!==expected[i]))
+    throw new Error('web presenter mismatch: '+line+' got '+actual.join(','));
+}
+if(counts.soc!==303 || counts.rssi!==258 || counts.warn!==1)
+  throw new Error('incomplete web presenter golden: '+JSON.stringify(counts));
+console.log('OK app.js SoC, RSSI glyphs and warning threshold match native helpers on 562 golden vectors');

@@ -64,7 +64,7 @@
         },
         "CMakeFiles/__idf_main.dir/mqtt_ha.cpp.su": {
           "/COMPONENT_MAIN_DIR/mqtt_ha.cpp :: bool mqtt_ha_start_impl(VehicleController&, NvsStorageAdapter&)": 832,
-          "/COMPONENT_MAIN_DIR/mqtt_ha.cpp :: bool publish_discovery()": 256,
+          "/COMPONENT_MAIN_DIR/mqtt_ha.cpp :: bool publish_discovery_rows(const char*)": 256,
           "/COMPONENT_MAIN_DIR/mqtt_ha.cpp :: bool publish_state()": 528
         },
         "CMakeFiles/__idf_main.dir/net.cpp.su": {
@@ -173,7 +173,7 @@
         },
         "CMakeFiles/__idf_main.dir/mqtt_ha.cpp.su": {
           "/COMPONENT_MAIN_DIR/mqtt_ha.cpp :: bool mqtt_ha_start_impl(VehicleController&, NvsStorageAdapter&)": 832,
-          "/COMPONENT_MAIN_DIR/mqtt_ha.cpp :: bool publish_discovery()": 256,
+          "/COMPONENT_MAIN_DIR/mqtt_ha.cpp :: bool publish_discovery_rows(const char*)": 256,
           "/COMPONENT_MAIN_DIR/mqtt_ha.cpp :: bool publish_state()": 528
         },
         "CMakeFiles/__idf_main.dir/net.cpp.su": {

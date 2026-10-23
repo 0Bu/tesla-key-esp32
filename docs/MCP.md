@@ -7,7 +7,7 @@ directly, with no proxy process in between. The endpoint runs on the same `esp_h
 as the REST API and web UI, on port 80.
 
 This is the user/integrator guide: wire format, tool reference, client configuration and
-troubleshooting. For the firmware-internal design (heap budget, code layout, why stateless)
+troubleshooting. For the firmware-internal design (request/reply bounds, ownership and stateless handling)
 see [`ARCHITECTURE.md`](ARCHITECTURE.md#mcp-endpoint-mcp); for the security posture see
 [`SECURITY.md`](SECURITY.md#http-api-exposure).
 

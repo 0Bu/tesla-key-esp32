@@ -42,6 +42,7 @@
 // leave metadata changed, so their result is uncertain rather than proof rollback stays armed.
 #include <atomic>
 #include <cstdint>
+#include <cstddef>
 
 namespace tk {
 
@@ -51,11 +52,39 @@ enum class HealthVerdict {
     GiveUp,  // no health within the hard cap — leave PENDING_VERIFY, a reboot rolls it back
 };
 
+// One ordered local sample shared by both irreversible confirmation paths. Each reader is
+// invoked at most once; this is sequential evidence, not an atomic snapshot with the SDK mark.
+enum class RuntimeHealthFailure : uint8_t { None, NotReady, HostUnsynced, HostReset, CriticalHeap };
+struct RuntimeHealthSample {
+    RuntimeHealthFailure failure = RuntimeHealthFailure::NotReady;
+    std::size_t largest = 0;
+    bool healthy() const noexcept { return failure == RuntimeHealthFailure::None; }
+};
+
+template<typename Ready, typename Synced, typename Resets, typename Heap>
+inline RuntimeHealthSample sample_runtime_health(Ready ready, Synced synced, Resets resets,
+                                                 Heap heap, std::size_t critical_bytes) {
+    if (!ready()) return {RuntimeHealthFailure::NotReady, 0};
+    if (!synced()) return {RuntimeHealthFailure::HostUnsynced, 0};
+    if (resets() != 0) return {RuntimeHealthFailure::HostReset, 0};
+    const std::size_t largest = heap();
+    return {largest < critical_bytes ? RuntimeHealthFailure::CriticalHeap
+                                    : RuntimeHealthFailure::None, largest};
+}
+
 enum class OtaVerificationState : uint8_t {
     Stable,
     PendingVerify,
     Unknown,
 };
+
+inline constexpr const char* ota_verification_name(OtaVerificationState state) {
+    switch (state) {
+        case OtaVerificationState::Stable: return "stable";
+        case OtaVerificationState::PendingVerify: return "pending_verify";
+        default: return "unknown";
+    }
+}
 
 enum class IdentityMutationEntry : uint8_t {
     HttpGenerateKey,
