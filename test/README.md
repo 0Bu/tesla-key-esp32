@@ -100,7 +100,7 @@ ctest --test-dir build_mock --output-on-failure
 ```
 
 CI splits host evidence into `logic-test` and `logic-harness`; both run alongside producer and
-independent per-target compiles, and final `build` requires both host jobs. Python gates use
+independent per-target compiles, and final `build` fails unless both host jobs succeeded. Python gates use
 `scripts/with-host-python.sh` (Python ≥3.11). Linux sanitizer
 checks use ASan, UBSan and LSan, with deliberate tripwires proving the detectors work, plus a fixed-seed
 20,000-case fuzz corpus. Local host evidence is distinct from remote CI.
@@ -236,7 +236,7 @@ WiFi-driver callback framing, a physical exported log or complete sanitation.
 | `scripts/repo-lint.sh` | Syntax/local links, workflow-policy and host-gate mutation canaries, logic ownership and protocol wiring |
 | `tools/agent-config/selftest.sh` / `test_codex_setup.py` | Canonical skills/reviewers/hooks, native adapter parity/trust boundaries, read-only scopes, owner contracts, exact content and approval/artifact canaries |
 | `scripts/test-build-contracts.sh` | Targets, pins, partitions, generated artifacts, size/stack/effective-build and publication contracts; validator self-tests isolate offsets, digest syntax, unsigned-prefix/size reuse, production pins, signed padding/image binding and complete Release/Pages bytes with deterministic disposable fixtures. Pages controls cover build-state/CLI consumption, bounded backoff beyond 50 seconds, delayed size/hash/404 failures for each of 16 parts, independent complete retries, bounded persistent failures, separate manifest/Release-byte delegation and immutable-input rejection before polling; no real signing key |
-| `scripts/test-pr-gates.sh` | Exact-head review records, relevance and canonical Git command boundaries using fixtures |
+| `scripts/test-pr-gates.sh` | Exact-head review records, relevance, canonical Git command boundaries and shared-library loss using fixtures; `ci-heal.sh` refusals with stubbed `git`/`gh` |
 | `web_ui_browser_gate.py` / `test_web_ui_browser_gate.py` | Linux-only browser launch policy plus the actual assembled page in Chrome/Chromium: console/request failures, degraded poller, escaping, DOM focus, actual CSS focus/hover rules under deterministic pseudo-state emulation, computed unfiltered control/icon contrast in light/dark themes, and desktop/mobile layout |
 | `web_installer.test.mjs` | Actual installer with passive serial/flasher adapters: installed-firmware check and the Flash rule, phase ordering with the OTA selector last, abort/release including esptool's reset lines and buffered reads, one serial open per connection, explicit Clean flash confirmation, the boot-version check, and `eraseAll:false` on every write. No physical flash or NVS-preservation proof. |
 | `serial_port_release.test.mjs` | Port leases, quarantine and permission removal of the installer. |
