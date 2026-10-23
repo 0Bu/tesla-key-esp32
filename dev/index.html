@@ -318,7 +318,7 @@ code{font-family:var(--font-mono);font-size:.88em;background:var(--soft);border:
     </aside>
 
     <main class="installer-main">
-      <span class="installer-channel" id="build-channel">Main build</span>
+      <span class="installer-channel" id="build-channel">Release</span>
       <h1>Install firmware</h1>
       <p class="installer-intro">Connect your board, verify the detected ESP target, choose what to preserve, and follow the real flash progress and boot log on this page.</p>
 
@@ -380,7 +380,7 @@ code{font-family:var(--font-mono);font-size:.88em;background:var(--soft);border:
           </label>
           <label class="installer-choice">
             <input type="radio" name="install-mode" value="erase">
-            <span class="installer-choice-body"><span class="installer-choice-name">Erase everything <span class="installer-recommended" id="erase-recommended" hidden>Recommended for first install</span></span><span class="installer-choice-text">Full factory reset. WiFi setup and vehicle pairing are required again.</span></span>
+            <span class="installer-choice-body"><span class="installer-choice-name">Erase everything <span class="installer-recommended" id="erase-recommended" hidden>Recommended for first install</span></span><span class="installer-choice-text">Deletes WiFi, VIN, MQTT, the pairing key and BLE sessions. Back up secret NVS first. A factory-reset confirmation is required.</span></span>
           </label>
         </div>
 
@@ -406,7 +406,7 @@ code{font-family:var(--font-mono);font-size:.88em;background:var(--soft);border:
         <strong class="installer-card-title" id="after-title">Bring the key online</strong>
         <ol class="installer-after-list">
           <li><span>On a first install or after choosing Erase, join <code>tesla-key-esp32-setup</code>. The captive portal opens automatically; enter WiFi and the Tesla VIN. An update without Erase reconnects with the saved WiFi.</span></li>
-          <li><span>Once it joins your network, open <code>http://tesla-key-esp32.local</code>. Generate the security key there and complete the pairing request in the Tesla.</span></li>
+          <li><span>Once it joins your network, open <code>http://tesla-key-esp32.local</code>. Key setup and pairing run automatically. When pairing is needed, place a Tesla keycard on the console reader and approve the request on the touchscreen.</span></li>
           <li><span>Future releases install over the air: open the device page and tap the download icon on the Firmware row (Check for updates). USB is only needed for recovery or partition-layout changes.</span></li>
         </ol>
         <p class="installer-links"><a href="https://github.com/0Bu/tesla-key-esp32#readme">README</a> · <a href="https://github.com/0Bu/tesla-key-esp32/tree/main/docs">docs</a> · <a href="https://github.com/0Bu/tesla-key-esp32/releases/latest">latest release</a></p>
@@ -419,7 +419,7 @@ code{font-family:var(--font-mono);font-size:.88em;background:var(--soft);border:
       </section>
     </main>
   </div>
-  <footer class="installer-footer">MIT · not affiliated with Tesla, Inc.</footer>
+  <footer class="installer-footer"><a href="./LICENSE">AGPL-3.0</a> · <a href="./THIRD_PARTY.md">Third-party notices</a> · not affiliated with Tesla, Inc.</footer>
 </div>
 
 <script type="module" src="./installer-bootstrap.mjs"></script>

@@ -4,7 +4,11 @@ import { attachWebInstaller } from "./web-installer.mjs";
 
 function configurePreview(documentImpl, locationImpl) {
   const match = locationImpl.pathname.match(/\/PR\/(\d+)\//);
-  if (!match) return;
+  if (!match) {
+    const channel = documentImpl.getElementById("build-channel");
+    if (channel) channel.textContent = /\/dev(?:\/|$)/.test(locationImpl.pathname) ? "Development" : "Release";
+    return;
+  }
 
   const number = match[1].replace(/\D/g, "");
   const channel = documentImpl.getElementById("build-channel");
