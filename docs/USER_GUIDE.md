@@ -77,16 +77,22 @@ In the web UI, click the download icon on **Firmware**, confirm the offered upda
 the device to reboot. Click the version to select **Release** (official releases, default) or
 **Dev** (main builds). OTA preserves configuration and keys.
 
-For USB recovery, **Keep configuration** is available for an existing dual-OTA layout.
-**Erase everything** and a merged-image write erase WiFi, VIN and pairing; back up secret NVS
-before an intentional destructive recovery. If an installation times out or USB disconnects, the
-installer aborts the active serial read or write, blocks later commands and keeps the port reserved
-until the active operation and its port cleanup settle. The page shows **Stopping** during this
-interval; keep the board connected and do not retry until the installer reports the timeout or
-disconnect. If the browser cannot complete a USB operation, the page remains busy rather than
-releasing a port that may still be active. Reconnect and inspect the board's firmware before
-retrying. Never flash an unsigned local build: it cannot boot.
-[Verified delivery procedures](DEVELOPMENT.md#delivery).
+For USB recovery, **Connect** reads the installed partition table and firmware without writing.
+**Flash** keeps WiFi, VIN, pairing and sessions; it is offered only for tesla-key-esp32 on a layout
+with the same NVS partition and also writes the current partition table. Otherwise only
+**Clean flash** remains, which erases them, as does a merged-image write; back up secret NVS before
+an intentional destructive recovery. If the device cannot be read, both choices stay available.
+
+One connection opens the serial port once: the log takes it over after the check, **Reset** only
+pulses EN, and an install borrows the port and hands it back to the log, which waits up to 20 s
+for the new version. **Disconnect** also removes the browser's permission for the port; a single
+port that is still paired reconnects when the page loads or the board is plugged in. If an
+installation times out or USB disconnects, the installer aborts the active serial read or write,
+blocks later commands and keeps the port reserved until the active operation and its port cleanup
+settle; keep the board connected and do not retry until the log reports it. If the browser cannot
+complete a USB operation, the page remains busy rather than releasing a port that may still be
+active. Reconnect and inspect the board's firmware before retrying. Never flash an unsigned local
+build: it cannot boot. [Verified delivery procedures](DEVELOPMENT.md#delivery).
 
 A reviewed same-repository PR with the `signed-preview` label may offer a signed installer at
 `https://0bu.github.io/tesla-key-esp32/PR/<N>/`. Its version is `<stable>-PR-<N>` and it remains on
@@ -135,8 +141,8 @@ change state; distinguish them from reading an existing log or cached status.
 
 | Symptom | Check | Next step |
 |---|---|---|
-| Installer has no serial port | Data cable, browser Web Serial support, port already in use | Close the serial monitor; hold BOOT while connecting or use BOOT + RESET. |
-| Installer: firmware installed, start not verified | Adapter without reset lines, a native USB port that reconnected late, or an image that does not boot | The firmware is already on flash: press RESET or reconnect the cable. If it still does not start, open the serial monitor and reinstall with Keep configuration rather than Erase. |
+| Installer has no serial port | Data cable, browser Web Serial support, port already in use | Close other serial programs or tabs; hold BOOT while connecting or use BOOT + RESET. |
+| Installer: version not seen within 20 s | Adapter without reset lines, a native USB port that reconnected late, or an image that does not boot | The firmware is already on flash: press **Reset** or reconnect the cable and read the log. If it still does not start, reinstall with **Flash** rather than **Clean flash**. |
 | `.local` will not load | DHCP lease in router | Open the current IP. Use that IP or `.local` for browser saves. |
 | No WiFi | SSID/password, open or WPA2 network | Use setup AP or `provision.py`; do not write partial NVS images. Failed LAN credential changes roll back once. With saved credentials the device keeps retrying them and the setup AP closes after 10 minutes without a client (30 minutes at most); power-cycle to reopen it. |
 | No pairing prompt | VIN configured, `key_present`, BLE range, NFC card on reader | Explicitly send the existing key, then confirm on the touchscreen. Check status before retrying an ambiguous send result. |

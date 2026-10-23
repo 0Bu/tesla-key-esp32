@@ -53,8 +53,8 @@ The storage adapter rejects unknown records, wrong APIs, collisions and names ov
 | `tesla_ble/key_created` | pairing | durable across OTA |
 | `tesla_ble/key_rotate` | key rotation | recovery journal |
 
-OTA, verified signed app-only USB delivery and installer **Keep configuration** preserve NVS.
-**Erase everything**, merged-image writes and full flash erases destroy it. NVS remains at
+OTA, verified signed app-only USB delivery and installer **Flash** preserve NVS.
+Installer **Clean flash**, merged-image writes and full flash erases destroy it. NVS remains at
 `0x9000` for `0x6000` bytes. Firmware rollback does not restore keys/configuration. Destructive or
 identity work needs explicit authorization and a backup/rollback plan.
 
@@ -103,9 +103,13 @@ No eFuse anti-rollback is burned. Pending images retain rollback until runtime h
 [Architecture](ARCHITECTURE.md#ota-self-update) owns confirmation rules and allowed channel transitions.
 
 The USB installer verifies schema-v2 manifest source SHA, exact four-target roles/offsets, byte lengths
-and all SHA-256 hashes **before erasing/writing**; otadata activation is last. These hashes detect
+and all SHA-256 hashes **before erasing/writing**; otadata activation is last. Downloads stream
+within each part's declared size, reject redirects and stop after 60 seconds. These hashes detect
 mixed/corrupt deployments, but USB still trusts the chosen Pages origin. Vendored hash-pinned
-`esptool-js@0.6.1` runs under `script-src 'self'`, with no CDN execution.
+`esptool-js@0.7.0` runs under `script-src 'self'`, with no CDN execution. **Flash** is offered only
+when the device's own partition table places `nvs` at `0x9000`/`0x6000` and its boot slot runs
+`tesla-key-esp32`; this read-only check is a safeguard, not an authorization, and a device that
+cannot be read keeps both choices.
 
 ## Signed OTA images
 

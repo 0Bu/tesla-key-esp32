@@ -2,26 +2,19 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  attachSerialPortRelease,
-  grantedSerialPorts,
+  acquireSerialPortLease,
+  forgetSerialPort,
   releaseFeedback,
-  releaseSelectedSerialPort,
-  supportsSerialForget
+  releaseSerialPortLease,
+  serialPortIsOpen,
+  serialPortLease,
+  subscribeSerialOwnership,
+  supportsSerialForget,
+  updateSerialPortLease
 } from "../docs/serial-port-release.mjs";
 
 class ForgetCapablePort {
   forget() {}
-}
-
-function fakeButton() {
-  return {
-    disabled: false,
-    attributes: new Map(),
-    listeners: new Map(),
-    addEventListener(name, handler) { this.listeners.set(name, handler); },
-    setAttribute(name, value) { this.attributes.set(name, value); },
-    removeAttribute(name) { this.attributes.delete(name); }
-  };
 }
 
 test("serial forget support requires permission discovery, the chooser and forget API", () => {
@@ -30,258 +23,103 @@ test("serial forget support requires permission discovery, the chooser and forge
   assert.equal(supportsSerialForget({ requestPort() {} }, ForgetCapablePort), false);
   assert.equal(supportsSerialForget({ getPorts() {} }, ForgetCapablePort), false);
   assert.equal(supportsSerialForget(serial, class {}), false);
+  assert.equal(supportsSerialForget(serial, undefined), false);
 });
 
-test("granted serial ports are normalized to an array", async () => {
+test("a port is open while either native stream exists", () => {
+  assert.equal(serialPortIsOpen({ readable: null, writable: null }), false);
+  assert.equal(serialPortIsOpen({ readable: {}, writable: null }), true);
+  assert.equal(serialPortIsOpen({ readable: null, writable: {} }), true);
+  assert.equal(serialPortIsOpen(null), false);
+});
+
+test("one lease per port: busy until released, and every change notifies subscribers", () => {
   const port = {};
-  assert.deepEqual(await grantedSerialPorts({ async getPorts() { return [port]; } }), [port]);
-  assert.deepEqual(await grantedSerialPorts({ async getPorts() { return new Set([port]); } }), [port]);
+  const seen = [];
+  const unsubscribe = subscribeSerialOwnership(() => seen.push(serialPortLease(port)?.phase || "free"));
+  const lease = acquireSerialPortLease(port, "probe");
+  assert.deepEqual([lease.kind, lease.phase, serialPortLease(port)], ["probe", "probe", lease]);
+  assert.throws(() => acquireSerialPortLease(port, "flash"), { name: "InvalidStateError", message: /^Port busy/ });
+  updateSerialPortLease(lease, "cleanup");
+  updateSerialPortLease(lease, "quarantined");
+  releaseSerialPortLease(lease);
+  assert.equal(serialPortLease(port), undefined);
+  unsubscribe();
+  acquireSerialPortLease(port, "monitor");
+  assert.deepEqual(seen, ["probe", "cleanup", "quarantined", "free"], "an unsubscribed listener hears nothing more");
 });
 
-test("no chooser opens when this site has no granted port", async () => {
-  let chooserOpened = false;
-  const serial = {
-    async getPorts() { return []; },
-    async requestPort() { chooserOpened = true; }
-  };
-
-  await assert.rejects(releaseSelectedSerialPort(serial), { name: "NotFoundError" });
-  assert.equal(chooserOpened, false);
+test("a stale lease can neither change nor release its successor", () => {
+  const port = {};
+  const first = acquireSerialPortLease(port, "probe");
+  releaseSerialPortLease(first);
+  const second = acquireSerialPortLease(port, "monitor");
+  updateSerialPortLease(first, "quarantined");
+  releaseSerialPortLease(first);
+  assert.equal(serialPortLease(port), second);
+  assert.equal(second.phase, "monitor");
+  releaseSerialPortLease(second);
 });
 
-test("a single granted closed port is released without opening the chooser", async () => {
-  const calls = [];
-  const port = {
-    readable: null,
-    writable: null,
-    async forget() { calls.push("forget"); }
-  };
-  const serial = {
-    async getPorts() {
-      calls.push("get");
-      return [port];
-    },
-    async requestPort() { calls.push("request"); }
-  };
-
-  await releaseSelectedSerialPort(serial);
-  assert.deepEqual(calls, ["get", "forget"]);
+test("a listener that throws does not stop the others", () => {
+  const port = {};
+  let heard = 0;
+  const stopFaulty = subscribeSerialOwnership(() => { throw new Error("faulty listener"); });
+  const stopGood = subscribeSerialOwnership(() => { heard++; });
+  releaseSerialPortLease(acquireSerialPortLease(port, "probe"));
+  stopFaulty();
+  stopGood();
+  assert.equal(heard, 2);
 });
 
-test("the chooser disambiguates multiple previously granted ports", async () => {
-  const calls = [];
-  const first = { readable: null, writable: null, async forget() { calls.push("first"); } };
-  const second = { readable: null, writable: null, async forget() { calls.push("second"); } };
-  const serial = {
-    async getPorts() { return [first, second]; },
-    async requestPort() {
-      calls.push("request");
-      return second;
-    }
-  };
+test("a port is forgotten only while paired, closed, unowned and not blocked, under its own lease", async () => {
+  const port = { readable: null, writable: null, forgotten: 0, leaseDuringForget: null };
+  port.forget = async () => { port.forgotten++; port.leaseDuringForget = serialPortLease(port)?.kind; };
+  const serial = { grants: [port], async getPorts() { return [...this.grants]; } };
+  const blocked = { isReleaseBlocked: () => true };
 
-  await releaseSelectedSerialPort(serial);
-  assert.deepEqual(calls, ["request", "second"]);
+  serial.grants = [];
+  await assert.rejects(forgetSerialPort(serial, port), { name: "NotFoundError" });
+  serial.grants = [port];
+  port.readable = {};
+  await assert.rejects(forgetSerialPort(serial, port), { name: "InvalidStateError", message: /still open/ });
+  port.readable = null;
+  const probe = acquireSerialPortLease(port, "probe");
+  await assert.rejects(forgetSerialPort(serial, port), { name: "InvalidStateError", message: /^Port busy/ });
+  releaseSerialPortLease(probe);
+  await assert.rejects(forgetSerialPort(serial, port, { controller: blocked }), { name: "InvalidStateError" });
+  assert.equal(port.forgotten, 0, "no refused request reached the browser");
+
+  assert.equal(await forgetSerialPort(serial, port), port);
+  assert.deepEqual([port.forgotten, port.leaseDuringForget], [1, "release"], "forgotten under the release lease");
+  assert.equal(serialPortLease(port), undefined, "and the lease is returned afterwards");
 });
 
-test("an open port is not released when its owner does not close it", async () => {
-  let forgotten = false;
-  const port = {
-    readable: {},
-    writable: {},
-    async forget() { forgotten = true; }
-  };
-  const serial = {
-    async getPorts() { return [port]; },
-    async requestPort() { return port; }
-  };
-
-  await assert.rejects(releaseSelectedSerialPort(serial), { name: "InvalidStateError" });
-  assert.equal(forgotten, false);
-});
-
-test("the selected installer port is disconnected before its permission is removed", async () => {
-  const calls = [];
-  const port = {
-    readable: {},
-    writable: {},
-    async forget() { calls.push("forget"); }
-  };
-  const serial = {
-    async getPorts() { calls.push("get"); return [port]; },
-    async requestPort() { throw new Error("chooser must not open"); }
-  };
-
-  const releasedPort = await releaseSelectedSerialPort(serial, async (selectedPort) => {
-    calls.push("disconnect");
-    assert.equal(selectedPort, port);
-    port.readable = null;
-    port.writable = null;
-  });
-
-  assert.equal(releasedPort, port);
-  assert.deepEqual(calls, ["get", "disconnect", "forget"]);
-});
-
-test("a failed disconnect prevents permission removal", async () => {
-  let forgotten = false;
-  const port = {
-    readable: {},
-    writable: {},
-    async forget() { forgotten = true; }
-  };
-  const serial = {
-    async getPorts() { return [port]; },
-    async requestPort() { return port; }
-  };
-  const disconnectError = Object.assign(new Error("busy"), { name: "InvalidStateError" });
-
-  await assert.rejects(
-    releaseSelectedSerialPort(serial, async () => { throw disconnectError; }),
-    disconnectError
-  );
-  assert.equal(forgotten, false);
-});
-
-test("cancelling the chooser is reported without an error state", () => {
-  assert.deepEqual(releaseFeedback({ name: "NotFoundError" }), {
-    kind: "info",
-    message: "No port released."
-  });
-});
-
-test("the UI stays hidden when this site has no granted port", async () => {
-  const container = { hidden: false };
-  const button = fakeButton();
-  const status = { hidden: true, dataset: {}, textContent: "" };
-  const serial = {
-    async getPorts() { return []; },
-    async requestPort() { throw new Error("chooser must not open"); }
-  };
-
-  assert.equal(await attachSerialPortRelease({
-    serial,
-    SerialPortCtor: ForgetCapablePort,
-    container,
-    button,
-    status,
-    refreshTarget: null
-  }), true);
-  assert.equal(container.hidden, true);
-});
-
-test("the UI refreshes when a granted device connects or disconnects", async () => {
-  let ports = [];
-  const serialListeners = new Map();
-  const pageListeners = new Map();
-  const container = { hidden: false };
-  const button = fakeButton();
-  const status = { hidden: true, dataset: {}, textContent: "" };
+test("granted ports may be any iterable, and a browser without forget is refused", async () => {
   const port = { readable: null, writable: null, async forget() {} };
-  const serial = {
-    async getPorts() { return ports; },
-    async requestPort() { return port; },
-    addEventListener(name, handler) { serialListeners.set(name, handler); }
-  };
-  const refreshTarget = {
-    addEventListener(name, handler) { pageListeners.set(name, handler); }
-  };
-
-  await attachSerialPortRelease({
-    serial,
-    SerialPortCtor: ForgetCapablePort,
-    container,
-    button,
-    status,
-    refreshTarget
-  });
-  assert.equal(container.hidden, true);
-
-  ports = [port];
-  await serialListeners.get("connect")();
-  assert.equal(container.hidden, false);
-
-  ports = [];
-  await serialListeners.get("disconnect")();
-  assert.equal(container.hidden, true);
-
-  ports = [port];
-  await pageListeners.get("focus")();
-  assert.equal(container.hidden, false);
+  assert.equal(await forgetSerialPort({ async getPorts() { return new Set([port]); } }, port), port);
+  await assert.rejects(forgetSerialPort({ async getPorts() { return [port]; } }, { readable: null, writable: null }),
+    { name: "NotSupportedError" });
 });
 
-test("the UI disconnects before release and disappears after releasing it", async () => {
-  let granted = true;
-  let releasedCallback = false;
-  const calls = [];
-  const port = {
-    readable: {},
-    writable: {},
-    async forget() { calls.push("forget"); granted = false; }
-  };
-  const container = { hidden: true };
-  const button = fakeButton();
-  const status = { hidden: true, dataset: {}, textContent: "" };
-  const serial = {
-    async getPorts() { return granted ? [port] : []; },
-    async requestPort() { return port; }
-  };
-
-  assert.equal(await attachSerialPortRelease({
-    serial,
-    SerialPortCtor: ForgetCapablePort,
-    container,
-    button,
-    status,
-    refreshTarget: null,
-    async onBeforeRelease(selectedPort) {
-      calls.push("disconnect");
-      assert.equal(selectedPort, port);
-      port.readable = null;
-      port.writable = null;
-    },
-    async onReleased() { calls.push("released"); releasedCallback = true; }
-  }), true);
-  assert.equal(container.hidden, false);
-
-  await button.listeners.get("click")();
-  assert.equal(granted, false);
-  assert.equal(releasedCallback, true);
-  assert.equal(container.hidden, true);
-  assert.equal(button.disabled, false);
-  assert.equal(button.attributes.has("aria-busy"), false);
-  assert.equal(status.dataset.kind, "success");
-  assert.match(status.textContent, /no longer paired/);
-  assert.deepEqual(calls, ["disconnect", "forget", "released"]);
+test("one release at a time, and a stalled browser call reports a timeout but keeps the port reserved", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let finishForget;
+  const port = { readable: null, writable: null, forget: () => new Promise((resolve) => { finishForget = resolve; }) };
+  const serial = { async getPorts() { return [port]; } };
+  const releasing = forgetSerialPort(serial, port);
+  for (let turn = 0; turn < 20 && !finishForget; turn++) await Promise.resolve();
+  await assert.rejects(forgetSerialPort(serial, port), { name: "InvalidStateError", message: /already in progress/ });
+  t.mock.timers.tick(10000);
+  await assert.rejects(releasing, { name: "SerialPermissionTimeoutError", message: /no release is confirmed/ });
+  assert.equal(serialPortLease(port)?.kind, "release", "the pending native call still owns the port");
+  finishForget();
+  for (let turn = 0; turn < 20 && serialPortLease(port); turn++) await Promise.resolve();
+  assert.equal(serialPortLease(port), undefined);
 });
 
-test("the UI stays available when another granted port remains", async () => {
-  let grantedPorts;
-  const first = {
-    readable: null,
-    writable: null,
-    async forget() { grantedPorts = [second]; }
-  };
-  const second = { readable: null, writable: null, async forget() {} };
-  grantedPorts = [first, second];
-  const container = { hidden: true };
-  const button = fakeButton();
-  const status = { hidden: true, dataset: {}, textContent: "" };
-  const serial = {
-    async getPorts() { return grantedPorts; },
-    async requestPort() { return first; }
-  };
-
-  await attachSerialPortRelease({
-    serial,
-    SerialPortCtor: ForgetCapablePort,
-    container,
-    button,
-    status,
-    refreshTarget: null
-  });
-  await button.listeners.get("click")();
-
-  assert.deepEqual(grantedPorts, [second]);
-  assert.equal(container.hidden, false);
+test("release feedback treats an unpaired port as information", () => {
+  assert.deepEqual(releaseFeedback({ name: "NotFoundError" }), { kind: "info", message: "port not paired" });
+  assert.deepEqual(releaseFeedback(new Error("denied")), { kind: "error", message: "denied" });
+  assert.deepEqual(releaseFeedback(undefined), { kind: "error", message: "unknown error" });
 });
