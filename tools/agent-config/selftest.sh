@@ -324,6 +324,12 @@ perl -0pi -e 's/build needs prepare, logic-test, logic-harness and build-target/
 expect_failure "multi-target host-gate dependency" "$fixture" \
   "multi-target reviewer is missing the independent-rebuild/publication DAG contract"
 
+fixture="$WORK/multi-target-skipped-build"; make_fixture "$fixture"
+perl -0pi -e 's/fails first unless every need succeeded/is skipped when a need fails/' \
+  "$fixture/.agents/subagents.json"
+expect_failure "multi-target fail-closed build join" "$fixture" \
+  "multi-target reviewer is missing the independent-rebuild/publication DAG contract"
+
 fixture="$WORK/multi-target-host-gate-concurrency"; make_fixture "$fixture"
 perl -0pi -e 's/prepare, logic-test and logic-harness start concurrently/prepare -> logic-test + logic-harness/' \
   "$fixture/.agents/subagents.json"

@@ -38,8 +38,8 @@ jobs:
     # The run mode and release version, computed once for every downstream job. They used to be the
     # last steps of logic-test, which forced the four firmware builds to wait for the whole ~3 minute
     # host-test job. The builds only need these two answers, so they now depend on this ~20 s job and
-    # run concurrently with logic-test; `build` still needs logic-test, so a failing host gate still
-    # fails the build check.
+    # run concurrently with logic-test; `build` still needs logic-test and fails unless it
+    # succeeded, so a failing host gate still fails the build check.
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
@@ -128,7 +128,8 @@ jobs:
   logic-harness:
     # The remaining host gates, split out of logic-test so the two run concurrently: the tesla-ble
     # harness, the sanitizer tripwires, the build/PR-gate contract self-tests and the gate matcher.
-    # `build` needs both jobs, so a red gate in either still fails the required build check.
+    # `build` needs both jobs and fails unless both succeeded, so a red gate in either still fails
+    # the required build check.
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
@@ -282,6 +283,11 @@ jobs:
           path: _repro/
 
   build:
+    # `build` is the only required status check. GitHub skips a job whose needs did not succeed and
+    # treats a skipped required check as passed, so this job always runs and its first step fails
+    # unless every needed job succeeded: a red, cancelled or skipped host gate or target leg must
+    # fail the required check instead of skipping it.
+    if: ${{ always() }}
     needs: [prepare, logic-test, logic-harness, build-target]
     runs-on: ubuntu-26.04
     timeout-minutes: 20
@@ -298,6 +304,24 @@ jobs:
       bump: ${{ needs.prepare.outputs.bump }}
       exact-version: ${{ needs.prepare.outputs.exact-version }}
     steps:
+      - name: Require every needed job to succeed
+        env:
+          NEEDS_PREPARE: ${{ needs.prepare.result }}
+          NEEDS_LOGIC_TEST: ${{ needs.logic-test.result }}
+          NEEDS_LOGIC_HARNESS: ${{ needs.logic-harness.result }}
+          NEEDS_BUILD_TARGET: ${{ needs.build-target.result }}
+        run: |
+          set -euo pipefail
+          failed=0
+          for pair in "prepare=$NEEDS_PREPARE" "logic-test=$NEEDS_LOGIC_TEST" \
+                      "logic-harness=$NEEDS_LOGIC_HARNESS" "build-target=$NEEDS_BUILD_TARGET"; do
+            if [ "${pair#*=}" != success ]; then
+              echo "::error::needed job ${pair%%=*} ended '${pair#*=}', not success"
+              failed=1
+            fi
+          done
+          [ "$failed" -eq 0 ]
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # PR artifacts and their provenance are built from the exact current head. The separate

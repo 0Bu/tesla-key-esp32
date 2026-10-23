@@ -407,6 +407,7 @@ const multiTargetPublicationContracts = [
   "build-target and independent-rebuild-target each need only prepare",
   "build -> independent-rebuild -> publish -> deploy",
   "build needs prepare, logic-test, logic-harness and build-target",
+  "fails first unless every need succeeded",
   "independent-rebuild needs build and every independent-rebuild-target leg",
   "SHA/version-bound Actions artifact",
   "deploy consumes only that named artifact",

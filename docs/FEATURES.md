@@ -121,7 +121,7 @@ unresolved material findings prevent a clean verdict.
 | Separate publication and USB bench acceptance | `.agents/skills/deploy/SKILL.md`, `.agents/skills/deploy-bench/SKILL.md`, `test/test_deploy_target.py`; [delivery](DEVELOPMENT.md#delivery) | A Git/PR workflow silently contacting devices, flashing the wrong board in a mixed-firmware USB inventory, or accepting tests from a different artifact or target. |
 | Resource-bounded build container | `scripts/idf-docker.sh`, `scripts/check-build-gate-contract.py` | A local ESP-IDF compile starving a shared k3s/Docker node. |
 | Fail-closed host verification | `scripts/run-mock-tests.sh --require-all`, `run-sanitizer-tests.sh`, `run-fuzz-smoke.sh`; [test scope](../test/README.md) | Skipped CI coverage, unsafe runtime boundaries, partial JSON, parser UB or browser-only failures. |
-| Split host gates and concurrent target builds | `.github/workflows/build.yml` (`logic-test`, `logic-harness`, `build-target`), `scripts/check-workflow-policy.py` | Serial host/firmware waits or an aggregate build that omits a host gate. |
+| Split host gates and concurrent target builds | `.github/workflows/build.yml` (`logic-test`, `logic-harness`, `build-target`; `build` runs with `if: always()` and fails unless every need succeeded), `scripts/check-workflow-policy.py` | Serial host/firmware waits, an aggregate build that omits a host gate, or a red gate that only skips the required `build` check, which GitHub counts as passed. |
 | Concurrent independent rebuild | `.github/workflows/build.yml` (`independent-rebuild-target`, `independent-rebuild`); [publication](SECURITY.md#release-pipeline-and-trust-boundaries) | Serial fresh builds or producer claims reaching the signer without a secret-free byte comparison. |
 | Shared-runner browser cold-start budget | `test/web_ui_browser_gate.py`, `scripts/run-mock-tests.sh` | A healthy real-browser gate flaking because a loaded runner needs > 20 s to start Chrome, or a relaxed inner deadline exceeding the outer bound. |
 | Repository/workflow lint with mutation canaries | `scripts/repo-lint.sh`, `check-workflow-policy.py`, `check-host-gate-contract.py`, `check-markdown-links.py` | Malformed or unsafe workflows, broken links, invalid ownership and fail-open Stop hooks. |
@@ -142,7 +142,8 @@ unresolved material findings prevent a clean verdict.
 
 Native Codex registration is generated from canonical reviewers/hooks and checked for parity;
 current hook trust and primary-checkout declarations remain separate runtime conditions. Both host
-jobs are mandatory for the aggregate build, alongside concurrent producer/independent target legs.
+jobs are mandatory for the aggregate build, alongside concurrent producer/independent target legs:
+`build` fails, rather than being skipped, unless every need succeeded.
 The PSA harness verifies v6.2.0 peer admission, domain hash isolation, encrypted VCSEC denial
 before telemetry and message refusal when the RNG fails.
 Upstream v6.2.0's charging-power estimator is not used by the native controller; charge telemetry

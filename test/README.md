@@ -27,7 +27,7 @@ ctest --test-dir build_mock --output-on-failure
 ```
 
 CI splits host evidence into `logic-test` and `logic-harness`; both run alongside producer and
-independent per-target compiles, and final `build` requires both host jobs. Python gates use
+independent per-target compiles, and final `build` fails unless both host jobs succeeded. Python gates use
 `scripts/with-host-python.sh` (Python ≥3.11). Linux sanitizer
 checks use ASan, UBSan and LSan, with deliberate tripwires proving the detectors work, plus a fixed-seed
 20,000-case fuzz corpus. Local host evidence is distinct from remote CI.

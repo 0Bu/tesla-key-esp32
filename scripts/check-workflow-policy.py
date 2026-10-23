@@ -424,6 +424,24 @@ def validate(root: Path) -> None:
             "build.yml:build must need logic-harness")
     require(job_has_need(build["build"], "build-target"),
             "build.yml:build must need build-target")
+    # `build` is the only required status check, and GitHub treats a job skipped because a need
+    # failed as a passed required check. The join must therefore always run and fail first unless
+    # every need succeeded.
+    require(re.search(r"^    if: \$\{\{ always\(\) \}\}\s*$", build["build"], re.MULTILINE)
+            is not None,
+            "build.yml:build must run with if: ${{ always() }} so a failed need fails the required check")
+    needs_gate = build["build"].find("      - name: Require every needed job to succeed\n")
+    require(needs_gate != -1 and needs_gate < build["build"].find("actions/checkout@"),
+            "build.yml:build must check every need result before any other step")
+    for need, variable in (("prepare", "NEEDS_PREPARE"), ("logic-test", "NEEDS_LOGIC_TEST"),
+                           ("logic-harness", "NEEDS_LOGIC_HARNESS"),
+                           ("build-target", "NEEDS_BUILD_TARGET")):
+        require(f"          {variable}: ${{{{ needs.{need}.result }}}}\n" in build["build"]
+                and f'"{need}=${variable}"' in build["build"],
+                f"build.yml:build must fail unless {need} succeeded")
+    require('            if [ "${pair#*=}" != success ]; then\n' in build["build"]
+            and '          [ "$failed" -eq 0 ]\n' in build["build"],
+            "build.yml:build must fail unless every need succeeded")
     # The four independent legs only need the run mode/version (prepare), so they run concurrently
     # with the producer builds; the join needs both the producer's display version and every leg.
     require(job_has_need(build["independent-rebuild-target"], "prepare"),
@@ -1264,6 +1282,19 @@ def self_test(root: Path) -> None:
         ("build-host-harness", "build.yml",
          "    needs: [prepare, logic-test, logic-harness, build-target]\n",
          "    needs: [prepare, logic-test, build-target]\n", "build must need logic-harness"),
+        ("build-skips-on-red-need", "build.yml",
+         "    if: ${{ always() }}\n    needs: [prepare, logic-test, logic-harness, build-target]\n",
+         "    needs: [prepare, logic-test, logic-harness, build-target]\n",
+         "so a failed need fails the required check"),
+        ("build-ignores-harness-result", "build.yml",
+         '"logic-harness=$NEEDS_LOGIC_HARNESS" ', "", "fail unless logic-harness succeeded"),
+        ("build-accepts-skipped-need", "build.yml",
+         '            if [ "${pair#*=}" != success ]; then\n',
+         '            if [ "${pair#*=}" = failure ]; then\n',
+         "fail unless every need succeeded"),
+        ("build-needs-gate-late", "build.yml",
+         "      - name: Require every needed job to succeed\n",
+         "      - name: Check needs later\n", "check every need result before any other step"),
         ("repro-leg-dropped", "build.yml", "|| '[\"primary\",\"reproduction\"]'", "|| '[\"primary\"]'",
          "parallel reproduction leg"),
         ("repro-skip-dropped", "build.yml", "            --skip-repro\n", "",
