@@ -13,7 +13,7 @@ Apply [repository policy](../AGENTS.md) and the normative
 - Leaf cache/result locks allow only small bounded struct/string snapshots with `tk::SemGuard`
   RAII against allocation failure. Release them before logging, network/flash I/O, unbounded
   allocation or calls out. Serialize library access through the documented Vehicle lock,
-  with RAII unwind; never wait for command completion while holding it. Critical sections copy
+  with RAII unwind; never wait for command completion while holding it. `portMUX` critical sections copy
   bounded POD only.
 - Contain exceptions/OOM at HTTP/MCP, task and C callback boundaries, including catch-all exits.
   Rejected input cannot dispatch, persist or restart.

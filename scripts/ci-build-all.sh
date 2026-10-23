@@ -11,12 +11,25 @@ set -euo pipefail
 # forbidden even when the value is empty so every build starts from the same explicit toolchain.
 for variable in \
   CPATH CPLUS_INCLUDE_PATH C_INCLUDE_PATH OBJC_INCLUDE_PATH \
-  DEPENDENCIES_OUTPUT SUNPRO_DEPENDENCIES GCC_EXEC_PREFIX COMPILER_PATH LIBRARY_PATH; do
+  DEPENDENCIES_OUTPUT SUNPRO_DEPENDENCIES GCC_EXEC_PREFIX COMPILER_PATH LIBRARY_PATH \
+  SDKCONFIG_DEFAULTS EXTRA_COMPONENT_DIRS CFLAGS CXXFLAGS CPPFLAGS LDFLAGS; do
   if declare -p "$variable" &>/dev/null; then
     echo "ERROR: compiler-injection environment variable is set: $variable" >&2
     exit 2
   fi
 done
+
+# Component/configuration overrides can change the build before compiler inventories exist.
+# Reject every present override, including empty values and future names under these namespaces.
+while IFS= read -r variable; do
+  case "$variable" in
+    IDF_COMPONENT_*|TESLA_BLE_*)
+      echo "ERROR: build-configuration environment variable is set: $variable" >&2
+      exit 2
+      ;;
+  esac
+done < <(compgen -A variable)
+
 
 # ESP-IDF can launch compilation through ccache even though compile_commands.json records the
 # target compiler directly. Any caller-provided ccache option could thus wrap or rewrite the real
@@ -267,6 +280,11 @@ for target in $TARGETS; do
     --baseline scripts/firmware-stack-baseline.json
 done
 # EXACT_FOUR_TARGETS_END budget
+
+# Compile the opt-in driver once where an S3 primary exists; keep variant bytes outside dist.
+if [[ -z "$target_override" || "$target_override" == esp32s3 ]]; then
+  bash scripts/ci-build-led-variant.sh "$version" dist/esp32s3/sdkconfig.esp32s3
+fi
 
 if [[ -z "$target_override" ]]; then
 {

@@ -13,3 +13,6 @@ inline constexpr BaseType_t pdPASS = 1;
 inline constexpr TickType_t portMAX_DELAY = 0xffffffffu;
 
 #define pdMS_TO_TICKS(ms) static_cast<TickType_t>(ms)
+
+// Host clock uses one millisecond per tick; hardware conversion remains an IDF boundary.
+#define pdTICKS_TO_MS(ticks) static_cast<uint32_t>(ticks)

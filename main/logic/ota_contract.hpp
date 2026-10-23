@@ -15,6 +15,33 @@ namespace tk {
 inline constexpr std::size_t kOtaVersionMaxBytes = 31;
 inline constexpr std::size_t kOtaManifestMaxBytes = 8192;
 
+// Scheme requirement only; the HTTP client still validates the complete URL and TLS peer.
+inline constexpr bool ota_https_url(std::string_view url) {
+    return url.size() > 8 && url.substr(0, 8) == "https://";
+}
+
+enum class OtaStartResult : uint8_t { Started, Busy, PendingVerification, Unavailable, InternalError };
+
+inline constexpr int ota_start_http_status(OtaStartResult result) {
+    switch (result) {
+        case OtaStartResult::Started: return 200;
+        case OtaStartResult::Busy:
+        case OtaStartResult::PendingVerification: return 409;
+        case OtaStartResult::InternalError: return 500;
+        default: return 503;
+    }
+}
+
+inline constexpr const char* ota_start_reason(OtaStartResult result, bool check) {
+    switch (result) {
+        case OtaStartResult::Started: return check ? "version check started" : "update started — the device will reboot when done";
+        case OtaStartResult::Busy: return "another device operation is already in progress";
+        case OtaStartResult::PendingVerification: return "running firmware is still pending verification";
+        case OtaStartResult::InternalError: return check ? "could not start update check" : "could not start OTA task";
+        default: return "OTA service or firmware verification state is unavailable";
+    }
+}
+
 struct OtaVersionParts {
     std::array<std::string_view, 3> core{};
     std::string_view suffix{};

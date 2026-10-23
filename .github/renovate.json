@@ -47,7 +47,7 @@
       "matchDepNames": ["espressif/idf"],
       "allowedVersions": "<7.0.0",
       "prBodyNotes": [
-        "⚠️ **Before merging — re-verify the tesla-ble PSA port.** An ESP-IDF bump changes the Mbed TLS / TF-PSA-Crypto the firmware links, and the firmware build fails closed until `MBEDTLS_REF` in scripts/test-tesla-ble-harness.sh and `MBEDTLS_COMMIT` in scripts/check-dependency-contract.py name the new image's components/mbedtls/mbedtls commit. Update both, rerun the V1 protocol vectors, and re-check patches/tesla-ble/0006-port-crypto-bindings-to-psa.patch (docs/adr/0002-idf6-mbedtls4-crypto-seam.md). Do not widen `allowedVersions` to 7.x as a routine bump."
+        "⚠️ **Before merging — re-verify the tesla-ble PSA port.** An ESP-IDF bump changes the Mbed TLS / TF-PSA-Crypto the firmware links, and the firmware build fails closed until `MBEDTLS_REF` in scripts/test-tesla-ble-harness.sh and `MBEDTLS_COMMIT` in scripts/check-dependency-contract.py name the new image's components/mbedtls/mbedtls commit. Update both, rerun the V1 protocol vectors, and re-check patches/tesla-ble/0006-port-crypto-bindings-to-psa.patch (docs/adr/0002-idf6-mbedtls4-crypto-seam.md). Do not widen `allowedVersions` to 7.x as a routine bump. See docs/DEVELOPMENT.md#esp-idf-migration-inputs for the complete lockfile, workflow, resource-baseline, version-literal and X509-bundle fan-out."
       ]
     },
     {

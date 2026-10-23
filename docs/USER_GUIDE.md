@@ -6,8 +6,9 @@ Install and pair using the [quick start](../README.md). This guide covers ongoin
 
 Supports **esp32, esp32s3, esp32c3 and esp32c6**, with 2.4 GHz WiFi/BLE and at least 4 MB flash
 for dual OTA; PSRAM is not required. First installation needs a USB data cable. Classic esp32
-requires revision v3.0 (ECO3) or newer; pre-ECO3 chips such as ESP32-PICO-D4 are refused before
-flashing. esp32c3 builds keep ESP-IDF's default minimum of revision v0.3; esp32s3 and esp32c6
+requires revision v3.0 (ECO3) or newer. The installer refuses a detected pre-ECO3 revision before
+flashing; if the revision cannot be read, it continues and the bootloader remains the final check.
+An unreadable revision is not evidence of compatibility. esp32c3 builds keep ESP-IDF's default minimum of revision v0.3; esp32s3 and esp32c6
 have no revision floor. ESP32-S2 lacks BLE; H2/P4 lack WiFi.
 
 The pinned library also declares C5, but this firmware does not support it: restoring C5 requires
@@ -52,20 +53,23 @@ python3 provision.py --url http://tesla-key-esp32.local --mode lan \
 ```
 
 The retired `--port` path fails closed with a data-loss explanation; for genuine low-level recovery,
-make and verify a complete NVS backup before writing at `0x9000`. The WiFi contract is identical in
-the setup portal, LAN API and host tool: a 1–32-byte UTF-8 SSID plus an explicitly selected open
-network, an 8–63-byte UTF-8 WPA2 passphrase, or exactly 64 ASCII hex characters (raw PSK).
-Enterprise authentication is not supported.
+make and verify a complete NVS backup before writing at `0x9000`. All three provisioning paths
+require a 1–32-byte UTF-8 SSID. The password is an 8–63-byte UTF-8 WPA2 passphrase or exactly
+64 ASCII hex characters (raw PSK). In the setup portal and LAN API an empty password means an
+open network; the host tool requires `--open-network` to select that explicitly. Enterprise
+authentication is not supported.
 
 ## Pairing and identity
 
-A configured VIN is required before pairing. The device keeps its key and performs read-only
-status/health probes; it does not enroll automatically. To enroll or retry, place the Tesla NFC
-keycard on the console reader and explicitly use **Send existing key** in the web UI or
-`POST /send_key`. This sends the current Charging Manager key; transmission does not confirm car
-approval, so confirm the prompt on the touchscreen and wait for status to verify the session.
-`POST /send_key?role=owner` is refused (`403`). An ambiguous request result is not resent
-automatically; check status before deciding to try again.
+A configured VIN is required before pairing. The device sends its existing Charging Manager key
+automatically; there is no manual send button or HTTP endpoint. Place the Tesla NFC keycard on the
+console reader and approve the request on the touchscreen. The hero shows the pairing status.
+Sending the request does not confirm vehicle approval; wait for the session to be established.
+
+Before each attempt the device probes status. Unconfirmed attempts use backoff of 60, 120, 240,
+then 300 seconds, allowing a keycard placed later to complete pairing. Connection-recovery hints
+can request the same bounded flow with an existing session; they never replace the key or delete
+sessions. A failed storage read or active OTA operation prevents enrollment.
 
 Changing VIN or forcing key generation removes the old pairing. Re-saving the same VIN is a no-op.
 Use these operations only for an intentional identity change, then pair again. Connection timeouts
@@ -76,8 +80,10 @@ alone do not require a new key. [Pairing lifecycle](ARCHITECTURE.md#pairing-life
 In the web UI, click the download icon on **Firmware**, confirm the offered update and wait for
 the device to reboot. Click the version to select **Release** (official releases, default) or
 **Dev** (main builds). OTA preserves configuration and keys.
+The update dialog shows up to five change entries at once. Scroll inside the list to read more.
 
-For USB recovery, **Keep configuration** is available for an existing dual-OTA layout.
+For USB recovery, **Keep configuration** is selected by default for an existing dual-OTA layout.
+For a first install choose **Erase everything** deliberately; each erase requires confirmation.
 **Erase everything** and a merged-image write erase WiFi, VIN and pairing; back up secret NVS
 before an intentional destructive recovery. If an installation times out or USB disconnects, the
 installer aborts the active serial read or write, blocks later commands and keeps the port reserved
@@ -127,6 +133,17 @@ NVS. Delivery only needs the hostname/IP to resolve (UDP, no ack); `/status.sysl
 advisory ARP/ICMP hint, so a collector behind firewalled ICMP still receives lines with
 `reachable:false` shown.
 
+The web page labels a failed or timed-out device connection and retains the last received values.
+A successful status refresh clears the notice. Vehicle actions use the named button inside the gauge;
+tapping the surrounding status card does not send a command.
+
+If the hero reports **Pairing paused**, normal automatic enrolment is blocked by a local storage or
+identity recovery condition. Storage checks and saved-key cleanup retry automatically. An ambiguous
+key commit or runtime/key mismatch requires a restart to reload the saved identity; inspect diagnostics
+if it returns. Do not regenerate the key as a recovery step. **Device recovery required** means a fatal
+runtime failure stopped vehicle services for this process. HTTP diagnostics are available only when
+HTTP startup succeeded; early boot failures can require serial diagnostics.
+
 ## Troubleshooting
 
 Inspect the web UI first, then `/status`, `/diag` and `/heap` as needed. Device requests require
@@ -139,14 +156,35 @@ change state; distinguish them from reading an existing log or cached status.
 | Installer: firmware installed, start not verified | Adapter without reset lines, a native USB port that reconnected late, or an image that does not boot | The firmware is already on flash: press RESET or reconnect the cable. If it still does not start, open the serial monitor and reinstall with Keep configuration rather than Erase. |
 | `.local` will not load | DHCP lease in router | Open the current IP. Use that IP or `.local` for browser saves. |
 | No WiFi | SSID/password, open or WPA2 network | Use setup AP or `provision.py`; do not write partial NVS images. Failed LAN credential changes roll back once. With saved credentials the device keeps retrying them and the setup AP closes after 10 minutes without a client (30 minutes at most); power-cycle to reopen it. |
-| No pairing prompt | VIN configured, `key_present`, BLE range, NFC card on reader | Explicitly send the existing key, then confirm on the touchscreen. Check status before retrying an ambiguous send result. |
+| No pairing prompt | VIN configured, `key_present`, BLE range, NFC card on reader | Place the keycard on the reader and wait for the automatic same-key retry with backoff, then confirm on the touchscreen. |
 | BLE connection fails | `/status.ble.connect_fail`, `car_connectable`, log cause | Move closer; disconnect another phone/fob if the car advertises non-connectable. |
 | Command times out | BLE availability and car asleep | An intentional wake may be needed; wait for the link and retry. Preserve keys and logs. |
 | evcc has no SOC/current | `port: 80`, VIN, cache freshness | Inspect `.response.response.charge_state` from `vehicle_data`; active stale telemetry returns `503`. |
-| Key needs attention | `reauth`, stored session and BLE availability | The key is preserved. If enrollment is needed, explicitly send the existing key with the NFC card on the reader and confirm on the touchscreen. No firmware erase is required. |
+| Key needs attention | `reauth`, stored session and BLE availability | Reconnection and same-key pairing run automatically. Place the NFC card on the reader and confirm a pairing prompt on the touchscreen. No firmware erase is required. |
 | MQTT save fails | `mqtt.error`; HTTP `400`, `502` or `503` | Check credentials, reachability or contiguous heap respectively. A failed probe saves nothing. |
 | Syslog says unreachable | Collector DNS and UDP delivery | ICMP is only advisory; a collector blocking ping may still receive logs. |
 | Restart or crash | `sys.reset_reason`, `last_crash`, `last_reboot`, heap trend | Retain evidence and match a dump to the same build's ELF before clearing it. |
+
+### Safe mode and fatal startup
+
+Safe mode keeps networking, the web UI and OTA available when those services start successfully;
+BLE, vehicle work and MQTT stay disabled. Check `sys.safe_mode` and retain the boot log before
+changing configuration or restarting. Identify the first crash or counter-storage error.
+
+After correcting the cause, one intentional restart can clear the crash sequence only if its
+counter is readable, valid and successfully reset in NVS. Check that `sys.safe_mode` becomes false
+and normal startup completes. If storage errors remain or safe mode returns, preserve the log
+and investigate storage recovery; repeated resets or firmware installs do not repair shared NVS.
+Preserve keys and configuration. Erase, restore or key replacement requires a separate recovery
+plan; see [NVS retention](SECURITY.md#nvs-retention).
+
+A fatal startup failure can halt an already valid image before HTTP or Syslog has started. If
+the web UI is unavailable, retain the serial boot record and the last `FATAL` component before
+another attempt. A pending OTA image instead attempts rollback. Use the identified, signed
+[delivery/recovery procedure](DEVELOPMENT.md#delivery) if firmware repair is needed; a halt alone
+does not justify erasing configuration or changing identity.
+
+### Sharing diagnostics
 
 For sharing, use `/status?redact=1` and `/diag?redact=1`, then inspect the output: the board MAC
 remains visible. Core dumps, NVS backups and unredacted Syslog are private artifacts.

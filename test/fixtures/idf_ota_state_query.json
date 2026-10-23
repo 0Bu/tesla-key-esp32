@@ -1,0 +1,16 @@
+{
+  "scope": "Unmodified pinned public SDK CRC/query bodies against explicit passive host type/I/O bridge. Not a bootloader, scheduler, SDK flash-write or device test.",
+  "toolchainFileSha256": "6ef2f1d9c15bb269430cbb4530d689022d914b12ac8610b539d4ac00d148d84f",
+  "fixtureSha256": "2f609fdaa860f336a1fe5d658be877b0d1307e605d356fde8225d3f6a3d54897",
+  "sourceFiles": {
+    "components/esp_rom/patches/esp_rom_crc.c": "e2c882fb507b8ba1d646235efcc7a5944524a3066e9d0a9bb282cc31354d7ff6",
+    "components/bootloader_support/src/bootloader_common_loader.c": "c8042255ded92f8b756ad211a2b1a5b3096921e877f7fc3f9ddaa1169b0c7453",
+    "components/app_update/esp_ota_ops.c": "526bee796363f147de53bb51b8b6f021800ddc50c5ce4f9f63680a66fe8a06ee"
+  },
+  "fragmentSha256": [
+    "333cc8202da6dcd762cb9d60ae2447fe3f86b0b9376df2dbb980c21580f0d83e",
+    "2894b873ad0da8eaf263eb211acee88bd3b19faa2cc8a2df9a0c2229cd0dca09",
+    "60e45a77782d4d67152d5401780e9b4efc6f56356dd4e1de05504393aa351d7f",
+    "853ba0555df6759258a0f558356cee399487cf5167bb615c63947a0288b0b8bc"
+  ]
+}

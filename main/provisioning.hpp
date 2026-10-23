@@ -3,8 +3,8 @@
 #include "nvs_storage.hpp"
 
 // Starts a SoftAP "tesla-key-esp32-setup" + captive config portal so WiFi/VIN can be
-// entered from a phone without recompiling. On save it writes wifi_ssid/wifi_pass/
-// vin into the given config store (namespace "tesla_cfg") and reboots.
+// entered from a phone without recompiling. Save updates one verified ConfigBlob in tesla_cfg,
+// preserving service settings, and reboots after a confirmed save. An unreadable snapshot is refused.
 //
 // provisioning_run() NEVER returns — it is the terminal state of first-time setup until the
 // user reboots the device by saving the form. Call it instead of connecting to WiFi.

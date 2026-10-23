@@ -149,7 +149,7 @@ def detect_mode(base_url: str, timeout: float) -> tuple[str, dict[str, object] |
     return "setup", None
 
 
-def provision_setup(base_url: str, ssid: str, password: str, vin: str, timeout: float) -> None:
+def provision_setup(base_url: str, ssid: str, password: str, vin: str, timeout: float) -> str:
     body, _ = request(
         base_url,
         "/save",
@@ -159,6 +159,9 @@ def provision_setup(base_url: str, ssid: str, password: str, vin: str, timeout: 
     )
     if "Saved" not in body:
         raise ProvisionError(f"setup portal did not confirm the save: {body[:300]}")
+    # This marker is emitted only for the portal's fixed, bounded firmware warning text.
+    warning = re.search(r"<p id=firmware-warning>([^<]*)</p>", body)
+    return warning.group(1) if warning else ""
 
 
 def provision_wifi(base_url: str, ssid: str, password: str, timeout: float) -> None:
@@ -174,7 +177,14 @@ def provision_wifi(base_url: str, ssid: str, password: str, timeout: float) -> N
         result = json.loads(body)
     except json.JSONDecodeError as error:
         raise ProvisionError("/set_wifi returned malformed JSON") from error
-    if not isinstance(result, dict) or result.get("result") is not True:
+    response = result.get("response") if isinstance(result, dict) else None
+    if (isinstance(response, dict) and response.get("reply_degraded") is True
+            and response.get("outcome") in ("unknown", "applied_recovery_pending")):
+        raise ProvisionError(
+            "WiFi update outcome not confirmed; inspect device status before another attempt: "
+            + str(response.get("reason", "operation outcome unknown"))
+        )
+    if not isinstance(response, dict) or response.get("result") is not True:
         raise ProvisionError(f"device refused WiFi update: {body[:300]}")
 
 
@@ -186,7 +196,14 @@ def provision_vin(base_url: str, vin: str, timeout: float) -> None:
         result = json.loads(body)
     except json.JSONDecodeError as error:
         raise ProvisionError("/set_vin returned malformed JSON") from error
-    if not isinstance(result, dict) or result.get("result") is not True:
+    response = result.get("response") if isinstance(result, dict) else None
+    if (isinstance(response, dict) and response.get("reply_degraded") is True
+            and response.get("outcome") in ("unknown", "applied_recovery_pending")):
+        raise ProvisionError(
+            "VIN update outcome not confirmed; inspect device status before another attempt: "
+            + str(response.get("reason", "operation outcome unknown"))
+        )
+    if not isinstance(response, dict) or response.get("result") is not True:
         raise ProvisionError(f"device refused VIN update: {body[:300]}")
 
 
@@ -256,7 +273,7 @@ def main(argv: list[str] | None = None) -> int:
                     "a changed VIN clears pairing with the old vehicle; repeat with --confirm-vin-change"
                 )
             provision_vin(base_url, vin, args.timeout)
-            print("VIN transaction accepted; the device is rebooting. Existing NVS was not overwritten.")
+            print("VIN configuration accepted; a changed VIN clears pairing and reboots.")
             return 0
 
         if not args.ssid:
@@ -265,8 +282,10 @@ def main(argv: list[str] | None = None) -> int:
         validate_wifi(args.ssid, password)
 
         if mode == "setup":
-            provision_setup(base_url, args.ssid, password, vin, args.timeout)
+            warning = provision_setup(base_url, args.ssid, password, vin, args.timeout)
             print("Setup transaction accepted; the device is rebooting. Existing key/session NVS was preserved.")
+            if warning:
+                print(warning)
             return 0
 
         if vin:
@@ -284,7 +303,7 @@ def main(argv: list[str] | None = None) -> int:
                     "--confirm-vin-change, wait for reboot, then update WiFi"
                 )
         provision_wifi(base_url, args.ssid, password, args.timeout)
-        print("WiFi transaction accepted with one-shot rollback; the device is rebooting.")
+        print("WiFi configuration accepted; changed credentials take effect after restart.")
         return 0
     except ProvisionError as error:
         print(f"ERROR: {error}", file=sys.stderr)

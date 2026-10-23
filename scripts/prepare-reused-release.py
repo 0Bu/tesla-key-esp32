@@ -777,6 +777,25 @@ def self_test() -> None:
 
     expect_rejected("alias", tamper_alias, "signed app aliases differ", version, source_sha)
 
+    def changed_unsigned_prefix(artifact: Path, _download: Path, _release: dict[str, Any]) -> None:
+        # Same-size valid ESP image; the published signed bytes remain internally valid.
+        (artifact / "_unsigned" / "esp32" / "tesla-key-esp32.bin").write_bytes(
+            FIRMWARE_CONTRACT.make_image("esp32", "1.2.4", app=True)
+        )
+
+    expect_rejected("unsigned-prefix", changed_unsigned_prefix, "signed app prefix differs",
+                    version, source_sha)
+
+    def wrong_unsigned_projection(artifact: Path, download: Path, _release: dict[str, Any]) -> None:
+        # Every unsigned byte is a matching prefix of the published app, but its length would
+        # require another signature alignment block. Isolate projection from the prefix check.
+        (artifact / "_unsigned" / "esp32" / "tesla-key-esp32.bin").write_bytes(
+            (download / "tesla-key-esp32.bin").read_bytes()
+        )
+
+    expect_rejected("unsigned-projection", wrong_unsigned_projection, "unsigned projection",
+                    version, source_sha)
+
     def tamper_signature(_artifact: Path, download: Path, release: dict[str, Any]) -> None:
         target = "esp32c3"
         suffix = "-c3"

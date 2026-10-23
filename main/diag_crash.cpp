@@ -1,224 +1,302 @@
-// One-shot crash/reset capture (see diag_crash.hpp). The pure decisions — fault classification,
-// notability, orphan detection, rendering — live in logic/crashinfo.hpp and are host-tested; this
-// file is the ESP-IDF glue and the cache.
 #include "diag_crash.hpp"
-
+#include "coredump_hash.hpp"
+#include "logic/bootlog.hpp"
 #include <sdkconfig.h>
-
 #include <esp_app_desc.h>
 #include <esp_core_dump.h>
-#include <esp_err.h>
 #include <esp_log.h>
+#include <esp_memory_utils.h>
 #include <esp_system.h>
-
-#include <cstdlib>
-#include <cstring>
+#include <freertos/FreeRTOS.h>
 #include <atomic>
-
-static const char* TAG = "diag_crash";
+#include <array>
+#include <cstddef>
+#include <cstring>
+#include <type_traits>
+#include <utility>
+#if defined(CONFIG_IDF_TARGET_ARCH_XTENSA)
+#include <xtensa_context.h>
+#else
+#include <riscv/rvruntime-frames.h>
+#endif
 
 namespace tk {
-
-// logic/reset_reason.hpp mirrors esp_reset_reason_t BY VALUE so the header stays IDF-free and the
-// firmware can pass the raw int. These asserts are what makes that safe: if IDF ever renumbers the
-// enum, the build fails here instead of the device silently mislabelling every crash it reports —
-// which is the one failure this whole path cannot tolerate, since a wrong label is worse than no
-// label (it sends the next investigation somewhere else). Spot-check the values the classifier
-// actually branches on.
-static_assert(static_cast<int>(ResetCode::PowerOn)  == ESP_RST_POWERON,  "reset enum drift");
-static_assert(static_cast<int>(ResetCode::Sw)       == ESP_RST_SW,       "reset enum drift");
-static_assert(static_cast<int>(ResetCode::Panic)    == ESP_RST_PANIC,    "reset enum drift");
-static_assert(static_cast<int>(ResetCode::IntWdt)  == ESP_RST_INT_WDT,  "reset enum drift");
+static const char* TAG = "diag_crash";
+static_assert(static_cast<int>(ResetCode::PowerOn) == ESP_RST_POWERON, "reset enum drift");
+static_assert(static_cast<int>(ResetCode::Sw) == ESP_RST_SW, "reset enum drift");
+static_assert(static_cast<int>(ResetCode::Panic) == ESP_RST_PANIC, "reset enum drift");
+static_assert(static_cast<int>(ResetCode::IntWdt) == ESP_RST_INT_WDT, "reset enum drift");
 static_assert(static_cast<int>(ResetCode::TaskWdt) == ESP_RST_TASK_WDT, "reset enum drift");
 static_assert(static_cast<int>(ResetCode::Brownout) == ESP_RST_BROWNOUT, "reset enum drift");
-
-// Same contract for the one esp_err_t logic/crashinfo.hpp has to know about: an erase that found
-// no coredump partition. Mirrored by value there to keep the header IDF-free; pinned to the real
-// macro here, so a renumbering breaks the build instead of silently turning every dismissal on an
-// OTA-upgraded device back into an HTTP 500.
-static_assert(kEspErrNotFound == ESP_ERR_NOT_FOUND, "ESP_ERR_NOT_FOUND drift");
-
-// Filled once by diag_crash_capture() and immutable afterwards. Dismissal has its own atomic so an
-// HTTP writer can never race the string/vector snapshot copied by HTTP or MQTT.
-static CrashInfo s_ci;
-static std::atomic<bool> s_dismissed{false};
-static std::atomic<bool> s_foreign_dump{false};
-
-// Every esp_core_dump_image_* symbol lives in IDF's core_dump_flash.c, which is compiled ONLY
-// when CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH is set — so on a build that disables core dumps these
-// are not merely no-ops, they do not LINK. Every current target enables them, but the guard sits on
-// the CALLS rather than only on the parsing so that turning the component off for a size-constrained
-// board stays a one-line sdkconfig change instead of a compile error.
-bool diag_crash_coredump_present() {
-#if defined(CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH)
-    if (s_foreign_dump.load(std::memory_order_acquire)) {
-        return false;
-    }
-    // EXACTLY what handle_coredump uses to decide it has something to stream — any extra condition
-    // here could make /status advertise a download the endpoint refuses, or hide one it would
-    // serve, and that disagreement is precisely what this path exists to prevent. An ESP_OK return
-    // already implies a sane size: esp_core_dump_partition_and_size_get rejects a blank partition
-    // (the size word reading back 0xffffffff) and anything under 4 bytes. One 4-byte flash read.
-    //
-    // On a device flashed BEFORE the coredump partition existed this simply returns false forever:
-    // the partition lookup fails, nothing is advertised, and the reset-reason half of the report
-    // (which needs no partition) still works. That is the supported degraded state, not a bug.
-    size_t addr = 0, size = 0;
-    return esp_core_dump_image_get(&addr, &size) == ESP_OK;
-#else
-    return false;   // this build writes no dumps, so there is never one to offer
+static_assert(CONFIG_APP_RETRIEVE_LEN_ELF_SHA == 64, "full dump identity required");
+#if defined(CONFIG_ESP_COREDUMP_CHECK_BOOT) || defined(CONFIG_ESP_COREDUMP_CAPTURE_DRAM)
+#error "Use the bounded project reader; keep SDK boot parsing and DRAM capture disabled"
 #endif
-}
 
-CrashInfo diag_crash_info_live() {
-    CrashInfo c = s_ci;                            // boot-time reason + parsed summary
-    c.dismissed = s_dismissed.load(std::memory_order_acquire);
-    c.foreign_dump = s_foreign_dump.load(std::memory_order_acquire);
-    c.coredump     = diag_crash_coredump_present();   // …but the image itself may be gone by now
-    return c;
-}
-
-const CrashInfo& diag_crash_info() { return s_ci; }
-
-void diag_crash_capture() {
-    s_dismissed.store(false, std::memory_order_release);
-    s_foreign_dump.store(false, std::memory_order_release);
-    crash_set_reset(s_ci, static_cast<int>(esp_reset_reason()));
-    s_ci.coredump = diag_crash_coredump_present();
-
-    // The running build's identity, always — not only when a dump exists. It is what ties a log
-    // stream (and a downloaded dump) to the .elf that can symbolise it, and CI archives one .elf
-    // per build precisely so that match can be made later.
-    char run_sha[65] = {0};
-    esp_app_get_elf_sha256(run_sha, sizeof(run_sha));
-    s_ci.elf_sha256 = run_sha;
-
-#if defined(CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH) && defined(CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF)
-    // Parse the summary only from a VALID image (checksum ok). The struct is ~2 KB, so it goes on
-    // the heap rather than this task's stack — at boot the heap is still whole (WiFi/NimBLE/MQTT
-    // have not started), which is the other reason capture belongs here and not on a request path.
-    if (s_ci.coredump && esp_core_dump_image_check() == ESP_OK) {
-        auto* sum = static_cast<esp_core_dump_summary_t*>(calloc(1, sizeof(esp_core_dump_summary_t)));
-        if (sum && esp_core_dump_get_summary(sum) == ESP_OK) {
-            s_ci.task = sum->exc_task;
-            s_ci.pc   = sum->exc_pc;
-
-            // THE BACKTRACE IS XTENSA-ONLY, and that is an IDF fact rather than a choice of ours.
-            // esp_core_dump_bt_info_t is declared per ARCHITECTURE: on Xtensa it carries an
-            // unwound PC array (bt/depth/corrupted), on RISC-V it carries a raw STACK DUMP
-            // instead, because RISC-V has no windowed registers and IDF cannot unwind on-device.
-            // Two of this project's four targets are RISC-V (c3/c6), so getting this wrong is
-            // not an edge case — it is half the fleet.
-            //
-            // On RISC-V the report is not empty, it is SHORTER: reason, task, PC and the app-ELF
-            // hash are all still captured, and the full stack is still in the dump that GET
-            // /coredump streams — where an offline decoder with the matching .elf can unwind it
-            // properly anyway. Publishing IDF's raw stack words as if they were a backtrace would
-            // be worse than publishing none: they are not return addresses, and a reader has no
-            // way to tell from /status which of the two they are holding.
+static_assert(offsetof(StaticTask_t, ucDummy7) == 52 &&
+              sizeof(StaticTask_t::ucDummy7) == 16 && configMAX_TASK_NAME_LEN == 16,
+              "review the pinned writer's actual task-name ABI");
 #if defined(CONFIG_IDF_TARGET_ARCH_XTENSA)
-            uint32_t depth = sum->exc_bt_info.depth;
-            if (depth > kCrashBacktraceMax) depth = kCrashBacktraceMax;
-            s_ci.backtrace.clear();
-            s_ci.backtrace.reserve(depth);
-            for (uint32_t i = 0; i < depth; i++) s_ci.backtrace.push_back(sum->exc_bt_info.bt[i]);
+static_assert(sizeof(StaticTask_t) == 100 && sizeof(XtExcFrame) == 112 &&
+              offsetof(XtExcFrame, pc) == 4 && offsetof(XtExcFrame, a0) == 12 &&
+              offsetof(XtExcFrame, a1) == 16, "review Xtensa dump ABI");
+static constexpr CoredumpAbi kAbi{true, sizeof(StaticTask_t), offsetof(StaticTask_t, ucDummy7),
+    sizeof(StaticTask_t::ucDummy7), sizeof(XtExcFrame), offsetof(XtExcFrame, pc),
+    offsetof(XtExcFrame, a1), offsetof(XtExcFrame, a0), 152};
+static constexpr uint16_t kMachine = 94;
+#else
+static_assert(sizeof(StaticTask_t) == 96 && sizeof(RvExcFrame) == 148 &&
+              offsetof(RvExcFrame, mepc) == 0, "review RISC-V dump ABI");
+static constexpr CoredumpAbi kAbi{false, sizeof(StaticTask_t), offsetof(StaticTask_t, ucDummy7),
+    sizeof(StaticTask_t::ucDummy7), sizeof(RvExcFrame), offsetof(RvExcFrame, mepc), 0, 0, 8};
+static constexpr uint16_t kMachine = 243;
+#endif
+// Preserve the same checked ABI values as compile-time parser inputs. The generic
+// host entry still accepts dynamic ABI fixtures and exercises every refusal guard.
+struct CompiledCoredumpAbi {
+    static constexpr bool xtensa = kAbi.xtensa;
+    static constexpr uint32_t tcb_bytes = kAbi.tcb_bytes, name_offset = kAbi.name_offset;
+    static constexpr uint32_t name_bytes = kAbi.name_bytes, frame_bytes = kAbi.frame_bytes;
+    static constexpr uint32_t pc_offset = kAbi.pc_offset, sp_offset = kAbi.sp_offset;
+    static constexpr uint32_t a0_offset = kAbi.a0_offset, extra_bytes = kAbi.extra_bytes;
+};
+// Fixed outer/INFO/EXTRA schema is source-bound to IDF6.1's espcoredump writers.
+// EXTRA contains the crashed TCB first and ISR flag last; no private SDK unwinder is called.
+static constexpr uint32_t kVersion = (uint32_t{CONFIG_IDF_FIRMWARE_CHIP_ID} << 16) | 0x0104;
+enum Admission : uint32_t { NoArtifact, Quarantined, Foreign, Current };
+static constexpr uint32_t kStateMask = 7, kGeneration = 8;
+// Capture is completed before service tasks. This payload never changes afterward;
+// erase revokes atomic admission only, so borrowed views remain memory-safe.
+struct BootCrashInfo : CrashFacts {
+    std::array<char, 17> task{};
+    uint32_t pc{0};
+    std::array<uint32_t, kCrashBacktraceMax> backtrace{};
+    uint8_t depth{0};
+    std::array<char, 65> elf_sha256{}, dump_elf_sha256{};
+};
+static_assert(std::is_trivially_copyable<BootCrashInfo>::value, "complete boot publication cannot allocate");
+static_assert(sizeof(BootCrashInfo) <= 256, "bounded immutable boot metadata");
+static_assert(kCrashBacktraceMax == kCoredumpBacktraceMax, "one frame bound");
+static BootCrashInfo s_boot;
+static CrashInfoView crash_borrow(const BootCrashInfo& owner) noexcept {
+    CrashInfoView view;
+    static_cast<CrashFacts&>(view) = owner;
+    view.task = owner.task.data();
+    view.pc = owner.pc;
+    view.backtrace = {owner.backtrace.data(), owner.depth};
+    view.elf_sha256 = owner.elf_sha256.data();
+    view.dump_elf_sha256 = owner.dump_elf_sha256.data();
+    return view;
+}
+static CrashResetInfo s_reset{0, false};
+static CoredumpHeader s_header;
+static std::atomic<uint32_t> s_admission{NoArtifact};
+static std::atomic<bool> s_dismissed{false};
+static std::atomic<bool> s_query_error{false};
+static std::atomic_flag s_dump_owner = ATOMIC_FLAG_INIT;
 
-            s_ci.corrupted = sum->exc_bt_info.corrupted;
-#endif  // CONFIG_IDF_TARGET_ARCH_XTENSA
+static Admission state(uint32_t value) { return static_cast<Admission>(value & kStateMask); }
+static void invalidate(Admission next) noexcept {
+    uint32_t previous = s_admission.load(std::memory_order_acquire);
+    while (!s_admission.compare_exchange_weak(previous,
+              ((previous + kGeneration) & ~kStateMask) | next,
+              std::memory_order_acq_rel, std::memory_order_acquire)) {}
+}
+CoredumpLease::CoredumpLease() noexcept
+    : held_(!s_dump_owner.test_and_set(std::memory_order_acquire)) {}
+CoredumpLease::~CoredumpLease() { if (held_) s_dump_owner.clear(std::memory_order_release); }
+const CrashResetInfo& diag_crash_reset_info() noexcept { return s_reset; }
 
-            // app_elf_sha256 is a uint8_t[] holding a HEX STRING, not a C string and not raw
-            // digest bytes — so it neither converts to std::string on its own nor should be
-            // treated as binary. Copy through a bounded buffer and terminate it ourselves rather
-            // than trusting the array to carry its own NUL: this runs while decoding a crash, and
-            // reading past the end of a struct field is a poor way to report one.
-            char dump_sha[sizeof(sum->app_elf_sha256) + 1] = {0};
-            std::memcpy(dump_sha, sum->app_elf_sha256, sizeof(sum->app_elf_sha256));
-            s_ci.dump_elf_sha256 = dump_sha;
+struct PartitionQuery { const esp_partition_t* part{nullptr}; bool error{false}; };
+static PartitionQuery locate_partition() {
+    struct Iterator {
+        esp_partition_iterator_t value{nullptr};
+        ~Iterator() { if (value) esp_partition_iterator_release(value); }
+    } iterator;
+    // A NOT_FOUND from a filtered lookup can also mean the table loader failed
+    // (e.g. missing MD5). First require a successfully loaded, nonempty registry.
+    if (esp_partition_find_err(ESP_PARTITION_TYPE_ANY, ESP_PARTITION_SUBTYPE_ANY,
+                              nullptr, &iterator.value) != ESP_OK || !iterator.value)
+        return {nullptr, true};
+    const esp_partition_t* found = nullptr;
+    unsigned entries = 0;
+    for (; iterator.value && entries < 128; ++entries) {
+        const auto* part = esp_partition_get(iterator.value);
+        if (!part) return {nullptr, true};
+        if (part->type == ESP_PARTITION_TYPE_DATA && part->subtype == ESP_PARTITION_SUBTYPE_DATA_COREDUMP) {
+            // Refuse duplicates or unexpected extents before read/SDK erase.
+            if (found || part->address != 0x12000 || part->size != kCoredumpCapacity)
+                return {nullptr, true};
+            found = part;
         }
-        free(sum);
+        iterator.value = esp_partition_next(iterator.value); // releases at end
     }
-
-    // A dump can OUTLIVE the firmware that wrote it: the coredump partition survives an OTA, and a
-    // panic that cannot write its own dump (a stack overflow can overrun the writer) leaves the
-    // PREVIOUS build's image in place. Such an orphan still passes esp_core_dump_image_check() — it
-    // is a valid image, just of another binary — so `coredump` reads true, /status offers a
-    // download, and only the offline decoder rejects it three steps later on a SHA-256 mismatch.
-    // Erasing it makes `coredump` mean "a dump for THIS firmware is downloadable" and frees the
-    // slot for the next real panic. The summary fields go with it: they describe the foreign binary
-    // and would symbolise to garbage against the running .elf.
-    //
-    // coredump_is_foreign() declares foreign only on PROOF (two present hashes, a meaningful
-    // comparison length, an actual mismatch), because the erase is destructive and the artifact it
-    // would destroy is the only thing a panic left behind.
-    if (crash_has_summary(s_ci) && coredump_is_foreign(s_ci.elf_sha256, s_ci.dump_elf_sha256)) {
-        s_foreign_dump.store(true, std::memory_order_release);
-        ESP_LOGW(TAG, "stale core dump from build %s (running %s) — erasing",
-                 s_ci.dump_elf_sha256.c_str(), s_ci.elf_sha256.c_str());
-        esp_err_t err = esp_core_dump_image_erase();
-        if (err != ESP_OK)
-            ESP_LOGW(TAG, "stale core dump erase failed: %s", esp_err_to_name(err));
-        // Cleared regardless of the erase result: reporting a dump we KNOW is foreign is worse than
-        // reporting none.
-        s_ci.coredump = false;
-        s_ci.foreign_dump = true;
-        s_ci.task.clear();
-        s_ci.pc = 0;
-        s_ci.backtrace.clear();
-        s_ci.corrupted = false;
-        s_ci.dump_elf_sha256.clear();
+    if (iterator.value) return {nullptr, true};
+    return {found, false}; // absence only after a complete, successful table walk
+}
+static bool same_header(const CoredumpHeader& a, const CoredumpHeader& b) {
+    return a.length == b.length && a.version == b.version && a.chip_revision == b.chip_revision;
+}
+struct HeaderQuery { const esp_partition_t* part{nullptr}; CoredumpHeader header; bool error{false}; };
+// Share the bounded reader instantiation across boot admission and live header checks.
+// Its only state is the already validated partition; neither caller owns mutable input data.
+struct PartitionReader {
+    const esp_partition_t* part;
+    bool operator()(uint32_t offset, void* data, uint32_t bytes) const {
+        return esp_partition_read(part, offset, data, bytes) == ESP_OK;
     }
-#endif
-
-    if (crash_is_notable(s_ci)) {
-        // Into the esp_log stream, which diag_log.cpp captures for /diag AND forwards to syslog —
-        // so the one record that explains an unattended reboot reaches a place that outlives the
-        // next one. (The forwarder is not up yet at this point in boot; logic/bootlog.hpp's replay
-        // is what gets these lines to the collector — see syslog.cpp.)
-        ESP_LOGE(TAG, "%s", build_crash_text(s_ci).c_str());
+};
+static HeaderQuery query_header() {
+    const auto query = locate_partition();
+    HeaderQuery out; out.part = query.part; out.error = query.error;
+    if (!out.part) return out;
+    PartitionReader io{out.part};
+    CoredumpInput input(io, out.part->size);
+    out.header = input.admit(); out.error = input.failed();
+    return out;
+}
+CrashInfoView diag_crash_info_live() {
+    const uint32_t before = s_admission.load(std::memory_order_acquire);
+    HeaderQuery query;
+    try { query = query_header(); } catch (...) { query.error = true; }
+    if (query.error) { s_query_error.store(true, std::memory_order_release); invalidate(Quarantined); }
+    else if (!query.header.present) {
+        if (state(before) != NoArtifact) invalidate(NoArtifact);
+    } else if ((state(before) == Current || state(before) == Foreign) &&
+               !same_header(query.header, s_header)) {
+        invalidate(Quarantined);
     }
+    CrashInfoView info = crash_borrow(s_boot); // static immutable payload; no copy/allocation/leaf lock
+    info.dismissed = s_dismissed.load(std::memory_order_acquire);
+    info.artifact_present = query.header.present;
+    info.query_error = query.error || s_query_error.load(std::memory_order_acquire);
+    info.raw_available = query.header.readable && !query.error;
+    const uint32_t after = s_admission.load(std::memory_order_acquire);
+    crash_finish_snapshot(info, {before, after, same_header(query.header, s_header),
+        query.error, query.header.readable, state(after) == Current, state(after) == Foreign,
+        state(after) == NoArtifact});
+    return info;
 }
 
-// Acknowledge + delete this boot's crash report. Erase FIRST, mark second: on a failed erase
-// nothing is marked, so the banner comes back rather than the device claiming a crash is gone while
-// its dump is still downloadable.
-//
-// The erase is unconditional rather than gated on diag_crash_coredump_present():
-// esp_core_dump_image_erase() succeeds on an already-blank partition, and gating it on the presence
-// check would leave behind exactly the images that check REJECTS — a truncated or checksum-broken
-// dump, which is stale crash residue like any other.
-//
-// `dismissed` is written from the httpd task while MQTT/status may snapshot the report. It is kept
-// outside the otherwise immutable CrashInfo and release/acquire-published, so there is no plain
-// bool versus string/vector-copy data race and no allocation under a mutex.
-bool diag_crash_dismiss() {
-    bool erased = false;
+static void capture_artifact(BootCrashInfo& captured, const char* running) {
+    const auto query = locate_partition();
+    if (query.error) { captured.query_error = true; s_admission.store(Quarantined); return; }
+    if (!query.part) { s_admission.store(NoArtifact); return; }
+    PartitionReader read{query.part};
+    CoredumpInput input(read, query.part->size);
+    const auto outer = input.admit(); s_header = outer;
+    captured.artifact_present = outer.present; captured.raw_available = outer.readable;
+    captured.query_error = input.failed();
+    if (!outer.present && !input.failed()) { s_admission.store(NoArtifact); return; }
+    s_admission.store(Quarantined);
+    if (!outer.readable || input.failed()) return;
+    const bool checksum = verify_coredump_checksum(input, outer);
+    const auto metadata = parse_coredump_metadata(input, outer, kMachine, kVersion,
+                                                 running, std::strlen(running), checksum);
+    CoredumpSummary summary;
+    if (metadata.identity == DumpIdentity::VerifiedCurrent) {
+        summary = parse_coredump_summary_for_arch<kAbi.xtensa>(input, metadata, CompiledCoredumpAbi{}, [](uint32_t pc) {
+            return esp_ptr_executable(reinterpret_cast<const void*>(static_cast<uintptr_t>(pc)));
+        });
+    }
+    captured.query_error = input.failed();
+    if (input.failed()) return; // never admit a previously verified image after a later read failure
+    captured.checksum_verified = checksum;
+    captured.dump_identity = metadata.identity;
+    captured.foreign_dump = metadata.identity == DumpIdentity::Foreign;
+    std::memcpy(captured.dump_elf_sha256.data(), metadata.hash, sizeof(metadata.hash));
+    if (summary.available) {
+        if (summary.depth > captured.backtrace.size()) { captured.query_error = true; return; }
+        std::memcpy(captured.task.data(), summary.task, sizeof(summary.task));
+        captured.pc = summary.pc;
+        captured.depth = summary.depth;
+        std::memcpy(captured.backtrace.data(), summary.backtrace, summary.depth * sizeof(uint32_t));
+        captured.summary_available = true;
+        captured.corrupted = summary.corrupted; captured.truncated = summary.truncated;
+        captured.isr = summary.isr;
+    }
+    captured.coredump = metadata.identity == DumpIdentity::VerifiedCurrent;
+    s_admission.store(captured.coredump ? Current : captured.foreign_dump ? Foreign : Quarantined,
+                      std::memory_order_release);
+}
+// Reuse the bounded CRASH records already emitted by Syslog. No second human
+// formatter is linked into firmware; complete running identity survives no-summary cases.
+static void log_boot_crash(const CrashInfoView& info) noexcept {
+    try {
+        if (!crash_is_notable(info)) return;
+        std::vector<std::string> lines;
+        build_crash_log_lines(info, lines);
+        for (const auto& line : lines) ESP_LOGE(TAG, "%s", line.c_str());
+        if (!info.summary_available && !info.elf_sha256.empty())
+            ESP_LOGE(TAG, "elf_sha256=%.64s", info.elf_sha256.data());
+    } catch (...) {} // formatting/partial logging never changes admission or retries
+}
+void diag_crash_capture() noexcept {
+    s_dismissed.store(false, std::memory_order_release);
+    s_reset = {static_cast<int>(esp_reset_reason()), false};
+    s_reset.fault = reset_is_fault(s_reset.code);
+    crash_set_reset(s_boot, s_reset.code);
+    try {
+        BootCrashInfo captured; crash_set_reset(captured, s_reset.code);
+        esp_app_get_elf_sha256(captured.elf_sha256.data(), captured.elf_sha256.size());
+        capture_artifact(captured, captured.elf_sha256.data());
+        s_boot = captured; // publish only a complete fixed boot-owned object
+        s_query_error.store(s_boot.query_error, std::memory_order_release);
+    } catch (...) {
+        s_boot.query_error = true;
+        s_query_error.store(true, std::memory_order_release);
+        invalidate(Quarantined);
+    }
+    log_boot_crash(crash_borrow(s_boot));
+}
+
+CoredumpOpenResult diag_crash_open_dump(const CoredumpLease& lease, bool raw, CoredumpDownload& out) {
+    out = {};
+    if (!lease.held()) return CoredumpOpenResult::Busy;
+    const uint32_t before = s_admission.load(std::memory_order_acquire);
+    HeaderQuery query;
+    try { query = query_header(); } catch (...) { query.error = true; }
+    if (query.error) {
+        s_query_error.store(true, std::memory_order_release); invalidate(Quarantined);
+        return CoredumpOpenResult::Error;
+    }
+    if (!query.header.present) { invalidate(NoArtifact); return CoredumpOpenResult::Absent; }
+    if (!query.header.readable) { invalidate(Quarantined); return CoredumpOpenResult::Unverified; }
+    if ((state(before) == Current || state(before) == Foreign) &&
+        !same_header(query.header, s_header)) invalidate(Quarantined);
+    if (!raw && (!same_header(query.header, s_header) ||
+        before != s_admission.load(std::memory_order_acquire) || state(before) != Current))
+        return CoredumpOpenResult::Unverified;
+    out = {query.part, query.header.length};
+    return CoredumpOpenResult::Ready;
+}
+CrashEraseResult diag_crash_erase(bool dismiss, EffectReplyState& reply) noexcept {
+    CoredumpLease lease;
+    if (!lease.held()) return CrashEraseResult::Busy;
+    try {
+        const auto query = locate_partition();
+        if (!query.error && !query.part) {
+            invalidate(NoArtifact); s_query_error.store(false, std::memory_order_release);
+            if (dismiss) s_dismissed.store(true, std::memory_order_release);
+            reply.succeeded(); return CrashEraseResult::Absent;
+        }
+        // Conservative before any possible erase/exception; never restore Current during this boot.
+        reply.attempting(RequestEffect::CoredumpErase); invalidate(Quarantined);
+        if (query.error) { s_query_error.store(true, std::memory_order_release); return CrashEraseResult::Unconfirmed; }
 #if defined(CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH)
-    // The #if above is a COMPILE-time guard ("this build has no coredump support"). It does not
-    // cover the RUNTIME case that turns out to be the common one: a build that CAN write dumps
-    // running on a device whose installed partition table has no `coredump` partition, because a
-    // partition table is not part of an OTA image. There the erase returns ESP_ERR_NOT_FOUND, and
-    // treating that as a failure answered 500 to every dismissal on every OTA-upgraded board.
-    // crash_erase_permits_dismiss() draws that line, host-tested, and keeps every other error
-    // fatal — see logic/crashinfo.hpp.
-    const esp_err_t err = esp_core_dump_image_erase();
-    if (!crash_erase_permits_dismiss(static_cast<int>(err))) {
-        ESP_LOGW(TAG, "dismiss failed — coredump erase: %s", esp_err_to_name(err));
-        return false;
-    }
-    erased = (err == ESP_OK);
-    if (erased) {
-        s_foreign_dump.store(false, std::memory_order_release);
-    }
-    if (!erased)
-        ESP_LOGI(TAG, "no coredump partition on this device — dismissing the reset report only");
+        if (esp_core_dump_image_erase() != ESP_OK) {
+            s_query_error.store(true, std::memory_order_release); return CrashEraseResult::Unconfirmed;
+        }
+        invalidate(NoArtifact); s_query_error.store(false, std::memory_order_release);
+        if (dismiss) s_dismissed.store(true, std::memory_order_release);
+        reply.succeeded(); return CrashEraseResult::Erased;
+#else
+        return CrashEraseResult::Unconfirmed;
 #endif
-    // On a build with no dump there is nothing to erase, and dismissal still MEANS something: the
-    // report it clears is the fault RESET, which is what /status.last_crash carries there. Failing
-    // it would leave a crash banner that no action can dismiss.
-    s_dismissed.store(true, std::memory_order_release);
-    ESP_LOGI(TAG, "crash report dismissed (reset=%s, dump %s)", reset_reason_slug(s_ci.reset_code),
-             erased ? "erased" : "none present");
-    return true;
+    } catch (...) {
+        reply.attempting(RequestEffect::CoredumpErase); invalidate(Quarantined);
+        s_query_error.store(true, std::memory_order_release);
+        return CrashEraseResult::Unconfirmed;
+    }
 }
-
 }  // namespace tk

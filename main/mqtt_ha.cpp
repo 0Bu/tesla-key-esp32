@@ -25,6 +25,7 @@
 #include <array>
 #include <string>
 #include <ctime>
+#include <cstring>
 #include <exception>
 
 #include "freertos/FreeRTOS.h"
@@ -70,7 +71,6 @@ static std::string s_node;                     // vehicle-stable node id (teslak
 static std::string s_base;                     // state-topic base (<base_prefix>/<node>)
 static std::string s_avail;                    // availability (LWT) topic
 static std::string s_devname;                  // HA device display name
-static std::string s_cfgurl;                   // device configuration_url (http://<ip>)
 static std::string s_broker_disp;              // "host:port" for the web UI
 static int         s_interval_s = 15;
 static bool        s_client_started = false;
@@ -132,7 +132,18 @@ static void commit_domain(tk::mqtt::StateDomain domain,
 }
 
 // ─── HA discovery ─────────────────────────────────────────────────────────────
-static bool publish_discovery() {
+static void current_configuration_url(char* out, size_t capacity) {
+    if (!out || capacity < 8) return;
+    out[0] = '\0';
+    esp_netif_t* netif = tk::net_active_netif();
+    esp_netif_ip_info_t ip{};
+    if (!netif || esp_netif_get_ip_info(netif, &ip) != ESP_OK ||
+        ip.ip.addr == 0 || tk::net_active_netif() != netif) return;
+    std::memcpy(out, "http://", 7);
+    if (!esp_ip4addr_ntoa(&ip.ip, out + 7, capacity - 7)) out[0] = '\0';
+}
+
+[[gnu::noinline]] static bool publish_discovery_rows(const char* cfgurl) {
     for (const tk::mqtt::DiscoveryEntry& entry : tk::mqtt::kDiscoveryEntries) {
         const std::string uid = tk::mqtt::discovery_unique_id(s_node, entry);
         const std::string value_template = tk::mqtt::discovery_value_template(entry);
@@ -157,7 +168,7 @@ static bool publish_discovery() {
             s_devname.c_str(),
             TK_PLATFORM,
             esp_app_get_description()->version,
-            s_cfgurl.empty() ? nullptr : s_cfgurl.c_str(),
+            cfgurl[0] ? cfgurl : nullptr,
         };
 
         // Retained so HA recreates entities after a restart. A failed builder, print, or broker
@@ -167,6 +178,13 @@ static bool publish_discovery() {
     ESP_LOGI(TAG, "published %d HA-discovery configs under %s/",
              static_cast<int>(tk::mqtt::kDiscoveryEntries.size()), s_prefix.c_str());
     return true;
+}
+
+static bool publish_discovery() {
+    // One bounded address snapshot per round; keep it outside the row builder's frame.
+    char cfgurl[24] = {};
+    current_configuration_url(cfgurl, sizeof(cfgurl));
+    return publish_discovery_rows(cfgurl);
 }
 
 // ─── State publish ────────────────────────────────────────────────────────────
@@ -366,18 +384,18 @@ static bool publish_state() {
         payload.has_ble_rssi = s_vehicle->ble_rssi(r);
         payload.ble_rssi = r;
         payload.paired = s_vehicle->has_session();
+        payload.session_available = s_vehicle->session_available();
         // Boot time as an ISO-8601 timestamp → HA renders it as auto-scaling relative
         // time ("8 minutes ago" → "2 days ago"), so it's human-readable and each reboot
         // shows as a step change. Only emit once the wall clock is authoritatively synced
-        // (SNTP or browser /set_time), not merely restored from NVS (which represents historical
-        // time from a prior shutdown). Cached once synced so it stays stable per boot.
+        // by NTP, not by browser/restored estimates. Cached once synced so it stays stable per boot.
         static time_t s_boot_epoch = 0;
         static bool   s_latched_via_ntp = false;
         if (clock_is_authoritative()) {
             const bool is_ntp = clock_synced_via_ntp();
             if (s_boot_epoch == 0 || (!s_latched_via_ntp && is_ntp)) {
                 time_t now_ = time(nullptr);
-                if (now_ > 1600000000) {
+                if (tk::historical_date_valid(now_, clock_plausibility_ceiling())) {
                     s_boot_epoch = now_ - (time_t)(esp_timer_get_time() / 1000000);
                     if (is_ntp) s_latched_via_ntp = true;
                 }
@@ -399,7 +417,7 @@ static bool publish_state() {
         payload.min_free_heap =
             (double)heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
 
-        const tk::CrashInfo ci = tk::diag_crash_info_live();
+        const auto ci = tk::diag_crash_info_live();
         payload.reset_reason = tk::reset_reason_slug(ci.reset_code);
         payload.reset_reason_code = (double)ci.reset_code;
         // "a dump for THIS build is downloadable right now" — re-read from flash per publish, since
@@ -638,12 +656,6 @@ static bool mqtt_ha_start_impl(VehicleController& vehicle,
     // Device display name + a clickable link back to this device's web UI.
     s_devname = "Tesla Key";
     if (vin.size() == 17) s_devname += " (" + vin + ")";
-    esp_netif_t* netif = tk::net_active_netif();
-    esp_netif_ip_info_t ip{};
-    if (netif && esp_netif_get_ip_info(netif, &ip) == ESP_OK) {
-        char ipbuf[16]; esp_ip4addr_ntoa(&ip.ip, ipbuf, sizeof(ipbuf));
-        s_cfgurl = std::string("http://") + ipbuf;
-    }
 
     // esp-mqtt v5 nested config struct. LWT marks us "offline" if the link drops.
     esp_mqtt_client_config_t cfg = {};

@@ -1,4 +1,5 @@
 #pragma once
+#include "service_target_limits.hpp"
 
 #include <cerrno>
 #include <cstddef>
@@ -39,7 +40,7 @@ inline bool syslog_target_parse(const std::string& raw, std::string& host, int& 
 // host-tested. No scheme is accepted (syslog is UDP, not a URI-style broker).
 inline bool syslog_target_is_plausible(const std::string& raw) {
     if (raw.empty()) return true;
-    if (raw.size() > 120) return false;
+    if (raw.size() > kServiceTargetInputMaxBytes) return false;
     if (raw.find_first_of(" \t\r\n") != std::string::npos) return false;
     std::string host;
     int port = 0;
@@ -144,6 +145,15 @@ inline int syslog_severity_for_line(const char* text, size_t len) {
 
 inline int syslog_pri_for_line(const char* text, size_t len) {
     return kSyslogFacilityUser * 8 + syslog_severity_for_line(text, len);
+}
+// Only the firmware replay caller supplies a typed record. Arbitrary message text
+// keeps the normal esp_log-prefix classifier, including an unprefixed "CRASH" line.
+enum class SyslogRecord { Ordinary, Boot, Crash };
+
+inline int syslog_pri_for_record(SyslogRecord record, const char* text, size_t len) {
+    if (record == SyslogRecord::Boot) return kSyslogFacilityUser * 8 + 6;
+    if (record == SyslogRecord::Crash) return kSyslogFacilityUser * 8 + 3;
+    return syslog_pri_for_line(text, len);
 }
 
 }  // namespace tk

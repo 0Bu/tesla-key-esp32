@@ -9,6 +9,8 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
+#include "esp_timer.h"
 #include "esp_event.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
@@ -41,11 +43,10 @@
 #include "led_status.hpp"
 #include "time_sync.hpp"
 #include "logic/bootlog.hpp"
+#include "logic/device_hostname.hpp"
 #include "logic/health_gate.hpp"
 #include "logic/heap_watchdog.hpp"
 #include "logic/vin_transition.hpp"
-
-static const char* MDNS_HOSTNAME = "tesla-key-esp32";  // → http://tesla-key-esp32.local
 
 static const char* TAG = "main";
 
@@ -77,67 +78,145 @@ static const char* TAG = "main";
 }
 
 // ─── Wall clock ───────────────────────────────────────────────────────────────
-// NTP (esp_sntp) is the primary time source; the browser (POST /set_time) is only a
-// fallback for networks that block NTP. on_time_sync() flips s_ntp_synced and, on the
-// first sync, refreshes the NVS cache so a later offline reboot restores a recent
-// accurate time instead of sitting at 1970.
-// atomic (not volatile): written from the SNTP callback task, read from the http/set_time
-// task. volatile stops selected compiler optimizations but is NOT a cross-task
-// happens-before edge under the C++ memory model; std::atomic is. Simple seq_cst policy.
-static std::atomic<bool>  s_ntp_synced{false};
-static std::atomic<bool>  s_clock_authoritative{false};
-static NvsStorageAdapter* s_cfg_store  = nullptr;
+// Only a validated, successfully applied NTP sample is authority for durable dates.
+// Browser time and the restored checkpoint are temporary estimates, never authority.
+static std::atomic<bool> s_ntp_synced{false}; // ever committed this boot; never reset on failure
+static NvsStorageAdapter* s_cfg_store = nullptr;
+static StaticSemaphore_t s_clock_mutex_storage;
+static SemaphoreHandle_t s_clock_mutex = nullptr;
+// SNTP calls its hook serially on the TCP/IP task. Browser requests never touch this policy.
+static tk::ClockCheckpointPolicy s_clock_checkpoint;
 
-static void on_time_sync(struct timeval*) {
+int64_t clock_plausibility_ceiling() noexcept {
+    return tk::clock_ceiling_seconds(esp_app_get_description()->date);
+}
+
+static void initialize_clock_gate_() {
+    // Pinned libc lazily initializes private Adjtime/Boot locks here, before producers and
+    // outside our gate. This bootstrap can allocate/abort on SDK OOM; it is not C++-catchable.
+    timeval warm{};
+    if (gettimeofday(&warm, nullptr) != 0) boot_fatal("clock bootstrap");
+    s_clock_mutex = xSemaphoreCreateMutexStatic(&s_clock_mutex_storage);
+    if (!s_clock_mutex) boot_fatal("clock mutex");
+}
+
+struct ClockOperationGuard {
+    bool held{false};
+    ClockOperationGuard() noexcept
+        : held(s_clock_mutex && xSemaphoreTake(s_clock_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {}
+    ~ClockOperationGuard() { if (held) xSemaphoreGive(s_clock_mutex); }
+    ClockOperationGuard(const ClockOperationGuard&) = delete;
+    ClockOperationGuard& operator=(const ClockOperationGuard&) = delete;
+};
+
+bool clock_synced_via_ntp() noexcept { return s_ntp_synced.load(std::memory_order_acquire); }
+bool clock_is_authoritative() noexcept { return clock_synced_via_ntp(); }
+
+BrowserClockResult apply_browser_clock_sample(tk::ClockSample sample) noexcept {
     try {
-        const bool first_sync = !s_ntp_synced.exchange(true);
-        s_clock_authoritative.store(true, std::memory_order_release);
-        if (first_sync && s_cfg_store) {
-            try {
-                if (!s_cfg_store->save_str(tk::nvs_contract::kLastTime,
-                                           std::to_string((long long)time(nullptr)))) {
-                    ESP_LOGW(TAG, "NTP time synced but not cached to NVS — a headless reboot "
-                                  "with NTP unreachable will come up at 1970");
-                }
-            } catch (const std::exception& e) {
-                ESP_LOGE(TAG, "NTP callback could not cache time (%s)", e.what());
-            } catch (...) {
-                ESP_LOGE(TAG, "NTP callback could not cache time (unknown exception)");
-            }
-        }
-        ESP_LOGI(TAG, "NTP time synced");
-    } catch (const std::exception& e) {
-        ESP_LOGE(TAG, "NTP callback boundary failed (%s)", e.what());
+        ClockOperationGuard guard;
+        if (!guard.held) return {BrowserClockStatus::Busy, 0};
+        // Check INSIDE the same gate that commits the first NTP apply. Once committed,
+        // no later browser writer can overwrite it, including an already admitted request.
+        if (clock_synced_via_ntp()) return {BrowserClockStatus::AlreadyNtpSynced, 0};
+        if (!tk::clock_sample_valid(sample, clock_plausibility_ceiling()))
+            return {BrowserClockStatus::Invalid, 0};
+        timeval value{static_cast<time_t>(sample.seconds),
+                      static_cast<suseconds_t>(sample.microseconds)};
+        if (settimeofday(&value, nullptr) != 0) return {BrowserClockStatus::SetFailed, 0};
+        return {BrowserClockStatus::Applied, sample.seconds};
     } catch (...) {
-        ESP_LOGE(TAG, "NTP callback boundary failed (unknown exception)");
+        // Conservative if a platform test double throws after an attempted syscall. No retry.
+        return {BrowserClockStatus::SetFailed, 0};
     }
 }
 
-// Queried by the HTTP /set_time handler so the browser clock is applied only as a
-// fallback while NTP has not synced this boot.
-bool clock_synced_via_ntp() noexcept { return s_ntp_synced.load(std::memory_order_acquire); }
-bool clock_is_authoritative() noexcept { return s_clock_authoritative.load(std::memory_order_acquire); }
-void mark_clock_authoritative() noexcept { s_clock_authoritative.store(true, std::memory_order_release); }
+BrowserClockResult apply_browser_clock(double milliseconds) noexcept {
+    tk::ClockSample sample;
+    // Preserve the valid-body/schema NTP no-op even for an out-of-window numeric value.
+    if (!tk::browser_clock_sample(milliseconds, clock_plausibility_ceiling(), sample)) {
+        // Recheck under the operation gate; an NTP transition must not create an unguarded
+        // browser apply. An empty sample is rejected if NTP still has not committed.
+        return apply_browser_clock_sample({});
+    }
+    return apply_browser_clock_sample(sample);
+}
 
-// Seed the wall clock from the NVS cache written by on_time_sync, so we never sit at 1970
-// waiting for NTP (or forever, if the network blocks it and no browser ever visits). Called
-// early in app_main — before VehicleController::init, so the system clock is set to real Unix
-// time (~1.79 billion s). load_nvs_sessions_() in vehicle_telemetry.cpp computes
-// (unix_now - session.clock_time) against vehicle uptime/epoch rather than Unix time (ADR-0005 §2),
-// so once the wall clock is restored to Unix time (~1.79·10⁹ s), *every* stored session is
-// rejected regardless of age (rather than performing a real freshness check). Restoring the clock
-// ensures fail-closed session rejection at startup. Network-free by design: it must be usable
-// before esp_netif exists. Refined by NTP as soon as the link is up.
+static void checkpoint_ntp_time_(tk::ClockSample sample, uint64_t monotonic_us) {
+    if (!s_cfg_store || !s_clock_checkpoint.due(monotonic_us)) return;
+    // Mark before any allocation/storage: failed attempts cannot cause a tight write loop.
+    s_clock_checkpoint.note_attempt(monotonic_us);
+    bool saved = false;
+    try {
+        saved = s_cfg_store->save_str(tk::nvs_contract::kLastTime,
+                                      std::to_string(sample.seconds));
+    } catch (...) {
+        ESP_LOGW(TAG, "NTP checkpoint metadata allocation failed");
+    }
+    s_clock_checkpoint.note_result(saved, static_cast<uint64_t>(esp_timer_get_time()));
+    if (!saved) ESP_LOGW(TAG, "NTP synced but its checkpoint was not confirmed");
+}
+
+// Called by the C hook below. Only bounded POD/time operations while holding this gate.
+static bool apply_ntp_clock_(tk::ClockSample supplied, int64_t entered_us,
+                              tk::ClockSample& applied) {
+    ClockOperationGuard guard;
+    if (!guard.held || !tk::clock_advance_sample(supplied,
+            esp_timer_get_time() - entered_us, clock_plausibility_ceiling(), applied)) return false;
+    // 100ms bounds admission only. libc's inner time locks can wait indefinitely.
+    timeval value{static_cast<time_t>(applied.seconds),
+                  static_cast<suseconds_t>(applied.microseconds)};
+    if (settimeofday(&value, nullptr) != 0) return false;
+    s_ntp_synced.store(true, std::memory_order_release);
+    return true;
+}
+
+// Strong implementation of the pinned IDF weak extension seam. The SDK caller
+// sntp_set_system_time reaches this hook INSTEAD of its unguarded default clock write.
+extern "C" void sntp_sync_time(struct timeval* source) {
+    try {
+        const int64_t entered_us = esp_timer_get_time();
+        if (!source || sntp_get_sync_mode() != SNTP_SYNC_MODE_IMMED ||
+            source->tv_usec < 0 || source->tv_usec >= 1000000) {
+            sntp_set_sync_status(SNTP_SYNC_STATUS_RESET);
+            return;
+        }
+        const tk::ClockSample supplied{static_cast<int64_t>(source->tv_sec),
+                                       static_cast<int32_t>(source->tv_usec)};
+        tk::ClockSample applied;
+        if (!tk::clock_sample_valid(supplied, clock_plausibility_ceiling()) ||
+            !apply_ntp_clock_(supplied, entered_us, applied)) {
+            sntp_set_sync_status(SNTP_SYNC_STATUS_RESET);
+            return;
+        }
+        // Status, strings, storage and logging follow gate release.
+        sntp_set_sync_status(SNTP_SYNC_STATUS_COMPLETED);
+        checkpoint_ntp_time_(applied, static_cast<uint64_t>(esp_timer_get_time()));
+        ESP_LOGI(TAG, "NTP time synced");
+    } catch (...) {
+        // Never unwind through the SDK C caller or reset an already committed authority bit.
+        sntp_set_sync_status(SNTP_SYNC_STATUS_RESET);
+        ESP_LOGE(TAG, "NTP clock boundary failed");
+    }
+}
+
+// Startup-only checkpoint estimate, before controller/HTTP/SNTP producers. It does not
+// certify wall time or repair the inherited Unix-versus-vehicle session-age comparison.
 static void restore_clock_from_nvs(NvsStorageAdapter& config_store) {
-    std::string last_time;
-    if (!config_store.load_str(tk::nvs_contract::kLastTime, last_time) || last_time.empty()) {
-        ESP_LOGW(TAG, "no cached clock in NVS — starting at 1970 until NTP syncs; stored "
-                      "BLE sessions loaded during init will not be rejected fail-closed");
+    if (!tk::clock_should_restore(static_cast<int64_t>(time(nullptr)))) return;
+    std::string checkpoint;
+    int64_t seconds = 0;
+    if (!config_store.load_str(tk::nvs_contract::kLastTime, checkpoint) ||
+        !tk::clock_parse_checkpoint(checkpoint, clock_plausibility_ceiling(), seconds)) {
+        ESP_LOGW(TAG, "no valid clock checkpoint; waiting for NTP or a browser estimate");
         return;
     }
-    struct timeval tv = { (time_t)atoll(last_time.c_str()), 0 };
-    settimeofday(&tv, nullptr);
-    ESP_LOGI(TAG, "clock restored from NVS: %s (NTP will refine it)", last_time.c_str());
+    timeval value{static_cast<time_t>(seconds), 0};
+    if (settimeofday(&value, nullptr) != 0) {
+        ESP_LOGW(TAG, "clock checkpoint could not be applied");
+        return;
+    }
+    ESP_LOGI(TAG, "clock checkpoint restored as an estimate; NTP will refine it");
 }
 
 // ─── app_main ─────────────────────────────────────────────────────────────────
@@ -224,10 +303,7 @@ static void ota_health_gate_task(void*) {
         }
         const uint32_t elapsed_s =
             (uint32_t) (pdTICKS_TO_MS(xTaskGetTickCount() - start) / 1000);
-        const size_t largest = heap_caps_get_largest_free_block(
-            MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
-        const bool runtime_healthy = largest >= tk::kHeapCriticalBytes &&
-                                     ble_host_synced() && ble_host_reset_count() == 0;
+        const bool runtime_healthy = ota_runtime_health().healthy();
         const tk::HealthVerdict v =
             tk::health_gate_decide(elapsed_s, tk::kHealthGateBaseS, tk::kHealthGateCapS,
                                    s_ota_gate_link_expected, tk::net_is_up(), runtime_healthy);
@@ -240,36 +316,40 @@ static void ota_health_gate_task(void*) {
             // loses to this owner while the heap re-check can still veto the commit.
             OtaHealthCommitGuard commit_guard;
             if (!commit_guard) continue;
-            if (!tk::runtime_admission_vehicle_ready()) continue;
-            if (!ble_host_synced()) continue;
-            if (ble_host_reset_count() != 0) continue;
-            const size_t commit_largest = heap_caps_get_largest_free_block(
-                MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
-            if (commit_largest < tk::kHeapCriticalBytes) continue;
+            const auto commit_health = ota_runtime_health();
+            if (!commit_health.healthy()) continue;
+            const size_t commit_largest = commit_health.largest;
 
-            if (esp_ota_mark_app_valid_cancel_rollback() == ESP_OK) {
+            const esp_err_t mark_result = esp_ota_mark_app_valid_cancel_rollback();
+            // Refresh before fallible diagnostics: an SDK error may follow a durable effect.
+            ota_refresh_verification_cache();
+            if (mark_result == ESP_OK) {
                 ESP_LOGI(TAG, "OTA image healthy after %us on %s — marked valid (rollback "
                               "cancelled, largest block %u)",
                          (unsigned) elapsed_s, tk::net_link_str(tk::net_kind()),
                          (unsigned) commit_largest);
+            } else {
+                ESP_LOGE(TAG, "OTA mark-valid failed: %s (%d); verification is uncertain; "
+                              "health task stops without retry",
+                         esp_err_to_name(mark_result), (int) mark_result);
             }
         } else {
-            // Loud, and to syslog as well as /diag: this is the one outcome where the device
-            // keeps running a build that is going to disappear on the next reboot, and nothing
-            // else in the system will mention it.
+            // Report the unresolved gate through syslog and /diag. A later restart may roll
+            // back; qualifying configuration commits report their own verification result
+            // and can confirm the image only when their readiness/host/heap checks pass.
             ESP_LOGE(TAG, "OTA image never proved link, BLE host and heap health within %us — NOT marking "
                           "it valid; the "
-                          "next reboot rolls back to the previous firmware. Save a network or "
-                          "logging setting that durably commits and reboots (POST /set_wifi, "
-                          "/set_mqtt or /set_syslog) to keep this image instead.",
+                          "next reboot may roll back. A changed MQTT or Syslog save may confirm "
+                          "it only with Ready admission, a synced/reset-free BLE host and healthy "
+                          "internal heap. WiFi changes remain blocked during probation.",
                      (unsigned) tk::kHealthGateCapS);
         }
         break;
     }
     vTaskDelete(nullptr);
   } catch (...) {
-    // Leave rollback armed. A health-gate exception is not evidence that this image is healthy.
-    ESP_LOGE(TAG, "OTA health-gate task threw; image remains pending and task stops");
+    // An exception after a mark attempt cannot prove that rollback remains armed.
+    ESP_LOGE(TAG, "OTA health-gate task threw; verification is uncertain and task stops");
     vTaskDelete(nullptr);
   }
 }
@@ -295,6 +375,7 @@ extern "C" void app_main() {
   try {
     // Capture console output into the in-memory diagnostic ring (GET /diag).
     diag_log_init();
+    initialize_clock_gate_();
 
     // Why we (re)booted, plus the heap baseline to pair it with. SAMPLED HERE, LOGGED LATER:
     // the line itself is emitted after syslog_start() below, because syslog_send() is a no-op
@@ -310,12 +391,8 @@ extern "C" void app_main() {
     const unsigned boot_min_free    = (unsigned) esp_get_minimum_free_heap_size();
     const unsigned boot_largest     = (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
 
-    // Capture WHAT the last run left behind, immediately after the heap baseline above and before
-    // anything else allocates: the reset reason (always) plus, where the coredump partition exists,
-    // the dump SUMMARY — crashed task, PC, backtrace, the build that wrote it. Parsing it costs a
-    // ~2 KB transient allocation, which is why it belongs here rather than on a request path where
-    // the heap is already committed to WiFi + NimBLE + MQTT. Everything downstream — /status,
-    // safe mode, the syslog boot replay — reads this one cache.
+    // Verify bounded crash bytes and build the immutable boot report before service tasks.
+    // Live consumers only recheck header/admission; bootstrap fault policy uses the reset POD.
     tk::diag_crash_capture();
 
     // NimBLE logs every GAP/GATT procedure at INFO — tens of lines per connect.
@@ -403,7 +480,7 @@ extern "C" void app_main() {
     // which is what turns a reboot loop into a flat traction battery.
     // A deliberate esp_restart() (a successfully persisted rebooting configuration save, setup
     // portal save, or OTA) reports ESP_RST_SW and is NOT a fault, so ordinary reboots never count.
-    const bool safe_mode = tk::safe_mode_begin(config_store, tk::diag_crash_info().fault);
+    const bool safe_mode = tk::safe_mode_begin(config_store, tk::diag_crash_reset_info().fault);
     if (safe_mode && !tk::runtime_admission_mark_safe_mode()) {
         boot_fatal("safe-mode runtime admission");
     }
@@ -494,34 +571,9 @@ extern "C" void app_main() {
 
     log_heap("preinit");
 
-    // Wall clock, restored from NVS — BEFORE VehicleController::init below, which is the whole
-    // point of doing it here rather than next to the SNTP setup after WiFi (where it used to
-    // live). Since #306, VehicleController::init() uses the firmware's own load_nvs_sessions_()
-    // (main/vehicle_telemetry.cpp), whose age check computes (unix_now - session.clock_time)
-    // against vehicle uptime/epoch rather than Unix time (ADR-0005 §2). Restoring the wall clock to
-    // Unix time (~1.79·10⁹ s) causes (unix_now - session.clock_time) to far exceed 3600 s, so
-    // *every* stored session is rejected fail-closed at startup. A 1970 clock (before time sync)
-    // produces a negative age and would keep stored sessions; restoring last_time from NVS before
-    // init() ensures the clock is set to real Unix time so every stored session is rejected
-    // fail-closed (see docs/ARCHITECTURE.md).
-    //
-    // Needs no network (unlike SNTP, which stays below with the rest of the post-WiFi setup),
-    // so there is nothing keeping it down there. NTP refines this within seconds of the link
-    // coming up; until then a cached-but-slightly-stale clock beats 1970 for TLS cert validity
-    // for OTA and ensuring stored sessions are rejected fail-closed.
-    //
-    // It is deliberately NOT good enough for a DURABLE wall-clock stamp. A restored clock reads
-    // the time of the PREVIOUS sync, so writing key_created or paired_at from it dates a fresh
-    // key or pairing to whenever the board last had a real clock — and that wrong value then
-    // outlives the boot. Both stamps therefore gate on clock_is_authoritative()
-    // (main/time_sync.hpp), which only SNTP or an explicit browser /set_time sets; this restore
-    // deliberately does not. Any new durable stamp must do the same.
-    //
-    // If you are about to move this back down: the comment that used to sit next to it said
-    // "tesla-ble signed-command freshness does NOT [need real UTC]", which is true — signing
-    // uses the vehicle's SessionInfo.ClockTime plus a monotonic delta (peer.cpp) — and is
-    // exactly the sentence that made this look safe. Session PERSISTENCE is a different
-    // consumer with a different clock, and it is the one that breaks.
+    // Restore a strictly validated estimate only if the warm clock is unset, before loading
+    // sessions. NTP alone permits durable new dates. Session clock epochs remain an independent
+    // limitation documented in ADR-0005; this checkpoint is not proof of session freshness.
     restore_clock_from_nvs(config_store);
 
     // ── Tesla BLE controller ─────────────────────────────────────────────────
@@ -810,8 +862,8 @@ extern "C" void app_main() {
 
     // mDNS: advertise http://tesla-key-esp32.local so users need not find the IP
     if (mdns_init() == ESP_OK) {
-        mdns_hostname_set(MDNS_HOSTNAME);
-        mdns_instance_name_set("tesla-key-esp32");
+        mdns_hostname_set(tk::kDeviceHostname);
+        mdns_instance_name_set(tk::kDeviceHostname);
         // Advertise only the firmware version. The full VIN is private identity data and must not
         // become multicast-browseable merely because a client enumerates HTTP services; callers
         // that are already trusted to query this open LAN API can obtain it from /status.
@@ -820,7 +872,7 @@ extern "C" void app_main() {
             { "ver", esp_app_get_description()->version },
         };
         mdns_service_add(nullptr, "_http", "_tcp", 80, txt, 1);
-        ESP_LOGI(TAG, "mDNS: http://%s.local", MDNS_HOSTNAME);
+        ESP_LOGI(TAG, "mDNS: http://%s.local", tk::kDeviceHostname);
     } else {
         ESP_LOGW(TAG, "mDNS init failed");
     }
@@ -831,7 +883,7 @@ extern "C" void app_main() {
     s_cfg_store = &config_store;
     esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL);
     esp_sntp_setservername(0, "pool.ntp.org");
-    sntp_set_time_sync_notification_cb(on_time_sync);
+    sntp_set_sync_mode(SNTP_SYNC_MODE_IMMED);
     esp_sntp_init();
 
     // Start NimBLE host. Discovery scanning is manual/time-limited; the client
@@ -849,6 +901,9 @@ extern "C" void app_main() {
     } else {
         ESP_LOGW(TAG, "SAFE MODE — NimBLE not started");
     }
+
+    // Seed diagnostic verification before HTTP/health/vehicle tasks can observe or change it.
+    ota_refresh_verification_cache();
 
     // Primary HTTP API (evcc + web UI + MCP). ESSENTIAL: it is the device's whole reason to
     // exist. http_server_start() unwinds a partial registration internally and returns false;
@@ -936,10 +991,9 @@ extern "C" void app_main() {
         }
     }
 
-    // Clear the crash-boot counter once THIS boot has proven it can stay up under load. A timer,
-    // not a line at the end of app_main: reaching here proves the device initialised, while the
-    // crashes this guards against happen minutes in — an end-of-init clear would have declared
-    // exactly those boots healthy and the counter would never reach its threshold.
+    // Arm the bounded kBootHealthyS (30 s) crash-counter window after initialization. The timer
+    // stays disabled in safe mode. This proves survival of that startup window, not long-term
+    // health; a later unrelated crash begins a new sequence after a successful counter clear.
     tk::safe_mode_arm_healthy_timer(config_store);
 
     if (safe_mode) {

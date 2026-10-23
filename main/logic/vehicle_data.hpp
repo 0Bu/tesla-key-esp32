@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -107,6 +108,12 @@ struct ClosuresStateResult {
 
 namespace tk {
 
+// evcc requires a complete numeric schema. Treat a non-finite reading like an absent
+// reading's existing zero placeholder, rather than letting cJSON print a JSON null.
+inline double vehicle_data_number(double value) noexcept {
+    return std::isfinite(value) ? value : 0.0;
+}
+
 // Serialize charge_state for GET /api/1/vehicles/{VIN}/vehicle_data
 // Shape mirrors Tesla Fleet API / TeslaBleHttpProxy: always emits every field so evcc
 // parsing floats/ints never hits a missing key. On failure/omission, cs is zero-initialised
@@ -114,14 +121,14 @@ namespace tk {
 template <typename Emitter>
 void emit_vehicle_charge_state(const ChargeStateResult& cs, Emitter& e) {
     e.str("charging_state", cs.charging_state.empty() ? "Disconnected" : cs.charging_state.c_str());
-    e.num("battery_level",          cs.battery_level);
-    e.num("usable_battery_level",   cs.has_usable_battery_level ? cs.usable_battery_level : cs.battery_level);
-    e.num("charge_limit_soc",       cs.charge_limit_soc);
-    e.num("charger_power",          cs.charger_power);
-    e.num("charge_rate",            cs.charge_rate);
+    e.num("battery_level",          vehicle_data_number(cs.battery_level));
+    e.num("usable_battery_level",   vehicle_data_number(cs.has_usable_battery_level ? cs.usable_battery_level : cs.battery_level));
+    e.num("charge_limit_soc",       vehicle_data_number(cs.charge_limit_soc));
+    e.num("charger_power",          vehicle_data_number(cs.charger_power));
+    e.num("charge_rate",            vehicle_data_number(cs.charge_rate));
     e.num("charge_amps",            cs.charging_amps);
-    e.num("charge_energy_added",    cs.charge_energy_added);
-    e.num("battery_range",          cs.battery_range);
+    e.num("charge_energy_added",    vehicle_data_number(cs.charge_energy_added));
+    e.num("battery_range",          vehicle_data_number(cs.battery_range));
     e.num("minutes_to_full_charge", cs.minutes_to_full_charge);
 }
 
@@ -150,9 +157,9 @@ template <typename Emitter>
 void emit_vehicle_climate_state(const VehicleClimateData& cl, Emitter& e) {
     e.boolean("is_climate_on",      cl.is_climate_on);
     e.boolean("is_preconditioning", cl.has_preconditioning && cl.is_preconditioning);
-    e.num("inside_temp",            cl.inside_temp);
-    e.num("outside_temp",           cl.outside_temp);
-    e.num("driver_temp_setting",    cl.driver_setpoint);
+    e.num("inside_temp",            vehicle_data_number(cl.inside_temp));
+    e.num("outside_temp",           vehicle_data_number(cl.outside_temp));
+    e.num("driver_temp_setting",    vehicle_data_number(cl.driver_setpoint));
 }
 
 template <typename Emitter>
@@ -190,7 +197,7 @@ inline VehicleDriveData vehicle_drive_data(const DriveStateResult& drive) noexce
 // scales by 1.60934 and rejects <= 0, so an absent odometer emits 0.
 template <typename Emitter>
 void emit_vehicle_drive_state(const VehicleDriveData& dr, Emitter& e) {
-    e.num("odometer", dr.has_odometer ? static_cast<float>(km_to_mi(dr.odometer_km)) : 0.0f);
+    e.num("odometer", vehicle_data_number(dr.has_odometer ? static_cast<float>(km_to_mi(dr.odometer_km)) : 0.0f));
 }
 
 // Last-known semantics: the odometer only grows, so freshness comes from the in-window rotation

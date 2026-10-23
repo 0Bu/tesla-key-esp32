@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <string_view>
+#include "device_hostname.hpp"
 
 // Pure, hardware-free logic shared by the firmware and the host-side mock build
 // (test/, built without ESP-IDF). Keep this file free of IDF/FreeRTOS/cJSON/
@@ -57,10 +58,16 @@ inline std::string_view host_without_port(std::string_view host) {
 // is being served by this very board and must keep working. Every non-empty entry of
 // `device_ipv4s` counts as device-owned; an address the board does not hold never does.
 inline bool device_host_allowed(std::string_view host, const std::string_view* device_ipv4s,
-                                size_t device_ipv4_count) {
+                                size_t device_ipv4_count,
+                                std::string_view mdns_hostname = kDeviceHostname) {
     const std::string_view name = host_without_port(host);
     if (name.empty()) return false;
-    if (ascii_iequal(name, "tesla-key-esp32.local") || ascii_iequal(name, "tesla-key-esp32")) {
+    // DHCP still uses the boot name. Only the current mDNS name owns its .local spelling.
+    if (ascii_iequal(name, kDeviceHostname) ||
+        (!mdns_hostname.empty() && (ascii_iequal(name, mdns_hostname) ||
+         (name.size() == mdns_hostname.size() + 6 &&
+          ascii_iequal(name.substr(0, mdns_hostname.size()), mdns_hostname) &&
+          ascii_iequal(name.substr(mdns_hostname.size()), ".local"))))) {
         return true;
     }
     for (size_t i = 0; i < device_ipv4_count; ++i) {
@@ -129,15 +136,15 @@ inline bool extract_referer_authority(std::string_view referer,
 //     * valid same-origin Referer, OR
 //     * valid same-origin Origin, OR
 //     * Sec-Fetch-Site: same-origin or none (with device-owned host), OR
-//     * a non-simple custom header (has_custom_header, e.g. X-Requested-With).
-inline bool mutation_request_allowed(bool is_post,
-                                     std::string_view host,
-                                     std::string_view origin,
-                                     std::string_view fetch_site,
-                                     std::string_view referer,
-                                     bool has_custom_header,
-                                     const std::string_view* device_ipv4s,
-                                      size_t device_ipv4_count) {
+//     * the non-simple X-Requested-With header (has_custom_header).
+// The integration shell may snapshot owned addresses/names before reading the larger Referer
+// buffer. The checked boolean must come from device_host_allowed, never the incoming Host itself.
+inline bool mutation_request_allowed_for_owned_host(bool is_post, bool host_owned,
+                                                     std::string_view host,
+                                                     std::string_view origin,
+                                                     std::string_view fetch_site,
+                                                     std::string_view referer,
+                                                     bool has_custom_header) {
     if (ascii_iequal(fetch_site, "cross-site")) return false;
     if (ascii_iequal(origin, "null")) return false;
 
@@ -147,7 +154,7 @@ inline bool mutation_request_allowed(bool is_post,
         std::string_view origin_auth;
         std::string_view origin_port;
         if (!extract_origin_authority(origin, origin_auth, origin_port)) return false;
-        if (!device_host_allowed(host, device_ipv4s, device_ipv4_count)) return false;
+        if (!host_owned) return false;
         if (!authority_matches_host(origin_auth, host, origin_port)) return false;
     }
 
@@ -157,7 +164,7 @@ inline bool mutation_request_allowed(bool is_post,
         std::string_view ref_auth;
         std::string_view ref_port;
         if (!extract_referer_authority(referer, ref_auth, ref_port)) return false;
-        if (!device_host_allowed(host, device_ipv4s, device_ipv4_count)) return false;
+        if (!host_owned) return false;
         if (!authority_matches_host(ref_auth, host, ref_port)) return false;
     }
 
@@ -171,22 +178,36 @@ inline bool mutation_request_allowed(bool is_post,
         // Genuinely headerless client on POST (evcc, curl)
         if (fetch_site.empty()) return true;
         if (ascii_iequal(fetch_site, "same-origin") || ascii_iequal(fetch_site, "none")) {
-            return device_host_allowed(host, device_ipv4s, device_ipv4_count);
+            return host_owned;
         }
         return false;
     }
 
     // State-changing GET:
     if (has_custom_header) {
-        return device_host_allowed(host, device_ipv4s, device_ipv4_count);
+        return host_owned;
     }
 
     if (ascii_iequal(fetch_site, "same-origin") || ascii_iequal(fetch_site, "none")) {
-        return device_host_allowed(host, device_ipv4s, device_ipv4_count);
+        return host_owned;
     }
 
     // Genuinely headerless GET on a mutating endpoint: REJECT
     return false;
+}
+
+inline bool mutation_request_allowed(bool is_post,
+                                     std::string_view host,
+                                     std::string_view origin,
+                                     std::string_view fetch_site,
+                                     std::string_view referer,
+                                     bool has_custom_header,
+                                     const std::string_view* device_ipv4s,
+                                     size_t device_ipv4_count,
+                                     std::string_view mdns_hostname = kDeviceHostname) {
+    return mutation_request_allowed_for_owned_host(
+        is_post, device_host_allowed(host, device_ipv4s, device_ipv4_count, mdns_hostname),
+        host, origin, fetch_site, referer, has_custom_header);
 }
 
 inline bool mutation_request_allowed(bool is_post,
@@ -228,14 +249,16 @@ inline std::string_view request_path(std::string_view uri) {
 //     `/diag?CLEAR=1`, `?VERBOSE=0|1` and `/coredump?CLEAR=1` unclassified while the handler still
 //     cleared the ring, flipped verbose logging and erased the core dump.
 //   * the VALUE is compared case-SENSITIVELY and byte-for-byte up to '&'. IDF copies it verbatim —
-//     no percent-decoding, no case folding — and query_param_is() then does a plain strcmp, so
-//     folding it here would classify requests the handler ignores and, worse, invite the inverse
+//     no percent-decoding, no case folding — and query_param_is() then uses plain strcmp.
+//     The URL parser excludes a literal fragment before extracting the query.
+//     Folding it here would classify requests the handler ignores and, worse, invite the inverse
 //     mistake later. Keep this half exact.
 inline bool query_has_exact(std::string_view uri, std::string_view key,
                             std::string_view value) {
     const size_t query = uri.find('?');
     if (query == std::string_view::npos) return false;
     std::string_view rest = uri.substr(query + 1);
+    rest = rest.substr(0, rest.find('#'));
     while (!rest.empty()) {
         const size_t amp = rest.find('&');
         const std::string_view item = rest.substr(0, amp);

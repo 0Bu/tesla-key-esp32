@@ -5,9 +5,10 @@
 // esp_https_ota in ESP_OTA_IMG_PENDING_VERIFY. The bootloader reverts to the previous slot if the
 // device reboots before the app calls esp_ota_mark_app_valid_cancel_rollback(). So the app's only
 // decision is WHEN to make that call — and that call is irreversible: it spends the one automatic
-// way back to a known-good build. A USB-flashed image boots UNDEFINED (blank otadata), never
-// PENDING_VERIFY, so none of this runs for it and a fresh board — which has no previous slot — can
-// never be stranded by it.
+// way back to a known-good build. For a normal blank-otadata first start with the pinned
+// no-factory bootloader, successful metadata initialization records VALID before app startup.
+// USB app-only delivery alone does not prove that write succeeded or identify an older installed
+// bootloader. Always query current metadata; errors are unknown, never inferred Stable.
 //
 // WHY A TIMER IS THE WRONG ANSWER, WHICH IS WHAT THIS REPLACES. The gate used to be
 // `vTaskDelay(90 s); mark_valid()`. That commits on a single piece of evidence — "the image did not
@@ -34,12 +35,14 @@
 // does not restart itself, because a self-restart would turn a long router outage into an automatic
 // downgrade of a perfectly good build — the failure mode is silent and the operator never asked for
 // it. Leaving it pending keeps the rollback armed and costs nothing while the device runs; and any
-// successfully persisted, rebooting network/logging save (/set_wifi, /set_mqtt, /set_syslog or the
-// setup portal) calls ota_confirm_pending_image() on its way to a reboot, which is the manual
-// override for someone who knows the image is fine. Identity mutations (/set_vin, /gen_keys) never
-// confirm a pending image and remain Stable-only.
+// successfully persisted MQTT/Syslog save may request early confirmation while holding its
+// ConfigRestart lease, subject to Ready, NimBLE sync/reset and fresh INTERNAL heap checks.
+// WiFi uniformly refuses during probation; unchanged WiFi never confirms or reboots. Setup saves
+// never confirm. Identity mutations (/set_vin, /gen_keys) remain Stable-only. SDK mark errors can
+// leave metadata changed, so their result is uncertain rather than proof rollback stays armed.
 #include <atomic>
 #include <cstdint>
+#include <cstddef>
 
 namespace tk {
 
@@ -49,17 +52,46 @@ enum class HealthVerdict {
     GiveUp,  // no health within the hard cap — leave PENDING_VERIFY, a reboot rolls it back
 };
 
+// One ordered local sample shared by both irreversible confirmation paths. Each reader is
+// invoked at most once; this is sequential evidence, not an atomic snapshot with the SDK mark.
+enum class RuntimeHealthFailure : uint8_t { None, NotReady, HostUnsynced, HostReset, CriticalHeap };
+struct RuntimeHealthSample {
+    RuntimeHealthFailure failure = RuntimeHealthFailure::NotReady;
+    std::size_t largest = 0;
+    bool healthy() const noexcept { return failure == RuntimeHealthFailure::None; }
+};
+
+template<typename Ready, typename Synced, typename Resets, typename Heap>
+inline RuntimeHealthSample sample_runtime_health(Ready ready, Synced synced, Resets resets,
+                                                 Heap heap, std::size_t critical_bytes) {
+    if (!ready()) return {RuntimeHealthFailure::NotReady, 0};
+    if (!synced()) return {RuntimeHealthFailure::HostUnsynced, 0};
+    if (resets() != 0) return {RuntimeHealthFailure::HostReset, 0};
+    const std::size_t largest = heap();
+    return {largest < critical_bytes ? RuntimeHealthFailure::CriticalHeap
+                                    : RuntimeHealthFailure::None, largest};
+}
+
 enum class OtaVerificationState : uint8_t {
     Stable,
     PendingVerify,
     Unknown,
 };
 
+inline constexpr const char* ota_verification_name(OtaVerificationState state) {
+    switch (state) {
+        case OtaVerificationState::Stable: return "stable";
+        case OtaVerificationState::PendingVerify: return "pending_verify";
+        default: return "unknown";
+    }
+}
+
 enum class IdentityMutationEntry : uint8_t {
     HttpGenerateKey,
     HttpSetVin,
     InitialKey,
     AutomaticKey,
+    AutomaticEnrollment,
 };
 
 // One process-wide exclusion gate binds OTA workers, identity transactions, deliberate fault
@@ -146,6 +178,7 @@ constexpr const char* identity_mutation_entry_name(IdentityMutationEntry entry) 
         case IdentityMutationEntry::HttpSetVin:      return "HTTP VIN transition";
         case IdentityMutationEntry::InitialKey:      return "initial key generation";
         case IdentityMutationEntry::AutomaticKey:    return "automatic key rotation";
+        case IdentityMutationEntry::AutomaticEnrollment: return "automatic key enrollment";
     }
     return "identity mutation";
 }

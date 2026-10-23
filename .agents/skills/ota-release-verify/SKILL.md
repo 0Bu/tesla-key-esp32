@@ -243,8 +243,9 @@ END_ASSET_SET=$(printf '%s' "$LATEST_RELEASE_JSON" | release_asset_set) || {
 }
 ```
 
-`new_install_prompt_erase:true` preselects **Erase everything** in the project's installer using
-vendored esptool-js. Selecting Erase wipes NVS; **Keep configuration** preserves it on an existing
+`new_install_prompt_erase:true` supplies first-install guidance; **Keep configuration** remains
+the default. Each installation with **Erase everything** selected requires a separate factory-reset
+confirmation before any flash work starts. Erase wipes NVS; Keep preserves it on an existing
 compatible layout. The flag does not affect OTA, which never rewrites `nvs@0x9000`.
 
 ### 3. Verify every app's embedded version and chip family

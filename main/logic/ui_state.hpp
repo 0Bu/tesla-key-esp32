@@ -5,11 +5,11 @@
 #include "logic/net_link.hpp"
 
 // Immutable, hardware-free snapshot of everything the on-device status indicators need
-// to decide what to show — the ST7735 status display (logic/display_model.hpp) and, in
-// future, the APA102 status LED (logic/led_status.hpp). It is the single INPUT CONTRACT
-// shared by every presenter, so the display and the LED can never disagree about the car's
-// state: they read ONE struct instead of each racing the controller's accessors
-// independently (which was the "4th/5th sink of link_state()" drift hazard). Pure data —
+// to decide what to show — the ST7735 status display (logic/display_model.hpp) and
+// the APA102 status LED (logic/led_status.hpp). Each presenter receives one coherent
+// vehicle snapshot rather than separately sampling controller accessors. Tasks can sample at
+// different times; sharing this input structure does not synchronize their rendered frames.
+// Pure data —
 // no IDF types, no std::string, no heap — so every presenter that consumes it is host-tested
 // in test/ without a board (the same reason logic/link_state.hpp exists).
 //
@@ -18,8 +18,8 @@
 //   • VehicleController::ui_snapshot() fills the vehicle-owned cache fields (link_state /
 //     ble_* / soc / charging) in ONE read under its cache lock — instead of a presenter
 //     calling five separate accessors across a frame and mixing state from different instants.
-//   • The caller (the display / LED task) fills `paired` from its own ≤1 Hz has_session()
-//     sample — that call hits NVS, so it must NOT run every frame — and the wifi_* fields
+//   • The caller (the display / LED task) fills the `paired` presentation input from its own ≤1 Hz durable-record
+//     or usable-RAM sample (public `paired` keeps its durable meaning), and the wifi_* fields
 //     from esp_wifi. Neither is the controller's concern.
 namespace tk {
 
@@ -31,9 +31,9 @@ struct UiSnapshot {
     int       ble_rssi       = 0;       // dBm, valid iff ble_rssi_valid
     bool      have_soc       = false;   // charge cache valid AND battery level present
     int       soc            = 0;       // battery %, RAW (rounded, NOT yet clamped 0..100)
-    bool      charging       = false;   // charging_state == "Charging"
+    bool      charging       = false;   // fresh ChargeState says "Charging" while link is Awake
 
-    // ── pairing (caller, sampled at ≤1 Hz — has_session() hits NVS) ──
+    // ── pairing presentation (caller, ≤1 Hz): durable presence OR usable VCSEC RAM ──
     bool      paired         = false;
 
     // ── network (caller, from tk::net_* at the seam) ──

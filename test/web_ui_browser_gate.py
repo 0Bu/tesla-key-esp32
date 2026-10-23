@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the assembled device page in a real, dependency-free headless browser."""
+"""Exercise the assembled device page in a real Linux headless browser."""
 
 from __future__ import annotations
 
@@ -22,6 +22,8 @@ TERMINATION_GRACE_SECONDS = 2
 
 
 def browser_binary() -> str | None:
+    if sys.platform != "linux":
+        return None
     configured = os.environ.get("BROWSER_BIN")
     if configured:
         return shutil.which(configured) or (configured if Path(configured).is_file() else None)
@@ -29,8 +31,7 @@ def browser_binary() -> str | None:
         found = shutil.which(name)
         if found:
             return found
-    mac = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
-    return str(mac) if mac.is_file() else None
+    return None
 
 
 def assembled_page() -> str:
@@ -74,7 +75,44 @@ console.error = function() {
 ;(async function browserGate() {
   const failures = [];
   const check = (condition, message) => { if (!condition) failures.push(message); };
+  const pixel = document.createElement("canvas").getContext("2d", {willReadFrequently:true});
+  function luminance(color) {
+    pixel.clearRect(0,0,1,1); pixel.fillStyle=color; pixel.fillRect(0,0,1,1);
+    const rgba=pixel.getImageData(0,0,1,1).data;
+    check(rgba[3]===255,"contrast fixture requires opaque computed colors");
+    return [0.2126,0.7152,0.0722].reduce((sum,weight,i)=>{
+      const c=rgba[i]/255;
+      return sum+weight*(c<=0.04045?c/12.92:Math.pow((c+0.055)/1.055,2.4));
+    },0);
+  }
+  function contrast(foreground,background) {
+    const a=luminance(foreground), b=luminance(background);
+    return (Math.max(a,b)+0.05)/(Math.min(a,b)+0.05);
+  }
+  function textContrast(element,label) {
+    const style=getComputedStyle(element);
+    check(style.filter==="none",label+" contrast requires unfiltered colors");
+    check(contrast(style.color,style.backgroundColor)>=4.5,label+" contrast >=4.5");
+  }
   try {
+    const dark=location.search.includes("profile=mobile");
+    check(matchMedia("(prefers-color-scheme: dark)").matches===dark,"isolated browser color scheme");
+    // dump-dom may deactivate its window. Exercise the actual CSS cascade deterministically:
+    // attributes have the same specificity as these pseudo-classes; declarations stay unchanged.
+    const stateRules=[];
+    function emulateStates(rules){
+      for(const rule of rules){
+        if(rule.selectorText && /:(focus-visible|focus|hover)(?![-\w])/.test(rule.selectorText)){
+          const original=rule.selectorText;
+          stateRules.push([rule,original]);
+          rule.selectorText=original.replace(/:(focus-visible|focus|hover)(?![-\w])/g,
+            (_,state)=>":is(:"+state+",[data-ui-"+state+"])");
+        }
+        if(rule.cssRules) emulateStates(rule.cssRules);
+      }
+    }
+    for(const sheet of document.styleSheets) emulateStates(sheet.cssRules);
+    check(stateRules.length>0,"actual interactive CSS rules are available");
     check(document.documentElement.lang === "en", "document language");
     check(!!document.querySelector('meta[name="viewport"]'), "viewport metadata");
     const ids = Array.from(document.querySelectorAll("[id]"), element => element.id);
@@ -108,15 +146,51 @@ console.error = function() {
     await poll();
     check(feedOk === false, "status poll marks the live feed unavailable after transport failure");
     check(window.__browserGateFetchCalls === 2, "browser request-failure fixture call count");
+    const feedStatus = document.getElementById("feedStatus");
+    check(feedStatus && !feedStatus.classList.contains("hide") && feedStatus.textContent.includes("Device unavailable"),
+          "failed status feed has a visible accessible notice");
+
 
     toast('<img src=x onerror="console.error(1)">', "err");
     const toastRegion = document.getElementById("toasts");
     check(!toastRegion.querySelector("img"), "toast content remains escaped");
     check(toastRegion.textContent.includes("<img"), "escaped toast remains readable");
+    for(const kind of ["info","ok","err"]){
+      const notification=toast("Contrast fixture",kind,"contrast");
+      textContrast(notification.querySelector(".ic"),kind+" toast icon");
+    }
+    for(const kind of ["btn primary","ib avail"]){
+      const control=document.createElement("button"); control.className=kind; control.textContent="Fixture";
+      document.body.appendChild(control); textContrast(control,kind);
+      control.setAttribute("data-ui-hover",""); textContrast(control,kind+" hover"); control.remove();
+    }
 
     render({paired: true, last_seen_s: 0,
       vehicle: {status: "Stopped", actual_amps: 16, volts: 230, phases: 2},
       tele: {climate: {cop: "FanOnly", front_defrost: true, rear_defrost: true, defrost_mode: "Max"}}});
+    let primaryClicks = 0;
+    const actualHeroAction = heroActFn;
+    heroActFn = function(){ primaryClicks++; };
+    document.getElementById("hero").click();
+    document.getElementById("hlabel").click();
+    document.getElementById("hstats").click();
+    check(primaryClicks === 0, "informational hero clicks never dispatch a vehicle action");
+    const primaryButton = document.querySelector("#hicon button");
+    check(primaryButton && primaryButton.getAttribute("aria-label"), "primary action is a named button");
+    primaryButton.focus();
+    check(document.activeElement===primaryButton,"primary action receives DOM focus");
+    primaryButton.setAttribute("data-ui-focus","");
+    primaryButton.setAttribute("data-ui-focus-visible","");
+    const primaryStyle=getComputedStyle(primaryButton);
+    check(primaryStyle.outlineStyle!=="none" && parseFloat(primaryStyle.outlineWidth)>=2,
+          "primary action has a visible focus ring in the emulated keyboard state");
+    check(contrast(primaryStyle.outlineColor,getComputedStyle(document.getElementById("hero")).backgroundColor)>=3,
+          "primary action focus ring contrast >=3");
+    primaryButton.removeAttribute("data-ui-focus"); primaryButton.removeAttribute("data-ui-focus-visible");
+    for(const [rule,original] of stateRules) rule.selectorText=original;
+    primaryButton.click();
+    check(primaryClicks === 1, "only the gauge button invokes the primary action once");
+    heroActFn = actualHeroAction;
     const climateChips = document.getElementById("hstats");
     check(climateChips.textContent.includes("Overheat setting"), "COP is a setting");
     check(climateChips.textContent.includes("Fan only"), "COP setting is readable");
@@ -138,6 +212,114 @@ console.error = function() {
       tele: {climate: {cop: "FanOnly", front_defrost: true, rear_defrost: true, defrost_mode: "Max"}}});
     checkChipBounds();
     check(window.__browserGateFetchCalls === 2, "rendering climate does not request vehicle data");
+
+    render({paired: true, link: "awake", last_seen_s: 0, charge_age_s: 31,
+      last: {usable_soc: 0, status: "Charging"}, ble: {connected: true}});
+    check(document.getElementById("hlabel").textContent.includes("Charge reading unavailable"),
+          "fresh unrelated contact does not make old ChargeState look live");
+    check(climateChips.textContent.includes("Last battery") && climateChips.textContent.includes("Updated"),
+          "stale charge has an explicit retained battery and its own age");
+    check(!climateChips.textContent.includes("kW") && !climateChips.textContent.includes("Idle"),
+          "awake stale charge has no live power or fabricated idle age");
+    check(!document.querySelector("#hicon button") && !heroActFn,
+          "awake stale charge offers neither charging nor wake command");
+    checkChipBounds();
+    check(window.__browserGateFetchCalls === 2, "rendering stale charge remains cache-only");
+
+    const notesList = document.getElementById("otaChanges");
+    const otaCard = document.querySelector("#otaModal .sheet");
+    const update = {current: "1.6.2-PR-400", available: "1.6.3-dev.19", channel: "dev"};
+    const visibleNotes = () => {
+      const box = notesList.getBoundingClientRect();
+      return Array.from(notesList.children).filter(item => {
+        const row = item.getBoundingClientRect();
+        return row.top >= box.top - 1 && row.bottom <= box.bottom + 1;
+      }).length;
+    };
+    const checkNotesLayout = label => {
+      check(visibleNotes() <= 5, label + ": at most five complete entries visible");
+      check(notesList.scrollWidth <= notesList.clientWidth + 1, label + ": notes wrap horizontally");
+      check(otaCard.scrollHeight <= otaCard.clientHeight + 1, label + ": only the notes need scrolling");
+      const cardBox = otaCard.getBoundingClientRect();
+      check(cardBox.left >= 0 && cardBox.right <= window.innerWidth + 1 &&
+            cardBox.top >= 0 && cardBox.bottom <= window.innerHeight + 1,
+            label + ": dialog stays inside the viewport");
+      for (const id of ["otaHelp", "otaCancel", "otaInstall"]) {
+        const box = document.getElementById(id).getBoundingClientRect();
+        check(box.top >= cardBox.top && box.bottom <= cardBox.bottom,
+              label + ": help and actions stay visible: " + id);
+      }
+    };
+    for (const count of [0, 1, 5, 6, 13]) {
+      const notes = Array.from({length: count}, (_, i) => "Change " + (i + 1));
+      askOtaInstall(update, notes.join("\n"));
+      check(notesList.children.length === count, "all " + count + " notes retained");
+      check(notesList.scrollTop === 0, "new dialog starts at the first note");
+      checkNotesLayout(count + " short notes");
+      if (count <= 5) {
+        check(notesList.hidden === (count === 0), "empty list visibility");
+        if (count) check(visibleNotes() === count, "short list fits without truncation");
+      } else {
+        check(notesList.scrollHeight > notesList.clientHeight, "long list scrolls");
+        check(notesList.tabIndex === 0 && notesList.getAttribute("aria-label"), "notes are keyboard reachable and named");
+        notesList.focus();
+        check(document.activeElement === notesList, "scrolling list receives keyboard focus");
+        notesList.scrollTop = notesList.scrollHeight;
+        checkNotesLayout("last of " + count + " notes");
+        const last = notesList.lastElementChild.getBoundingClientRect();
+        check(last.bottom <= notesList.getBoundingClientRect().bottom + 1, "last note can be read");
+      }
+      closeOtaModal(false);
+    }
+    askOtaInstall(update, Array.from({length: 13}, (_, i) => i < 5
+      ? "Change " + i + " — " + "A wrapped maintenance and reliability improvement. ".repeat(3)
+      : "Change " + i).join("\n"));
+    checkNotesLayout("mixed wrapped notes");
+    notesList.scrollTop = notesList.scrollHeight;
+    checkNotesLayout("short notes after wrapped notes");
+    otaCard.style.width = "300px";
+    window.dispatchEvent(new Event("resize"));
+    checkNotesLayout("resized dialog");
+    notesList.scrollTop = notesList.scrollHeight;
+    checkNotesLayout("resized last notes");
+    otaCard.style.width = "";
+    closeOtaModal(false);
+    askOtaInstall(update, Array.from({length: 6}, (_, i) =>
+      "Change " + i + " — " + "A maintenance improvement. ".repeat(3)).join("\n"));
+    const wideLimit = parseFloat(notesList.style.maxHeight);
+    otaCard.style.width = "260px";
+    window.dispatchEvent(new Event("resize"));
+    check(parseFloat(notesList.style.maxHeight) > wideLimit, "five-note height follows narrower text wrapping");
+    checkNotesLayout("all wrapped notes after resize");
+    otaCard.style.width = "";
+    closeOtaModal(false);
+    check(window.__browserGateFetchCalls === 2, "reading notes does not contact the device");
+
+    const offlineFetch = window.fetch, originalPoll = poll;
+    poll = function() {};
+    for (const status of ["Stopped", "Charging"]) {
+      for (const cause of ["vehicle not reachable", "response timed out", "already_set"]) {
+        const requests = [];
+        const reason = "command outcome unknown; command may have executed; " + cause;
+        state = {vin: "TESTVIN0000000001", vehicle: {status, soc: 40}};
+        window.fetch = async function(url, options) {
+          requests.push({url, options});
+          return {ok: false, status: 502, json: async function() {
+            return {response: {result: false, reason}};
+          }};
+        };
+        await toggleCharge();
+        const message = toastRegion.querySelector('[data-key="charge"]');
+        check(message && message.lastElementChild.textContent === reason,
+              "HTTP 502 charging uncertainty remains visible: " + status + "/" + cause);
+        check(message && message.classList.contains("err"), "uncertain charge is not informational success");
+        check(requests.length === 1 && requests[0].options.method === "POST",
+              "uncertain charge sends exactly one command request");
+        check(!chgBusy, "uncertain charge releases its UI busy state");
+      }
+    }
+    window.fetch = offlineFetch;
+    poll = originalPoll;
 
     check(getComputedStyle(document.body).display !== "none", "body is rendered");
     check(document.querySelector(".wrap").getBoundingClientRect().width > 0, "main layout has width");
@@ -165,6 +347,8 @@ console.error = function() {
 
 
 def run_profile(browser: str, html: Path, profile: str, size: str, user_data: Path) -> None:
+    if sys.platform != "linux":
+        raise RuntimeError("automatic browser processes are supported only on Linux")
     command = [
         browser,
         "--headless",
@@ -187,6 +371,8 @@ def run_profile(browser: str, html: Path, profile: str, size: str, user_data: Pa
     ]
     if hasattr(os, "geteuid") and os.geteuid() == 0:
         command.insert(1, "--no-sandbox")
+    if profile == "mobile":
+        command.insert(1, "--force-dark-mode")
     timed_out = False
     with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as stdout_file, \
             tempfile.TemporaryFile(mode="w+", encoding="utf-8") as stderr_file:
@@ -200,8 +386,8 @@ def run_profile(browser: str, html: Path, profile: str, size: str, user_data: Pa
         try:
             returncode = process.wait(timeout=PROFILE_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
-            # Chrome for Testing on macOS can finish --dump-dom and then remain alive while its
-            # updater/crash helper drains. Terminate the isolated process group; a completed DOM
+            # A browser can finish --dump-dom while a child process is still draining.
+            # Terminate only this test's isolated process group; a completed DOM
             # below is still authoritative, while an incomplete dump remains a hard failure.
             timed_out = True
             try:
@@ -238,6 +424,14 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--require-browser", action="store_true")
     args = parser.parse_args()
+    if sys.platform != "linux":
+        message = ("web-ui-browser: automatic native browser launch is disabled outside Linux; "
+                   "run scripts/run-browser-tests-linux.sh or the Linux CI gate")
+        if args.require_browser:
+            print(message, file=sys.stderr)
+            return 2
+        print(message + "; SKIP (no real-browser evidence)")
+        return 0
     browser = browser_binary()
     if not browser:
         message = "web-ui-browser: no Chrome/Chromium binary found"
@@ -256,7 +450,7 @@ def main() -> int:
     except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
         print(f"web-ui-browser: {exc}", file=sys.stderr)
         return 1
-    print("web-ui-browser: PASS (real DOM, console, keyboard, live regions, desktop/mobile layout)")
+    print("web-ui-browser: PASS (real DOM, console, emulated focus/hover CSS, light/dark contrast, live regions, desktop/mobile layout)")
     return 0
 
 

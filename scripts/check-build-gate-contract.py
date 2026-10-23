@@ -30,6 +30,12 @@ COMPILER_INJECTION_ENV = (
     "GCC_EXEC_PREFIX",
     "COMPILER_PATH",
     "LIBRARY_PATH",
+    "SDKCONFIG_DEFAULTS",
+    "EXTRA_COMPONENT_DIRS",
+    "CFLAGS",
+    "CXXFLAGS",
+    "CPPFLAGS",
+    "LDFLAGS",
 )
 UNSIGNED_TARGET_FILES = (
     "bootloader/bootloader.bin",
@@ -108,6 +114,7 @@ SIGNED_STAGE_PATHS = tuple(
     )
 )
 REQUIRED_FILES = (
+    "CMakeLists.txt",
     ".gitignore",
     ".github/workflows/build.yml",
     ".github/workflows/signed-pr-preview.yml",
@@ -122,6 +129,7 @@ REQUIRED_FILES = (
     "scripts/check-pages-source.py",
     "scripts/check-otadata-contract.py",
     "scripts/check-published-release.py",
+    "scripts/wait-pages-build.py",
     "scripts/check-release-assets.py",
     "scripts/check-signed-root-inventory.py",
     "scripts/prepare-reused-release.py",
@@ -129,7 +137,13 @@ REQUIRED_FILES = (
     "scripts/check-reproducible-build.sh",
     "scripts/check-reproducible-artifacts.py",
     "scripts/idf-docker.sh",
+    "scripts/check-idf-container-mounts.py",
+    "scripts/apply-tesla-ble-patches.sh",
+    "scripts/apply-tesla-ble-patches.py",
+    "scripts/tesla-ble-patch-state.json",
+    "scripts/precheck-firmware.sh",
     "scripts/ci-build-all.sh",
+    "scripts/ci-build-led-variant.sh",
     "scripts/ci-build-verify.sh",
     "scripts/ci-sign-artifacts.sh",
     "scripts/report-firmware-size.py",
@@ -284,8 +298,47 @@ def validate(root: Path) -> None:
         read(root, relative)
 
     build_all = read(root, "scripts/ci-build-all.sh")
+    led_variant = read(root, "scripts/ci-build-led-variant.sh")
+    led_call = 'if [[ -z "$target_override" || "$target_override" == esp32s3 ]]; then\n  bash scripts/ci-build-led-variant.sh "$version" dist/esp32s3/sdkconfig.esp32s3\nfi'
+    require(build_all.count(led_call) == 1 and
+            build_all.index(led_call) > build_all.index("# EXACT_FOUR_TARGETS_END budget") and
+            all(token in led_variant for token in (
+                "source.replace(disabled, 'CONFIG_TESLA_LED_ENABLED=y')",
+                "'CONFIG_TESLA_LED_DI_GPIO=40'", "'CONFIG_TESLA_LED_CI_GPIO=39'",
+                "'CONFIG_TESLA_LED_BRIGHTNESS=8'", 'assert lines.count(wanted) == 1',
+                '--bootloader "$work/build/bootloader/bootloader.bin" --app "$work/build/tesla-key-esp32.bin"',
+                'python3 scripts/check-sdkconfig-defaults.py --target esp32s3',
+                'python3 scripts/check-build-semantics.py --target esp32s3',
+                'python3 scripts/check-stack-usage.py --target esp32s3',
+                '--baseline scripts/firmware-stack-baseline.json',
+                "assert 'led_task' in symbols")),
+            "optional LED SDK variant is missing or does not verify its enabled task/configuration")
     idf_docker = read(root, "scripts/idf-docker.sh")
     dependency_contract = read(root, "scripts/check-dependency-contract.py")
+    patch_applier = read(root, "scripts/apply-tesla-ble-patches.py")
+    require(
+        'exec python3 "$repo_root/scripts/apply-tesla-ble-patches.py" "$@"'
+        in read(root, "scripts/apply-tesla-ble-patches.sh")
+        and 'COMMAND "${CMAKE_SOURCE_DIR}/scripts/apply-tesla-ble-patches.sh"'
+        in read(root, "CMakeLists.txt")
+        and 'dependency.validate(root)' in patch_applier
+        and '"-F0"' in patch_applier
+        and 'require(is_after, "recorded patch postimage drifted' in patch_applier
+        and 'require(is_before or is_after, "unknown or mixed source state' in patch_applier,
+        "tesla-ble patch admission must validate canonical inputs and exact source states with zero fuzz",
+    )
+    patch_cmake = read(root, "CMakeLists.txt")
+    patch_precheck = read(root, "scripts/precheck-firmware.sh")
+    require(
+        'COMMAND "${CMAKE_SOURCE_DIR}/scripts/apply-tesla-ble-patches.sh" --list-inputs' in patch_cmake
+        and 'set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${TESLA_BLE_CONFIGURE_INPUTS})' in patch_cmake
+        and 'file(GLOB TESLA_BLE_INPUT_INVENTORY CONFIGURE_DEPENDS' in patch_cmake
+        and '"${CMAKE_SOURCE_DIR}/patches/tesla-ble/*"' in patch_cmake
+        and '"${CMAKE_SOURCE_DIR}/dependencies.lock.*"' in patch_cmake
+        and 'scripts/apply-tesla-ble-patches.py scripts/tesla-ble-patch-state.json' in patch_precheck
+        and 'scripts/check-dependency-contract.py scripts/test-tesla-ble-harness.sh dependencies.lock.*' in patch_precheck,
+        "tesla-ble incremental configure dependencies, inventories and precheck fingerprint drifted",
+    )
     inventory = read(root, "scripts/check-build-artifact-inventory.py")
     build_semantics = read(root, "scripts/check-build-semantics.py")
     signer = read(root, "scripts/ci-sign-artifacts.sh")
@@ -361,6 +414,16 @@ def validate(root: Path) -> None:
     require(build_contracts.count(
                 'python3 "$repo_root/scripts/check-dev-pages.py" --self-test') == 1,
             "test-build-contracts.sh: dev Pages acceptance self-test is not wired")
+    require(build_contracts.count(
+                'python3 "$repo_root/scripts/wait-pages-build.py" --self-test') == 1
+            and build_workflow.count('python3 scripts/wait-pages-build.py --self-test') == 1,
+            "Pages build readiness self-test must run in host and build-contract gates")
+    for consumer in ("check-dev-pages.py", "check-published-release.py"):
+        readiness = ('python3 scripts/wait-pages-build.py --repository "$GITHUB_REPOSITORY" \\\n'
+                     '            --attempts 8 --interval 10 --timeout 15\n'
+                     '          python3 scripts/' + consumer + ' \\\n')
+        require(build_workflow.count(readiness) == 1,
+                "Pages build readiness must immediately precede both byte acceptance consumers")
     require(build_contracts.count(
                 'python3 "$repo_root/scripts/generate-ota-changelog.py" --self-test') == 1,
             "test-build-contracts.sh: OTA changelog generator self-test is not wired")
@@ -460,8 +523,18 @@ def validate(root: Path) -> None:
         "sdkconfig.defaults: the unused NimBLE Security Manager (SMP) must stay disabled",
     )
     require(
-        idf_docker.count("docker run --rm --cpus 1.5 --memory 1800m") == 1,
+        idf_docker.count("docker run --rm --cpus 1.5 --memory 1800m") == 2,
         "idf-docker.sh: build containers must retain the explicit 1.5 CPU / 1800 MiB limits",
+    )
+    require(
+        'docker run -d --name "$daemon_name" \\\n        --cpus 1.5 --memory 1800m \\' in idf_docker,
+        "idf-docker.sh: daemon creation must retain the explicit resource ceiling",
+    )
+    require(
+        'docker run --rm --cpus 1.5 --memory 1800m --user 0:0 --entrypoint /bin/chmod \\\n      -v "$build_vol_name":/b "$image" 777 /b >/dev/null\n' in idf_docker
+        and 'alpine' not in idf_docker
+        and 'python3 "$repo_root/test/test_idf_wrapper_runtime.py"' in idf_docker,
+        "idf-docker.sh: volume setup must use the pinned image, normal limits and checked exit",
     )
     # F06: a running daemon is reusable only when it was created from the CURRENT pin with the
     # reviewed limits. The check must guard daemon start, status and the build-time reuse path.
@@ -473,6 +546,21 @@ def validate(root: Path) -> None:
         and "if [ \"$is_authoritative_gate\" -eq 0 ] && [ \"$is_daemon_running\" = \"true\" ] && ! daemon_matches_contract; then"
         in idf_docker,
         "idf-docker.sh: daemon reuse must be bound to the current toolchain image and resource limits",
+    )
+    require(
+        re.search(r'(?m)^\s*\*\) mount_flags\+=\(-v "\$git_common_abs":"\$git_common_abs":ro\) ;;\s*$', idf_docker)
+        and 'git_parent=' not in idf_docker
+        and '"${mount_contract[@]}" --inspect' in idf_docker
+        and '[ "$daemon_mount_label" = "$mount_label" ]' in idf_docker
+        and "'{{json .Mounts}}'" in idf_docker
+        and '--label "org.tesla-key.idf-mount-contract=$mount_label"' in idf_docker,
+        "idf-docker.sh: exact read-only external Git mounts and actual daemon mount validation are required",
+    )
+    require(
+        'export -p > /tmp/esp_env.sh.tmp && mv /tmp/esp_env.sh.tmp /tmp/esp_env.sh' in idf_docker
+        and 'else . /opt/esp/idf/export.sh >/dev/null 2>&1; fi; exec "$@"' in idf_docker
+        and '. /opt/esp/entrypoint.sh' not in idf_docker,
+        "idf-docker.sh: daemon initialization must publish complete environment and execute the requested command",
     )
 
     for text, label in (
@@ -556,22 +644,29 @@ def validate(root: Path) -> None:
 
     require(build_all.count("for target in $TARGETS; do") == 2,
             "ci-build-all.sh: exact four-target build/budget loops drifted")
-    environment_guard = re.findall(
-        r'for variable in \\\n(?P<variables>.*?)\; do\n'
-        r'  if declare -p "\$variable" &>/dev/null; then\n'
-        r'    echo "ERROR: compiler-injection environment variable is set: \$variable" >&2\n'
-        r'    exit 2\n'
-        r'  fi\n'
-        r'done',
-        build_all,
-        re.DOTALL,
-    )
-    require(
-        len(environment_guard) == 1
-        and tuple(re.findall(r"[A-Z][A-Z_]+", environment_guard[0]))
-        == COMPILER_INJECTION_ENV,
-        "ci-build-all.sh: exact compiler-injection environment guard drifted",
-    )
+    for script_name, script_text in (("ci-build-all.sh", build_all), ("check-reproducible-build.sh", (root / "scripts/check-reproducible-build.sh").read_text())):
+        environment_guard = re.findall(
+            r'for variable in \\\n(?P<variables>.*?)\; do\n'
+            r'  if declare -p "\$variable" &>/dev/null; then\n'
+            r'    echo "ERROR: compiler-injection environment variable is set: \$variable" >&2\n'
+            r'    exit 2\n'
+            r'  fi\n'
+            r'done',
+            script_text,
+            re.DOTALL,
+        )
+        require(
+            len(environment_guard) == 1
+            and tuple(re.findall(r"[A-Z][A-Z_]+", environment_guard[0]))
+            == COMPILER_INJECTION_ENV,
+            f"{script_name}: exact compiler-injection environment guard drifted",
+        )
+        require(
+            'IDF_COMPONENT_*|TESLA_BLE_*)' in script_text
+            and 'done < <(compgen -A variable)' in script_text
+            and script_text.index('IDF_COMPONENT_*|TESLA_BLE_*)') < script_text.index('export IDF_CCACHE_ENABLE='),
+            f"{script_name}: component/configuration namespace environment guard drifted",
+        )
     require(
         build_all.count('export EXTRA_CFLAGS="-fstack-usage"') == 1
         and build_all.count('export EXTRA_CXXFLAGS="-fstack-usage"') == 1
@@ -657,6 +752,7 @@ def validate(root: Path) -> None:
         "managed external include path mutation was accepted",
         "managed external dependency mutation was accepted",
         "LIBRARY_PATH environment mutation was accepted",
+        "build override environment mutation was accepted",
         "self_test_build_graph_contract(Path(__file__).resolve().parent.parent)",
     )
     require(
@@ -945,7 +1041,9 @@ def validate(root: Path) -> None:
         and "tesla-key-esp32*.bin" not in preview_workflow,
         "signed-pr-preview.yml: exact 12-file signed root gate/listing must protect upload",
     )
-    require(release_relevance.count(".immutable == true") == 1 and
+    require(release_relevance.count('r.get("immutable") is True') == 1
+            and "direct immutable false authority was accepted" in release_relevance
+            and "direct immutable missing authority was accepted" in release_relevance and
             "mutable Release authority failed open" in release_relevance and
             "without immutable field failed open" in release_relevance,
             "release-relevance.sh: immutable true authority/canaries drifted")
@@ -1039,9 +1137,9 @@ def validate(root: Path) -> None:
         "build.yml Draft upload must be preceded by the exact signed root inventory gate",
     )
     require(
-        build_workflow.count(PAGES_SOURCE_CHECK) == 4
+        build_workflow.count(PAGES_SOURCE_CHECK) == 5
         and publish_section.count(PAGES_SOURCE_CHECK) == 1
-        and deploy_section.count(PAGES_SOURCE_CHECK) == 3
+        and deploy_section.count(PAGES_SOURCE_CHECK) == 4
         and "Revalidate current Release candidate immediately before signed artifact upload"
         in build_workflow
         and "actions/configure-pages@" not in build_workflow
@@ -1069,12 +1167,17 @@ def validate(root: Path) -> None:
          "python3 scripts/check-pages-manifest.py ./_deploy-input/_site",
          "- name: Revalidate current main immediately before dev deployment",
          "./scripts/select-release-version.sh --require-current-main",
+         "- name: Revalidate branch-backed Pages authority immediately before dev deployment",
+         '          python3 scripts/check-pages-source.py "$pages_json"\n\n'
+         "      - name: Deploy dev site to gh-pages",
          "- name: Deploy dev site to gh-pages",
          "./scripts/publish-pages-branch.sh dev ./_deploy-input/_site",
          "- name: Accept branch-served Pages against dev build artifacts"),
     )
     require(
         "        run: ./scripts/select-release-version.sh --require-current-main \"$SOURCE_SHA\"\n\n"
+        "      - name: Revalidate branch-backed Pages authority immediately before dev deployment" in deploy_section
+        and '          python3 scripts/check-pages-source.py "$pages_json"\n\n'
         "      - name: Deploy dev site to gh-pages" in deploy_section
         and "        if: needs.build.outputs.mode == 'dev'\n        env:\n          SOURCE_SHA: ${{ github.sha }}"
         in deploy_section,
@@ -1210,9 +1313,43 @@ def copy_fixture(root: Path, destination: Path) -> None:
 def self_test(root: Path) -> None:
     validate(root)
     mutations = (
+        ("led-sdk-unsigned-cli", "scripts/ci-build-led-variant.sh",
+         '--bootloader "$work/build/bootloader/bootloader.bin" --app "$work/build/tesla-key-esp32.bin"',
+         '--app-only --app "$work/build/tesla-key-esp32.bin"', "optional LED SDK variant"),
+        ("led-sdk-call", "scripts/ci-build-all.sh",
+         '  bash scripts/ci-build-led-variant.sh "$version" dist/esp32s3/sdkconfig.esp32s3',
+         '  true # removed LED SDK compile', "optional LED SDK variant"),
+        ("led-sdk-disabled", "scripts/ci-build-led-variant.sh",
+         "source.replace(disabled, 'CONFIG_TESLA_LED_ENABLED=y')",
+         "source.replace(disabled, 'CONFIG_TESLA_LED_ENABLED=n')", "optional LED SDK variant"),
+        ("led-sdk-task-missing", "scripts/ci-build-led-variant.sh",
+         "assert 'led_task' in symbols", "assert True", "optional LED SDK variant"),
+        ("patch-incremental-input-dependencies", "CMakeLists.txt",
+         'CMAKE_CONFIGURE_DEPENDS ${TESLA_BLE_CONFIGURE_INPUTS}',
+         'CMAKE_CONFIGURE_DEPENDS', "incremental configure dependencies"),
+        ("patch-incremental-inventory", "CMakeLists.txt",
+         'file(GLOB TESLA_BLE_INPUT_INVENTORY CONFIGURE_DEPENDS',
+         'file(GLOB TESLA_BLE_INPUT_INVENTORY', "incremental configure dependencies"),
+        ("patch-precheck-fingerprint", "scripts/precheck-firmware.sh",
+         'scripts/apply-tesla-ble-patches.py scripts/tesla-ble-patch-state.json',
+         'scripts/apply-tesla-ble-patches.py', "precheck fingerprint drifted"),
+        ("patch-source-zero-fuzz", "scripts/apply-tesla-ble-patches.py",
+         '"-F0"', '"-F1"', "exact source states with zero fuzz"),
+        ("patch-recorded-postimages", "scripts/apply-tesla-ble-patches.py",
+         'require(is_after, "recorded patch postimage drifted',
+         'require(True, "recorded patch postimage drifted', "exact source states with zero fuzz"),
         ("idf-docker-resource-limits", "scripts/idf-docker.sh",
          "docker run --rm --cpus 1.5 --memory 1800m",
          "docker run --rm --cpus 4 --memory 8g", "explicit 1.5 CPU / 1800 MiB limits"),
+        ("idf-docker-daemon-creation-limits", "scripts/idf-docker.sh",
+         '--cpus 1.5 --memory 1800m \\\n        --label',
+         '--cpus 4 --memory 8g \\\n        --label', "daemon creation must retain the explicit resource ceiling"),
+        ("idf-docker-volume-image", "scripts/idf-docker.sh",
+         '-v "$build_vol_name":/b "$image" 777 /b',
+         '-v "$build_vol_name":/b alpine 777 /b', "volume setup must use the pinned image"),
+        ("idf-docker-volume-failure", "scripts/idf-docker.sh",
+         '"$image" 777 /b >/dev/null', '"$image" 777 /b >/dev/null || true',
+         "volume setup must use the pinned image"),
         ("idf-docker-daemon-image-binding", "scripts/idf-docker.sh",
          '[ "$daemon_image" = "$image" ] \\', '[ -n "$daemon_image" ] \\',
          "daemon reuse must be bound to the current toolchain image"),
@@ -1220,6 +1357,21 @@ def self_test(root: Path) -> None:
          'if [ "$is_authoritative_gate" -eq 0 ] && [ "$is_daemon_running" = "true" ] && ! daemon_matches_contract; then',
          'if false; then',
          "daemon reuse must be bound to the current toolchain image"),
+        ("idf-docker-external-git-readonly", "scripts/idf-docker.sh",
+         'mount_flags+=(-v "$git_common_abs":"$git_common_abs":ro)',
+         'mount_flags+=(-v "$git_common_abs":"$git_common_abs")',
+         "exact read-only external Git mounts"),
+        ("idf-docker-readonly-comment-decoy", "scripts/idf-docker.sh",
+         'mount_flags+=(-v "$git_common_abs":"$git_common_abs":ro)',
+         'mount_flags+=(-v "$git_common_abs":"$git_common_abs")\n# mount_flags+=(-v "$git_common_abs":"$git_common_abs":ro)',
+         "exact read-only external Git mounts"),
+        ("idf-docker-actual-mount-inventory", "scripts/idf-docker.sh",
+         '"${mount_contract[@]}" --inspect', 'true',
+         "actual daemon mount validation"),
+        ("idf-docker-daemon-fallback-exec", "scripts/idf-docker.sh",
+         'else . /opt/esp/idf/export.sh >/dev/null 2>&1; fi; exec "$@"',
+         'else . /opt/esp/entrypoint.sh true; fi; exec "$@"',
+         "execute the requested command"),
         ("build-target", "scripts/ci-build-all.sh",
          'TARGETS="esp32 esp32s3 esp32c3 esp32c6"',
          'TARGETS="esp32 esp32s3 esp32c3"', "ci-build-all.sh: target set/order"),
@@ -1227,6 +1379,13 @@ def self_test(root: Path) -> None:
          "  CPATH CPLUS_INCLUDE_PATH C_INCLUDE_PATH OBJC_INCLUDE_PATH \\\n",
          "  CPLUS_INCLUDE_PATH C_INCLUDE_PATH OBJC_INCLUDE_PATH \\\n",
          "exact compiler-injection environment guard"),
+        ("reproducer-build-environment", "scripts/check-reproducible-build.sh",
+         "  SDKCONFIG_DEFAULTS EXTRA_COMPONENT_DIRS CFLAGS CXXFLAGS CPPFLAGS LDFLAGS; do",
+         "  SDKCONFIG_DEFAULTS EXTRA_COMPONENT_DIRS CXXFLAGS CPPFLAGS LDFLAGS; do",
+         "exact compiler-injection environment guard"),
+        ("component-namespace-environment", "scripts/ci-build-all.sh",
+         "IDF_COMPONENT_*|TESLA_BLE_*)", "IDF_COMPONENT_*|TESLA_BLE_OVERRIDE)",
+         "component/configuration namespace environment guard"),
         ("stack-flags-overwrite", "scripts/ci-build-all.sh",
          'export EXTRA_CFLAGS="-fstack-usage"',
          'export EXTRA_CFLAGS="${EXTRA_CFLAGS:-} -fstack-usage"',
@@ -1449,13 +1608,32 @@ def self_test(root: Path) -> None:
         ("preview-current-default", ".github/workflows/signed-pr-preview.yml",
          TRUSTED_DEFAULT_ENV, "TRUSTED_DEFAULT_SHA: ${{ needs.validate.outputs.head-sha }}",
          "current trusted default SHA"),
-        ("relevance-immutable", "scripts/release-relevance.sh", ".immutable == true",
-         ".immutable == false", "immutable true authority"),
+        ("relevance-immutable", "scripts/release-relevance.sh", 'r.get("immutable") is True',
+         'r.get("immutable") is not False', "immutable true authority"),
         ("selector-immutable", "scripts/select-release-version.sh", ".immutable == true",
          ".immutable == false", "all Release API authorities"),
         ("acceptance-immutable", "scripts/check-published-release.py",
          "release_validator.validate_metadata(release_metadata",
          "release_validator.validate_metadata({}", "immutable API metadata gate"),
+        ("pages-build-readiness-stable", ".github/workflows/build.yml",
+         '            --attempts 8 --interval 10 --timeout 15\n'
+         '          python3 scripts/check-published-release.py',
+         '            --attempts 1 --interval 10 --timeout 15\n'
+         '          python3 scripts/check-published-release.py',
+         "Pages build readiness must immediately precede"),
+        ("pages-build-readiness-dev", ".github/workflows/build.yml",
+         '            --attempts 8 --interval 10 --timeout 15\n'
+         '          python3 scripts/check-dev-pages.py',
+         '            --attempts 1 --interval 10 --timeout 15\n'
+         '          python3 scripts/check-dev-pages.py',
+         "Pages build readiness must immediately precede"),
+        ("pages-build-readiness-host-test", ".github/workflows/build.yml",
+         'python3 scripts/wait-pages-build.py --self-test',
+         'python3 scripts/missing-pages-build.py --self-test',
+         "Pages build readiness self-test must run"),
+        ("pages-build-readiness-contract-test", "scripts/test-build-contracts.sh",
+         'python3 "$repo_root/scripts/wait-pages-build.py" --self-test\n', "",
+         "Pages build readiness self-test must run"),
         ("pr-head", ".github/workflows/build.yml", HEAD_REF,
          "ref: ${{ github.sha }}", "exact head SHA"),
         ("independent-rebuild", ".github/workflows/build.yml",
@@ -1508,6 +1686,22 @@ def self_test(root: Path) -> None:
          "immutable Release reuse gate is not directly wired"),
         ("root-pages-source", ".github/workflows/build.yml", PAGES_SOURCE_CHECK,
          "python3 scripts/check-pages-manifest.py", "use only branch-backed Pages authority"),
+        ("dev-pages-validator-removed", ".github/workflows/build.yml",
+         '          python3 scripts/check-pages-source.py "$pages_json"\n\n'
+         "      - name: Deploy dev site to gh-pages",
+         '          true\n\n      - name: Deploy dev site to gh-pages',
+         "use only branch-backed Pages authority"),
+        ("dev-pages-order", ".github/workflows/build.yml",
+         "- name: Revalidate branch-backed Pages authority immediately before dev deployment",
+         "- name: Skip current Dev Pages authority",
+         "required stage is missing"),
+        ("dev-pages-current-main-gap", ".github/workflows/build.yml",
+         "        run: ./scripts/select-release-version.sh --require-current-main \"$SOURCE_SHA\"\n\n"
+         "      - name: Revalidate branch-backed Pages authority immediately before dev deployment",
+         "        run: ./scripts/select-release-version.sh --require-current-main \"$SOURCE_SHA\"\n\n"
+         "      - name: Unreviewed intervening step\n        run: true\n\n"
+         "      - name: Revalidate branch-backed Pages authority immediately before dev deployment",
+         "adjacent to the dev-only current-main revalidation"),
         ("root-pre-upload-current", ".github/workflows/build.yml",
          "Revalidate current Release candidate immediately before signed artifact upload",
          "Trust signed artifact upload without revalidation",

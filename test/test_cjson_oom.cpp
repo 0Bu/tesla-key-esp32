@@ -1,5 +1,6 @@
 #include "json_builder.hpp"
 #include "json_http_reply.hpp"
+#include "http_effect_reply.hpp"
 #include "logic/json_syntax.hpp"
 #include "logic/status_model.hpp"
 #include "mcp_json_payloads.hpp"
@@ -8,10 +9,12 @@
 
 #include <cJSON.h>
 
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -105,6 +108,8 @@ tk::JsonOwner build_status_fixture() {
     inputs.key_fingerprint = "AA:BB:CC:DD:EE:FF";
     inputs.key_created = 1750000000;
     inputs.paired = true;
+    inputs.sessions.vcsec = {true, true, tk::SessionSaveState::Error};
+    inputs.sessions.infotainment = {true, true, tk::SessionSaveState::Confirmed};
     inputs.paired_at = 1750000100;
     inputs.reauth = true;
     inputs.wifi_connected = true;
@@ -169,6 +174,8 @@ tk::JsonOwner build_status_fixture() {
     inputs.closures.has_user_present = true;
     inputs.closures.user_present = true;
     inputs.charge.valid = true;
+    inputs.have_charge_age = true;
+    inputs.charge_age_s = 0;
     inputs.charge.has_battery_level = true;
     inputs.charge.battery_level = 63;
     inputs.charge.charging_state = "Charging";
@@ -200,6 +207,11 @@ tk::JsonOwner build_status_fixture() {
     inputs.crash_reason_code = 3;
     inputs.crash_fault = true;
     inputs.crash_coredump = true;
+    inputs.crash_summary_available = true;
+    inputs.crash_artifact_present = inputs.crash_raw_available = true;
+    inputs.crash_checksum_verified = true;
+    inputs.crash_dump_identity = tk::DumpIdentity::VerifiedCurrent;
+    inputs.crash_truncated = inputs.crash_isr = true;
     inputs.crash_corrupted = true;
     inputs.crash_task = "vehicle";
     inputs.crash_pc = 0x40001234;
@@ -343,6 +355,130 @@ tk::JsonOwner build_combined_fixture() {
 }
 tk::JsonOwner build_all_domains_fixture() {
     return build_vehicle_data_fixture("charge_state;climate_state;drive_state");
+}
+
+// Print and reparse with the actual pinned cJSON: its in-memory Number type alone would
+// miss the regression, because NaN/infinity become null only when cJSON prints them.
+void check_wire_number(tk::JsonOwner root, const char* key, double expected) {
+    CHECK(root != nullptr);
+    tk::JsonPrintOwner printed(cJSON_PrintUnformatted(root.get()));
+    CHECK(printed != nullptr);
+    tk::JsonOwner parsed(cJSON_Parse(printed.get()));
+    CHECK(parsed != nullptr);
+    const cJSON* number = cJSON_GetObjectItemCaseSensitive(parsed.get(), key);
+    CHECK(cJSON_IsNumber(number));
+    CHECK(std::isfinite(number->valuedouble));
+    // The wire values originate as protobuf floats. cJSON may choose 15 decimal digits;
+    // require exact recovery of that float, rather than unrelated double-print precision.
+    CHECK(static_cast<float>(number->valuedouble) == static_cast<float>(expected));
+}
+
+void test_vehicle_data_numeric_domain() {
+    struct NumberCase { float input; double expected; };
+    const NumberCase cases[] = {
+        {std::numeric_limits<float>::quiet_NaN(), 0.0},
+        {std::numeric_limits<float>::infinity(), 0.0},
+        {-std::numeric_limits<float>::infinity(), 0.0},
+        {0.0f, 0.0}, {-0.0f, 0.0}, {12.5f, 12.5}, {-3.25f, -3.25},
+        {std::numeric_limits<float>::max(), std::numeric_limits<float>::max()},
+        {std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest()},
+        {std::numeric_limits<float>::denorm_min(), std::numeric_limits<float>::denorm_min()},
+    };
+    struct ChargeField { float ChargeStateResult::* member; const char* key; };
+    const ChargeField charge_fields[] = {
+        {&ChargeStateResult::battery_level, "battery_level"},
+        {&ChargeStateResult::usable_battery_level, "usable_battery_level"},
+        {&ChargeStateResult::charge_limit_soc, "charge_limit_soc"},
+        {&ChargeStateResult::charger_power, "charger_power"},
+        {&ChargeStateResult::charge_rate, "charge_rate"},
+        {&ChargeStateResult::charge_energy_added, "charge_energy_added"},
+        {&ChargeStateResult::battery_range, "battery_range"},
+    };
+    for (const auto& field : charge_fields) {
+        for (const auto& sample : cases) {
+            reset_allocator(0);
+            {
+                ChargeStateResult charge{};
+                charge.valid = charge.has_usable_battery_level = true;
+                charge.*(field.member) = sample.input;
+                tk::JsonBuilder json;
+                tk::StatusJsonEmitter emitter(json);
+                tk::emit_vehicle_charge_state(charge, emitter);
+                check_wire_number(emitter.finish(), field.key, sample.expected);
+            }
+            CHECK(live_allocations == 0);
+        }
+    }
+    struct ClimateField { float ClimateStateResult::* member; const char* key; };
+    const ClimateField climate_fields[] = {
+        {&ClimateStateResult::inside_temp, "inside_temp"},
+        {&ClimateStateResult::outside_temp, "outside_temp"},
+        {&ClimateStateResult::driver_setpoint, "driver_temp_setting"},
+    };
+    for (const auto& field : climate_fields) {
+        for (const auto& sample : cases) {
+            for (bool projected : {false, true}) {
+                reset_allocator(0);
+                {
+                    ClimateStateResult climate{};
+                    climate.valid = true;
+                    climate.*(field.member) = sample.input;
+                    tk::JsonBuilder json;
+                    tk::StatusJsonEmitter emitter(json);
+                    if (projected) tk::emit_vehicle_climate_state(tk::vehicle_climate_data(climate), emitter);
+                    else tk::emit_vehicle_climate_state(climate, emitter);
+                    check_wire_number(emitter.finish(), field.key, sample.expected);
+                }
+                CHECK(live_allocations == 0);
+            }
+        }
+    }
+    for (const auto& sample : cases) {
+        // Conversion is independently covered by the ordinary drive fixtures. Here, verify
+        // its output is always a number, including absent/invalid inputs and float extremes.
+        for (bool present : {false, true}) {
+            reset_allocator(0);
+            {
+                tk::VehicleDriveData drive{};
+                drive.valid = true;
+                drive.has_odometer = present;
+                drive.odometer_km = sample.input;
+                tk::JsonBuilder json;
+                tk::StatusJsonEmitter emitter(json);
+                tk::emit_vehicle_drive_state(drive, emitter);
+                auto root = emitter.finish();
+                const double expected = present && std::isfinite(sample.input)
+                    ? static_cast<float>(tk::km_to_mi(sample.input)) : 0.0;
+                check_wire_number(std::move(root), "odometer", expected);
+            }
+            CHECK(live_allocations == 0);
+        }
+    }
+    // A missing usable SOC still falls back to battery SOC; invalid hidden data is unused.
+    for (const auto& sample : cases) {
+        reset_allocator(0);
+        {
+            ChargeStateResult charge{};
+            charge.battery_level = 42;
+            charge.usable_battery_level = sample.input;
+            tk::JsonBuilder json;
+            tk::StatusJsonEmitter emitter(json);
+            tk::emit_vehicle_charge_state(charge, emitter);
+            check_wire_number(emitter.finish(), "usable_battery_level", 42);
+        }
+        CHECK(live_allocations == 0);
+        reset_allocator(0);
+        {
+            ChargeStateResult charge{};
+            charge.battery_level = sample.input;
+            charge.usable_battery_level = 42;
+            tk::JsonBuilder json;
+            tk::StatusJsonEmitter emitter(json);
+            tk::emit_vehicle_charge_state(charge, emitter);
+            check_wire_number(emitter.finish(), "usable_battery_level", sample.expected);
+        }
+        CHECK(live_allocations == 0);
+    }
 }
 
 void test_evcc_vehicle_data_fields() {
@@ -600,6 +736,8 @@ tk::JsonOwner build_vehicle_state_fixture() {
     tk::mcp_json::VehicleStatePayload state;
     state.vin = "5YJ00000000000000";
     state.paired = true;
+    state.session_available = true;
+    state.charge_available = true;
     state.link = "awake";
     state.has_last_seen = true;
     state.last_seen_s = 5;
@@ -852,8 +990,11 @@ void test_rpc_request_envelope() {
 
     for (double nonfinite : {std::nan(""), HUGE_VAL, -HUGE_VAL}) {
         {
-            tk::JsonOwner value(cJSON_CreateNumber(nonfinite));
+            // Construct the malformed node without cJSON_CreateNumber(NaN)'s own
+            // float-to-int UB. This tests capture_id's defensive input domain.
+            tk::JsonOwner value(cJSON_CreateNumber(0));
             CHECK(value != nullptr);
+            value->valuedouble = nonfinite;
             tk::mcp_json::RpcId id;
             const tk::JsonRawNumberId invalid_raw{0, tk::JsonRawNumberStatus::InvalidNumber};
             CHECK(tk::mcp_json::capture_id(value.get(), invalid_raw, id) == RpcIdStatus::Invalid);
@@ -1082,15 +1223,386 @@ void test_throw_ownership() {
 
 }  // namespace
 
+void test_ram_only_mcp_state() {
+    reset_allocator(0);
+    {
+        tk::mcp_json::VehicleStatePayload state;
+        state.vin = "TESTVIN0000000001"; state.link = "unknown";
+        state.paired = false; state.session_available = true;
+        auto result = tk::mcp_json::build_vehicle_state_object(state);
+        CHECK(result != nullptr);
+        CHECK(cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(result.get(), "paired")));
+        CHECK(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(result.get(), "session_available")));
+    }
+    CHECK(live_allocations == 0);
+}
+
+void test_mcp_charge_availability() {
+    for (bool available : {false, true}) {
+        reset_allocator(0);
+        {
+            tk::mcp_json::VehicleStatePayload state;
+            state.vin = "TESTVIN0000000001"; state.link = "awake";
+            state.charge_available = available;
+            // Deliberately leave all telemetry flags set even for an unavailable cache.
+            state.has_soc = true; state.soc = 70;
+            state.has_usable_soc = true; state.usable_soc = 68;
+            state.charging_state = "Charging";
+            state.has_charge_limit = true; state.charge_limit = 80;
+            state.has_charge_amps = true; state.charge_amps = 16;
+            state.has_charger_power = true; state.charger_power_kw = 11;
+            auto result = tk::mcp_json::build_vehicle_state_object(state);
+            CHECK(result != nullptr);
+            const cJSON* flag = cJSON_GetObjectItemCaseSensitive(result.get(), "charge_available");
+            CHECK(available ? cJSON_IsTrue(flag) : cJSON_IsFalse(flag));
+            for (const char* key : {"soc", "usable_soc", "charging_state", "charge_limit",
+                                    "charge_amps", "charger_power_kw"}) {
+                CHECK((cJSON_GetObjectItemCaseSensitive(result.get(), key) != nullptr) == available);
+            }
+        }
+        CHECK(live_allocations == 0);
+    }
+}
+
+void test_request_intake_limits_and_duplicates() {
+    const auto array_of = [](unsigned items) {
+        std::string body = "[";
+        for (unsigned i = 0; i < items; ++i) { if (i) body += ','; body += '0'; }
+        return body + "]";
+    };
+    const std::string large = array_of(1023);
+    CHECK(large.size() == 2047);
+    reset_allocator(0);
+    {
+        tk::JsonOwner old_parse(cJSON_Parse(large.c_str()));
+        CHECK(old_parse != nullptr);
+        CHECK(allocation_attempt == 2047); // actual locked cJSON high-allocation positive control
+    }
+    CHECK(live_allocations == 0);
+    reset_allocator(0);
+    int parser_calls = 0;
+    auto parsed = tk::json_materialize<cJSON>(large.c_str(), large.size(), [&](const char* text) {
+        ++parser_calls; return cJSON_Parse(text);
+    }, tk::kJsonMaxRequestValues);
+    CHECK(parsed.status == tk::JsonMaterializeStatus::TooManyValues);
+    CHECK(parsed.root == nullptr && parser_calls == 0 && allocation_attempt == 0);
+    CHECK(live_allocations == 0);
+    // Generic/OTA callers retain the unlimited default, including large valid manifests/documents.
+    reset_allocator(0);
+    {
+        const auto unlimited = tk::json_materialize<cJSON>(large.c_str(), large.size(),
+            [](const char* text) { return cJSON_Parse(text); });
+        CHECK(unlimited.status == tk::JsonMaterializeStatus::Ok);
+        tk::JsonOwner owner(unlimited.root);
+        CHECK(allocation_attempt == 2047);
+    }
+    CHECK(live_allocations == 0);
+    for (const std::string& body : {array_of(63), std::string("{\"params\":{\"v\":16},\"escaped\":\"[0,0]\\\"{}\"}")}) {
+        reset_allocator(0);
+        size_t original_allocations = 0;
+        {
+            tk::JsonOwner direct(cJSON_Parse(body.c_str()));
+            CHECK(direct != nullptr);
+            original_allocations = allocation_attempt;
+        }
+        CHECK(live_allocations == 0);
+        reset_allocator(0);
+        {
+            const auto bounded = tk::json_materialize<cJSON>(body.c_str(), body.size(),
+                [](const char* text) { return cJSON_Parse(text); }, tk::kJsonMaxRequestValues);
+            CHECK(bounded.status == tk::JsonMaterializeStatus::Ok);
+            tk::JsonOwner owner(bounded.root);
+            CHECK(!tk::has_duplicate_json_keys(owner.get()));
+            CHECK(allocation_attempt == original_allocations);
+        }
+        CHECK(live_allocations == 0);
+        for (size_t nth = 1; nth <= original_allocations; ++nth) {
+            reset_allocator(nth);
+            const auto failed = tk::json_materialize<cJSON>(body.c_str(), body.size(),
+                [](const char* text) { return cJSON_Parse(text); }, tk::kJsonMaxRequestValues);
+            CHECK(failed.status == tk::JsonMaterializeStatus::NoMemory);
+            CHECK(failed.root == nullptr && live_allocations == 0);
+        }
+    }
+    reset_allocator(0);
+    parsed = tk::json_materialize<cJSON>(array_of(64).c_str(), array_of(64).size(),
+        [](const char* text) { return cJSON_Parse(text); }, tk::kJsonMaxRequestValues);
+    CHECK(parsed.status == tk::JsonMaterializeStatus::TooManyValues);
+    CHECK(parsed.root == nullptr && allocation_attempt == 0);
+    for (const char* body : {"{\"broker\":\"\",\"broker\":\"x\"}",
+                            "{\"broker\":\"\",\"bro\\u006ber\":\"x\"}",
+                            "{\"nested\":{\"x\":0,\"x\":1}}", "[{\"x\":0,\"x\":1}]"}) {
+        reset_allocator(0);
+        {
+            const auto result = tk::json_materialize<cJSON>(body, std::strlen(body),
+                [](const char* text) { return cJSON_Parse(text); }, tk::kJsonMaxRequestValues);
+            CHECK(result.status == tk::JsonMaterializeStatus::Ok);
+            tk::JsonOwner owner(result.root);
+            const size_t before = allocation_attempt;
+            CHECK(tk::has_duplicate_json_keys(owner.get()));
+            CHECK(tk::mcp_json::has_duplicate_json_keys(owner.get()));
+            CHECK(allocation_attempt == before); // shared decoded-key walk itself allocates nothing
+        }
+        CHECK(live_allocations == 0);
+    }
+    reset_allocator(0);
+    {
+        tk::JsonOwner unique(cJSON_Parse("{\"A\":0,\"a\":1,\"n\":{\"x\":0},\"m\":{\"x\":1}}"));
+        CHECK(!tk::has_duplicate_json_keys(unique.get()));
+    }
+    CHECK(live_allocations == 0);
+    struct Numeric { const char* json; double number; };
+    for (const Numeric& value : {Numeric{"\"16\"",16}, {"16",16}, {"1e1",10}, {"\"-5\"",-5}}) {
+        reset_allocator(0);
+        {
+            tk::JsonOwner json(cJSON_Parse(value.json));
+            CHECK(json != nullptr);
+            double number = 123;
+            CHECK(tk::json_command_number(json.get(), number));
+            CHECK(number == value.number);
+        }
+        CHECK(live_allocations == 0);
+    }
+    for (const char* text : {"0x10", "1e1", " 16", "16 ", "+16", "016", "-0", "16.0", "",
+                             "9007199254740992", "999999999999999999999999999999999999"}) {
+        reset_allocator(0);
+        {
+            tk::JsonOwner json(cJSON_CreateString(text));
+            CHECK(json != nullptr);
+            double number = 123;
+            CHECK(!tk::json_command_number(json.get(), number));
+            CHECK(number == 123);
+        }
+        CHECK(live_allocations == 0);
+    }
+}
+
+
+struct EffectTransportSpy {
+    int calls{};
+    int fail_call{};
+    bool throw_failure{};
+    int status{};
+    int status_calls{};
+    int type_calls{};
+    int sends{};
+    int ends{};
+    size_t size{};
+    char body[2048]{};
+
+    int operation() {
+        ++calls;
+        if (calls != fail_call) return 0;
+        if (throw_failure) throw std::runtime_error("transport fault");
+        return -7;
+    }
+    int set_status(int value) { ++status_calls; status = value; return operation(); }
+    int set_json_type() { ++type_calls; return operation(); }
+    int chunk(const char* value, size_t count) {
+        CHECK(value == nullptr || count != 0); // zero-sized IDF chunks END the response
+        if (!value) ++ends;
+        CHECK(size + count < sizeof(body));
+        const int code = operation();
+        // Simulate a partial network write before ESP_FAIL. A retry would corrupt the reply.
+        if (code && count > 1) count /= 2;
+        if (value) std::memcpy(body + size, value, count);
+        size += count;
+        body[size] = '\0';
+        return code;
+    }
+    int send(const char* value) { ++sends; return chunk(value, std::strlen(value)); }
+};
+
+tk::JsonOwner build_effect_fixture() {
+    tk::JsonBuilder json;
+    cJSON* response = json.object(json.root(), "response");
+    json.boolean(response, "result", true);
+    json.string(response, "reason", "normal request result");
+    return json.finish();
+}
+
+void check_effect_wire(const EffectTransportSpy& transport, const tk::HttpEffectReply& reply,
+                       bool degraded) {
+    CHECK(transport.status == 200);
+    CHECK(transport.status_calls == 1);
+    CHECK(transport.type_calls == 1);
+    auto json = tk::json_owner(cJSON_Parse(transport.body));
+    CHECK(json != nullptr);
+    const bool rpc = reply.state.shape == tk::ReplyShape::Rpc;
+    const cJSON* payload = (reply.state.shape == tk::ReplyShape::WrappedRest)
+        ? cJSON_GetObjectItemCaseSensitive(json.get(), "response")
+        : rpc ? cJSON_GetObjectItemCaseSensitive(json.get(), "result") : json.get();
+    CHECK(cJSON_IsObject(payload));
+    CHECK(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(payload, "result")) == reply.state.success());
+    if (!degraded) {
+        CHECK(!cJSON_GetObjectItemCaseSensitive(payload, "reply_degraded"));
+        return;
+    }
+    CHECK(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(payload, "reply_degraded")));
+    const auto* outcome = cJSON_GetObjectItemCaseSensitive(payload, "outcome");
+    CHECK(cJSON_IsString(outcome));
+    CHECK(std::strcmp(outcome->valuestring, reply.state.outcome_text()) == 0);
+    if (reply.state.recovery_pending)
+        CHECK(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(payload, "recovery_pending")));
+    if (reply.state.shape == tk::ReplyShape::OtaCheck) {
+        const auto* started = cJSON_GetObjectItemCaseSensitive(payload, "started");
+        CHECK(reply.state.success() ? cJSON_IsTrue(started) : cJSON_IsNull(started));
+    }
+    if (rpc) {
+        CHECK(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(payload, "isError")) == !reply.state.success());
+        const auto* id = cJSON_GetObjectItemCaseSensitive(json.get(), "id");
+        if (reply.id.kind == tk::mcp_json::RpcIdKind::String) {
+            CHECK(cJSON_IsString(id)); CHECK(std::strcmp(id->valuestring, reply.id.string) == 0);
+        } else {
+            CHECK(cJSON_IsNumber(id)); CHECK(id->valuedouble == double(reply.id.number));
+        }
+        CHECK(!cJSON_GetObjectItemCaseSensitive(json.get(), "error"));
+    }
+}
+
+void test_rpc_envelope_reference_after_input_release() {
+    const char* bodies[] = {
+        R"({"jsonrpc":"2.0","id":9007199254740991,"method":"ping"})",
+        R"({"jsonrpc":"2.0","id":-9007199254740991,"method":"ping"})",
+        R"({"jsonrpc":"2.0","id":"quote\"\\\n\u00e4","method":"ping"})"
+    };
+    for (int i=0;i<3;++i) {
+        reset_allocator(0);
+        auto input=tk::json_owner(cJSON_Parse(bodies[i])); CHECK(input);
+        const auto envelope=tk::mcp_json::inspect_request_envelope(input.get(),
+            tk::json_top_level_numeric_id(bodies[i],std::strlen(bodies[i])));
+        CHECK(envelope.status==tk::mcp_json::RpcRequestStatus::Valid);
+        const tk::mcp_json::RpcId& id=envelope.id; // same ownership/lifetime as the production entry point
+        input.reset(); CHECK(live_allocations==0);
+        {
+            auto response=tk::mcp_json::build_result_envelope(id,tk::JsonBuilder().finish()); CHECK(response);
+            tk::JsonPrintOwner text(cJSON_PrintUnformatted(response.get())); CHECK(text);
+            response.reset();
+            const auto wire=tk::json_owner(cJSON_Parse(text.get())); CHECK(wire);
+            const auto* value=cJSON_GetObjectItemCaseSensitive(wire.get(),"id");
+            if (i<2) { CHECK(cJSON_IsNumber(value)); CHECK(value->valuedouble==(i?-9007199254740991.0:9007199254740991.0)); }
+            else {
+                const char expected[]={'q','u','o','t','e',0x22,0x5c,0x0a,char(0xc3),char(0xa4),0};
+                CHECK(cJSON_IsString(value)); CHECK(std::strcmp(value->valuestring,expected)==0);
+            }
+        }
+        CHECK(live_allocations==0);
+    }
+}
+
+void test_effect_reply_renderer() {
+    using namespace tk;
+    reset_allocator(0);
+    size_t allocations = 0;
+    {
+        HttpEffectReply reply;
+        reply.state.attempting(RequestEffect::Command);
+        reply.state.succeeded();
+        EffectTransportSpy transport;
+        CHECK(effect_json_reply(transport, reply, 200, build_effect_fixture()) == 0);
+        allocations = allocation_attempt;
+        CHECK(allocations > 0);
+        check_effect_wire(transport, reply, false);
+    }
+    for (size_t failure = 1; failure <= allocations; ++failure) {
+        reset_allocator(failure);
+        HttpEffectReply reply;
+        reply.state.attempting(RequestEffect::Command);
+        reply.state.succeeded();
+        EffectTransportSpy transport;
+        CHECK(effect_json_reply(transport, reply, 200, build_effect_fixture()) == 0);
+        fail_at = 0;
+        check_effect_wire(transport, reply, true);
+        CHECK(reply.state.terminal);
+    }
+    for (const auto shape : {ReplyShape::WrappedRest, ReplyShape::FlatResult,
+                             ReplyShape::OtaCheck, ReplyShape::Rpc}) {
+        for (const auto outcome : {RequestOutcome::Uncertain, RequestOutcome::Succeeded,
+                                  RequestOutcome::IdentityRecovery}) {
+            for (int id_variant = 0; id_variant < 3; ++id_variant) {
+                reset_allocator(0);
+                HttpEffectReply reply;
+                reply.state.attempting(RequestEffect::Command);
+                reply.state.shape = shape;
+                reply.state.outcome = outcome;
+                reply.state.recovery_pending = outcome == RequestOutcome::IdentityRecovery;
+                if (id_variant < 2) {
+                    reply.id.kind = mcp_json::RpcIdKind::Number;
+                    reply.id.number = id_variant ? -9007199254740991LL : 9007199254740991LL;
+                } else {
+                    reply.id.kind = mcp_json::RpcIdKind::String;
+                    std::memset(reply.id.string, 'x', 64);
+                    reply.id.string[0] = '"'; reply.id.string[1] = '\\';
+                    reply.id.string[2] = '\n'; reply.id.string[3] = '\x01';
+                    reply.id.string[4] = '\xc3'; reply.id.string[5] = '\xa4';
+                }
+                EffectTransportSpy positive;
+                CHECK(degraded_effect_reply(positive, reply) == 0);
+                CHECK(allocation_attempt == 0); // project renderer, not IDF networking
+                CHECK(positive.ends == 1);
+                check_effect_wire(positive, reply, true);
+                const int total_calls = positive.calls;
+                for (int fail = 1; fail <= total_calls; ++fail) {
+                    for (bool throws : {false, true}) {
+                        auto failed_reply = reply;
+                        failed_reply.state.terminal = false;
+                        EffectTransportSpy transport;
+                        transport.fail_call = fail;
+                        transport.throw_failure = throws;
+                        bool caught = false;
+                        try { CHECK(degraded_effect_reply(transport, failed_reply) == -7); }
+                        catch (const std::runtime_error&) { caught = true; }
+                        CHECK(caught == throws);
+                        CHECK(failed_reply.state.terminal);
+                        CHECK(transport.calls == fail);
+                        CHECK(degraded_effect_reply(transport, failed_reply) == -1);
+                        CHECK(transport.calls == fail); // no second logical response after header/partial failure
+                        CHECK(transport.status_calls == 1);
+                    }
+                }
+            }
+        }
+    }
+    // Normal complete response keeps its original status and still has one terminal send attempt.
+    for (int fail : {0, 1, 2, 3}) {
+        reset_allocator(0);
+        HttpEffectReply reply;
+        reply.state.attempting(RequestEffect::Command);
+        EffectTransportSpy transport;
+        transport.fail_call = fail;
+        CHECK(effect_json_reply(transport, reply, 502, build_effect_fixture()) == (fail ? -7 : 0));
+        CHECK(transport.status == 502);
+        const int calls = transport.calls;
+        CHECK(degraded_effect_reply(transport, reply) == -1);
+        CHECK(transport.calls == calls);
+    }
+    reset_allocator(0);
+}
+
 int main() {
     cJSON_Hooks hooks{tracked_malloc, tracked_free};
     cJSON_InitHooks(&hooks);
+    test_effect_reply_renderer();
+    test_rpc_envelope_reference_after_input_release();
+    test_request_intake_limits_and_duplicates();
+    test_mcp_charge_availability();
 
     static constexpr char rest_oom[] =
         "{\"result\":false,\"reason\":\"out of memory\"}";
     static constexpr char mcp_oom[] =
         "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":"
         "{\"code\":-32603,\"message\":\"out of memory\"}}";
+    reset_allocator(0);
+    {
+        auto status = build_status_fixture();
+        CHECK(status != nullptr);
+        const auto* vehicle = cJSON_GetObjectItemCaseSensitive(status.get(), "vehicle");
+        CHECK(cJSON_IsObject(vehicle));
+        CHECK(cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(vehicle, "power")));
+        const auto* age = cJSON_GetObjectItemCaseSensitive(status.get(), "charge_age_s");
+        CHECK(cJSON_IsNumber(age) && age->valuedouble == 0);
+    }
+    CHECK(live_allocations == 0);
     exhaust_build_and_print("full /status production emitter", build_status_fixture, rest_oom);
     exhaust_build_and_print("evcc charge production reply", build_rest_fixture, rest_oom);
     exhaust_build_and_print("evcc climate production reply", build_climate_fixture, rest_oom);
@@ -1098,6 +1610,7 @@ int main() {
     exhaust_build_and_print("evcc combined production reply", build_combined_fixture, rest_oom);
     exhaust_build_and_print("evcc all-domains production reply", build_all_domains_fixture, rest_oom);
     test_evcc_vehicle_data_fields();
+    test_vehicle_data_numeric_domain();
     test_evcc_default_selection_excludes_drive();
     test_evcc_absent_preconditioning_is_false_success();
     test_evcc_stale_in_window_climate_fails();
@@ -1118,6 +1631,7 @@ int main() {
     test_ota_manifest_inspector();
     test_throw_ownership();
     test_max_tools_list_input_lifetime();
+    test_ram_only_mcp_state();
 
     reset_allocator(0);
     cJSON_InitHooks(nullptr);

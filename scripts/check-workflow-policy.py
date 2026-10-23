@@ -2,7 +2,7 @@
 """Offline GitHub Actions trust-boundary and DAG contract with mutation canaries.
 
 This checker deliberately validates Actions semantics rather than pretending its narrow workflow
-scanner is a YAML parser. scripts/check-yaml-syntax.rb uses Ruby Psych for the real offline YAML
+scanner is a YAML parser. Its structured model comes from the same offline Psych AST parser. scripts/check-yaml-syntax.rb uses Ruby Psych for the real offline YAML
 parse first; both are wired by scripts/repo-lint.sh and neither downloads actionlint or packages.
 """
 
@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -191,14 +192,30 @@ SIGNING_ENVIRONMENT_JOBS = {
     ("signed-pr-preview.yml", "sign-preview"),
 }
 
-# These three jobs cross the real-key or repository-write boundary.  Their complete raw job bodies are
-# reviewed allowlists: step order plus every name/uses/with/env/if/run byte is pinned.  Semantic
-# checks below keep failures explanatory; this final digest closes gaps in the narrow scanner.
+# Signing, publication, preview eligibility and cleanup bodies are reviewed as complete units.
+# Scalar/step semantics below remain explanatory; exact bodies also close narrow-scanner gaps.
 EXPECTED_PRIVILEGED_JOB_SHA256 = {
-    ("build.yml", "publish"): "7282303dac6098fa7fc04f44c6abb115d838f69dd3aea9c58f4aa1de22ec2a1f",
-    ("build.yml", "deploy"): "ca78910e478a363560646a64ff747ed773cdb4e590a7fcb1dbd2fcfc295f4f49",
-    ("signed-pr-preview.yml", "sign-preview"): "c18a38d6ecdfd36e1ee4ef3ae7e09ea137470bab4eba845bedb5156d645e0452",
+    ('build.yml', 'publish'): "3d8071b2e6361b0d013b5a07e6f598ff5152245e64eda83f4f031ba2f4850180",
+    ('build.yml', 'deploy'): "4bf4e43925d0fec42a726061437ce9eb78579b15371c57096ae4fd7aa482b341",
+    ('signed-pr-preview.yml', 'sign-preview'): "d99d4fc66df82378b9f0ab716d26288a819b5700d4ad5eb9c3fb58868464b7d2",
+    ('signed-pr-preview.yml', 'validate'): "44f1065eb3e479f4363e2fba6c10b29ae814cb01fe4ea4f0482f6b548f63511b",
+    ('pr-preview-cleanup.yml', 'cleanup-event'): "5a57a8ff2ff4efbccf040fc6fe23d85caed7ba5edce20fe360f8c39a5ce1e79c",
+    ('pr-preview-cleanup.yml', 'discover-stale'): "8669d8d2c7f0d295d9291e4b54dd19126ed549e9b82862d4747972bf64ab2b7e",
+    ('pr-preview-cleanup.yml', 'reconcile-stale'): "014f4bda84ed72cdf998852f0c9c0e615c06fd9833b4f036d9f21edba6586a77",
 }
+# Canonical JSON of the scalar-preserving `on` subtree. Changing event types, dispatch inputs or
+# schedules requires reviewing and updating this inventory; comments do not affect these digests.
+EXPECTED_TRIGGER_SHA256 = {
+    "bench-acceptance.yml": "68e21c743fa66c3f097aeb4e5b5c0df9cee49df0dc1977c52eadaca77595a00e",
+    "build.yml": "27425cc386bd907b87b2e080013a1b179e00ce3f9be2c073ff87e5de1c2b18df",
+    "pr-policy.yml": "96df64da9e79c5202cd8ca4113d400f3a79e1789691b33972709a6eed455ff85",
+    "pr-preview-cleanup.yml": "a9b49e11119a21964df1ff72c05fc732af13b5f1ad81eb1b1bb821281f29efad",
+    "renovate.yaml": "5bb540b32577ab414b7ef7b7133d0e289ba1d984e09867ec059e6f6cbd92a817",
+    "signed-pr-preview.yml": "d59c7040b41032896c1dfcdc96a10f1248e8fae579607c0e2b52da06c59fa60d",
+}
+EXPECTED_BUILD_MATRICES = {'build-target': {'target': ['esp32', 'esp32s3', 'esp32c3', 'esp32c6'], 'leg': '${{ fromJSON(github.ref == \'refs/heads/main\' && \'["primary"]\' || \'["primary","reproduction"]\') }}'}, 'independent-rebuild-target': {'target': ['esp32', 'esp32s3', 'esp32c3', 'esp32c6']}}
+YAML_MODELS = {}
+
 TRUSTED_DEFAULT_ENV = "TRUSTED_DEFAULT_SHA: ${{ github.sha }}"
 TRUSTED_DEFAULT_FETCH = "git fetch --no-tags origin"
 TRUSTED_DEFAULT_COMPARE = 'if [ "$current_default" != "$TRUSTED_DEFAULT_SHA" ]; then'
@@ -328,6 +345,26 @@ def signed_stage_upload_paths(job: str) -> Counter[str]:
     return Counter(re.findall(r"^            (_fw/[^\n]+)\s*$", job, re.MULTILINE))
 
 
+def workflow_model(path: Path, text: str) -> dict:
+    digest = hashlib.sha256(text.encode()).hexdigest()
+    if digest not in YAML_MODELS:
+        try:
+            result = subprocess.run(
+                ["ruby", str(Path(__file__).with_name("check-yaml-syntax.rb")), "--json", str(path)],
+                capture_output=True, text=True, timeout=10, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise PolicyError(f"{path.name}: offline YAML model unavailable: {exc}") from exc
+        require(result.returncode == 0, f"{path.name}: YAML model rejected: {result.stderr.strip()}")
+        try:
+            model = json.loads(result.stdout)
+        except ValueError as exc:
+            raise PolicyError(f"{path.name}: invalid offline YAML model") from exc
+        require(isinstance(model, dict), f"{path.name}: workflow must be a mapping")
+        YAML_MODELS[digest] = model
+    return YAML_MODELS[digest]
+
+
 def validate(root: Path) -> None:
     files = workflow_files(root)
     require(files, "no workflow files found")
@@ -348,6 +385,13 @@ def validate(root: Path) -> None:
         require("\t" not in text, f"{name}: tabs are forbidden in YAML")
         require(text.endswith("\n"), f"{name}: missing final newline")
         prefix, jobs = split_jobs(text, name)
+        model = workflow_model(path, text)
+        trigger_digest = hashlib.sha256(json.dumps(model.get("on"), sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        require(trigger_digest == EXPECTED_TRIGGER_SHA256[name], f"{name}: reviewed trigger schema drift")
+        structured_jobs = model.get("jobs")
+        require(isinstance(structured_jobs, dict) and set(structured_jobs) == set(jobs),
+                f"{name}: structured job inventory drift")
+
         jobs_by_file[name] = jobs
         require(
             set(jobs) == EXPECTED_WORKFLOW_JOBS[name],
@@ -360,6 +404,8 @@ def validate(root: Path) -> None:
             f"{name}: top-level permissions must be exact: "
             f"{EXPECTED_TOP_LEVEL_PERMISSIONS[name]}",
         )
+        require(model.get("permissions") == EXPECTED_TOP_LEVEL_PERMISSIONS[name],
+                f"{name}: top-level permissions must be exact: {EXPECTED_TOP_LEVEL_PERMISSIONS[name]}")
         require("write-all" not in text and "read-all" not in text,
                 f"{name}: broad permissions shortcut is forbidden")
         for use in ACTION.findall(text):
@@ -367,13 +413,41 @@ def validate(root: Path) -> None:
                     f"{name}: action is not pinned to one lowercase 40-hex commit: {use}")
         for job_name, job in jobs.items():
             key = (name, job_name)
+            structured_job = structured_jobs[job_name]
+            require(isinstance(structured_job, dict), f"{name}:{job_name}: job must be a mapping")
+            require(structured_job.get("runs-on") == "ubuntu-26.04", f"{name}:{job_name}: reviewed runner must be ubuntu-26.04")
+            steps = structured_job.get("steps")
+            require(isinstance(steps, list) and all(isinstance(step, dict) for step in steps),
+                    f"{name}:{job_name}: steps must be mappings")
+            if key in {("build.yml", "logic-test"), ("build.yml", "logic-harness")}:
+                require(not ({"if", "continue-on-error"} & set(structured_job)),
+                        f"{name}:{job_name}: required host gate must not be conditional or tolerate job failure")
+            if key == ("build.yml", "logic-test"):
+                vendor_steps = [step for step in steps if step.get("run") == "./scripts/verify-vendored-esptool-js.sh --source"]
+                require(len(vendor_steps) == 1 and set(vendor_steps[0]) == {"name", "run"},
+                        "build.yml:logic-test must run the unconditional checked vendored source gate")
+            actual_actions = tuple(step["uses"] for step in steps if "uses" in step)
+            for action in actual_actions:
+                require(isinstance(action, str) and PINNED_ACTION.fullmatch(action) is not None,
+                        f"{name}:{job_name}: action is not pinned to one lowercase 40-hex commit: {action}")
+            for step in steps:
+                if isinstance(step.get("uses"), str) and step["uses"].startswith("espressif/esp-idf-ci-action@"):
+                    require(isinstance(step.get("with"), dict) and step["with"].get("esp_idf_version") == "${{ steps.toolchain.outputs.image-version }}",
+                            f"{name}:{job_name}: ESP-IDF image must bind to toolchain output")
+            if key in {("build.yml", "build-target"), ("build.yml", "independent-rebuild-target")}:
+                strategy = structured_job.get("strategy")
+                require(isinstance(strategy, dict) and strategy.get("matrix") == EXPECTED_BUILD_MATRICES[job_name],
+                        f"{name}:{job_name}: exact four-target matrix drift")
+
             require(
                 job_permissions(job, f"{name}:{job_name}") == EXPECTED_JOB_PERMISSIONS[key],
                 f"{name}:{job_name}: permissions must match the exact reviewed inventory: "
                 f"{EXPECTED_JOB_PERMISSIONS[key]}",
             )
+            require(structured_job.get("permissions") == EXPECTED_JOB_PERMISSIONS[key],
+                    f"{name}:{job_name}: permissions must match the exact reviewed inventory: {EXPECTED_JOB_PERMISSIONS[key]}")
             if key == ("renovate.yaml", "renovate"):
-                actions = tuple(ACTION.findall(job))
+                actions = actual_actions
                 require(
                     len(actions) == 1
                     and actions[0].startswith("renovatebot/github-action@")
@@ -382,7 +456,7 @@ def validate(root: Path) -> None:
                 )
             else:
                 require(
-                    tuple(ACTION.findall(job)) == EXPECTED_ACTIONS[key],
+                    actual_actions == EXPECTED_ACTIONS[key],
                     f"{name}:{job_name}: action inventory drift",
                 )
             actual_secrets = Counter(re.findall(r"\bsecrets\.([A-Za-z_][A-Za-z0-9_]*)", job))
@@ -772,7 +846,7 @@ def validate(root: Path) -> None:
         "name: tesla-key-esp32-${{ needs.build.outputs.display-version }}-${{ github.sha }}"
         in deploy
         and "path: _deploy-input" in deploy
-        and deploy.count(pages_source_check) == 3
+        and deploy.count(pages_source_check) == 4
         and "./scripts/select-release-version.sh --require-published-release" in deploy
         and 'python3 scripts/check-release-assets.py "$release_json" ./_deploy-input'
         in deploy
@@ -818,6 +892,25 @@ def validate(root: Path) -> None:
         and "python3 scripts/check-dev-pages.py" in deploy,
         "build.yml:deploy must include dev branch publication",
     )
+    dev_pages_name = "Revalidate branch-backed Pages authority immediately before dev deployment"
+    deploy_steps = workflow_model(root / ".github/workflows/build.yml", contents["build.yml"])["jobs"]["deploy"]["steps"]
+    dev_pages_steps = [(index, step) for index, step in enumerate(deploy_steps) if step.get("name") == dev_pages_name]
+    expected_dev_pages = {
+        "name": dev_pages_name,
+        "if": "needs.build.outputs.mode == 'dev'",
+        "env": {"GH_TOKEN": "${{ github.token }}"},
+        "run": "set -euo pipefail\n"
+               'pages_json="$(mktemp)"\n'
+               "trap 'rm -f \"$pages_json\"' EXIT\n"
+               'gh api "repos/$GITHUB_REPOSITORY/pages" > "$pages_json"\n'
+               'python3 scripts/check-pages-source.py "$pages_json"\n',
+    }
+    require(len(dev_pages_steps) == 1 and dev_pages_steps[0][1] == expected_dev_pages,
+            "build.yml:deploy must fail closed on fresh branch-backed Pages authority before Dev write")
+    dev_pages_index = dev_pages_steps[0][0]
+    require(dev_pages_index + 1 < len(deploy_steps) and
+            deploy_steps[dev_pages_index + 1].get("name") == "Deploy dev site to gh-pages",
+            "build.yml:deploy Dev Pages authority check must immediately precede branch publication")
     dev_revalidation = "- name: Revalidate current main immediately before dev deployment"
     dev_publish = deploy[deploy.index("- name: Deploy dev site to gh-pages"):
                          deploy.index("- name: Accept branch-served Pages against dev build artifacts")]
@@ -1225,6 +1318,26 @@ def self_test(root: Path) -> None:
     )
     current_renovate_action = renovate_actions[0]
     mutations = [
+        ("quoted-job-permission", "build.yml", "      pages: read\n", '      issues: "write"\n      pages: read\n', "permissions must match the exact reviewed inventory"),
+        ("single-quoted-job-permission", "build.yml", "      pages: read\n", "      issues: 'write'\n      pages: read\n", "permissions must match the exact reviewed inventory"),
+        ("quoted-permission-key", "build.yml", "      pages: read\n", '      "issues": write\n      pages: read\n', "permissions must match the exact reviewed inventory"),
+        ("quoted-top-permission", "build.yml", "permissions:\n  contents: read\n", 'permissions:\n  contents: read\n  issues: "write"\n', "top-level permissions must be exact"),
+        ("flow-permission", "build.yml", "    permissions:\n      contents: read\n      pages: read\n    strategy:", '    permissions: {contents: read, pages: read, issues: "write"}\n    strategy:', "job-level permissions are missing"),
+        ("matrix-exclude-target", "build.yml", "        target: [esp32, esp32s3, esp32c3, esp32c6]\n", "        target: [esp32, esp32s3, esp32c3, esp32c6]\n        exclude: [{target: esp32c6}]\n", "exact four-target matrix"),
+        ("matrix-include-target", "build.yml", "        target: [esp32, esp32s3, esp32c3, esp32c6]\n", "        target: [esp32, esp32s3, esp32c3, esp32c6]\n        include: [{target: esp32c5}]\n", "exact four-target matrix"),
+        ("matrix-extra-dimension", "build.yml", "        target: [esp32, esp32s3, esp32c3, esp32c6]\n", "        target: [esp32, esp32s3, esp32c3, esp32c6]\n        other: [unexpected]\n", "exact four-target matrix"),
+        ("independent-matrix-exclude", "build.yml", "        target: [esp32, esp32s3, esp32c3, esp32c6]\n    steps:", "        target: [esp32, esp32s3, esp32c3, esp32c6]\n        exclude: [{target: esp32c6}]\n    steps:", "exact four-target matrix"),
+        ("flow-style-action-pin", "build.yml", "      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1",
+         "      - { uses: attacker/action@main }\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1", "40-hex"),
+        ("unprivileged-runner", "build.yml", "runs-on: ubuntu-26.04", "runs-on: self-hosted", "reviewed runner"),
+        ("extra-trigger", "build.yml", "on:\n", "on:\n  issue_comment:\n", "trigger schema drift"),
+        ("preview-extra-dispatch", "signed-pr-preview.yml", "on:\n", "on:\n  workflow_dispatch:\n", "trigger schema drift"),
+        ("cleanup-widen-events", "pr-preview-cleanup.yml", "types: [closed, synchronize, unlabeled]", "types: [closed, synchronize, unlabeled, opened]", "trigger schema drift"),
+        ("preview-eligibility", "signed-pr-preview.yml", 'if [ "$state" = open ]', 'if [ true ]', "exact privileged job schema drift"),
+        ("cleanup-fork-guard", "pr-preview-cleanup.yml", "      && github.event.pull_request.head.repo.full_name == github.repository\n", "", "exact privileged job schema drift"),
+        ("cleanup-concurrency", "pr-preview-cleanup.yml", "      group: signed-preview-${{ github.event.pull_request.number }}", "      group: uncoordinated", "exact privileged job schema drift"),
+        ("idf-image-input", "build.yml", "esp_idf_version: ${{ steps.toolchain.outputs.image-version }}", "esp_idf_version: v6.1", "ESP-IDF image must bind"),
+        ("target-matrix", "build.yml", "target: [esp32, esp32s3, esp32c3, esp32c6]", "target: [esp32, esp32s3, esp32c3, esp32c5]", "exact four-target matrix"),
         ("action-pin", "build.yml", "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
          "actions/checkout@main", "40-hex"),
         ("action-owner", "build.yml",
@@ -1265,7 +1378,7 @@ def self_test(root: Path) -> None:
          "    needs: [prepare, logic-test, logic-harness, build-target]\n",
          "    needs: [prepare, logic-test, build-target]\n", "build must need logic-harness"),
         ("repro-leg-dropped", "build.yml", "|| '[\"primary\",\"reproduction\"]'", "|| '[\"primary\"]'",
-         "parallel reproduction leg"),
+         "exact four-target matrix"),
         ("repro-skip-dropped", "build.yml", "            --skip-repro\n", "",
          "skip the in-job rebuild by argument"),
         ("repro-compare-dropped", "build.yml",
@@ -1282,6 +1395,20 @@ def self_test(root: Path) -> None:
          "    needs: build\n", "must need both build and successful immutable Release"),
         ("strict-host", "build.yml", "./scripts/run-mock-tests.sh --require-all",
          "./scripts/run-mock-tests.sh", "fail-closed host gate"),
+        ("vendor-source-omitted", "build.yml", "./scripts/verify-vendored-esptool-js.sh --source",
+         "./scripts/verify-vendored-esptool-js.sh", "vendored source gate"),
+        ("vendor-source-skipped", "build.yml", "      - name: Verify vendored installer source and notices\n",
+         "      - name: Verify vendored installer source and notices\n        if: false\n", "vendored source gate"),
+        ("vendor-source-ignored", "build.yml", "      - name: Verify vendored installer source and notices\n",
+         "      - name: Verify vendored installer source and notices\n        continue-on-error: true\n", "vendored source gate"),
+        ("host-job-skipped", "build.yml", "  logic-test:\n", "  logic-test:\n    if: false\n",
+         "required host gate must not be conditional"),
+        ("host-job-failure-ignored", "build.yml", "  logic-test:\n", "  logic-test:\n    continue-on-error: true\n",
+         "required host gate must not be conditional"),
+        ("harness-job-skipped", "build.yml", "  logic-harness:\n", "  logic-harness:\n    if: false\n",
+         "required host gate must not be conditional"),
+        ("harness-job-failure-ignored", "build.yml", "  logic-harness:\n", "  logic-harness:\n    continue-on-error: true\n",
+         "required host gate must not be conditional"),
         ("logic-merge-history", "build.yml",
          "          fetch-depth: 0\n      - name: Validate runner-neutral agent configuration",
          "      - name: Validate runner-neutral agent configuration",
@@ -1316,8 +1443,8 @@ def self_test(root: Path) -> None:
          "ref: ${{ github.sha }}", "exact PR head"),
         ("signing-environment", "build.yml", "    environment: firmware-signing\n", "",
          "protected Environment inventory drift"),
-        ("protected-extra-secret", "build.yml", "    environment: firmware-signing\n",
-         "    environment: firmware-signing\n    env:\n"
+        ("protected-extra-secret", "build.yml", "      BUMP: ${{ needs.build.outputs.bump }}\n",
+         "      BUMP: ${{ needs.build.outputs.bump }}\n"
          "      LEAK: ${{ secrets.EXTRA_SIGNING_SECRET }}\n",
          "secret reference inventory drift"),
         ("protected-id-token", "build.yml",
@@ -1376,9 +1503,23 @@ def self_test(root: Path) -> None:
          "", "refetch current main immediately before the in-place dev channel write"),
         ("dev-deploy-revalidation-after-write", "build.yml",
          "./scripts/select-release-version.sh --require-current-main \"$SOURCE_SHA\"\n\n"
-         "      - name: Deploy dev site to gh-pages",
-         "true\n\n      - name: Deploy dev site to gh-pages",
+         "      - name: Revalidate branch-backed Pages authority immediately before dev deployment",
+         "true\n\n      - name: Revalidate branch-backed Pages authority immediately before dev deployment",
          "refetch current main immediately before the in-place dev channel write"),
+        ("dev-pages-check-disabled", "build.yml",
+         "      - name: Revalidate branch-backed Pages authority immediately before dev deployment\n"
+         "        if: needs.build.outputs.mode == 'dev'",
+         "      - name: Revalidate branch-backed Pages authority immediately before dev deployment\n"
+         "        if: false", "fresh branch-backed Pages authority"),
+        ("dev-pages-check-softened", "build.yml",
+         "      - name: Revalidate branch-backed Pages authority immediately before dev deployment\n",
+         "      - name: Revalidate branch-backed Pages authority immediately before dev deployment\n"
+         "        continue-on-error: true\n", "fresh branch-backed Pages authority"),
+        ("dev-pages-check-omitted", "build.yml",
+         "          python3 scripts/check-pages-source.py \"$pages_json\"\n\n"
+         "      - name: Deploy dev site to gh-pages",
+         "          true\n\n      - name: Deploy dev site to gh-pages",
+         "download the exact SHA/version artifact"),
         ("dev-publisher-source-binding-removed", "build.yml",
          "          SOURCE_SHA: ${{ github.sha }}\n"
          "        run: ./scripts/publish-pages-branch.sh dev ./_deploy-input/_site",
@@ -1525,9 +1666,9 @@ def self_test(root: Path) -> None:
          'python3 scripts/check-pages-manifest.py "$pages_json"',
          "before every branch mutation"),
         ("preview-trusted-trigger", "signed-pr-preview.yml", "  workflow_run:\n",
-         "  workflow_dispatch:\n", "default-branch-owned completed-build workflow_run"),
+         "  workflow_dispatch:\n", "trigger schema drift"),
         ("cleanup-trusted-trigger", "pr-preview-cleanup.yml", "  pull_request_target:\n",
-         "  pull_request:\n", "trusted base workflow/code"),
+         "  pull_request:\n", "trigger schema drift"),
         ("cleanup-event-name", "pr-preview-cleanup.yml",
          "github.event_name == 'pull_request_target'",
          "github.event_name == 'pull_request'", "trusted base workflow/code"),
@@ -1640,7 +1781,7 @@ def self_test(root: Path) -> None:
          "jobs:\n  contact-device:\n    runs-on: ubuntu-26.04\n    timeout-minutes: 1\n    steps:\n      - run: true\n",
          "job inventory drift"),
         ("bench-local-producer", "bench-acceptance.yml", "      report-json:\n",
-         "      report-body:\n", "report-json dispatch input"),
+         "      report-body:\n", "trigger schema drift"),
         ("bench-artifact-hash", "bench-acceptance.yml",
          '--expect-artifact-sha256 "$EXPECTED_ARTIFACT_SHA256"',
          '--expect-artifact-sha256 "$EXPECTED_SHA"', "run blocks must match"),
@@ -1725,6 +1866,16 @@ def self_test(root: Path) -> None:
             )
         else:
             raise PolicyError("self-test accepted local Pages bind after signed upload")
+
+    # A valid flow-style action is admitted and still participates in the exact inventory.
+    with tempfile.TemporaryDirectory(prefix="workflow-policy-flow-positive-") as directory:
+        fixture = Path(directory)
+        shutil.copytree(root / ".github/workflows", fixture / ".github/workflows")
+        replace_once(fixture / ".github/workflows/build.yml",
+            "      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n"
+            "        with:\n          # select-release-version.sh reads tag ancestry, so it needs the full history.\n          fetch-depth: 0",
+            "      - {uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1, with: {fetch-depth: 0}}")
+        validate(fixture)
 
     with tempfile.TemporaryDirectory(prefix="workflow-policy-extra-workflow-") as directory:
         fixture = Path(directory)

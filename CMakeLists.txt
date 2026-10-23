@@ -19,12 +19,17 @@ idf_build_set_property(COMPILE_OPTIONS "-Wno-error=format" APPEND)
 
 project(tesla-key-esp32)
 
+# Exclude library debug/verbose argument evaluation and formatting from firmware builds.
+idf_component_get_property(TESLA_BLE_COMPONENT_LIB yoziru__tesla-ble COMPONENT_LIB)
+target_compile_definitions(${TESLA_BLE_COMPONENT_LIB} PRIVATE TESLA_BLE_LOG_LEVEL=2)
+
 # yoziru/tesla-ble v6.2.0 binds Parental Controls actions into the VehicleAction oneof
 # that this firmware never sends (trimmed to preserve target flash budget), and pulls
 # in redundant force_update_session dead code on counter replay instead of aligning with
 # signer.go. Key regeneration and BLE orchestration are handled natively in the firmware.
 # Apply the ordered, reviewable repository-owned patch series after Component Manager
 # has materialised the pinned dependency and before any source compiles.
+# TESLA_PATCH_STATE_BEGIN
 execute_process(
     COMMAND "${CMAKE_SOURCE_DIR}/scripts/apply-tesla-ble-patches.sh"
     RESULT_VARIABLE TESLA_BLE_PATCH_RESULT
@@ -32,3 +37,21 @@ execute_process(
 if(NOT TESLA_BLE_PATCH_RESULT EQUAL 0)
     message(FATAL_ERROR "Failed to apply the tesla-ble patch series")
 endif()
+
+# Reconfigure before compiling an edited postimage or verifier. CONFIGURE_DEPENDS also watches
+# inventories, so a newly added patch/lock cannot evade a list containing only existing leaves.
+execute_process(
+    COMMAND "${CMAKE_SOURCE_DIR}/scripts/apply-tesla-ble-patches.sh" --list-inputs
+    OUTPUT_VARIABLE TESLA_BLE_CONFIGURE_INPUTS
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    RESULT_VARIABLE TESLA_BLE_INPUT_RESULT
+)
+if(NOT TESLA_BLE_INPUT_RESULT EQUAL 0)
+    message(FATAL_ERROR "Failed to verify the tesla-ble configure inputs")
+endif()
+string(REPLACE "\n" ";" TESLA_BLE_CONFIGURE_INPUTS "${TESLA_BLE_CONFIGURE_INPUTS}")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${TESLA_BLE_CONFIGURE_INPUTS})
+file(GLOB TESLA_BLE_INPUT_INVENTORY CONFIGURE_DEPENDS
+    "${CMAKE_SOURCE_DIR}/patches/tesla-ble/*"
+    "${CMAKE_SOURCE_DIR}/dependencies.lock.*")
+# TESLA_PATCH_STATE_END

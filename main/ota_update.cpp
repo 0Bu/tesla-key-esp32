@@ -41,6 +41,7 @@ static const char* TAG = "ota";
 // fault restart owns FaultRestart from before reboot_why is persisted until restart (or releases
 // it when persistence fails).
 static tk::OtaIdentityOperationGate s_operation_gate;
+static std::atomic<tk::OtaVerificationState> s_verification{tk::OtaVerificationState::Unknown};
 
 static bool try_begin_ota_operation() {
     return s_operation_gate.try_begin(tk::OtaIdentityGateState::Ota);
@@ -119,71 +120,75 @@ OtaHealthCommitGuard::~OtaHealthCommitGuard() {
     if (held_) finish_operation(tk::OtaIdentityGateState::HealthCommit);
 }
 
-bool ota_config_restart_begin() {
-    return s_operation_gate.try_begin(tk::OtaIdentityGateState::ConfigRestart);
+OtaConfigRestartGuard::~OtaConfigRestartGuard() noexcept {
+    if (held_) {
+        held_ = false;
+        // No logging or other fallible diagnostics in noexcept cleanup.
+        (void)s_operation_gate.finish(tk::OtaIdentityGateState::ConfigRestart);
+    }
 }
 
-// Confirm a still-unverified OTA image before a successful network/logging commit reboot (the
-// setup-portal save also calls it, but is always refused: the portal never reaches Ready
-// admission) — see the header. Mirrors the mark-valid path in main.cpp's ota_health_gate_task,
-// but fires once the durable commit AND the post-admission heap sample prove the runtime
-// healthy. Identity mutations deliberately never reach this path. A qualifying restart inside
-// the health window must not trigger a rollback unless the image is already critically
-// heap-starved.
-void ota_confirm_pending_image(tk::OtaRebootClass reboot_class) {
-    if (!tk::ota_reboot_confirms_pending_image(reboot_class)) {
-        ESP_LOGE(TAG, "refusing OTA confirmation for non-user recovery reboot class %d",
-                 static_cast<int>(reboot_class));
-        return;
-    }
+bool OtaConfigRestartGuard::try_begin() noexcept {
+    if (held_) return owns_gate();
+    held_ = s_operation_gate.try_begin(tk::OtaIdentityGateState::ConfigRestart);
+    return held_;
+}
 
-    // The user commit is valid health evidence, but mark-valid is still the same irreversible
-    // operation as the timed health gate. Serialize it against a persisted FaultRestart window,
-    // OTA and identity work; if another owner won, leave PENDING_VERIFY armed so the imminent
-    // reboot fails closed into rollback instead of crossing that owner's shutdown transaction.
-    OtaHealthCommitGuard commit_guard;
-    if (!commit_guard) {
-        ESP_LOGW(TAG, "OTA image confirmation postponed by an active operation; rollback remains armed");
-        return;
+bool OtaConfigRestartGuard::owns_gate() const noexcept {
+    return held_ && s_operation_gate.state() == tk::OtaIdentityGateState::ConfigRestart;
+}
+
+tk::RuntimeHealthSample ota_runtime_health() {
+    return tk::sample_runtime_health(
+        [] { return tk::runtime_admission_vehicle_ready(); },
+        [] { return ble_host_synced(); },
+        [] { return ble_host_reset_count(); },
+        [] { return heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL); },
+        tk::kHeapCriticalBytes);
+}
+
+tk::ConfigImageResult ota_config_image_state(const OtaConfigRestartGuard& owner) noexcept {
+    using Result = tk::ConfigImageResult;
+    if (!owner.owns_gate()) return Result::WrongOwner;
+    try {
+        const esp_partition_t* running = esp_ota_get_running_partition();
+        esp_ota_img_states_t state{};
+        if (!running || esp_ota_get_state_partition(running, &state) != ESP_OK)
+            return Result::Unknown;
+        switch (state) {
+            case ESP_OTA_IMG_VALID: return Result::Valid;
+            case ESP_OTA_IMG_UNDEFINED: return Result::Undefined;
+            case ESP_OTA_IMG_NEW: return Result::New;
+            case ESP_OTA_IMG_PENDING_VERIFY: return Result::Pending;
+            default: return Result::Unsupported;
+        }
+    } catch (...) { return Result::Unknown; }
+}
+
+tk::ConfigImageResult ota_confirm_pending_image(
+    const OtaConfigRestartGuard& owner, tk::OtaRebootClass reboot_class) noexcept {
+    using Result = tk::ConfigImageResult;
+    if (!owner.owns_gate()) return Result::WrongOwner;
+    if (!tk::ota_reboot_confirms_pending_image(reboot_class)) return Result::WrongClass;
+    Result result = ota_config_image_state(owner);
+    if (result != Result::Pending) return result;
+    try {
+        const auto health = ota_runtime_health();
+        result = tk::config_health_failure(health.failure);
+        if (result != Result::None) return result;
+        result = Result::MarkUnknown;
+        if (esp_ota_mark_app_valid_cancel_rollback() == ESP_OK) {
+            result = Result::Confirmed;
+        }
+        ota_refresh_verification_cache();
+        if (result == Result::Confirmed) {
+            ESP_LOGI(TAG, "OTA image confirmed before user configuration restart");
+        }
+    } catch (...) {
+        // Preserve a successful mark even if its diagnostic throws. Otherwise retain the last
+        // known refusal/pending state or the uncertain SDK effect; never retry here.
     }
-    // A durable configuration write is not proof that the essential runtime started. In
-    // particular, recovery HTTP remains available in Safe Mode and during a partial boot. Check
-    // admission only after owning HealthCommit so Ready cannot race a FaultRestart/OTA owner; all
-    // non-Ready states leave the one automatic rollback armed.
-    if (!tk::runtime_admission_vehicle_ready()) {
-        ESP_LOGW(TAG, "OTA image confirmation refused: essential runtime is not ready; "
-                      "rollback remains armed");
-        return;
-    }
-    if (!ble_host_synced()) {
-        ESP_LOGW(TAG, "OTA image confirmation refused: NimBLE host is not synced; "
-                      "rollback remains armed");
-        return;
-    }
-    if (ble_host_reset_count() != 0) {
-        ESP_LOGW(TAG, "OTA image confirmation refused: NimBLE host reset since admission; "
-                      "rollback remains armed");
-        return;
-    }
-    // Re-sample only after winning the same exclusive owner as the timed health gate. A healthy
-    // sample taken before the CAS could become stale while FaultRestart persists its breadcrumb;
-    // crossing that window would permanently validate the image immediately before it reboots.
-    const size_t commit_largest = heap_caps_get_largest_free_block(
-        MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
-    if (commit_largest < tk::kHeapCriticalBytes) {
-        ESP_LOGW(TAG, "OTA image confirmation refused: internal largest block %u B < %u B; "
-                      "rollback remains armed",
-                 static_cast<unsigned>(commit_largest),
-                 static_cast<unsigned>(tk::kHeapCriticalBytes));
-        return;
-    }
-    const esp_partition_t* running = esp_ota_get_running_partition();
-    esp_ota_img_states_t st;
-    if (esp_ota_get_state_partition(running, &st) == ESP_OK &&
-        st == ESP_OTA_IMG_PENDING_VERIFY) {
-        if (esp_ota_mark_app_valid_cancel_rollback() == ESP_OK)
-            ESP_LOGI(TAG, "OTA image confirmed valid before a user-initiated reboot (rollback cancelled)");
-    }
+    return result;
 }
 
 // Short per-target image suffix so "esp32" appears only once in the OTA filename: esp32 ->
@@ -207,6 +212,10 @@ void ota_confirm_pending_image(tk::OtaRebootClass reboot_class) {
 #endif
 static_assert(std::string_view{TESLA_OTA_IMG_SUFFIX} == tk::image_suffix(TK_TARGET),
               "OTA image suffix macro drifted from tk::image_suffix()");
+static_assert(tk::ota_https_url(CONFIG_TESLA_OTA_MANIFEST_URL),
+              "OTA manifest URL must use HTTPS");
+static_assert(tk::ota_https_url(CONFIG_TESLA_OTA_FIRMWARE_BASE_URL),
+              "OTA firmware base URL must use HTTPS");
 
 // ─── Shared status (written by the OTA task, read by HTTP handlers) ────────────
 
@@ -259,6 +268,17 @@ static SemaphoreHandle_t ensure_lock() {
     return candidate;
 }
 
+tk::OtaVerificationState ota_cached_verification_state() noexcept {
+    return s_verification.load(std::memory_order_acquire);
+}
+
+tk::OtaVerificationState ota_refresh_verification_cache() noexcept {
+    tk::OtaVerificationState state = tk::OtaVerificationState::Unknown;
+    try { state = ota_verification_state(); } catch (...) {}
+    s_verification.store(state, std::memory_order_release);
+    return state;
+}
+
 static void set_state(OtaState st, int pct, const char* msg) {
     std::array<char, kOtaStatusMessageCapacity> message{};
     copy_status_text(message, msg);
@@ -287,6 +307,14 @@ tk::OtaChannel ota_get_channel() {
 
 void ota_set_channel(tk::OtaChannel channel) {
     s_ota_channel.store(channel, std::memory_order_release);
+}
+
+OtaState ota_get_state() {
+    SemaphoreHandle_t lock = ensure_lock();
+    if (!lock) return OtaState::Error;
+    tk::SemGuard guard(lock);
+    if (!guard) return OtaState::Error;
+    return s_status.state;
 }
 
 OtaStatus ota_get_status() {
@@ -588,14 +616,15 @@ static void ota_check_task(void* pvParameters) {
     }
 }
 
-bool ota_check_start(unsigned pr_number) {
-    if (!ensure_lock()) return false;
+tk::OtaStartResult ota_check_start(unsigned pr_number) {
+    using Result = tk::OtaStartResult;
+    if (!ensure_lock()) return Result::Unavailable;
     // Acquire the cross-domain gate before publishing/starting the worker. This atomically loses
     // to an in-flight key/VIN transaction instead of sampling a separate busy flag and racing it.
-    if (!try_begin_ota_operation()) return false;
+    if (!try_begin_ota_operation()) return Result::Busy;
     if (s_running.exchange(true, std::memory_order_acq_rel)) {
         finish_operation(tk::OtaIdentityGateState::Ota);
-        return false;
+        return Result::Busy;
     }
     s_target_pr.store(pr_number, std::memory_order_release);
     try {
@@ -603,19 +632,19 @@ bool ota_check_start(unsigned pr_number) {
     } catch (...) {
         s_running.store(false, std::memory_order_release);
         finish_operation(tk::OtaIdentityGateState::Ota);
-        return false;
+        return Result::InternalError;
     }
 
     // mbedTLS handshake + manifest fetch run here; same generous stack as ota_task.
     if (xTaskCreate(ota_check_task, "ota_chk", 8192,
                     reinterpret_cast<void*>(static_cast<uintptr_t>(pr_number)),
                     tk::kPrioOtaCheck, nullptr) != pdPASS) {
+        set_check_error("could not start check task");
         s_running.store(false, std::memory_order_release);
         finish_operation(tk::OtaIdentityGateState::Ota);
-        set_check_error("could not start check task");
-        return false;
+        return Result::InternalError;
     }
-    return true;
+    return Result::Started;
 }
 
 // ─── Background download + install ──────────────────────────────────────────────
@@ -809,15 +838,22 @@ static void ota_task(void* pvParameters) {
     }
 }
 
-bool ota_start(unsigned pr_number) {
-    if (!ensure_lock()) return false;
+tk::OtaStartResult ota_start(unsigned pr_number) {
+    using Result = tk::OtaStartResult;
+    if (!ensure_lock()) return Result::Unavailable;
     // The same owner word excludes both a second OTA and every identity transaction. On a
     // successful install it remains owned until esp_restart(); on every returning path the task
     // releases it below.
-    if (!try_begin_ota_operation()) return false;
+    if (!try_begin_ota_operation()) return Result::Busy;
+    const auto verification = ota_refresh_verification_cache();
+    if (verification != tk::OtaVerificationState::Stable) {
+        finish_operation(tk::OtaIdentityGateState::Ota);
+        return verification == tk::OtaVerificationState::PendingVerify
+            ? Result::PendingVerification : Result::Unavailable;
+    }
     if (s_running.exchange(true, std::memory_order_acq_rel)) {
         finish_operation(tk::OtaIdentityGateState::Ota);
-        return false;
+        return Result::Busy;
     }
     s_updating.store(true, std::memory_order_release);
     s_target_pr.store(pr_number, std::memory_order_release);
@@ -827,18 +863,18 @@ bool ota_start(unsigned pr_number) {
         s_updating.store(false, std::memory_order_release);
         s_running.store(false, std::memory_order_release);
         finish_operation(tk::OtaIdentityGateState::Ota);
-        return false;
+        return Result::InternalError;
     }
 
     // A generous stack: mbedTLS record processing + esp_https_ota run here.
     if (xTaskCreate(ota_task, "ota", 8192,
                     reinterpret_cast<void*>(static_cast<uintptr_t>(pr_number)),
                     tk::kPrioOta, nullptr) != pdPASS) {
+        try { set_state(OtaState::Error, 0, "could not start OTA task"); } catch (...) {}
         s_updating.store(false, std::memory_order_release);
         s_running.store(false, std::memory_order_release);
         finish_operation(tk::OtaIdentityGateState::Ota);
-        try { set_state(OtaState::Error, 0, "could not start OTA task"); } catch (...) {}
-        return false;
+        return Result::InternalError;
     }
-    return true;
+    return Result::Started;
 }

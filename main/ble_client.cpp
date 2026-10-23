@@ -198,7 +198,7 @@ bool BleClient::start() {
         return false;
     }
 
-    // Prefer larger MTU to reduce fragmentation
+    // Preferred value only: no ATT MTU exchange is initiated or accepted by this firmware.
     ble_att_set_preferred_mtu(247);
 
     // This device is BLE *central only* (it scans, connects, writes, subscribes).

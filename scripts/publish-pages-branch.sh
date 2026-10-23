@@ -5,10 +5,11 @@
 # Why a branch (not the Actions Pages artifact): the browser flasher fetches the manifest and
 # every .bin in-page, and GitHub release assets carry no CORS headers, so the parts must be
 # same-origin with the installer. The Actions artifact deploy replaces the WHOLE site atomically
-# and only from main, so it can't host per-PR subpaths. A gh-pages branch lets main own the root
-# and each PR own PR/<N>/ independently. See docs/ARCHITECTURE.md (PR preview installer).
+# and only from main, so it can't host per-PR subpaths. A gh-pages branch keeps stable root,
+# development dev/ and each PR/<N>/ independently. See docs/ARCHITECTURE.md (PR preview installer).
 #
-# The root installer always flashes main; a PR's firmware is reached only by its own page at
+# The root installer serves the published stable Release; main builds use dev/. A PR's firmware
+# is reached only by its own page at
 # PR/<N>/ (open the URL directly, or from the link on the PR) — there is no root version picker,
 # so no cross-PR index file is maintained.
 #

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 
 class NvsStorageAdapter;
@@ -19,6 +20,7 @@ struct SyslogStatus {
     std::string host;
     int         port;
     std::string error;
+    uint32_t dropped_lines{0};  // queue-full losses since boot, modulo 2^32
 };
 
 // Start the forwarder task. Reads NVS "syslog_uri" (web UI: Syslog row,
@@ -36,8 +38,8 @@ struct SyslogStatus {
 // must NOT stop boot — the primary BLE/HTTP proxy runs on regardless.
 bool syslog_start(NvsStorageAdapter& config_store);
 
-// Queue one already-formatted line for forwarding. Non-blocking (drops silently on
-// a full queue or before syslog_start() has run) so a stuck collector can never
+// Queue one already-formatted line for forwarding. Non-blocking (counts queue-full losses;
+// a no-op before syslog_start() has run) so a stuck collector can never
 // stall the caller. Called from diag_log.cpp's esp_log capture hook.
 void syslog_send(const char* msg, size_t len);
 

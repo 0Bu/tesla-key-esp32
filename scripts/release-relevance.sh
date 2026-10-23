@@ -9,7 +9,7 @@ set -euo pipefail
 contract_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 VERSION_RE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
 SELF_TEST_PYTHON=""  # Set only by this script's isolated --self-test fixture.
-RELEVANT_RE='^(main/|patches/tesla-ble/|docs/(index\.html|installer-bootstrap\.mjs|serial-port-release\.mjs|web-installer\.mjs|vendor/)|CMakeLists\.txt$|sdkconfig\.defaults(\.[a-z0-9]+)?$|dependencies\.lock\.[a-z0-9]+$|esp-idf-toolchain\.txt$|partitions\.csv$|version\.txt$|\.github/workflows/(build|signed-pr-preview|pr-preview-cleanup)\.yml$|scripts/firmware-(size|stack)-baseline\.json$|scripts/ota-signing-public-key\.sha256$|scripts/(ci-build-all|ci-build-verify|ci-sign-artifacts|next-version|select-release-version|release-relevance|test-release-contract|check-reproducible-build|idf-docker|idf-version|build-pages|publish-pages-branch|apply-tesla-ble-patches)\.sh$|scripts/(check-build-artifact-inventory|check-build-gate-contract|check-pages-manifest|check-pages-source|check-dev-pages|check-release-pages-bytes|check-release-assets|check-signed-root-inventory|prepare-reused-release|check-published-release|check-firmware-artifacts|check-partition-contract|check-dependency-contract|check-otadata-contract|check-build-semantics|check-stack-usage|check-sdkconfig-defaults|report-firmware-size|generate-ota-changelog)\.py$)'
+RELEVANT_RE='^(main/|patches/tesla-ble/|docs/(index\.html|installer-bootstrap\.mjs|serial-port-release\.mjs|web-installer\.mjs|vendor/)|CMakeLists\.txt$|sdkconfig\.defaults(\.[a-z0-9]+)?$|dependencies\.lock\.[a-z0-9]+$|esp-idf-toolchain\.txt$|partitions\.csv$|version\.txt$|\.github/workflows/(build|signed-pr-preview|pr-preview-cleanup)\.yml$|scripts/firmware-(size|stack)-baseline\.json$|scripts/ota-signing-public-key\.sha256$|scripts/tesla-ble-patch-state\.json$|scripts/(ci-build-all|ci-build-verify|ci-sign-artifacts|next-version|select-release-version|release-relevance|test-release-contract|check-reproducible-build|idf-docker|idf-version|build-pages|publish-pages-branch|apply-tesla-ble-patches)\.sh$|scripts/(check-idf-container-mounts|apply-tesla-ble-patches|check-build-artifact-inventory|check-build-gate-contract|check-pages-manifest|check-pages-source|wait-pages-build|check-dev-pages|check-release-pages-bytes|check-release-assets|check-signed-root-inventory|prepare-reused-release|check-published-release|check-firmware-artifacts|check-partition-contract|check-dependency-contract|check-otadata-contract|check-build-semantics|check-stack-usage|check-sdkconfig-defaults|report-firmware-size|generate-ota-changelog)\.py$)'
 
 validate_sha() {
   local repo_root="$1" sha="$2"
@@ -51,7 +51,7 @@ try:
             and r.get("target_commitish") == sha
             and r.get("draft") is False
             and r.get("prerelease") is False
-            and (r.get("immutable") is True and bool(".immutable == true"))):
+            and r.get("immutable") is True):
         sys.exit(1)
     assets = r.get("assets")
     if not isinstance(assets, list):
@@ -608,6 +608,9 @@ with open(p, "r+", encoding="utf-8") as f:
     d["immutable"] = False
     f.seek(0); f.truncate(); json.dump(d, f)
 ' "$fake_release"
+  if validate_release_json "$real_python" v1.0.1 "$sha_a" 1.0.1 < "$fake_release"; then
+    echo "direct immutable false authority was accepted" >&2; return 1;
+  fi
   got="$(PATH="$fakebin:$PATH" GITHUB_REPOSITORY=owner/repo GH_FAKE_RELEASE="$fake_release" \
     GH_FAKE_LIVE="$fake_live" changed_since_release "$tmp" "$sha_b")"
   [[ "$got" == yes ]] || {
@@ -622,6 +625,9 @@ with open(p, "r+", encoding="utf-8") as f:
     d.pop("immutable", None)
     f.seek(0); f.truncate(); json.dump(d, f)
 ' "$fake_release"
+  if validate_release_json "$real_python" v1.0.1 "$sha_a" 1.0.1 < "$fake_release"; then
+    echo "direct immutable missing authority was accepted" >&2; return 1;
+  fi
   got="$(PATH="$fakebin:$PATH" GITHUB_REPOSITORY=owner/repo GH_FAKE_RELEASE="$fake_release" \
     GH_FAKE_LIVE="$fake_live" changed_since_release "$tmp" "$sha_b")"
   [[ "$got" == yes ]] || {
@@ -632,6 +638,12 @@ with open(p, "r+", encoding="utf-8") as f:
   # Reviewed build-resource baselines affect what bytes are allowed to ship. Pin the real stack
   # filename: a name drift here would let its change bypass the cumulative release decision.
   mkdir -p "$tmp/scripts"
+  local contract_path
+  for contract_path in scripts/check-idf-container-mounts.py scripts/apply-tesla-ble-patches.py scripts/tesla-ble-patch-state.json scripts/wait-pages-build.py; do
+    printf '%s\n' "$contract_path" | grep -Eq "$RELEVANT_RE" || {
+      echo "build admission input is not release-relevant: $contract_path" >&2; return 1;
+    }
+  done
   printf '{"schemaVersion":1}\n' > "$tmp/scripts/firmware-stack-baseline.json"
   git -C "$tmp" add scripts/firmware-stack-baseline.json
   git -C "$tmp" commit -qm firmware-stack-baseline

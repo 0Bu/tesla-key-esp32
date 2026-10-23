@@ -31,7 +31,7 @@
 namespace tk {
 
 // Numeric mirror of ESP-IDF 5.x/6.1 esp_reset_reason_t — see the pinning note above. Scoped, with
-// an explicit int underlying type, so casting ANY int into it is well defined and the switch below
+// an explicit int underlying type, so casting ANY int into it is well defined and the bounds check below
 // can fall through to "unknown" for a value this table has never heard of.
 enum class ResetCode : int {
     Unknown    = 0,
@@ -54,25 +54,12 @@ enum class ResetCode : int {
 
 // Short, stable slug for a raw reset code.
 inline const char* reset_reason_slug(int code) {
-    switch (static_cast<ResetCode>(code)) {
-        case ResetCode::PowerOn:   return "power_on";
-        case ResetCode::Ext:       return "ext";
-        case ResetCode::Sw:        return "sw";
-        case ResetCode::Panic:     return "panic";
-        case ResetCode::IntWdt:    return "int_wdt";
-        case ResetCode::TaskWdt:   return "task_wdt";
-        case ResetCode::OtherWdt:  return "wdt";
-        case ResetCode::DeepSleep: return "deepsleep";
-        case ResetCode::Brownout:  return "brownout";
-        case ResetCode::Sdio:      return "sdio";
-        case ResetCode::Usb:       return "usb";
-        case ResetCode::Jtag:      return "jtag";
-        case ResetCode::Efuse:     return "efuse";
-        case ResetCode::PwrGlitch: return "pwr_glitch";
-        case ResetCode::CpuLockup: return "cpu_lockup";
-        case ResetCode::Unknown:
-        default:                   return "unknown";
-    }
+    static constexpr const char* slugs[] = {
+        "unknown", "power_on", "ext", "sw", "panic", "int_wdt", "task_wdt", "wdt",
+        "deepsleep", "brownout", "sdio", "usb", "jtag", "efuse", "pwr_glitch", "cpu_lockup",
+    };
+    const auto index = static_cast<unsigned>(code);
+    return slugs[index < sizeof(slugs) / sizeof(slugs[0]) ? index : 0];
 }
 
 // Did something go WRONG, or did this board simply start? The distinction is what decides

@@ -1,42 +1,8 @@
 #pragma once
-// The one-shot records a log forwarder replays once per boot — build identity, and the crash the
-// device woke up from. Pure, IDF-free, host-testable.
-//
-// WHY THIS EXISTS. Two independent facts make the most valuable lines of a boot the ones least
-// likely to be readable:
-//
-//   * TIMING. Crash capture has to run at the very top of app_main, before NVS, before WiFi and
-//     before the syslog forwarder's queue exists — the values must be sampled before anything
-//     else has allocated or rebooted. But a line logged before the forwarder starts has nowhere
-//     to go: the capture hook drops it, and the only copy lands in the in-RAM diag ring. The ring
-//     is small and the next restart erases it, so on a device that reboots again — which is what
-//     a crash-shaped failure does — the crash is readable NOWHERE. Syslog is the only record that
-//     survives a restart, which is precisely why the reset-reason line in this firmware is
-//     emitted AFTER the forwarder starts rather than where its values are read. These records are
-//     the same idea generalized: build them at boot, hand them to the forwarder the moment it has
-//     a collector, once.
-//
-//   * SIZE. The paste-friendly block from logic/crashinfo.hpp (build_crash_text) is multi-line
-//     and, worst case, longer than one log line: this firmware's diag and syslog paths both carry
-//     a 256-byte line buffer, so a long crash block truncates — and it truncates at the END,
-//     which is exactly where the backtrace and the ELF hash live. A record that drops the two
-//     fields it exists to carry is worse than no record, because it still looks like one. So
-//     these are SINGLE-LINE records, each one datagram, each bounded by construction (see
-//     kBootlogLineMax below) rather than by hoping the inputs stay short.
-//
-// build_crash_text() is untouched by all this: it stays the human-facing block for /diag and a
-// copy-paste bundle, where multi-line is a feature and nothing truncates it.
-//
-// FORMAT is logfmt-ish — a leading record tag, then key=value pairs separated by single spaces —
-// so a collector can extract fields without a bespoke parser, and a human can read it without
-// one. The tags (BOOT / CRASH) match the vocabulary this firmware's boot lines already use.
-//
-// A NOTE ON WHO CALLS THESE. Emitting them must not be able to take the device down. Both
-// builders allocate (std::string, and the caller's vector), and a forwarder task is a C frame
-// boundary — an escaping std::bad_alloc reaches std::terminate and reboots. Since the replay runs
-// on EVERY boot, that would be a boot LOOP rather than a one-off crash, so the caller wraps the
-// replay in try/catch and treats an out-of-memory replay as done rather than retrying forever: a
-// device that cannot spare a few hundred bytes has a worse problem than a missing log line.
+// Bounded single-line boot/crash records for the one-shot Syslog replay.
+// The formatter is pure; its caller owns live admission, replay severity, transport
+// and exception containment. Keep each record within kBootlogLineMax so full hashes
+// and return addresses survive transport. Human multiline text belongs to crashinfo.hpp.
 #include <cstddef>
 #include <string>
 #include <vector>
@@ -92,6 +58,11 @@ inline void append_capped(std::string& out, const std::string& v, size_t max) {
     out.append(v, 0, max);
 }
 
+inline void append_capped(std::string& out, std::string_view v, size_t max) {
+    if (v.empty()) { out += '?'; return; }
+    out.append(v.data(), v.size() < max ? v.size() : max);
+}
+
 }  // namespace detail
 
 // The build-identity record, emitted on EVERY boot including the entirely unremarkable ones.
@@ -142,15 +113,19 @@ inline std::string build_boot_line(const char* version, const char* elf_sha256,
 //
 // Allocates (the strings, and the vector's growth). See the note at the top of this header about
 // guarding the caller.
-inline int build_crash_log_lines(const CrashInfo& c, std::vector<std::string>& out) {
+template <class Crash> inline int build_crash_log_lines(const Crash& c, std::vector<std::string>& out) {
     if (!crash_is_notable(c)) return 0;
     int n = 0;
 
-    // 1. Worst case: 12 + 16 + 10 + 13 + 17 + 64 = 132 chars.
+    // 1. Worst case including query error, identity and a different full hash: 189 chars.
     std::string head = "CRASH reset=";
     detail::append_capped(head, reset_reason_slug(c.reset_code), 16);
     head += reset_is_fault(c.reset_code) ? " fault=yes" : " fault=no";
     head += c.coredump ? " coredump=yes" : " coredump=no";
+    head += c.artifact_present ? " artifact=yes" : " artifact=no";
+    head += c.raw_available ? " raw=yes" : " raw=no";
+    head += " identity="; head += dump_identity_name(c.dump_identity);
+    if (c.query_error) head += " query_error=yes";
     // Only when the dump names a DIFFERENT build than the running one: that is the state in which
     // the dump cannot be symbolized against this firmware, and saying so beside coredump=yes is
     // the difference between a reader chasing a decode failure and understanding it. Identical
@@ -166,12 +141,14 @@ inline int build_crash_log_lines(const CrashInfo& c, std::vector<std::string>& o
     // saying that much is still worth a datagram — "a dump is waiting" is actionable on its own.
     if (!crash_has_summary(c)) return n;
 
-    // 2. Worst case: 11 + 32 + 14 + 14 + 12 + 64 = 147 chars.
+    // 2. Worst case including corrupted/truncated/ISR flags and full hash: 169 chars.
     std::string sum = "CRASH task=";
     detail::append_capped(sum, c.task, kBootlogTaskMax);
     sum += " pc=";
     append_hex32(sum, c.pc);
     if (c.corrupted) sum += " corrupted=yes";
+    if (c.truncated) sum += " truncated=yes";
+    sum += c.isr ? " isr=yes" : " isr=no";
     if (!c.elf_sha256.empty()) {
         sum += " elf_sha256=";
         detail::append_capped(sum, c.elf_sha256, kBootlogShaMax);

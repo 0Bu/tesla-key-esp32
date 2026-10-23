@@ -276,8 +276,8 @@ bool NvsStorageAdapter::save_str(const char* key, const std::string& value) {
 // ── Raw blob helpers for the atomic config store (logic/config_store.hpp) ──
 // Kept separate from the generic tesla-ble Blob API, but still routed through map_key() as the
 // registry's sole RawBlob entry. One nvs_set_blob + one commit is the whole point — the
-// credential/service state becomes all-or-nothing across a write failure AND a power cut,
-// instead of the per-key sequence it replaces.
+// one coherent credential/service snapshot replaces the per-key sequence. A failed commit
+// leaves durability unconfirmed; the return code cannot prove that the previous snapshot survived.
 
 bool NvsStorageAdapter::load_blob(const char* key, std::vector<uint8_t>& out) {
     return load_blob_state(key, out) == tk::NvsBlobLoadState::Present;

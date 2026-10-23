@@ -139,12 +139,106 @@ def validate(site: pathlib.Path, expected_source: str | None, expected_version: 
         )
 
 
+def make_test_site(site: pathlib.Path) -> dict:
+    """Deterministic, non-flashable self-test data shared with the byte-binding self-test."""
+    manifest = {"name": "tesla-key-esp32", "layoutVersion": 2, "sourceSha": "a" * 40,
+                "version": "1.2.3", "new_install_prompt_erase": True, "builds": []}
+    for chip, target, suffix, boot_offset in (
+        ("ESP32", "esp32", "", 0x1000), ("ESP32-S3", "esp32s3", "-s3", 0),
+        ("ESP32-C3", "esp32c3", "-c3", 0), ("ESP32-C6", "esp32c6", "-c6", 0),
+    ):
+        parts = []
+        for name, offset, data in (
+            (f"bootloader-{target}.bin", boot_offset, b"boot"),
+            (f"partition-table-{target}.bin", 0x8000, b"partition"),
+            (f"tesla-key-esp32{suffix}.bin", 0x20000, f"app-{target}".encode()),
+            (f"ota_data_initial-{target}.bin", 0xF000, b"\xff" * 0x2000),
+        ):
+            (site / name).write_bytes(data)
+            parts.append({"path": name, "offset": offset, "size": len(data),
+                          "sha256": hashlib.sha256(data).hexdigest()})
+        manifest["builds"].append({"chipFamily": chip, "parts": parts})
+    (site / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    return manifest
+
+
+def self_test() -> None:
+    import copy
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="pages-manifest-test-") as directory:
+        site = pathlib.Path(directory)
+        original = make_test_site(site)
+        path = site / "manifest.json"
+
+        def check() -> None:
+            validate(site, "a" * 40, "1.2.3")
+
+        def reject(manifest: dict, reason: str) -> None:
+            path.write_text(json.dumps(manifest), encoding="utf-8")
+            try:
+                check()
+            except ManifestError as exc:
+                assert reason in str(exc), (reason, str(exc))
+            else:
+                raise AssertionError(f"Pages manifest accepted: {reason}")
+            finally:
+                path.write_text(json.dumps(original), encoding="utf-8")
+
+        check()
+        for build_index in range(4):
+            for part_index in range(4):
+                bad = copy.deepcopy(original)
+                bad["builds"][build_index]["parts"][part_index]["offset"] += 1
+                reject(bad, "expected offset")
+        for field, value, reason in (("version", "1.2.4", "version mismatch"),
+                                      ("sourceSha", "b" * 40, "sourceSha mismatch"),
+                                      ("version", "1.2.3-" + "x" * 26, "invalid version"),
+                                      ("name", "other", "name/layoutVersion"),
+                                      ("extra", True, "top-level fields")):
+            bad = copy.deepcopy(original); bad[field] = value; reject(bad, reason)
+        for key, value, reason in (("path", "../app.bin", "part path"),
+                                   ("size", True, "invalid size"),
+                                   ("size", 99, "length does not match"),
+                                   ("sha256", "g" * 64, "invalid SHA-256"),
+                                   ("sha256", "0" * 64, "SHA-256 does not match"),
+                                   ("extra", 0, "invalid part fields")):
+            bad = copy.deepcopy(original); bad["builds"][0]["parts"][0][key] = value
+            reject(bad, reason)
+        bad = copy.deepcopy(original); bad["builds"][0]["extra"] = 0
+        reject(bad, "build fields")
+        bad = copy.deepcopy(original); bad["builds"].pop(); reject(bad, "exactly four")
+        bad = copy.deepcopy(original); bad["builds"].reverse(); reject(bad, "chipFamily")
+        part = original["builds"][0]["parts"][3]
+        data_path = site / part["path"]; data = data_path.read_bytes()
+        data_path.write_bytes(b"\x00" + data[1:])
+        bad = copy.deepcopy(original)
+        bad["builds"][0]["parts"][3]["sha256"] = sha256(data_path)
+        reject(bad, "erased")
+        data_path.write_bytes(data)
+        extra = site / "extra.bin"; extra.write_bytes(b"extra")
+        reject(original, "unreferenced/missing")
+        extra.unlink()
+        first = site / original["builds"][0]["parts"][0]["path"]
+        data = first.read_bytes(); first.unlink(); first.symlink_to(data_path)
+        reject(original, "symlinked")
+        first.unlink(); first.write_bytes(data)
+        check()
+    print("Pages manifest self-test: PASS")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("site", type=pathlib.Path)
+    parser.add_argument("site", type=pathlib.Path, nargs="?")
+    parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--source-sha")
     parser.add_argument("--version")
     args = parser.parse_args()
+    if args.self_test:
+        self_test()
+        return 0
+    if args.site is None:
+        parser.error("site is required")
     try:
         validate(args.site, args.source_sha, args.version)
     except ManifestError as error:

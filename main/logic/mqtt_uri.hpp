@@ -1,4 +1,5 @@
 #pragma once
+#include "service_target_limits.hpp"
 // The ONE place that turns a saved broker string into the URI the client actually dials, plus the
 // rules the save-time pre-flight is decided by. Pure, IDF-free, host-tested.
 //
@@ -34,7 +35,7 @@ inline std::string mqtt_trim(const std::string& in) {
 // rfind(':') takes the LAST colon and the port is what follows it.
 inline bool mqtt_broker_is_plausible(const std::string& broker) {
     if (broker.empty()) return true;                  // empty = disable
-    if (broker.size() > 120) return false;
+    if (broker.size() > kServiceTargetInputMaxBytes) return false;
     if (broker.find_first_of(" \t\r\n") != std::string::npos) return false;
 
     std::string authority = broker;

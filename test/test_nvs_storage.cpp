@@ -10,9 +10,38 @@
 #include <cstring>
 #include <iostream>
 #include <map>
+#include <new>
 #include <string>
 #include <utility>
 #include <vector>
+#include <functional>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <chrono>
+
+// Fault the real vector allocation immediately after the passive NVS length probe. The shim
+// never reads device data and is inert outside the explicitly armed synthetic test.
+namespace {
+size_t fail_allocation_bytes = 0;
+bool allocation_fault_consumed = false;
+bool arm_allocation_after_blob_probe = false;
+[[gnu::noinline]] void* allocate_for_test(size_t bytes) {
+    if (fail_allocation_bytes && bytes == fail_allocation_bytes) {
+        fail_allocation_bytes = 0;
+        allocation_fault_consumed = true;
+        throw std::bad_alloc();
+    }
+    if (void* p = std::malloc(bytes ? bytes : 1)) return p;
+    throw std::bad_alloc();
+}
+}
+void* operator new(size_t bytes) { return allocate_for_test(bytes); }
+void* operator new[](size_t bytes) { return allocate_for_test(bytes); }
+void operator delete(void* p) noexcept { std::free(p); }
+void operator delete[](void* p) noexcept { std::free(p); }
+void operator delete(void* p, size_t) noexcept { std::free(p); }
+void operator delete[](void* p, size_t) noexcept { std::free(p); }
 
 namespace {
 
@@ -64,6 +93,14 @@ esp_err_t next_erase_error = ESP_OK;
 esp_err_t next_commit_error = ESP_OK;
 esp_err_t next_set_str_error = ESP_OK;
 std::string fail_erase_key;
+std::string fail_set_str_key;
+std::string fail_commit_key;
+std::string current_write_key;
+std::vector<uint8_t> last_blob_written;
+// Synthetic save observation only; the production buffer remains private. The pointed-to
+// storage is static and checked only after the owned cfg_save call has returned/unwound.
+const uint8_t* observed_config_buffer = nullptr;
+std::function<void(const uint8_t*, size_t)> observe_config_blob_save;
 
 esp_err_t consume_error(esp_err_t& value) {
     const esp_err_t result = value;
@@ -146,17 +183,30 @@ extern "C" esp_err_t nvs_get_blob(nvs_handle_t handle, const char* key, void* ou
     const size_t capacity = *length;
     *length = scripted.length;
     if (scripted.error != ESP_OK) return scripted.error;
-    if (!out_value) return ESP_OK;
+    if (!out_value) {
+        if (arm_allocation_after_blob_probe) {
+            arm_allocation_after_blob_probe = false;
+            fail_allocation_bytes = scripted.length;
+        }
+        return ESP_OK;
+    }
     if (capacity < scripted.length) return ESP_ERR_NVS_INVALID_LENGTH;
     std::memcpy(out_value, scripted.value.data(),
                 std::min(scripted.length, scripted.value.size()));
     return ESP_OK;
 }
 
-extern "C" esp_err_t nvs_set_blob(nvs_handle_t handle, const char* key, const void*, size_t) {
+extern "C" esp_err_t nvs_set_blob(nvs_handle_t handle, const char* key, const void* data, size_t size) {
     last_blob_key = key ? key : "";
     ++nvs_calls;
     record_call("set_blob", handle, key);
+    current_write_key = key ? key : "";
+    const auto* bytes = static_cast<const uint8_t*>(data);
+    last_blob_written.assign(bytes, bytes + size);
+    if (observe_config_blob_save && key && std::strcmp(key, tk::kConfigBlobKey) == 0) {
+        observed_config_buffer = bytes;
+        observe_config_blob_save(bytes, size);
+    }
     return consume_error(next_set_blob_error);
 }
 
@@ -173,6 +223,7 @@ extern "C" esp_err_t nvs_erase_key(nvs_handle_t handle, const char* key) {
 extern "C" esp_err_t nvs_commit(nvs_handle_t handle) {
     ++nvs_calls;
     record_call("commit", handle);
+    if (!fail_commit_key.empty() && current_write_key == fail_commit_key) return ESP_FAIL;
     return consume_error(next_commit_error);
 }
 
@@ -200,6 +251,8 @@ extern "C" esp_err_t nvs_set_str(nvs_handle_t handle, const char* key, const cha
     last_string_key = key ? key : "";
     ++nvs_calls;
     record_call("set_str", handle, key);
+    current_write_key = key ? key : "";
+    if (!fail_set_str_key.empty() && current_write_key == fail_set_str_key) return ESP_FAIL;
     return consume_error(next_set_str_error);
 }
 
@@ -780,6 +833,122 @@ static void test_vin_transition_cleanup_ordering(NvsStorageAdapter& config, NvsS
     CHECK(erased_marker);
 }
 
+static void check_config_buffer_wiped() {
+    CHECK(observed_config_buffer);
+    for (size_t i=0;i<tk::kConfigBlobCapBytes;++i) CHECK(observed_config_buffer[i]==0);
+}
+
+static void test_config_encode_lease(NvsStorageAdapter& storage) {
+    tk::ConfigBlob config;
+    config.wifi_ssid.assign(32,'s'); config.wifi_pass.assign(64,'p');
+    config.wifi_ssid_backup.assign(32,'b'); config.wifi_pass_backup.assign(64,'q');
+    config.vin.assign(17,'V'); config.mqtt_uri.assign(120,'m'); config.syslog_uri.assign(120,'l');
+    observe_config_blob_save=[](const uint8_t*,size_t size) { CHECK(size==473); };
+    clear_call_log(); CHECK(tk::cfg_save(storage,config)); CHECK(last_blob_written.size()==473);
+    check_config_buffer_wiped();
+    tk::ConfigBlob decoded;
+    CHECK(tk::config_blob_decode(last_blob_written.data(),last_blob_written.size(),decoded));
+    CHECK(decoded.mqtt_uri==config.mqtt_uri && decoded.syslog_uri==config.syslog_uri);
+
+    for (int fault : {1,2,3}) {
+        next_set_blob_error=next_commit_error=ESP_OK;
+        observe_config_blob_save=[&](const uint8_t*,size_t) {
+            if (fault==3) throw std::bad_alloc();
+        };
+        if (fault==1) next_set_blob_error=ESP_FAIL;
+        if (fault==2) next_commit_error=ESP_FAIL;
+        bool result=true, threw=false;
+        try { result=tk::cfg_save(storage,config); } catch (const std::bad_alloc&) { threw=true; }
+        CHECK(fault==3?threw:!result);
+        check_config_buffer_wiped();
+        next_set_blob_error=next_commit_error=ESP_OK;
+        observe_config_blob_save=[](const uint8_t*,size_t) {};
+        CHECK(tk::cfg_save(storage,config)); check_config_buffer_wiped(); // lease released on every exit
+    }
+    for (const char* key : {tk::nvs_contract::kLegacyWifiSsid, tk::nvs_contract::kLegacyWifiPass,
+                           tk::nvs_contract::kLegacyVin, tk::nvs_contract::kLegacyMqttUri,
+                           tk::nvs_contract::kLegacySyslogUri}) {
+        for (bool commit : {false,true}) {
+            if (commit) fail_commit_key=key; else fail_set_str_key=key;
+            CHECK(tk::cfg_save(storage,config)); // blob already committed; mirror is best effort
+            check_config_buffer_wiped();
+            fail_commit_key.clear(); fail_set_str_key.clear();
+        }
+    }
+    // Encoding refusal owns and wipes the entire buffer, but never reaches an NVS call.
+    config.mqtt_uri.assign(121,'x'); clear_call_log();
+    CHECK(!tk::cfg_save(storage,config) && nvs_call_log.empty()); check_config_buffer_wiped();
+    config.mqtt_uri.assign(120,'m');
+
+    // Real adapter reentry from the passive SDK save hook refuses before any new NVS/log work;
+    // it must not wipe or clear the outer owner's storage/permit.
+    int hook_calls=0;
+    observe_config_blob_save=[&](const uint8_t* bytes,size_t size) {
+        CHECK(++hook_calls==1); // a busy reentry must never reach this SDK hook
+        const std::vector<uint8_t> held_bytes(bytes,bytes+size);
+        const size_t calls=nvs_call_log.size();
+        CHECK(!tk::cfg_save(storage,config));
+        CHECK(nvs_call_log.size()==calls);
+        CHECK(std::equal(held_bytes.begin(),held_bytes.end(),bytes));
+    };
+    CHECK(tk::cfg_save(storage,config)); check_config_buffer_wiped();
+
+    // Controlled real thread entry while the first save is paused at its SDK call. Synchronize
+    // all observations; the refusing thread may touch only the atomic permit, never the NVS stub.
+    std::mutex mutex;
+    std::condition_variable condition;
+    bool entered=false, release=false, outer_result=false;
+    observe_config_blob_save=[&](const uint8_t*,size_t) {
+        std::unique_lock<std::mutex> lock(mutex); entered=true; condition.notify_all();
+        CHECK(condition.wait_for(lock,std::chrono::seconds(10),[&] { return release; }));
+    };
+    std::thread outer([&] { outer_result=tk::cfg_save(storage,config); });
+    {
+        std::unique_lock<std::mutex> lock(mutex); CHECK(condition.wait_for(lock,std::chrono::seconds(10),[&] { return entered; }));
+        const size_t calls=nvs_call_log.size();
+        const std::vector<uint8_t> held_bytes(observed_config_buffer,observed_config_buffer+473);
+        CHECK(!tk::cfg_save(storage,config)); CHECK(nvs_call_log.size()==calls);
+        CHECK(std::equal(held_bytes.begin(),held_bytes.end(),observed_config_buffer));
+        release=true; condition.notify_all();
+    }
+    outer.join(); CHECK(outer_result); check_config_buffer_wiped();
+    observe_config_blob_save={}; observed_config_buffer=nullptr;
+}
+
+static void test_key_date_stamp_or_retire(NvsStorageAdapter& tesla) {
+    namespace NC = tk::nvs_contract;
+    using R = tk::KeyCreatedDateResult;
+    for (bool allowed : {false,true}) for (int stamp_fault : {0,1,2,3})
+    for (bool retire_fault : {false,true}) {
+        next_set_str_error=next_commit_error=ESP_OK;
+        fail_erase_key=retire_fault?NC::kKeyCreated:"";
+        clear_call_log();
+        int stamp_calls=0, retire_calls=0;
+        const auto result=tk::stamp_or_retire_key_date(allowed,
+            [&] {
+                ++stamp_calls;
+                if (stamp_fault==1) next_set_str_error=ESP_FAIL;
+                if (stamp_fault==2) next_commit_error=ESP_FAIL;
+                if (stamp_fault==3) throw std::bad_alloc();
+                return tesla.save_str(NC::kKeyCreated,"1800000000");
+            },
+            [&] { ++retire_calls; return tesla.remove(NC::kKeyCreated); });
+        const bool stamped=allowed && stamp_fault==0;
+        CHECK(stamp_calls==int(allowed) && retire_calls==int(!stamped));
+        CHECK(result==(stamped?R::Stamped:retire_fault?R::Untrusted:R::Retired));
+        size_t set_index=nvs_call_log.size(), erase_index=nvs_call_log.size();
+        for (size_t i=0;i<nvs_call_log.size();++i) {
+            const auto& call=nvs_call_log[i];
+            CHECK(call.key.empty() || call.key==NC::kKeyCreated); // never touches identity/journal
+            if (call.api=="set_str") set_index=i;
+            if (call.api=="erase_key") erase_index=i;
+        }
+        if (allowed && stamp_fault!=3 && !stamped) CHECK(set_index<erase_index);
+        if (stamped) CHECK(erase_index==nvs_call_log.size());
+    }
+    fail_erase_key.clear(); next_set_str_error=next_commit_error=ESP_OK;
+}
+
 static void test_key_rotation_date_cleanup_ordering(NvsStorageAdapter& tesla) {
     namespace NC = tk::nvs_contract;
     using B = tk::KeyRotationBootState;
@@ -945,6 +1114,103 @@ static void test_nvs_blob_load() {
     }
 }
 
+
+static void test_config_save_commit_and_mirrors() {
+    namespace NC = tk::nvs_contract;
+    NvsStorageAdapter storage(NC::kConfigNamespace);
+    CHECK(storage.initialize());
+    tk::ConfigBlob cfg;
+    cfg.wifi_ssid = "synthetic-station";
+    cfg.wifi_pass = "synthetic-password";
+    cfg.vin = "SYNTHETIC00000001";
+    cfg.mqtt_uri = "broker.invalid:1883";
+    cfg.syslog_uri = "collector.invalid:514";
+    cfg.wifi_ssid_backup = "synthetic-prior";
+    cfg.wifi_pass_backup = "synthetic-prior-password";
+    cfg.wifi_rollback_active = true;
+    const std::array<const char*, 5> mirrors{{NC::kLegacyWifiSsid, NC::kLegacyWifiPass,
+        NC::kLegacyVin, NC::kLegacyMqttUri, NC::kLegacySyslogUri}};
+
+    clear_call_log();
+    CHECK(tk::cfg_save(storage, cfg));
+    CHECK(nvs_call_log.size() == 12);
+    check_call(0, "set_blob", NC::kConfigNamespace, NC::kConfigBlob);
+    check_call(1, "commit", NC::kConfigNamespace);
+    for (size_t i = 0; i < mirrors.size(); ++i) {
+        check_call(2 + 2*i, "set_str", NC::kConfigNamespace, mirrors[i]);
+        check_call(3 + 2*i, "commit", NC::kConfigNamespace);
+    }
+    tk::ConfigBlob decoded;
+    CHECK(tk::config_blob_decode(last_blob_written.data(), last_blob_written.size(), decoded));
+    CHECK(decoded.wifi_ssid == cfg.wifi_ssid && decoded.wifi_pass == cfg.wifi_pass);
+    CHECK(decoded.vin == cfg.vin && decoded.mqtt_uri == cfg.mqtt_uri);
+    CHECK(decoded.syslog_uri == cfg.syslog_uri);
+    CHECK(decoded.wifi_ssid_backup == cfg.wifi_ssid_backup);
+    CHECK(decoded.wifi_pass_backup == cfg.wifi_pass_backup && decoded.wifi_rollback_active);
+
+    for (bool fail_commit : {false, true}) {
+        clear_call_log();
+        if (fail_commit) next_commit_error = ESP_FAIL;
+        else next_set_blob_error = ESP_FAIL;
+        CHECK(!tk::cfg_save(storage, cfg));
+        CHECK(nvs_call_log.size() == (fail_commit ? 2u : 1u));
+        check_call(0, "set_blob", NC::kConfigNamespace, NC::kConfigBlob);
+        if (fail_commit) check_call(1, "commit", NC::kConfigNamespace);
+        // A false commit result is unconfirmed; the stub does not assert old/new durability.
+    }
+    for (size_t failed = 0; failed < mirrors.size(); ++failed) {
+        for (bool fail_commit : {false, true}) {
+            clear_call_log();
+            if (fail_commit) fail_commit_key = mirrors[failed];
+            else fail_set_str_key = mirrors[failed];
+            CHECK(tk::cfg_save(storage, cfg)); // already committed blob remains a successful save
+            CHECK(nvs_call_log.size() == 2 + 2*failed + (fail_commit ? 2 : 1));
+            check_call(0, "set_blob", NC::kConfigNamespace, NC::kConfigBlob);
+            check_call(1, "commit", NC::kConfigNamespace);
+            for (size_t i = 0; i <= failed; ++i) {
+                check_call(2 + 2*i, "set_str", NC::kConfigNamespace, mirrors[i]);
+                if (i < failed || fail_commit)
+                    check_call(3 + 2*i, "commit", NC::kConfigNamespace);
+            }
+            fail_commit_key.clear();
+            fail_set_str_key.clear();
+        }
+    }
+    cfg.wifi_ssid.assign(tk::kConfigMaxSsidLen + 1, 'x');
+    clear_call_log();
+    CHECK(!tk::cfg_save(storage, cfg));
+    CHECK(nvs_call_log.empty()); // refusal before the blob or any downgrade mirror write
+}
+
+static void test_blob_allocation_failure() {
+    namespace NC = tk::nvs_contract;
+    NvsStorageAdapter storage(NC::kConfigNamespace);
+    CHECK(storage.initialize());
+    for (bool full_config_load : {false, true}) {
+        script_blob_reads({{ESP_OK, 371, {}}});
+        script_string_reads({}); // OOM must not read stale legacy mirrors
+        std::vector<uint8_t> out{0xaa};
+        tk::ConfigBlob config;
+        config.wifi_ssid = "untouched-synthetic";
+        clear_call_log();
+        allocation_fault_consumed = false;
+        arm_allocation_after_blob_probe = true;
+        if (full_config_load) {
+            CHECK(!tk::cfg_load_for_update(storage, config));
+            CHECK(config.wifi_ssid == "untouched-synthetic");
+        } else {
+            CHECK(storage.load_blob_state(tk::kConfigBlobKey, out) == tk::NvsBlobLoadState::Error);
+            CHECK(out.empty());
+        }
+        CHECK(allocation_fault_consumed);
+        CHECK(fail_allocation_bytes == 0 && !arm_allocation_after_blob_probe);
+        CHECK(nvs_call_log.size() == 1);
+        check_call(0, "get_blob", NC::kConfigNamespace, NC::kConfigBlob);
+        check_blob_script_consumed();
+        check_script_consumed();
+    }
+}
+
 static void test_wifi_rollback_status_cache(NvsStorageAdapter& storage) {
     tk::ConfigBlob cfg;
     cfg.wifi_ssid = "MyWiFi";
@@ -962,7 +1228,7 @@ static void test_wifi_rollback_status_cache(NvsStorageAdapter& storage) {
     CHECK(tk::cfg_save(storage, cfg));
     CHECK(tk::cfg_wifi_rolled_back());
 
-    // Reproduce a changed WiFi save while its restart is deferred: no reboot occurs here.
+    // Exercise a changed configuration save directly, without a reboot or an HTTP/OTA check.
     tk::stage_wifi_change(cfg, std::string("NewWiFi"), std::string("test-pass-2"));
     CHECK(!cfg.wifi_rolled_back);
     next_set_blob_error = ESP_FAIL;
@@ -1007,6 +1273,8 @@ int main() {
     test_nvs_contract();
     test_uninitialized_no_call_guards();
     test_nvs_blob_load();
+    test_config_save_commit_and_mirrors();
+    test_blob_allocation_failure();
 
     // Uninitialised storage is an error, not an absent journal, and performs no NVS read.
     {
@@ -1038,6 +1306,8 @@ int main() {
     test_wifi_rollback_status_cache(storage);
     test_remove_paths(storage, tesla_storage);
     test_vin_transition_cleanup_ordering(storage, tesla_storage);
+    test_config_encode_lease(storage);
+    test_key_date_stamp_or_retire(tesla_storage);
     test_key_rotation_date_cleanup_ordering(tesla_storage);
 
     {

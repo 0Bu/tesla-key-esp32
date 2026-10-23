@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
+import os
 from pathlib import Path
 import shutil
 import stat
@@ -37,6 +39,7 @@ IDF_MBEDTLS_SUBMODULE = "components/mbedtls/mbedtls"
 # dependency update changes this validator together with the lockfiles; a normal build may not
 # silently rewrite an otherwise semantically plausible lock.
 FILE_DIGESTS = {
+    "scripts/tesla-ble-patch-state.json": "2b87f2cd85d412df2368d88122741cf2bc2738c76d35e08f7cd211e5929c594e",
     "esp-idf-toolchain.txt": "6ef2f1d9c15bb269430cbb4530d689022d914b12ac8610b539d4ac00d148d84f",
     "main/idf_component.yml": "39bdf106eddeeb5b0299c757af3dcffb5ca85fc19f7633344b79a590efe07bbc",
     "dependencies.lock.esp32": "11301cd8b614c8003a515be3c03899c4700873b7e965cd1cea172500d82fe054",
@@ -55,11 +58,15 @@ PATCH_INVENTORY = (
     ),
     (
         "0006-port-crypto-bindings-to-psa.patch",
-        "1a6cd161cd1db6f3be9353936e5247b4764e49fecdd97036f17014cae6f0f92d",
+        "7347b694ec9b8232aa6546748f5013ce80a4252317436b64054051114194c148",
     ),
     (
         "0007-fail-closed-on-request-entropy-errors.patch",
         "eb4c6dc7f653eb73f98a8609e3a350c6d9beeea63766a4dfcf8fce9cc9256c92",
+    ),
+    (
+        "0008-bind-existing-session-info-key.patch",
+        "213ac5d288e3e07b27a2a35bb8aee1989732128daf639c797f45714c1354473b",
     ),
 )
 # Espressif components resolved from their GitHub release sources: (name, repository, path in the
@@ -304,14 +311,116 @@ def validate(root: Path) -> None:
         require(actual_digest == expected_digest,
                 f"reviewed dependency file byte digest drifted: {relative}")
 
+    cmake_text = decode(read_regular(root / "CMakeLists.txt"), "CMakeLists.txt")
+    log_policy = (
+        'idf_component_get_property(TESLA_BLE_COMPONENT_LIB yoziru__tesla-ble COMPONENT_LIB)',
+        'target_compile_definitions(${TESLA_BLE_COMPONENT_LIB} PRIVATE TESLA_BLE_LOG_LEVEL=2)',
+    )
+    require(all(cmake_text.count(line) == 1 for line in log_policy),
+            "BLE library log policy must privately select INFO on the pinned component")
     harness_text = decode(read_regular(root / HARNESS_SCRIPT), HARNESS_SCRIPT)
+    require('CXX="$CXX" python3 "$ROOT_DIR/test/test_dependency_guards.py" --component "$TB_DIR"' in harness_text and
+            'python3 "$ROOT_DIR/test/test_dependency_guards.py" --component "$TB_DIR" --sanitize' in harness_text,
+            "native dependency failure/logging guards must execute in the real-library harness")
+    require(harness_text.count('TB_LOG_FLAGS="-DTESLA_BLE_LOG_LEVEL=2"') == 1 and
+            harness_text.count('"$TB_LOG_FLAGS"') == 2 and
+            'patches-$PATCH_STATE_SHA loglevel-2' in harness_text,
+            "BLE library harness log policy/object-cache key drifted")
     require(harness_text.count("MBEDTLS_REF=") == 1 and
             harness_text.count(f'\nMBEDTLS_REF="{MBEDTLS_COMMIT}"\n') == 1,
             f"{HARNESS_SCRIPT}: harness Mbed TLS commit must be exactly {MBEDTLS_COMMIT}")
 
 
+def probe_harness_invocations(source: str) -> None:
+    """Execute the whole shipped shell with passive tools and disposable fake dependencies."""
+    with tempfile.TemporaryDirectory(prefix="dependency-harness-flow-") as directory:
+        work = Path(directory)
+        (work / "scripts").mkdir()
+        (work / "scripts/test-tesla-ble-harness.sh").write_text(source)
+        applier = work / "scripts/apply-tesla-ble-patches.sh"
+        applier.write_text("#!/bin/sh\nexit 0\n")
+        applier.chmod(0o700)
+        component = work / "managed_components/yoziru__tesla-ble"
+        (component / "src").mkdir(parents=True)
+        (component / "generated/src").mkdir(parents=True)
+        (component / "idf_component.yml").write_text('version: "6.2.0"\n')
+        (component / "src/fake.cpp").write_text("int fake;\n")
+        (work / "main").mkdir()
+        (work / "main/idf_component.yml").write_text(
+            'dependencies:\n  yoziru/tesla-ble:\n    version: "v6.2.0"\n')
+        nanopb = work / "build/_deps/nanopb-src"
+        nanopb.mkdir(parents=True)
+        for name in ("pb_common.c", "pb_decode.c", "pb_encode.c"):
+            (nanopb / name).write_text("int fake;\n")
+        cache = work / "cache"
+        (cache / ("mbedtls-" + MBEDTLS_COMMIT)).mkdir(parents=True)
+        tools = work / "bin"
+        tools.mkdir()
+        # Python heredoc generators and compiler/archive tools are passive here. Only the
+        # actual shell's requested native-guard invocations count; no copied guard decisions.
+        stub = '''import json,os,sys
+from pathlib import Path
+name=Path(sys.argv[0]).name; args=sys.argv[1:]
+if name=="git":
+    if args[-2:]==["rev-parse","HEAD"]: print(os.environ["FLOW_MBEDTLS_COMMIT"])
+    else: raise SystemExit(2)
+elif name=="compiler":
+    if "-o" in args:
+        path=Path(args[args.index("-o")+1]); path.parent.mkdir(parents=True,exist_ok=True)
+        path.write_text("#!/bin/sh\\nexit 0\\n"); path.chmod(0o700)
+elif name=="python3":
+    if args and args[0].endswith("/test/test_dependency_guards.py"):
+        with Path(os.environ["FLOW_TRACE"]).open("a") as out: out.write(json.dumps(args)+"\\n")
+        kind="sanitize" if "--sanitize" in args else "normal"
+        if os.environ["FLOW_FAIL_GUARD"]==kind: raise SystemExit(37)
+    elif args and args[0]=="-c": print("0"*64)
+    elif args and args[0]=="-": sys.stdin.read()
+    else: raise SystemExit(2)
+elif name=="uname": print(os.environ["FLOW_SYSTEM"])
+elif name!="ar": raise SystemExit(2)
+'''
+        for name in ("git", "compiler", "python3", "uname", "ar"):
+            tool = tools / name
+            tool.write_text("#!" + sys.executable + "\n" + stub)
+            tool.chmod(0o700)
+        env = os.environ.copy()
+        for name in list(env):
+            if name in ("OTA_SIGNING_KEY", "OTA_SIGNING_KEY_FILE", "GH_TOKEN", "GITHUB_TOKEN",
+                        "BASH_ENV", "ENV", "PYTHONPATH", "PYTHONHOME") or name.startswith("BASH_FUNC_"):
+                env.pop(name, None)
+        env.update(PATH=str(tools) + os.pathsep + env.get("PATH", os.defpath),
+                   CC=str(tools / "compiler"), CXX=str(tools / "compiler"),
+                   CACHE_DIR=str(cache), FLOW_MBEDTLS_COMMIT=MBEDTLS_COMMIT)
+        for system, failure in (("Linux", ""), ("Darwin", ""),
+                                ("Linux", "normal"), ("Linux", "sanitize"),
+                                ("Darwin", "normal")):
+            build = work / ("host-" + system)
+            library = build / ("mbedtls-" + MBEDTLS_COMMIT) / "tf-psa-crypto/core/libtfpsacrypto.a"
+            library.parent.mkdir(parents=True, exist_ok=True)
+            library.write_text("passive archive\n")
+            trace = work / (system + "-" + (failure or "success") + ".jsonl")
+            env.update(BUILD_DIR=str(build), FLOW_SYSTEM=system, FLOW_TRACE=str(trace),
+                       FLOW_FAIL_GUARD=failure)
+            try:
+                run = subprocess.run(["/bin/bash", str(work / "scripts/test-tesla-ble-harness.sh"),
+                                      "--require-all"], env=env, cwd=work,
+                                     capture_output=True, text=True, timeout=10)
+            except subprocess.TimeoutExpired as exc:
+                raise DependencyError("native dependency harness invocation flow timed out") from exc
+            calls = [json.loads(line) for line in trace.read_text().splitlines()] if trace.exists() else []
+            normal = [str(work / "test/test_dependency_guards.py"), "--component", str(component)]
+            expected = [normal, normal + ["--sanitize"]] if system == "Linux" else [normal]
+            if failure == "normal":
+                expected = [normal]
+            expected_exit = 37 if failure else 0
+            success_message = "PASS: tesla-ble integration harness verified successfully"
+            require(run.returncode == expected_exit and calls == expected and
+                    (success_message in run.stdout) == (not failure),
+                    "native dependency harness invocation flow skipped or changed a guard: " + system)
+
+
 def copy_fixture(root: Path, destination: Path) -> None:
-    for relative in (*FILE_DIGESTS, HARNESS_SCRIPT):
+    for relative in (*FILE_DIGESTS, HARNESS_SCRIPT, "CMakeLists.txt"):
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(root / relative, target)
@@ -329,6 +438,24 @@ def mutate_text(path: Path, old: str, new: str) -> None:
 
 def self_test(root: Path) -> None:
     validate(root)
+    harness = (root / HARNESS_SCRIPT).read_text()
+    probe_harness_invocations(harness)
+    start = 'echo "[harness] Executing dependency failure/logging guards..."'
+    assert harness.count(start) == 1
+    for changed in (
+        harness.replace(start, "if false; then\n" + start) + "\nfi\n",
+        harness.replace(start, "exit 0\n" + start),
+        harness.replace('if [ "$(uname -s)" = Linux ]; then', 'if false; then'),
+        harness.replace('--component "$TB_DIR" --sanitize', '--sanitize'),
+        harness.replace('--component "$TB_DIR"\n', '--component "$TB_DIR" || true\n'),
+        harness.replace('--component "$TB_DIR" --sanitize\n', '--component "$TB_DIR" --sanitize || true\n'),
+    ):
+        try:
+            probe_harness_invocations(changed)
+        except DependencyError as exc:
+            require("invocation flow" in str(exc), "unexpected harness flow control failure")
+        else:
+            raise AssertionError("skipped/changed native dependency guard invocation was accepted")
 
     def text(relative: str, old: str, new: str) -> Callable[[Path], None]:
         return lambda fixture: mutate_text(fixture / relative, old, new)
@@ -384,6 +511,8 @@ def self_test(root: Path) -> None:
                                   "version: 2.0.0"), "file byte digest drifted"),
         ("patch-byte", text("patches/tesla-ble/0004-drop-unused-parental-controls-actions.patch",
                             "CarServer", "Carserver"), "patch digest drifted"),
+        ("patch-state-manifest", text("scripts/tesla-ble-patch-state.json",
+                                     '"schema": 1', '"schema": 2'), "reviewed dependency file byte digest drifted"),
         ("missing-lock", lambda fixture: (fixture / "dependencies.lock.esp32c6").unlink(),
          "lockfile inventory drifted"),
         ("extra-lock", lambda fixture: shutil.copy2(fixture / "dependencies.lock.esp32",
@@ -396,8 +525,20 @@ def self_test(root: Path) -> None:
         ("extra-patch", lambda fixture: shutil.copy2(
             fixture / "patches/tesla-ble" / PATCH_INVENTORY[0][0],
             fixture / "patches/tesla-ble/0006-extra.patch"), "patch filename inventory drifted"),
+        ("library-log-level", text("CMakeLists.txt", "PRIVATE TESLA_BLE_LOG_LEVEL=2", "PRIVATE TESLA_BLE_LOG_LEVEL=3"),
+         "BLE library log policy"),
+        ("library-log-scope", text("CMakeLists.txt", "PRIVATE TESLA_BLE_LOG_LEVEL=2", "PUBLIC TESLA_BLE_LOG_LEVEL=2"),
+         "BLE library log policy"),
+        ("harness-log-level", text(HARNESS_SCRIPT, 'TB_LOG_FLAGS="-DTESLA_BLE_LOG_LEVEL=2"', 'TB_LOG_FLAGS="-DTESLA_BLE_LOG_LEVEL=3"'),
+         "BLE library harness log policy"),
         ("harness-mbedtls", text(HARNESS_SCRIPT, MBEDTLS_COMMIT, "0" * 40),
          "harness Mbed TLS commit"),
+        ("missing-dependency-native-guards", text(HARNESS_SCRIPT,
+            'CXX="$CXX" python3 "$ROOT_DIR/test/test_dependency_guards.py" --component "$TB_DIR"',
+            '# omitted native dependency guards'), "native dependency failure/logging guards"),
+        ("missing-dependency-sanitizer-guards", text(HARNESS_SCRIPT,
+            'python3 "$ROOT_DIR/test/test_dependency_guards.py" --component "$TB_DIR" --sanitize',
+            'true # omitted native dependency sanitizer guards'), "native dependency failure/logging guards"),
         ("harness-mbedtls-override", text(HARNESS_SCRIPT, 'MBEDTLS_DIR="',
                                           'MBEDTLS_REF="main"\nMBEDTLS_DIR="'),
          "harness Mbed TLS commit"),

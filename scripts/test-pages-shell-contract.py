@@ -25,6 +25,7 @@ def check(shell: str) -> None:
         ):
             shutil.copy2(root / "scripts" / name, scripts / name)
         shutil.copytree(root / "docs", fixture / "docs")
+        shutil.copy2(root / "LICENSE", fixture / "LICENSE")
         environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
         # The disposable repository has no remote. These tests never need network access.
         environment.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
@@ -69,7 +70,19 @@ def check(shell: str) -> None:
             assert json.loads((output / "changelog.json").read_text()) == {
                 "version": "1.2.3", "changelog": "Preserve changelog fallback",
             }
-    print("pages-shell-contract: PASS (real assembler, four targets, absent/present ref)")
+            for relative, source in (
+                ("LICENSE", root / "LICENSE"),
+                ("THIRD_PARTY.md", root / "docs/THIRD_PARTY.md"),
+                ("vendor/esptool-js-0.6.1.LICENSE", root / "docs/vendor/esptool-js-0.6.1.LICENSE"),
+                ("vendor/pako-2.1.0.LICENSE", root / "docs/vendor/pako-2.1.0.LICENSE"),
+                ("vendor/pako-2.1.0.zlib.README", root / "docs/vendor/pako-2.1.0.zlib.README"),
+            ):
+                assert (output / relative).read_bytes() == source.read_bytes(), relative
+            footer = (output / "index.html").read_text().split('<footer class="installer-footer">', 1)[1].split("</footer>", 1)[0]
+            assert 'href="./LICENSE">AGPL-3.0</a>' in footer
+            assert 'href="./THIRD_PARTY.md"' in footer
+            assert "MIT" not in footer
+    print("pages-shell-contract: PASS (real assembler, four targets, absent/present ref, shipped licenses)")
 
 
 if __name__ == "__main__":

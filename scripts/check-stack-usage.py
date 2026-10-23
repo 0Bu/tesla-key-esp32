@@ -374,6 +374,14 @@ def self_test() -> None:
         )
         baseline_target = baseline_target_from_frames(frames)
         assert compare(frames, baseline_target) == []
+        # Dropping a complete translation unit must fail even if every remaining frame fits.
+        missing_unit = {name: records for name, records in frames.items() if name != "two.su"}
+        missing_failures = compare(missing_unit, baseline_target)
+        assert any("translation-unit set drifted" in failure and "two.su" in failure
+                   for failure in missing_failures), "missing translation unit was accepted"
+        extra_unit = {**frames, "extra.su": frames["two.su"]}
+        assert any("translation-unit set drifted" in failure and "extra.su" in failure
+                   for failure in compare(extra_unit, baseline_target)), "unexpected unit was accepted"
 
         baseline_path = root / "baseline.json"
         all_targets = {target: frames for target in TARGETS}

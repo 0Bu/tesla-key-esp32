@@ -119,12 +119,15 @@ static tk::JsonOwner vehicle_state_result_() {
     const std::string vin = g_vehicle->vin();
     state.vin = vin.c_str();
     state.paired = g_vehicle->has_session();
+    state.session_available = g_vehicle->session_available();
     state.link = tk::link_state_web_str(g_vehicle->link_state());
     uint32_t ago = 0;
     state.has_last_seen = g_vehicle->seconds_since_contact(ago);
     state.last_seen_s = static_cast<double>(ago);
-    ChargeStateResult cs = g_vehicle->get_cached_charge();
-    if (cs.valid) {
+    ChargeStateResult cs{};
+    const bool charge_available = g_vehicle->get_charge_state(cs);
+    state.charge_available = charge_available;
+    if (charge_available) {
         state.has_soc = cs.has_battery_level;
         state.soc = cs.battery_level;
         state.has_usable_soc = cs.has_usable_battery_level;
@@ -140,8 +143,9 @@ static tk::JsonOwner vehicle_state_result_() {
     return tk::mcp_json::build_vehicle_state_result(state);
 }
 
-static esp_err_t handle_tools_call_(httpd_req_t* req, const tk::mcp_json::RpcId& id,
+static esp_err_t handle_tools_call_(GuardedReq rq, const tk::mcp_json::RpcId& id,
                                     tk::JsonOwner request) {
+    httpd_req_t* req = rq.req();
     const cJSON* params = cJSON_GetObjectItemCaseSensitive(request.get(), "params");
     const cJSON* jname = cJSON_GetObjectItemCaseSensitive(params, "name");
     const char* name   = cJSON_IsString(jname) ? jname->valuestring : nullptr;
@@ -173,18 +177,11 @@ static esp_err_t handle_tools_call_(httpd_req_t* req, const tk::mcp_json::RpcId&
             if (a.mcp_required) problem = "missing required argument";
             // absent optional → keep the zero default
         } else if (a.type == tk::CmdArgType::Int) {
-            if (cJSON_IsNumber(j)) {
-                if (!tk::mcp_integer_value(j->valuedouble, a.lo, a.hi, ival[i]))
-                    problem = "integer required";
-            } else if (cJSON_IsString(j) && j->valuestring) {
-                char* end = nullptr;
-                double d = strtod(j->valuestring, &end);
-                const bool parsed = end != j->valuestring && end && *end == '\0' &&
-                                    tk::mcp_integer_value(d, a.lo, a.hi, ival[i]);
-                if (!parsed)
-                    problem = "integer required";
-            } else {
-                problem = "invalid argument";
+            double number{};
+            if (!tk::json_command_number(j, number) ||
+                !tk::mcp_integer_value(number, a.lo, a.hi, ival[i])) {
+                problem = cJSON_IsNumber(j) || (cJSON_IsString(j) && j->valuestring)
+                              ? "integer required" : "invalid argument";
             }
         } else {  // Bool
             if      (cJSON_IsBool(j))   bval[i] = cJSON_IsTrue(j);
@@ -210,7 +207,11 @@ static esp_err_t handle_tools_call_(httpd_req_t* req, const tk::mcp_json::RpcId&
     }
 
     // Same positional-values dispatch the REST /command path uses (command_exec.cpp).
+    rq.reply()->id = id; // validated bounded snapshot, independent of the released request tree
+    rq.reply()->state.shape = tk::ReplyShape::Rpc;
+    rq.reply()->state.attempting(tk::RequestEffect::Command);
     bool ok = execute_vehicle_command(*g_vehicle, info->kind, ival, bval);
+    if (ok) rq.reply()->state.succeeded();
 
     // Command outcome text is shared with the REST /command path (logic/command_result.hpp)
     // so the two can never report the same outcome differently. Tool-level failures are
@@ -218,13 +219,14 @@ static esp_err_t handle_tools_call_(httpd_req_t* req, const tk::mcp_json::RpcId&
     std::string err = g_vehicle->last_command_error();
     const bool effective_ok = ok || tk::is_nominal_already_set(err);
     const char* text = tk::command_result_text(effective_ok, err);
-    return send_rpc_result_(req, id, tk::mcp_json::build_tool_result(text, !effective_ok));
+    return send_effect_json(rq, 200, tk::mcp_json::build_result_envelope(
+        id, tk::mcp_json::build_tool_result(text, !effective_ok)).release());
 }
 
 // ─── entry points (dispatched from http_server.cpp's handle_all) ──────────────
 
 esp_err_t mcp_handle_post(GuardedReq rq) {
-    httpd_req_t* req = rq.req;
+    httpd_req_t* req = rq.req();
 
     // Preserve transport failures: a missing/failed body is a parse error, an oversized body is a
     // transport-level 413, and failure to allocate the bounded buffer is a 503. A raw nullptr used
@@ -239,7 +241,7 @@ esp_err_t mcp_handle_post(GuardedReq rq) {
     const tk::JsonRawNumberId raw_numeric_id =
         tk::json_top_level_numeric_id(body.data, req->content_len);
     const auto materialized = tk::json_materialize<cJSON>(
-        body.data, req->content_len, [](const char* text) { return cJSON_Parse(text); });
+        body.data, req->content_len, [](const char* text) { return cJSON_Parse(text); }, tk::kJsonMaxRequestValues);
     body_owner.reset();
     if (materialized.status == tk::JsonMaterializeStatus::Malformed) {
         return send_rpc_error_(req, {}, tk::kJsonRpcParseError, "parse error");
@@ -250,6 +252,9 @@ esp_err_t mcp_handle_post(GuardedReq rq) {
     if (materialized.status == tk::JsonMaterializeStatus::UnsupportedNul) {
         return send_rpc_error_(req, {}, tk::kJsonRpcInvalidRequest,
                                "JSON NUL escape not supported");
+    }
+    if (materialized.status == tk::JsonMaterializeStatus::TooManyValues) {
+        return send_rpc_error_(req, {}, tk::kJsonRpcInvalidRequest, "too many JSON values");
     }
     if (materialized.status == tk::JsonMaterializeStatus::NoMemory) return send_oom_503_(req);
     tk::JsonOwner msg(materialized.root);
@@ -284,11 +289,12 @@ esp_err_t mcp_handle_post(GuardedReq rq) {
             case tk::mcp_json::RpcRequestStatus::Valid:
                 break;
         }
-        const tk::mcp_json::RpcId correlation = envelope.id;
+        const tk::mcp_json::RpcId& correlation = envelope.id;
         msg.reset();
         return send_rpc_error_(req, correlation, tk::kJsonRpcInvalidRequest, problem);
     }
-    const tk::mcp_json::RpcId id = envelope.id;
+    // The envelope owns this fixed snapshot independently of the input tree.
+    const tk::mcp_json::RpcId& id = envelope.id;
     const tk::mcp_json::RpcIdStatus id_status = envelope.id_status;
 
     const cJSON* jm    = cJSON_GetObjectItemCaseSensitive(msg.get(), "method");
@@ -321,7 +327,7 @@ esp_err_t mcp_handle_post(GuardedReq rq) {
     }
 
     if (m == tk::McpMethod::ToolsCall) {
-        return handle_tools_call_(req, id, std::move(msg));
+        return handle_tools_call_(rq, id, std::move(msg));
     }
     msg.reset();
 
@@ -357,7 +363,7 @@ esp_err_t mcp_handle_post(GuardedReq rq) {
 
 esp_err_t mcp_handle_get(GuardedReq rq) {
     // Stateless profile: no server-initiated SSE stream is offered.
-    httpd_req_t* req = rq.req;
+    httpd_req_t* req = rq.req();
     httpd_resp_set_status(req, "405 Method Not Allowed");
     httpd_resp_set_hdr(req, "Allow", "POST");
     httpd_resp_set_type(req, "application/json");

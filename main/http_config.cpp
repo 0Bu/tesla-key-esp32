@@ -1,6 +1,5 @@
 // Setup / pairing / persisted-config endpoints:
 //   POST /gen_keys[?force=1]  (generate key — refuses overwrite w/o force)
-//   POST /send_key            (pair with vehicle, Charging Manager only)
 //   POST /set_time            (browser wall clock — NTP fallback)
 //   POST /set_vin             (persist VIN + reboot)
 //   POST /set_mqtt            (persist MQTT broker + reboot)
@@ -14,12 +13,13 @@
 #include "logic/config_request.hpp"
 #include "logic/http_route.hpp"
 #include "logic/json_syntax.hpp"
+#include "json_input_validation.hpp"
 #include "logic/syslog_policy.hpp"
 #include "logic/mqtt_uri.hpp"
 #include "logic/wifi_credentials.hpp"
 #include "logic/wifi_rollback.hpp"
 #include "logic/vin_transition.hpp"
-#include "ota_update.hpp"   // ota_confirm_pending_image() — guard OTA rollback across config reboots
+#include "ota_update.hpp"   // request-owned save/restart and typed image confirmation
 #include <esp_log.h>
 #include <esp_system.h>
 #include <esp_crt_bundle.h>
@@ -68,7 +68,7 @@ ParsedJsonBody parse_json_object_body_(httpd_req_t* req) {
     // cJSON reports both malformed input and allocator exhaustion as nullptr. The shared wrapper
     // validates without allocating first, then classifies a parser nullptr as resource failure.
     const auto materialized = tk::json_materialize<cJSON>(
-        body.data, req->content_len, [](const char* text) { return cJSON_Parse(text); });
+        body.data, req->content_len, [](const char* text) { return cJSON_Parse(text); }, tk::kJsonMaxRequestValues);
     if (materialized.status == tk::JsonMaterializeStatus::Malformed) {
         return {tk::JsonOwner{}, tk::ConfigSubmissionStatus::MalformedJson};
     }
@@ -78,12 +78,18 @@ ParsedJsonBody parse_json_object_body_(httpd_req_t* req) {
     if (materialized.status == tk::JsonMaterializeStatus::UnsupportedNul) {
         return {tk::JsonOwner{}, tk::ConfigSubmissionStatus::JsonUnsupportedNul};
     }
+    if (materialized.status == tk::JsonMaterializeStatus::TooManyValues) {
+        return {tk::JsonOwner{}, tk::ConfigSubmissionStatus::JsonTooManyValues};
+    }
     if (materialized.status == tk::JsonMaterializeStatus::NoMemory) {
         return {tk::JsonOwner{}, tk::ConfigSubmissionStatus::JsonNoMemory};
     }
     tk::JsonOwner json(materialized.root);
     if (!cJSON_IsObject(json.get())) {
         return {tk::JsonOwner{}, tk::ConfigSubmissionStatus::ObjectRequired};
+    }
+    if (tk::has_duplicate_json_keys(json.get())) {
+        return {tk::JsonOwner{}, tk::ConfigSubmissionStatus::DuplicateJsonKey};
     }
     return {std::move(json), tk::ConfigSubmissionStatus::Ready};
 }
@@ -123,7 +129,7 @@ esp_err_t send_config_unreadable_(httpd_req_t* req, const char* command, const c
 // ─── POST /gen_keys ───────────────────────────────────────────────────────────
 
 esp_err_t handle_gen_keys(GuardedReq rq) {
-    httpd_req_t* req = rq.req;
+    httpd_req_t* req = rq.req();
     if (validate_query_string(req) != ESP_OK) {
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid query string");
     }
@@ -139,9 +145,13 @@ esp_err_t handle_gen_keys(GuardedReq rq) {
     // charging until a physical re-pair. The controller checks this under command_mutex_, not as
     // a racy preflight that auto-pair could invalidate before mutation.
     const bool allow_replace = query_param_is(req, "force", "1");
+    rq.reply()->state.shape = tk::ReplyShape::FlatResult;
+    rq.reply()->state.attempting(tk::RequestEffect::Identity);
     const VehicleController::KeyGenerationResult generated =
         g_vehicle->generate_key_result(allow_replace);
     if (generated.key_probe_failed) {
+        rq.reply()->state.possible_effects = 0;
+        rq.reply()->state.outcome = tk::RequestOutcome::NotAttempted;
         tk::JsonBuilder json;
         json.boolean(json.root(), "result", false);
         json.string(json.root(), "reason",
@@ -149,6 +159,8 @@ esp_err_t handle_gen_keys(GuardedReq rq) {
         return send_json(req, 503, json.release());
     }
     if (generated.existing_key_refused) {
+        rq.reply()->state.possible_effects = 0;
+        rq.reply()->state.outcome = tk::RequestOutcome::NotAttempted;
         tk::JsonBuilder json;
         json.boolean(json.root(), "result", false);
         json.string(json.root(), "reason",
@@ -157,6 +169,8 @@ esp_err_t handle_gen_keys(GuardedReq rq) {
         return send_json(req, 409, json.release());
     }
     if (generated.transition_blocked) {
+        rq.reply()->state.possible_effects = 0;
+        rq.reply()->state.outcome = tk::RequestOutcome::NotAttempted;
         tk::JsonBuilder json;
         json.boolean(json.root(), "result", false);
         json.string(json.root(), "reason",
@@ -173,79 +187,39 @@ esp_err_t handle_gen_keys(GuardedReq rq) {
     // proves the new key committed, so the supervisor retries only idempotent cleanup.
     const bool reboot_to_restore = rotation == tk::KeyRotationResult::NotCommitted ||
                                    rotation == tk::KeyRotationResult::CommitUnknown;
+    if (reboot_to_restore) {
+        rq.reply()->state.continuation = tk::ReplyContinuation::IdentityRestart;
+        rq.reply()->state.recovery_pending = true;
+    }
+    if (ok) rq.reply()->state.succeeded();
+    else if (rotation == tk::KeyRotationResult::CleanupPending)
+        rq.reply()->state.identity_recovery();
     tk::JsonBuilder json;
     json.boolean(json.root(), "result", ok);
     json.string(
         json.root(), "reason",
-        ok ? "key generated — use /send_key to pair with vehicle"
+        ok ? "key generated — pairing proceeds automatically"
            : rotation == tk::KeyRotationResult::CommitUnknown
                ? "key commit outcome is ambiguous — rebooting to reload durable identity"
            : reboot_to_restore
                ? "key generation did not commit — rebooting to restore durable identity"
                : "new key saved, but pairing cleanup failed — retrying cleanup");
-    esp_err_t r = send_json(req, ok ? 200 : 500, json.release());
-    if (reboot_to_restore) {
-        // NotCommitted/CommitUnknown are recovery reboots after an HTTP 500, not successful
-        // user configuration commits. Keep a pending OTA rollback-capable.
-        vTaskDelay(pdMS_TO_TICKS(800));
-        esp_restart();
-    }
+    esp_err_t r = send_effect_json(rq, ok ? 200 : 500, json.release());
+    run_effect_continuation(rq);
     return r;
 }
 
-// ─── POST /send_key ───────────────────────────────────────────────────────────
-
-esp_err_t handle_send_key(GuardedReq rq) {
-    httpd_req_t* req = rq.req;
-    if (ota_is_updating()) {
-        tk::JsonBuilder json;
-        json.boolean(json.root(), "ok", false);
-        json.boolean(json.root(), "result", false);
-        json.string(json.root(), "reason", tk::kOtaUpdateInProgressReason.data());
-        return send_json(req, static_cast<int>(tk::HttpRouteOtaConflict::Reject409), json.release());
-    }
-    if (validate_query_string(req) != ESP_OK) {
-        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid query string");
-    }
-    // This firmware only enrolls a Charging Manager key (charging + wake), never an
-    // owner key — its sole purpose is the evcc BLE integration. Reject an explicit
-    // owner request rather than silently enrolling a different role than asked for.
-    if (query_param_is(req, "role", "owner")) {
-        tk::JsonBuilder json;
-        json.boolean(json.root(), "result", false);
-        json.string(json.root(), "role", "owner");
-        json.string(json.root(), "reason",
-            "owner role disabled — this device only enrolls Charging Manager keys");
-        return send_json(req, 403, json.release());
-    }
-
-    bool ok = g_vehicle->pair(tk::ConnectOrigin::Foreground);
-    tk::JsonBuilder json;
-    json.boolean(json.root(), "result", ok);
-    json.string(json.root(), "role", "charging_manager");
-    json.string(json.root(), "reason",
-        ok ? "key request transmitted; confirm it on the car's screen (vehicle approval is not confirmed)"
-           : "key transmission was not confirmed; check vehicle status before retrying");
-    return send_json(req, 200, json.release());
-}
-
-// ─── POST /set_time — set the wall clock from the browser (NTP fallback) ───────
-// TLS certificate validation (OTA) and the human-readable key_created/paired_at
-// timestamps need a real UTC clock. (tesla-ble signed-command freshness does NOT —
-// expires_at is the vehicle's clock plus a monotonic delta.) NTP is the primary
-// source; this endpoint is the fallback for networks that block NTP. The web UI posts the browser's clock ({"ms": <epoch ms>})
-// on load and before an OTA check, but we only apply it while SNTP has not synced —
-// otherwise NTP (which is more trustworthy than a possibly-skewed browser) wins. The
-// applied fallback time is persisted so a later offline reboot starts plausibly.
+// ─── POST /set_time — temporary browser estimate while NTP has not committed ──
+// Browser time is neither persisted nor authority for durable identity dates.
 esp_err_t handle_set_time(GuardedReq rq) {
-    httpd_req_t* req = rq.req;
-    if (ota_is_updating()) {
+    httpd_req_t* req = rq.req();
+    if (tk::http_route_blocks_during_ota_update_409(tk::HttpRoute::SetTime) &&
+        ota_is_updating()) {
         return send_json(req, static_cast<int>(tk::HttpRouteOtaConflict::Reject409),
                          make_response(false, "set_time", "", tk::kOtaUpdateInProgressReason.data()));
     }
     ParsedJsonBody parsed = parse_json_object_body_(req);
     if (!parsed) return send_config_body_error_(req, "set_time", parsed);
-
     cJSON* j = cJSON_GetObjectItemCaseSensitive(parsed.json.get(), "ms");
     if (!cJSON_IsNumber(j)) {
         return send_json(req, 400,
@@ -253,31 +227,31 @@ esp_err_t handle_set_time(GuardedReq rq) {
     }
     const double epoch_ms = j->valuedouble;
     parsed.json.reset();
-
-    // NTP already synced -> it is authoritative. Still require a complete, syntactically valid
-    // request before accepting the no-op, so body OOM/oversize/receive/schema failures never turn
-    // into a misleading success response merely because the clock happened to be synchronized.
+    // Even an NTP no-op requires the complete valid body/schema above.
     if (clock_synced_via_ntp()) {
         return send_json(req, 200, make_response(true, "set_time", "", "clock set via NTP"));
     }
-
-    // Reject a missing/implausible browser clock so we never push the device clock into the
-    // cert-invalid range — floor ~2023-11, ceiling build year + 10 (see browser_time_plausible).
-    if (!browser_time_plausible(epoch_ms)) {
-        return send_json(req, 400, make_response(false, "set_time", "",
-                                                 "implausible timestamp"));
+    rq.reply()->state.attempting(tk::RequestEffect::Clock);
+    const BrowserClockResult result = apply_browser_clock(epoch_ms);
+    if (result.status != BrowserClockStatus::Applied &&
+        result.status != BrowserClockStatus::SetFailed) {
+        rq.reply()->state.refused(tk::RequestEffect::Clock);
+        if (result.status == BrowserClockStatus::AlreadyNtpSynced)
+            return send_json(req, 200, make_response(true, "set_time", "", "clock set via NTP"));
+        const bool busy = result.status == BrowserClockStatus::Busy;
+        return send_json(req, busy ? 503 : 400, make_response(false, "set_time", "",
+                          busy ? "clock is busy" : "implausible timestamp"));
     }
-
-    long long sec = apply_browser_clock(epoch_ms);
-    ESP_LOGI(TAG, "clock set from browser: %lld", sec);
-
-    return send_json(req, 200, make_response(true, "set_time", "", "clock set"));
+    if (result.status == BrowserClockStatus::SetFailed)
+        return send_effect_json(rq, 500, make_response(false, "set_time", "", "clock set failed"));
+    ESP_LOGI(TAG, "temporary clock set from browser: %lld", (long long)result.seconds);
+    return send_effect_json(rq, 200, make_response(true, "set_time", "", "clock set"));
 }
 
 // ─── POST /set_vin — persist VIN, then reboot ─────────────────────────────────
 
 esp_err_t handle_set_vin(GuardedReq rq) {
-    httpd_req_t* req = rq.req;
+    httpd_req_t* req = rq.req();
     ParsedJsonBody parsed = parse_json_object_body_(req);
     if (!parsed) return send_config_body_error_(req, "set_vin", parsed);
     const char* submitted_vin = required_string_(parsed.json.get(), "vin");
@@ -325,6 +299,7 @@ esp_err_t handle_set_vin(GuardedReq rq) {
     tk::ConfigBlob next = current;
     next.vin = vin;
     bool vin_marker_written = false;
+    rq.reply()->state.attempting(tk::RequestEffect::Identity);
     const VehicleController::NewVehicleResetResult reset =
         g_vehicle->reset_for_new_vehicle([&](const std::string& previous_key_id) {
             // Cross-namespace journal: ConfigBlob is in tesla_cfg, key/session state in
@@ -332,6 +307,7 @@ esp_err_t handle_set_vin(GuardedReq rq) {
             // mutation, so every power cut has an unambiguous boot-recovery authority.
             const std::string marker =
                 tk::make_vin_transition_marker(current.vin, previous_key_id);
+            if (marker.empty()) return false; // never persist an undecodable identity journal
             if (!g_config->save_str(tk::nvs_contract::kVinTransition, marker)) return false;
             vin_marker_written = true;
             return tk::cfg_save(*g_config, next);
@@ -340,7 +316,19 @@ esp_err_t handle_set_vin(GuardedReq rq) {
     using A = tk::VinTransitionApply;
     const bool ok = reset.state == A::Complete;
     const bool recovery_blocked = reset.state == A::IdentityRecoveryPending;
+    if (reset.state == A::IdentityUnverified || recovery_blocked) {
+        // Both typed refusals return before staging/journaling/key mutation.
+        rq.reply()->state.possible_effects = 0;
+        rq.reply()->state.outcome = tk::RequestOutcome::NotAttempted;
+    }
     bool reboot = reset.state != A::IdentityUnverified && !recovery_blocked;
+    if (reboot) {
+        rq.reply()->state.continuation = tk::ReplyContinuation::IdentityRestart;
+        // A known committed identity remains partial until its local post-result work ends.
+        rq.reply()->state.recovery_pending = true;
+    }
+    if (reset.state == A::Complete || reset.state == A::RecoverCommittedIdentity)
+        rq.reply()->state.identity_recovery();
     bool previous_identity_restored = false;
     bool recovery_pending = false;
 
@@ -378,6 +366,10 @@ esp_err_t handle_set_vin(GuardedReq rq) {
         }
     }
 
+    if (ok) {
+        rq.reply()->state.succeeded();
+        rq.reply()->state.recovery_pending = false;
+    }
     const char* reason = reset.state == A::Complete
         ? "VIN and new key saved — rebooting"
         : reset.state == A::IdentityUnverified
@@ -393,15 +385,9 @@ esp_err_t handle_set_vin(GuardedReq rq) {
                     : recovery_pending
                         ? "VIN change incomplete — rebooting for recovery"
                         : "VIN change staging failed — rebooting fail-closed";
-    esp_err_t r = send_json(req, ok ? 200 : recovery_blocked ? 409 : 500,
+    esp_err_t r = send_effect_json(rq, ok ? 200 : recovery_blocked ? 409 : 500,
                             make_response(ok, "set_vin", vin.c_str(), reason));
-    if (reboot) {
-        // VIN/key identity changes are admitted only in Stable state by OtaIdentityMutationGuard.
-        // Therefore this reboot can never be evidence for a PendingVerify image; recovery and
-        // failure reboots likewise leave whatever OTA state exists untouched.
-        vTaskDelay(pdMS_TO_TICKS(800));
-        esp_restart();
-    }
+    run_effect_continuation(rq);
     return r;
 }
 
@@ -543,15 +529,8 @@ static tk::MqttProbeResult mqtt_probe_broker(const std::string& uri) {
     return resources.ctx.result;
 }
 
-esp_err_t handle_set_mqtt(GuardedReq rq) {
-    httpd_req_t* req = rq.req;
-    if (ota_is_updating()) {
-        return send_json(req, static_cast<int>(tk::HttpRouteOtaConflict::Reject409),
-                         make_response(false, "set_mqtt", "", tk::kOtaUpdateInProgressReason.data()));
-    }
-    tk::ConfigBlob cfg;
-    if (!tk::cfg_load_for_update(*g_config, cfg)) return send_config_unreadable_(req, "set_mqtt");
-    const tk::ConfigStringSubmission submitted = parse_string_submission_(req, "broker");
+[[gnu::noinline]] static esp_err_t apply_mqtt_submission_(
+    GuardedReq rq, tk::ConfigBlob& cfg, const tk::ConfigStringSubmission& submitted) {
     return tk::apply_config_string(
         submitted,
         [](const std::string& value) { return tk::mqtt_trim(value); },
@@ -570,28 +549,43 @@ esp_err_t handle_set_mqtt(GuardedReq rq) {
                                                   tk::mqtt_probe_reason(result)};
                 }
             }
-            return tk::ConfigProbeVerdict{};
+            return rq.context->config_restart.try_begin()
+                ? tk::ConfigProbeVerdict{}
+                : tk::ConfigProbeVerdict{false, 409, tk::kConfigRestartBusyReason};
         },
         [&](const std::string& broker) {
             cfg.mqtt_uri = broker;
-            return tk::cfg_save(*g_config, cfg);
+            rq.reply()->state.attempting(tk::RequestEffect::Configuration);
+            const bool stored = tk::cfg_save(*g_config, cfg);
+            if (stored) finish_config_save(rq);
+            return stored;
         },
         [&](int status, bool ok, const char* reason) {
-            return send_json(req, status, make_response(ok, "set_mqtt", "", reason));
+            return send_config_reply(rq, status, ok, "set_mqtt", reason);
         },
         [&]() {
-            ota_confirm_pending_image(tk::OtaRebootClass::SuccessfulUserConfigCommit);
-            if (!ota_config_restart_begin()) {
-                ESP_LOGW(TAG, "set_mqtt: reboot postponed — active operation owns gate; "
-                              "configuration saved and will apply on next restart");
-                return;
-            }
-            vTaskDelay(pdMS_TO_TICKS(800));
-            esp_restart();
+            run_effect_continuation(rq);
         },
         {"MQTT already disabled — no reboot", "MQTT broker unchanged — no reboot",
          "invalid broker (use host:port)", "MQTT disabled — rebooting",
          "MQTT broker saved — rebooting", "failed to save MQTT broker"});
+}
+
+esp_err_t handle_set_mqtt(GuardedReq rq) {
+    httpd_req_t* req = rq.req();
+    if (tk::http_route_blocks_during_ota_update_409(tk::HttpRoute::SetMqtt) &&
+        ota_is_updating()) {
+        return send_json(req, static_cast<int>(tk::HttpRouteOtaConflict::Reject409),
+                         make_response(false, "set_mqtt", "", tk::kOtaUpdateInProgressReason.data()));
+    }
+    const tk::ConfigStringSubmission submitted = parse_string_submission_(req, "broker");
+    if (submitted.status != tk::ConfigSubmissionStatus::Ready) {
+        return send_json(req, tk::config_submission_http_status(submitted.status),
+            make_response(false, "set_mqtt", "", tk::config_submission_reason(submitted.status)));
+    }
+    tk::ConfigBlob cfg;
+    if (!tk::cfg_load_for_update(*g_config, cfg)) return send_config_unreadable_(req, "set_mqtt");
+    return apply_mqtt_submission_(rq, cfg, submitted);
 }
 
 // ─── POST /set_syslog — persist the Syslog server, then reboot ───────────────────
@@ -599,15 +593,8 @@ esp_err_t handle_set_mqtt(GuardedReq rq) {
 // disables Syslog). Stored in NVS ("syslog_uri") and applied on reboot — the
 // forwarder resolves it once at start (syslog.cpp), same as /set_mqtt.
 
-esp_err_t handle_set_syslog(GuardedReq rq) {
-    httpd_req_t* req = rq.req;
-    if (ota_is_updating()) {
-        return send_json(req, static_cast<int>(tk::HttpRouteOtaConflict::Reject409),
-                         make_response(false, "set_syslog", "", tk::kOtaUpdateInProgressReason.data()));
-    }
-    tk::ConfigBlob cfg;
-    if (!tk::cfg_load_for_update(*g_config, cfg)) return send_config_unreadable_(req, "set_syslog");
-    const tk::ConfigStringSubmission submitted = parse_string_submission_(req, "server");
+[[gnu::noinline]] static esp_err_t apply_syslog_submission_(
+    GuardedReq rq, tk::ConfigBlob& cfg, const tk::ConfigStringSubmission& submitted) {
     return tk::apply_config_string(
         submitted,
         [](const std::string& value) {
@@ -618,48 +605,103 @@ esp_err_t handle_set_syslog(GuardedReq rq) {
         },
         [&]() { return cfg.syslog_uri; },
         [](const std::string& value) { return tk::syslog_target_is_plausible(value); },
-        [](const std::string&) {
-            return tk::ConfigProbeVerdict{};
+        [&](const std::string&) {
+            return rq.context->config_restart.try_begin()
+                ? tk::ConfigProbeVerdict{}
+                : tk::ConfigProbeVerdict{false, 409, tk::kConfigRestartBusyReason};
         },
         [&](const std::string& server) {
             cfg.syslog_uri = server;
-            return tk::cfg_save(*g_config, cfg);
+            rq.reply()->state.attempting(tk::RequestEffect::Configuration);
+            const bool stored = tk::cfg_save(*g_config, cfg);
+            if (stored) finish_config_save(rq);
+            return stored;
         },
         [&](int status, bool ok, const char* reason) {
-            return send_json(req, status, make_response(ok, "set_syslog", "", reason));
+            return send_config_reply(rq, status, ok, "set_syslog", reason);
         },
         [&]() {
-            ota_confirm_pending_image(tk::OtaRebootClass::SuccessfulUserConfigCommit);
-            if (!ota_config_restart_begin()) {
-                ESP_LOGW(TAG, "set_syslog: reboot postponed — active operation owns gate; "
-                              "configuration saved and will apply on next restart");
-                return;
-            }
-            vTaskDelay(pdMS_TO_TICKS(800));
-            esp_restart();
+            run_effect_continuation(rq);
         },
         {"Syslog already disabled — no reboot", "Syslog server unchanged — no reboot",
          "invalid server (use host:port)", "Syslog disabled — rebooting",
          "Syslog server saved — rebooting", "failed to save Syslog server"});
 }
 
+esp_err_t handle_set_syslog(GuardedReq rq) {
+    httpd_req_t* req = rq.req();
+    if (tk::http_route_blocks_during_ota_update_409(tk::HttpRoute::SetSyslog) &&
+        ota_is_updating()) {
+        return send_json(req, static_cast<int>(tk::HttpRouteOtaConflict::Reject409),
+                         make_response(false, "set_syslog", "", tk::kOtaUpdateInProgressReason.data()));
+    }
+    const tk::ConfigStringSubmission submitted = parse_string_submission_(req, "server");
+    if (submitted.status != tk::ConfigSubmissionStatus::Ready) {
+        return send_json(req, tk::config_submission_http_status(submitted.status),
+            make_response(false, "set_syslog", "", tk::config_submission_reason(submitted.status)));
+    }
+    tk::ConfigBlob cfg;
+    if (!tk::cfg_load_for_update(*g_config, cfg)) return send_config_unreadable_(req, "set_syslog");
+    return apply_syslog_submission_(rq, cfg, submitted);
+}
+
 // ─── POST /set_wifi — change the WiFi credentials over the LAN, undoably ──────
 //
-// Until this route existed, WiFi credentials could ONLY be changed from the open setup AP, and only
-// by overwriting the stored pair in place. Both halves of that are bad in the same way: you had to
-// be physically near the device to move it to a different network, and a typo was unrecoverable —
-// the old credentials were gone, the new ones did not work, and the only way back was a USB cable.
-//
-// So the save is a TRANSACTION. The previous SSID/password are stashed as a one-shot backup inside
-// the SAME atomic blob as the new ones (logic/config_store.hpp — no write ordering to get wrong),
-// and the boot after this reboot decides: if the new credentials get a lease, the backup is
-// dropped; if the AP keeps refusing them, main.cpp restores the backup and reboots back onto the
-// network that worked. The decision itself is the host-tested logic/wifi_rollback.hpp, and it is
-// deliberately asymmetric — a rollback DESTROYS the new credentials, so only an AP that sustains
-// its refusal spends them, while an absent SSID (a router still rebooting) is given minutes.
+// stage_wifi_change preserves the last proven credentials inside the same ConfigBlob while a new
+// pair is on trial. Boot either clears that backup after a lease or uses logic/wifi_rollback.hpp
+// to decide a bounded restore. Save/response/restart ordering is shared with other config routes.
+[[gnu::noinline]] static esp_err_t save_wifi_submission_(GuardedReq rq,
+                                                         const tk::ConfigBlob& cfg) {
+    rq.reply()->state.attempting(tk::RequestEffect::Configuration);
+    const bool ok = tk::cfg_save(*g_config, cfg);
+    if (ok) {
+        rq.reply()->state.succeeded();
+        rq.reply()->state.continuation = tk::ReplyContinuation::SuccessfulConfigRestart;
+    }
+    esp_err_t r = send_effect_json(rq, ok ? 200 : 500,
+        make_response(ok, "set_wifi", "",
+                      ok ? "WiFi credentials accepted"
+                         : "config write failed"));
+    run_effect_continuation(rq);
+    return r;
+}
+
+[[gnu::noinline]] static esp_err_t apply_wifi_submission_(GuardedReq rq,
+                                                          const std::string& ssid,
+                                                          const std::string& pass) {
+    httpd_req_t* req = rq.req();
+    tk::ConfigBlob cfg;
+    if (!tk::cfg_load_for_update(*g_config, cfg)) return send_config_unreadable_(req, "set_wifi");
+
+    // Refuse uniformly before comparing credentials: the refusal must not reveal equality.
+    if (!tk::config_service_targets_fit_old_writer(cfg)) {
+        return send_json(req, 409, make_response(false, "set_wifi", "",
+            "shorten existing service addresses to 64 bytes before changing WiFi"));
+    }
+
+    if (!rq.context->config_restart.try_begin())
+        return send_json(req, 409, make_response(false, "set_wifi", "", tk::kConfigRestartBusyReason));
+    if (!tk::config_wifi_may_save(ota_config_image_state(rq.context->config_restart)))
+        return send_json(req, 409, make_response(false, "set_wifi", "", tk::kConfigWifiVerificationReason));
+
+    if (cfg.wifi_ssid == ssid && cfg.wifi_pass == pass) {
+        return send_json(req, 200, make_response(true, "set_wifi", "",
+                                                 "WiFi credentials accepted"));
+    }
+
+    // Arm the one-shot rollback only when there is something to roll back TO, and keep the last
+    // PROVEN pair as the backup while an earlier change is still on trial (a deferred restart):
+    // the host-tested logic/wifi_rollback.hpp. A new attempt also retires the previous verdict, so
+    // /status.wifi.rolled_back describes the LAST attempt.
+    tk::stage_wifi_change(cfg, ssid, pass);
+
+    return save_wifi_submission_(rq, cfg);
+}
+
 esp_err_t handle_set_wifi(GuardedReq rq) {
-    httpd_req_t* req = rq.req;
-    if (ota_is_updating()) {
+    httpd_req_t* req = rq.req();
+    if (tk::http_route_blocks_during_ota_update_409(tk::HttpRoute::SetWifi) &&
+        ota_is_updating()) {
         return send_json(req, static_cast<int>(tk::HttpRouteOtaConflict::Reject409),
                          make_response(false, "set_wifi", "", tk::kOtaUpdateInProgressReason.data()));
     }
@@ -688,44 +730,16 @@ esp_err_t handle_set_wifi(GuardedReq rq) {
                                                  tk::wifi_credentials_reason(wifi_error)));
     }
 
-    tk::ConfigBlob cfg;
-    if (!tk::cfg_load_for_update(*g_config, cfg)) return send_config_unreadable_(req, "set_wifi");
-
-    if (cfg.wifi_ssid == ssid && cfg.wifi_pass == pass) {
-        return send_json(req, 200, make_response(true, "set_wifi", "",
-                                                 "WiFi unchanged — no reboot"));
-    }
-
-    // Arm the one-shot rollback only when there is something to roll back TO, and keep the last
-    // PROVEN pair as the backup while an earlier change is still on trial (a deferred restart):
-    // the host-tested logic/wifi_rollback.hpp. A new attempt also retires the previous verdict, so
-    // /status.wifi.rolled_back describes the LAST attempt.
-    tk::stage_wifi_change(cfg, ssid, pass);
-
-    const bool ok = tk::cfg_save(*g_config, cfg);
-    esp_err_t r = send_json(req, ok ? 200 : 500,
-        make_response(ok, "set_wifi", "",
-                      ok ? "WiFi credentials saved — rebooting to join the new network"
-                         : "config write failed"));
-    if (ok) {
-        ota_confirm_pending_image(tk::OtaRebootClass::SuccessfulUserConfigCommit);
-        if (!ota_config_restart_begin()) {
-            ESP_LOGW(TAG, "set_wifi: reboot postponed — active operation owns gate; "
-                          "configuration saved and will apply on next restart");
-            return r;
-        }
-        vTaskDelay(pdMS_TO_TICKS(800));
-        esp_restart();
-    }
-    return r;
+    return apply_wifi_submission_(rq, ssid, pass);
 }
 
 // ─── POST /set_ota — update the OTA update channel (live, no reboot) ─────────────
 // Body: {"channel":"release"|"dev"}
-// Persists the channel selection in NVS (ConfigBlob v2) and updates the active channel.
+// Persists the channel in ConfigBlob v1 reserved flag bits and updates the active channel.
 esp_err_t handle_set_ota(GuardedReq rq) {
-    httpd_req_t* req = rq.req;
-    if (ota_is_updating()) {
+    httpd_req_t* req = rq.req();
+    if (tk::http_route_blocks_during_ota_update_409(tk::HttpRoute::SetOta) &&
+        ota_is_updating()) {
         return send_json(req, static_cast<int>(tk::HttpRouteOtaConflict::Reject409),
                          make_response(false, "set_ota", "", tk::kOtaUpdateInProgressReason.data()));
     }
@@ -745,26 +759,32 @@ esp_err_t handle_set_ota(GuardedReq rq) {
     if (!tk::cfg_load_for_update(*g_config, cfg)) return send_config_unreadable_(req, "set_ota");
     const tk::OtaChannel want = tk::ota_channel_parse(channel);
     if (cfg.has_ota && tk::ota_channel_from_int(cfg.ota_channel) == want) {
+        rq.reply()->state.shape = tk::ReplyShape::FlatResult;
+        rq.reply()->state.attempting(tk::RequestEffect::Configuration);
         ota_set_channel(want);
+        rq.reply()->state.succeeded();
         tk::JsonBuilder resp;
         resp.boolean(resp.root(), "ok", true);
         resp.boolean(resp.root(), "result", true);
         resp.string(resp.root(), "channel", tk::ota_channel_name(want));
-        return send_json(req, 200, resp.release());
+        return send_effect_json(rq, 200, resp.release());
     }
 
     cfg.ota_channel = tk::ota_channel_to_int(want);
     cfg.has_ota = true;
+    rq.reply()->state.attempting(tk::RequestEffect::Configuration);
     if (!tk::cfg_save(*g_config, cfg)) {
-        return send_json(req, 500, make_response(false, "set_ota", "", "failed to save config"));
+        return send_effect_json(rq, 500, make_response(false, "set_ota", "", "failed to save config"));
     }
 
+    rq.reply()->state.shape = tk::ReplyShape::FlatResult;
     ota_set_channel(want);
+    rq.reply()->state.succeeded();
     ESP_LOGI(TAG, "OTA channel set to %s", tk::ota_channel_name(want));
 
     tk::JsonBuilder resp;
     resp.boolean(resp.root(), "ok", true);
     resp.boolean(resp.root(), "result", true);
     resp.string(resp.root(), "channel", tk::ota_channel_name(want));
-    return send_json(req, 200, resp.release());
+    return send_effect_json(rq, 200, resp.release());
 }

@@ -1,6 +1,6 @@
 // Pairing lifecycle: the supervisor task, key generation/fingerprinting,
 // session/cache invalidation, the VIN-change reset, the non-waking VCSEC health probe
-// (advisory connection-health hint) and explicit whitelist-add. Part of the VehicleController
+// (advisory connection-health hint) and automatic same-key whitelist-add. Part of the VehicleController
 // implementation split — see vehicle_ctrl_internal.hpp.
 
 #include "vehicle_ctrl.hpp"
@@ -28,9 +28,8 @@
 
 static const char* TAG = "vehicle_ctrl";
 
-// Pairing supervisor: perform bounded, read-only status/health probes. Whitelist Add Key is
-// sent only by the explicit user action /send_key; a remote error, missing session or startup
-// state must never silently enrol an identity onto a vehicle.
+// Pairing supervisor: probe first, then submit the existing key automatically when a session
+// is verifiably absent or a connection-recovery hint persists. Never replace identity.
 void VehicleController::auto_pair_task_fn_(void* arg) {
   try {
     auto* self = static_cast<VehicleController*>(arg);
@@ -44,11 +43,12 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
     bool warned_no_vin = false;
     tk::PeriodicLogState unpaired_notice;
     tk::PeriodicLogState recovery_notice;
+    tk::AutoEnrollmentState enrollment;
     while (true) {
       // Pairing/crypto is an allocation-rich 8 KiB task. Record its historical minimum at the one
       // point every supervision round reaches, before an exception or early continue can skip it.
       tk::stack_watch_sample(tk::StackWatch::AutoPair);
-      // Iteration-boundary containment (issue #204): pair()/generate_key()/health_probe_() run
+      // Iteration-boundary containment (issue #204): enroll_existing_key_()/generate_key()/health_probe_() run
       // tesla-ble crypto + std::string work that can throw std::bad_alloc. An escape would unwind
       // into the FreeRTOS C task trampoline → std::terminate → reboot (and a reboot loop re-opens
       // the poll window). Contain it, pause, and start the next supervision round.
@@ -61,7 +61,7 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
         if (!self->has_plausible_vin()) {
             if (!warned_no_vin) {
                 ESP_LOGW(TAG, "auto-pair: no VIN configured — pairing probes disabled. Set a VIN via the "
-                              "setup AP or POST /set_vin; enrollment remains an explicit user action.");
+                              "setup AP or POST /set_vin to enable automatic pairing.");
                 warned_no_vin = true;
             }
             // Keep a fresh, LISTING-ONLY view of nearby Teslas for the web UI (nearby() sorts
@@ -123,6 +123,7 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
         const bool recovery_hint = self->pairing_recovery_hint_.load();
         const tk::AutomaticKeyAction key_action = tk::decide_automatic_key_action(
             key_probe_ok, stored_key_present, self->key_runtime_safe_.load(), recovery_hint);
+        self->automatic_key_action_.store(key_action);
         if (key_action == tk::AutomaticKeyAction::StorageUnavailable) {
             self->key_runtime_safe_.store(false);
             self->believed_paired_.store(false);
@@ -139,14 +140,14 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
         }
         if (key_action == tk::AutomaticKeyAction::RecoveryRequired) {
             // Remote status/error evidence is only a volatile recovery hint. Keep the durable
-            // key and sessions intact; explicit /send_key reuses the same key if the user
-            // decides to enrol it again. Continue below only with a non-waking health probe.
+            // key and sessions intact. A bounded same-key enrollment attempt can follow a
+            // failed status probe; the hint never authorizes local identity replacement.
             self->repair_notice_.store(true);
             if (tk::periodic_log_due(
                     recovery_notice,
                     static_cast<uint64_t>(esp_timer_get_time()) / 1000ULL,
                     tk::kAutoPairNoticeRepeatMs)) {
-                ESP_LOGW(TAG, "auto-pair: vehicle authorization needs attention — preserving key and sessions; explicit enrolment required");
+                ESP_LOGW(TAG, "auto-pair: checking vehicle authorization — preserving key and sessions");
             }
         }
         if (key_action == tk::AutomaticKeyAction::Generate) {
@@ -162,7 +163,9 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
             continue;
         }
 
-        if (self->has_session()) {
+        if ((self->has_session() || self->session_available()) && !recovery_hint) {
+            // Keep the send deadline across healthy/hint oscillation; clearing a transient
+            // hint must not restart the enrollment cadence with an immediate transmission.
             // Re-entering enrolment after a real paired state is a state change and should
             // announce its instructions immediately rather than inherit the old hourly clock.
             tk::periodic_log_reset(unpaired_notice);
@@ -221,9 +224,8 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
             continue;
         }
 
-        // No stored VCSEC session: do not infer that the key was deleted and do not send a
-        // Whitelist Add automatically. A user can explicitly submit the existing key with
-        // /send_key; this bounded status probe can discover an already-enrolled key meanwhile.
+        // A bounded status probe may establish a session for an already-enrolled key. Do this
+        // before each scheduled enrollment, including after an unconfirmed transmission.
         self->believed_paired_ = false;
         // Leaving the paired steady state also retires its retry countdown. The idle wait
         // deliberately leaves its deadline armed-but-expired so the row reads "retrying…"
@@ -231,10 +233,17 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
         self->retry_deadline_.store(0);
 
         // Read-only probe for an existing whitelist entry. It cannot enrol or rotate a key.
-        VehicleStatusResult st;
-        self->get_vehicle_status(st, tk::ConnectOrigin::Background, 6000);
-        if (self->has_session()) {
-            ESP_LOGI(TAG, "auto-pair: session established");
+        const bool status_received = self->poll_existing_key_();
+        const auto session = self->enrollment_session_snapshot_(pdMS_TO_TICKS(50));
+        if (session.observed() && session.present() && (!recovery_hint || status_received)) {
+            if (status_received) {
+                // As in health_probe_, this only clears an advisory connection hint. A
+                // plaintext response is not evidence of authenticated vehicle acceptance.
+                self->pairing_recovery_hint_.store(false);
+                self->repair_notice_.store(false);
+            }
+            ESP_LOGD(TAG, "auto-pair: durable or runtime session available");
+            self->idle_until_next_health_poll_();
             continue;
         }
 
@@ -244,9 +253,16 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
             tk::kAutoPairNoticeRepeatMs);
         self->repair_notice_.store(true);
         if (announce_unpaired) {
-            ESP_LOGI(TAG, "auto-pair: no stored session — preserving key; use the web UI's explicit send-key action if enrolment is intended");
+            ESP_LOGI(TAG, "auto-pair: pairing automatically with the existing key; place the NFC card on the reader and approve on the touchscreen");
         } else {
-            ESP_LOGD(TAG, "auto-pair: no stored session — preserving key; explicit enrolment action is required");
+            ESP_LOGD(TAG, "auto-pair: waiting for automatic pairing with the existing key");
+        }
+        const uint64_t now_ms = static_cast<uint64_t>(esp_timer_get_time()) / 1000ULL;
+        if (tk::auto_enrollment_due(enrollment, now_ms, session,
+                self->pairing_recovery_hint_.load(), stored_key_present && self->key_runtime_safe_.load(),
+                ota_identity_mutation_allowed(tk::IdentityMutationEntry::AutomaticEnrollment))) {
+            tk::auto_enrollment_started(enrollment, now_ms);
+            self->enroll_existing_key_();
         }
         self->idle_until_next_health_poll_();
       } catch (const std::exception& e) {
@@ -419,55 +435,27 @@ tk::KeyRotationResult VehicleController::generate_key_locked_() {
         tk::MutexGuard cache_guard(cache_mutex_);
         key_fingerprint_cache_ = std::move(new_fp);
     }
-    // Record when the key was generated so the UI can show the key's creation date next to its
-    // fingerprint — but only from an AUTHORITATIVE clock (SNTP, or an explicit browser
-    // /set_time), never from the NVS-cached wall clock main.cpp restores at boot. That cached
-    // value is the time of the PREVIOUS sync, so stamping it here would date a key minutes old
-    // to hours or weeks ago, durably: nothing rewrites key_created until the next rotation. The
-    // exposure is a headless board on a network that blocks NTP, re-keying because the car
-    // dropped our key — exactly the case with no browser to correct it. Same rule as the sibling
-    // paired_at() stamp; see main/time_sync.hpp. Leaving it unstamped is the better failure:
-    // status_model.hpp omits key_created below its plausibility floor, so the UI shows nothing
-    // rather than a confident wrong date, and the next rotation under a real clock stamps it.
-    //
-    // The date describes THIS key. When it cannot be stamped (no authoritative clock, or the write
-    // failed) the previous key's date must not survive beside the new fingerprint, or the UI would
-    // present the old key's age as the new key's: retire it, and if even that fails distrust the
-    // stored value until the next successful stamp.
-    bool key_created_stamped = false;
-    if (storage_ && clock_is_authoritative()) {
-        try {
-            time_t now = time(nullptr);
-            key_created_stamped = storage_->save_str(tk::nvs_contract::kKeyCreated,
-                                                     std::to_string((long long)now));
-            if (!key_created_stamped) {
-                ESP_LOGW(TAG, "key generated but its creation date was not persisted");
-            }
-        } catch (...) {
-            ESP_LOGW(TAG, "key generated but creation-date metadata allocation failed");
-        }
-    }
+    // Only an acquired NTP authority followed by a bounded time sample may stamp THIS key.
+    // Failed/no stamp retires the previous key's date before the existing journal cleanup.
     if (storage_) {
-        if (key_created_stamped) {
+        const bool authoritative = clock_is_authoritative();
+        const time_t now = authoritative ? time(nullptr) : 0;
+        const auto date = tk::stamp_or_retire_key_date(
+            authoritative && tk::historical_date_valid(now, clock_plausibility_ceiling()),
+            [&] { return storage_->save_str(tk::nvs_contract::kKeyCreated,
+                                             std::to_string((long long)now)); },
+            [&] { return storage_->remove(tk::nvs_contract::kKeyCreated); });
+        if (date == tk::KeyCreatedDateResult::Stamped) {
             key_created_untrusted_.store(false);
-        } else {
-            bool retired = false;
-            try {
-                retired = storage_->remove(tk::nvs_contract::kKeyCreated);
-            } catch (...) {
-                ESP_LOGW(TAG, "previous key creation date could not be retired (allocation failed)");
-            }
-            if (!retired) {
-                key_created_untrusted_.store(true);
-                ESP_LOGW(TAG, "previous key creation date could not be erased — rotation journal "
-                              "remains armed until the date can be retired");
-            }
+        } else if (date == tk::KeyCreatedDateResult::Untrusted) {
+            key_created_untrusted_.store(true);
+            ESP_LOGW(TAG, "previous key creation date could not be retired; journal remains armed");
         }
     }
     // A new key invalidates any existing pairing: the stored session belonged to the
     // previous key/whitelist entry, so a fresh enrolment + handshake is required.
     // Wipe the session and cached data so has_session() flips to false. The UI then offers
-    // an explicit same-key enrollment action; the supervisor does not enroll automatically.
+    // the automatic same-key enrollment flow after the identity transaction completes.
     bool cleanup_complete = false;
     try {
         cleanup_complete = finish_key_rotation_cleanup_();
@@ -551,39 +539,37 @@ bool VehicleController::finish_key_rotation_cleanup_() {
 // called while holding vehicle_mutex_ (it takes it to reset the in-memory peers).
 bool VehicleController::clear_session_and_cache_() {
     bool cleanup_ok = true;
-    // Reset in-memory peer sessions (and flush command runner / RX
-    // state) so a stale session key cannot be reused.
-    // Only bother when something is actually established to avoid a spurious log on a
-    // first-boot key generation.
-    bool had_link    = ble_ && ble_->is_connected();
-    bool had_session = has_session();
-    // is_connected() now means GATT command-ready, which is intentionally narrower than a
-    // physical GAP link. Disconnect unconditionally so a rotation also aborts service/CCCD
-    // discovery; otherwise its delayed ready callback could publish the just-invalidated link.
+    session_runtime_bits_.store(0, std::memory_order_release);
+    // RAM sessions can remain valid after persistence failed and the link disconnected.
+    // Identity cleanup must invalidate them even when no durable session or ready link exists.
+    // Disconnect unconditionally to abort discovery and its delayed ready callback as well.
     if (ble_) ble_->disconnect();
-    if (had_link || had_session) {
-        // Reset command runner and in-memory peer sessions so a stale session key cannot be reused.
-        command_generation_.fetch_add(1);
-        try {
-            tk::SemGuard g(vehicle_mutex_);
+    command_generation_.fetch_add(1);
+    try {
+        tk::SemGuard g(vehicle_mutex_);
+        if (!g) {
+            ESP_LOGE(TAG, "pairing in-memory reset unavailable — vehicle lock was not acquired");
+            cleanup_ok = false;
+        } else {
+            retire_vcsec_contexts_();
             command_runner_.reset(/*reset_framer=*/false);
             request_framer_reset_();
             command_builders_.fill(nullptr);
             if (client_) {
                 if (auto* p = client_->get_peer(UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY)) {
-                    p->set_is_valid(false);
+                    p->reset();
                 }
                 if (auto* p = client_->get_peer(UniversalMessage_Domain_DOMAIN_INFOTAINMENT)) {
-                    p->set_is_valid(false);
+                    p->reset();
                 }
             }
-        } catch (const std::exception& e) {
-            ESP_LOGE(TAG, "pairing in-memory reset threw (%s)", e.what());
-            cleanup_ok = false;
-        } catch (...) {
-            ESP_LOGE(TAG, "pairing in-memory reset threw (unknown)");
-            cleanup_ok = false;
         }
+    } catch (const std::exception& e) {
+        ESP_LOGE(TAG, "pairing in-memory reset threw (%s)", e.what());
+        cleanup_ok = false;
+    } catch (...) {
+        ESP_LOGE(TAG, "pairing in-memory reset threw (unknown)");
+        cleanup_ok = false;
     }
 
     // Erase the persisted sessions so has_session() is false until a fresh handshake.
@@ -743,39 +729,36 @@ bool VehicleController::health_probe_(int timeout_ms) {
             VCSEC_InformationRequestType_INFORMATION_REQUEST_TYPE_GET_STATUS, b, l);
     }, WakePolicy::NoWakeFail, timeout_ms, tk::ConnectOrigin::Background,
        /*auth_fail_is_health_probe=*/true,
-       tk::CompletionTimeoutPolicy::BackgroundHealth);
+       tk::CompletionTimeoutPolicy::BackgroundHealth, false,
+       tk::CommandEffect::ReadOnly, tk::VcsecReplyKind::Status);
 }
 
 time_t VehicleController::key_created_at() {
-    if (!storage_) return 0;
-    // A rotation could neither stamp nor erase the previous key's date: it belongs to a key that
-    // no longer exists, so report "unknown" rather than a confident wrong date.
-    if (key_created_untrusted_.load()) return 0;
-    std::string s;
-    if (!storage_->load_str(tk::nvs_contract::kKeyCreated, s)) return 0;
-    return (time_t)atoll(s.c_str());
+    if (!storage_ || key_created_untrusted_.load()) return 0;
+    std::string text;
+    int64_t seconds = 0;
+    if (!storage_->load_str(tk::nvs_contract::kKeyCreated, text) ||
+        !tk::clock_parse_date(text, clock_plausibility_ceiling(), seconds)) return 0;
+    // Old plausible records have no stored provenance; do not rewrite or infer their source.
+    return static_cast<time_t>(seconds);
 }
 
 time_t VehicleController::paired_at() {
     if (!storage_ || !has_session()) return 0;
-    std::string s;
-    if (storage_->load_str(tk::nvs_contract::kPairedAt, s)) {
-        time_t t = (time_t)atoll(s.c_str());
-        if (t > 1600000000) return t;
-    }
-    // First time we observe a session with an authoritative wall clock: stamp it now. For a
-    // fresh handshake this is within seconds of pairing; a pairing that predates this
-    // tracking (or whose clock was unsynced) gets stamped at first sync instead.
-    // Do NOT stamp when the clock is merely restored from NVS (historical shutdown time).
-    time_t now = time(nullptr);
-    if (clock_is_authoritative() && now > 1600000000) {
-        if (!storage_->save_str(tk::nvs_contract::kPairedAt,
-                                std::to_string((long long)now))) {
-            ESP_LOGW(TAG, "pairing date not persisted — the UI will re-stamp it on the next sync");
-        }
-        return now;
-    }
-    return 0;
+    std::string text;
+    int64_t seconds = 0;
+    if (storage_->load_str(tk::nvs_contract::kPairedAt, text) &&
+        tk::clock_parse_date(text, clock_plausibility_ceiling(), seconds))
+        return static_cast<time_t>(seconds);
+    // First status observation of a stored session at NTP time, not the Tesla pairing event.
+    // Acquire authority BEFORE sampling time: the reverse ordering could persist a browser
+    // sample taken just before the first NTP commit. Storage is outside the clock gate.
+    if (!clock_is_authoritative()) return 0;
+    const time_t now = time(nullptr);
+    if (!tk::historical_date_valid(now, clock_plausibility_ceiling())) return 0;
+    if (!storage_->save_str(tk::nvs_contract::kPairedAt, std::to_string((long long)now)))
+        ESP_LOGW(TAG, "session first-observed date not confirmed; a later status may retry");
+    return now;
 }
 
 bool VehicleController::has_key() {
@@ -831,10 +814,8 @@ __attribute__((noinline)) std::string VehicleController::compute_key_fingerprint
                 if (psa_hash_compute(PSA_ALG_SHA_1, pub, publen, sha, sizeof(sha), &shalen) ==
                         PSA_SUCCESS &&
                     shalen == sizeof(sha)) {
-                    char buf[16];
-                    snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X",
-                             sha[0], sha[1], sha[2], sha[3]);
-                    fp = buf;
+                    const auto formatted = tk::key_fingerprint_text(sha, sizeof(sha));
+                    fp = formatted.data();
                 }
             }
         }
@@ -867,24 +848,49 @@ std::string VehicleController::key_fingerprint() {
     return fp;
 }
 
-bool VehicleController::pair(tk::ConnectOrigin origin, int timeout_ms) {
-    if (origin != tk::ConnectOrigin::Foreground) {
-        ESP_LOGE(TAG, "automatic Whitelist Add is disabled — enrollment requires explicit user action");
-        return false;
-    }
+// Keep the string-bearing status result out of the long-lived supervisor frame.
+__attribute__((noinline))
+bool VehicleController::poll_existing_key_() {
+    VehicleStatusResult status;
+    return get_vehicle_status(status, tk::ConnectOrigin::Background, 6000);
+}
+
+tk::AutoEnrollmentSession VehicleController::enrollment_session_snapshot_(TickType_t wait_ticks) {
+    tk::AutoEnrollmentSession snapshot;
+    snapshot.storage_readable = storage_ &&
+        storage_->probe_blob(tk::nvs_contract::kSessionVcsec, snapshot.stored);
+    // Storage I/O above, then a bounded POD snapshot only. Missing ownership/client/peer is
+    // unknown, never confirmed absence. No library validators that can log under this lock.
+    tk::SemGuard vehicle_guard(vehicle_mutex_, wait_ticks);
+    if (!vehicle_guard || !client_) return snapshot;
+    const auto runtime = runtime_session_observation_locked_(UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY);
+    snapshot.runtime_readable = runtime.known;
+    snapshot.runtime_ready = runtime.usable;
+    return snapshot;
+}
+
+bool VehicleController::enroll_existing_key_(int timeout_ms) {
+    OtaIdentityMutationGuard identity_guard(tk::IdentityMutationEntry::AutomaticEnrollment);
+    if (!identity_guard) return false;
     if (!tk::runtime_admission_vehicle_ready()) return false;
     if (timeout_ms <= 0) return false;
     const uint32_t deadline = deadline_in_(static_cast<uint32_t>(timeout_ms));
     tk::SemGuard cmd_guard(command_mutex_, ticks_until_(deadline));
     if (!cmd_guard) {
-        ESP_LOGW(TAG, "pair deadline exhausted waiting for another request");
+        ESP_LOGD(TAG, "pair deadline exhausted waiting for another request");
         return false;
     }
     // Check only after taking command_mutex_: a concurrent generate_key() may have changed the
-    // identity while this caller waited. has_key() proves storage contains a key;
+    // identity while this caller waited. Tri-state probes must confirm the stored key and session;
     // command_identity_ready_ proves this Vehicle uses it and cleanup is complete.
-    if (!has_key() || !command_identity_ready_()) {
-        ESP_LOGE(TAG, "pair refused — no verified storage-backed runtime key (reboot or regenerate required)");
+    bool key_present = false;
+    const bool key_probe_ok = storage_ && storage_->probe_blob(tk::nvs_contract::kPrivateKey, key_present);
+    const auto session = enrollment_session_snapshot_(
+        std::min<TickType_t>(ticks_until_(deadline), pdMS_TO_TICKS(50)));
+    if (!tk::runtime_admission_vehicle_ready() || !has_plausible_vin() ||
+        !key_probe_ok || !key_present || !command_identity_ready_() ||
+        !tk::auto_enrollment_needed(session, pairing_recovery_hint_.load())) {
+        ESP_LOGD(TAG, "automatic enrollment deferred — identity/session admission changed");
         return false;
     }
     tk::InFlightGuard inflight(cmd_in_flight_);
@@ -900,21 +906,21 @@ bool VehicleController::pair(tk::ConnectOrigin origin, int timeout_ms) {
             return c->build_white_list_message(
                 role, VCSEC_KeyFormFactor_KEY_FORM_FACTOR_CLOUD_KEY, b, l);
         },
-        WakePolicy::NoWakeFail, deadline, origin,
+        WakePolicy::NoWakeFail, deadline, tk::ConnectOrigin::Background,
         /*auth_fail_is_health_probe=*/false,
-        tk::CompletionTimeoutPolicy::ForegroundWarn,
+        tk::CompletionTimeoutPolicy::ExpectedSilent,
         true /* completes_on_transmit: the vehicle does not acknowledge Whitelist Add */,
         0 /* max_retries: a partial BLE write may already have reached the vehicle */);
 
     if (!outcome.completed && !outcome.error.empty()) {
-        ESP_LOGW(TAG, "Whitelist Add transmission was not confirmed: %s", outcome.error.c_str());
+        ESP_LOGD(TAG, "Whitelist Add transmission was not confirmed: %s", outcome.error.c_str());
     } else if (!outcome.completed) {
-        ESP_LOGW(TAG, "Whitelist Add was not confirmed as transmitted");
+        ESP_LOGD(TAG, "Whitelist Add was not confirmed as transmitted");
     } else if (!outcome.success) {
-        ESP_LOGW(TAG, "Whitelist Add transmission failed: %s",
+        ESP_LOGD(TAG, "Whitelist Add transmission failed: %s",
                  outcome.error.empty() ? "vehicle returned failure" : outcome.error.c_str());
     } else {
-        ESP_LOGI(TAG, "Whitelist Add transmitted; vehicle approval remains unconfirmed");
+        ESP_LOGD(TAG, "Whitelist Add transmitted; vehicle approval remains unconfirmed");
     }
     return outcome.completed && outcome.success;
 }

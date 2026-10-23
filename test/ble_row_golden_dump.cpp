@@ -5,14 +5,19 @@
 // and diffs the result — so "app.js mirrors the presenter" is checked by CI, not by hand.
 // Host-only, no ESP-IDF; plain g++. Built + run by scripts/check-ble-row-parity.sh.
 //
-// The sweep is exhaustive over the representable input space rather than a hand-picked list:
-// the whole point of this file is to leave no combination where the two implementations could
-// quietly differ.
+// BLE vectors cover the finite input classes below. --web-presenters additionally sweeps all
+// integer SoC percentages with clamp cases, signed-byte RSSI and integer extrema.
 
 #include "logic/ble_row.hpp"
 #include "logic/link_state.hpp"
 
+#include "logic/display_model.hpp"
+#include "logic/soc_gradient.hpp"
+
 #include <cstdio>
+#include <cstring>
+#include <limits>
+#include <initializer_list>
 
 namespace b = tk::ble;
 
@@ -24,7 +29,25 @@ static const char* phase_str(b::Phase p) {
     }
 }
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc==2 && std::strcmp(argv[1],"--web-presenters")==0) {
+        std::printf("kind\tinput\tr\tg\tb\n");
+        for (int soc=-100;soc<=200;++soc) {
+            int r,g,b;tk::soc_rgb(soc,r,g,b);
+            std::printf("soc\t%d\t%d\t%d\t%d\n",soc,r,g,b);
+        }
+        for (int soc : {std::numeric_limits<int>::min(),std::numeric_limits<int>::max()}) {
+            int r,g,b;tk::soc_rgb(soc,r,g,b);
+            std::printf("soc\t%d\t%d\t%d\t%d\n",soc,r,g,b);
+        }
+        for (int rssi=-128;rssi<=127;++rssi)
+            std::printf("rssi\t%d\t%d\t0\t0\n",rssi,tk::display::rssi_bars(rssi));
+        for (int rssi : {std::numeric_limits<int>::min(),std::numeric_limits<int>::max()})
+            std::printf("rssi\t%d\t%d\t0\t0\n",rssi,tk::display::rssi_bars(rssi));
+        std::printf("warn\t0\t%u\t0\t0\n",static_cast<unsigned>(b::kConnectFailWarn));
+        return 0;
+    }
+    if (argc!=1) return 2;
     const b::Phase phases[]  = { b::Phase::None, b::Phase::Connecting, b::Phase::Waiting };
     const uint32_t fails[]   = { 0, 1, 2, 9 };
     const int      devices[] = { 0, 4 };

@@ -288,14 +288,9 @@ export function describeSerialConnection(info = {}) {
   return "Web Serial";
 }
 
-export function selectManifestBuild(manifest, chipFamily, info = {}) {
+export function selectManifestBuild(manifest, chipFamily) {
   if (!manifest || !Array.isArray(manifest.builds)) return undefined;
-  const serialType = detectedSerialType(info);
-  return manifest.builds.find((build) =>
-    build.chipFamily === chipFamily && build.serialType === serialType
-  ) || manifest.builds.find((build) =>
-    build.chipFamily === chipFamily && build.serialType === undefined
-  );
+  return manifest.builds.find((build) => build.chipFamily === chipFamily);
 }
 
 export function combinedProgress(fileArray, fileIndex, written, total) {
@@ -326,6 +321,9 @@ function manifestError(message) {
 function validateBuild(build, manifestUrl) {
   if (!build || !SUPPORTED_CHIPS.includes(build.chipFamily)) {
     throw manifestError("The firmware manifest contains an unsupported chip family.");
+  }
+  if (Object.keys(build).sort().join(",") !== "chipFamily,parts") {
+    throw manifestError("Firmware build fields must be exactly chipFamily and parts.");
   }
   if (!Array.isArray(build.parts) || build.parts.length !== 4) {
     throw manifestError(`${build.chipFamily} must contain exactly four flash parts.`);
@@ -410,7 +408,7 @@ export async function fetchFirmwareParts(build, manifestUrl, fetchImpl = fetch, 
     if (data.byteLength !== part.size) {
       throw errorWithName(
         "FirmwareIntegrityError",
-        `${part.path} has ${data.byteLength} bytes; the signed manifest requires ${part.size}.`
+        `${part.path} has ${data.byteLength} bytes; the manifest requires ${part.size}.`
       );
     }
     const actualHash = await sha256Hex(data, cryptoImpl);
@@ -853,7 +851,8 @@ export function attachWebInstaller({
   ESPLoaderCtor,
   fetchImpl = fetch,
   manifestPath = "manifest.json",
-  verifyBootImpl = verifyBootVersion
+  verifyBootImpl = verifyBootVersion,
+  confirmEraseImpl = (message) => globalThis.confirm?.(message) === true
 }) {
   if (!root) throw new Error("The installer root is missing.");
 
@@ -1150,7 +1149,7 @@ export function attachWebInstaller({
       markSteps(2);
       setPageStatus(
         manifest.new_install_prompt_erase
-          ? "Device ready. Erase is selected for a first install; choose Keep only for an existing dual-OTA installation."
+          ? "Device ready. Keep configuration preserves an existing dual-OTA installation. For a first install, choose Erase and confirm the factory reset."
           : "Device ready. Choose how the firmware should be installed.",
         "success"
       );
@@ -1174,6 +1173,14 @@ export function attachWebInstaller({
 
   const install = async () => {
     if (!selectedPort || !manifest || busy || monitorStartPromise || monitorStopPromise) return;
+    const eraseFirst = root.querySelector('input[name="install-mode"]:checked')?.value === "erase";
+    if (eraseFirst && confirmEraseImpl(
+      "Erase everything? This permanently deletes WiFi, VIN, MQTT settings, the private pairing key and BLE sessions. " +
+      "Back up secret NVS before continuing. Vehicle pairing will be required again."
+    ) !== true) {
+      setPageStatus("Installation cancelled. No flash changes were made.");
+      return;
+    }
     busy = true;
     const installController = new AbortController();
     activeInstallController = installController;
@@ -1194,7 +1201,6 @@ export function attachWebInstaller({
 
     let written = false;
     try {
-      const eraseFirst = Boolean(root.querySelector('input[name="install-mode"]:checked')?.value === "erase");
       const flashed = await flashDevice({
         port: selectedPort,
         manifest,
@@ -1343,11 +1349,7 @@ export function attachWebInstaller({
         previewLink.textContent = `View source commit ${shortSha}`;
       }
       if (manifest.new_install_prompt_erase) {
-        const eraseOption = root.querySelector('input[name="install-mode"][value="erase"]');
-        const keepBadge = element("keep-recommended");
         const eraseBadge = element("erase-recommended");
-        if (eraseOption) eraseOption.checked = true;
-        if (keepBadge) keepBadge.hidden = true;
         if (eraseBadge) eraseBadge.hidden = false;
       }
       if (selectedPort && !busy) installButton.disabled = false;

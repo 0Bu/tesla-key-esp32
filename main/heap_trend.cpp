@@ -71,7 +71,7 @@ struct AdoptionLog {
 // Decide under the trend mutex; log only the captured outcome after it is released.
 AdoptionLog adopt_or_reset() {
     if (s_ready) return Adoption::None;
-    const bool retained = heap_persist_valid(persist());
+    const bool retained = heap_persist_valid(persist()) && heap_carry_fits(persist().ring);
     AdoptionLog out(retained ? Adoption::Retained : Adoption::Empty);
     if (retained) {
         s_carry_s = heap_persist_next_carry(persist().ring);
@@ -113,6 +113,13 @@ void heap_trend_record(uint32_t monotonic_s, uint32_t free_bytes, uint32_t large
     {
         SemGuard g(m);
         adopted = adopt_or_reset();
+        if (!heap_timeline_fits(monotonic_s, s_carry_s)) {
+            // Retained time uses uint32 seconds. Start a new diagnostic timeline rather than
+            // wrapping its carry after about 136 years; persistent layout and NVS are unchanged.
+            persist().ring.reset();
+            s_carry_s = 0;
+            adopted = Adoption::Empty;
+        }
         // The carry places this boot's uptime on the retained timeline.
         persist().ring.record(monotonic_s + s_carry_s, free_bytes, largest_bytes);
         seal();

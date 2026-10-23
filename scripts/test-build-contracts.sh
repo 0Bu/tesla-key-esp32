@@ -6,6 +6,28 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 "$repo_root/scripts/release-relevance.sh" --self-test
 "$repo_root/scripts/select-release-version.sh" --self-test
 "$repo_root/scripts/check-reproducible-build.sh" --self-test
+# Actual entry points must reject injected build settings before even their tool-free self-test.
+python3 - "$repo_root" <<'PY_ENV'
+import os, subprocess, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+names = ("SDKCONFIG_DEFAULTS", "EXTRA_COMPONENT_DIRS", "CFLAGS", "CXXFLAGS", "CPPFLAGS", "LDFLAGS",
+         "IDF_COMPONENT_FUTURE", "TESLA_BLE_FUTURE")
+for script in ("ci-build-all.sh", "check-reproducible-build.sh"):
+    clean = dict(os.environ)
+    for name in names:
+        clean.pop(name, None)
+    positive = subprocess.run([str(root / "scripts" / script), "--self-test"], env=clean,
+                              capture_output=True, timeout=10)
+    assert positive.returncode == 0, (script, positive.stderr.decode())
+    for name in names:
+        for value in ("", "untrusted"):
+            env = dict(clean, **{name: value})
+            result = subprocess.run([str(root / "scripts" / script), "--self-test"], env=env,
+                                    capture_output=True, timeout=10)
+            assert result.returncode == 2 and name.encode() in result.stderr, (script, name, value)
+print("build override entry-point controls: PASS (2 positive, 32 negative)")
+PY_ENV
 "$repo_root/scripts/publish-pages-branch.sh" --self-test
 python3 "$repo_root/scripts/check-reproducible-artifacts.py" --self-test
 python3 "$repo_root/scripts/check-dependency-contract.py" --self-test
@@ -21,9 +43,12 @@ python3 "$repo_root/scripts/report-firmware-size.py" --self-test
 python3 "$repo_root/scripts/check-release-assets.py" --self-test
 python3 "$repo_root/scripts/check-signed-root-inventory.py" --self-test
 python3 "$repo_root/scripts/prepare-reused-release.py" --self-test
+python3 "$repo_root/scripts/wait-pages-build.py" --self-test
 python3 "$repo_root/scripts/check-published-release.py" --self-test
 python3 "$repo_root/scripts/check-pages-source.py" --self-test
 python3 "$repo_root/scripts/check-dev-pages.py" --self-test
+python3 "$repo_root/scripts/check-pages-manifest.py" --self-test
+python3 "$repo_root/scripts/check-release-pages-bytes.py" --self-test
 python3 "$repo_root/scripts/generate-ota-changelog.py" --self-test
 python3 "$repo_root/scripts/check-stack-usage.py" --self-test
 python3 "$repo_root/scripts/check-build-gate-contract.py" --self-test

@@ -159,26 +159,6 @@ def verify_snapshot(
     except (TypeError, ValueError, RuntimeError) as exc:
         raise AcceptanceError(f"published Release metadata is not authoritative: {exc}") from exc
 
-    manifest_raw: bytes | None = None
-    manifest: dict[str, Any] | None = None
-    downloads: list[tuple[str, int]] | None = None
-    last_error: Exception | None = None
-    for attempt in range(1, attempts + 1):
-        url = exact_url(pages_base, "manifest.json", f"{source_sha}-{attempt}")
-        try:
-            candidate = fetcher(url, MANIFEST_MAX)
-            parsed, planned = parse_ready_manifest(candidate, version, source_sha)
-            manifest_raw, manifest, downloads = candidate, parsed, planned
-            break
-        except AcceptanceError as exc:
-            last_error = exc
-            if attempt < attempts:
-                sleeper(interval)
-    if manifest_raw is None or manifest is None or downloads is None:
-        raise AcceptanceError(
-            f"deployed manifest did not converge after {attempts} bounded attempts: {last_error}"
-        )
-
     manifest_validator = load_module(scripts_dir / "check-pages-manifest.py", "pages_manifest_validator")
     byte_validator = load_module(scripts_dir / "check-release-pages-bytes.py", "release_pages_validator")
     with tempfile.TemporaryDirectory(prefix="tesla-published-acceptance-") as directory:
@@ -187,14 +167,7 @@ def verify_snapshot(
         release = root / "release"
         site.mkdir()
         release.mkdir()
-        (site / "manifest.json").write_bytes(manifest_raw)
-        for name, expected_size in downloads:
-            data = fetcher(exact_url(pages_base, name, source_sha), expected_size)
-            if len(data) != expected_size:
-                raise AcceptanceError(
-                    f"deployed Pages part {name} length differs: expected={expected_size} actual={len(data)}"
-                )
-            (site / name).write_bytes(data)
+        # Release authority and immutable bytes are checked once, before Pages propagation retries.
         for _family, _target, suffix, _boot_offset in TARGETS:
             name = f"tesla-key-esp32{suffix}-{version}-merged.bin"
             data = fetcher(exact_url(release_base, name), FLASH_SIZE)
@@ -203,13 +176,34 @@ def verify_snapshot(
             (release / name).write_bytes(data)
 
         try:
-            manifest_validator.validate(site, source_sha, version)
-            count = byte_validator.verify(site, release, version)
             if release_validator.validate(release_metadata, release, version, source_sha) != len(TARGETS):
                 raise AcceptanceError("published Release metadata did not bind exactly four assets")
         except (OSError, ValueError, RuntimeError) as exc:
-            raise AcceptanceError(f"deployed Release/Pages byte acceptance failed: {exc}") from exc
-    return count
+            raise AcceptanceError(f"published Release byte acceptance failed: {exc}") from exc
+
+        last_error: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            cache_key = f"{source_sha}-{attempt}"
+            try:
+                candidate = fetcher(exact_url(pages_base, "manifest.json", cache_key), MANIFEST_MAX)
+                _manifest, downloads = parse_ready_manifest(candidate, version, source_sha)
+                (site / "manifest.json").write_bytes(candidate)
+                for name, expected_size in downloads:
+                    data = fetcher(exact_url(pages_base, name, cache_key), expected_size)
+                    if len(data) != expected_size:
+                        raise AcceptanceError(
+                            f"deployed Pages part {name} length differs: expected={expected_size} actual={len(data)}"
+                        )
+                    (site / name).write_bytes(data)
+                manifest_validator.validate(site, source_sha, version)
+                return byte_validator.verify(site, release, version)
+            except (AcceptanceError, OSError, ValueError, RuntimeError) as exc:
+                last_error = exc
+                if attempt < attempts:
+                    sleeper(min(interval * (2 ** (attempt - 1)), 60))
+    raise AcceptanceError(
+        f"deployed Release/Pages served-byte snapshot did not converge after {attempts} bounded attempts: {last_error}"
+    )
 
 
 def self_test() -> None:
@@ -332,6 +326,43 @@ def self_test() -> None:
         exact_url(pages_base, "manifest.json", source_sha)
     ).path
     ready_manifest = mappings[manifest_path]
+    # These two delegates protect different contracts. Internally consistent altered Pages
+    # must still match Release bytes; Release-equal bytes must still have a canonical manifest.
+    def reject_snapshot(label: str) -> None:
+        try:
+            verify_snapshot(
+                pages_base, release_base, version, source_sha, release_metadata,
+                attempts=2, interval=0, fetcher=fake_fetch, sleeper=lambda _: None,
+            )
+        except AcceptanceError:
+            return
+        raise AssertionError(f"published snapshot accepted: {label}")
+
+    for build_index in range(4):
+        changed = json.loads(ready_manifest)
+        part = changed["builds"][build_index]["parts"][2]
+        path = urllib.parse.urlsplit(exact_url(pages_base, part["path"])).path
+        original = mappings[path]
+        altered = bytes([original[0] ^ 1]) + original[1:]
+        part["sha256"] = hashlib.sha256(altered).hexdigest()
+        mappings[path] = altered
+        mappings[manifest_path] = json.dumps(changed).encode()
+        try:
+            reject_snapshot("internally valid Pages app differs from immutable Release")
+        finally:
+            mappings[path] = original
+            mappings[manifest_path] = ready_manifest
+    for field in ("project-name", "declared-hash"):
+        changed = json.loads(ready_manifest)
+        if field == "project-name":
+            changed["name"] = "wrong-project"
+        else:
+            changed["builds"][0]["parts"][2]["sha256"] = "0" * 64
+        mappings[manifest_path] = json.dumps(changed).encode()
+        try:
+            reject_snapshot("Release-equal Pages bytes with invalid manifest " + field)
+        finally:
+            mappings[manifest_path] = ready_manifest
     stale_manifest = json.loads(ready_manifest)
     stale_manifest["sourceSha"] = "f" * 40
     mappings[manifest_path] = json.dumps(stale_manifest).encode("utf-8")
@@ -352,8 +383,79 @@ def self_test() -> None:
         pass
     else:
         raise AssertionError("stale deployed manifest was accepted")
-    assert sleeps == [0.25, 0.25], "manifest polling did not stop at the configured bound"
+    assert sleeps == [0.25, 0.5], "manifest polling did not stop at the configured bound"
     mappings[manifest_path] = ready_manifest
+
+    part_names = [part["path"] for build in builds for part in build["parts"]]
+    for lagging in part_names:
+        for failure in ("length", "hash", "404"):
+            calls: list[tuple[str, str]] = []
+            sleeps = []
+
+            def propagating(url: str, maximum: int) -> bytes:
+                parsed = urllib.parse.urlsplit(url)
+                name = parsed.path.rsplit("/", 1)[-1]
+                key = urllib.parse.parse_qs(parsed.query).get("accept", [""])[0]
+                calls.append((key, name))
+                data = fake_fetch(url, maximum)
+                if key == source_sha + "-1" and name == lagging:
+                    if failure == "404":
+                        raise AcceptanceError("not propagated")
+                    return data[:-1] if failure == "length" else bytes([data[0] ^ 1]) + data[1:]
+                return data
+
+            assert verify_snapshot(
+                pages_base, release_base, version, source_sha, release_metadata,
+                attempts=2, interval=0.25, fetcher=propagating, sleeper=sleeps.append,
+            ) == 16
+            assert sleeps == [0.25]
+            assert [name for key, name in calls if key == source_sha + "-2"] == ["manifest.json", *part_names]
+            assert len([name for key, name in calls if not key]) == 4
+            assert all(not key for key, _name in calls[:4]), "Release bytes were not checked before Pages"
+
+    calls = []
+    sleeps = []
+
+    def alternating(url: str, maximum: int) -> bytes:
+        parsed = urllib.parse.urlsplit(url)
+        name = parsed.path.rsplit("/", 1)[-1]
+        key = urllib.parse.parse_qs(parsed.query).get("accept", [""])[0]
+        calls.append((key, name))
+        if key and name != "manifest.json":
+            attempt = int(key.removeprefix(source_sha + "-"))
+            if name == part_names[attempt % 2]:
+                raise AcceptanceError("each attempt has a missing part")
+        return fake_fetch(url, maximum)
+
+    try:
+        verify_snapshot(
+            pages_base, release_base, version, source_sha, release_metadata,
+            attempts=3, interval=0.25, fetcher=alternating, sleeper=sleeps.append,
+        )
+    except AcceptanceError:
+        pass
+    else:
+        raise AssertionError("Release acceptance accumulated incomplete Pages attempts")
+    assert sleeps == [0.25, 0.5]
+    assert [key for key, name in calls if name == "manifest.json"] == [source_sha + f"-{n}" for n in (1, 2, 3)]
+    assert len([name for key, name in calls if not key]) == 4
+
+    clock = [0.0]
+    waits: list[float] = []
+    delayed_identity = json.loads(ready_manifest)
+    delayed_identity["sourceSha"] = "f" * 40
+    def advance(seconds: float) -> None:
+        waits.append(seconds)
+        clock[0] += seconds
+    def delayed(url: str, maximum: int) -> bytes:
+        if urllib.parse.urlsplit(url).path == manifest_path and clock[0] < 60:
+            return json.dumps(delayed_identity).encode()
+        return fake_fetch(url, maximum)
+    assert verify_snapshot(
+        pages_base, release_base, version, source_sha, release_metadata,
+        attempts=6, interval=10, fetcher=delayed, sleeper=advance,
+    ) == 16
+    assert waits == [10, 20, 40] and clock[0] == 70
 
     first_release = urllib.parse.urlsplit(
         exact_url(release_base, f"tesla-key-esp32-{version}-merged.bin")
@@ -361,6 +463,13 @@ def self_test() -> None:
     tampered = bytearray(mappings[first_release])
     tampered[0x20000] ^= 1
     mappings[first_release] = bytes(tampered)
+    immutable_calls: list[str] = []
+    sleeps = []
+
+    def corrupt_release(url: str, maximum: int) -> bytes:
+        immutable_calls.append(url)
+        return fake_fetch(url, maximum)
+
     try:
         verify_snapshot(
             pages_base,
@@ -368,14 +477,17 @@ def self_test() -> None:
             version,
             source_sha,
             release_metadata,
-            attempts=1,
-            interval=0,
-            fetcher=fake_fetch,
+            attempts=3,
+            interval=0.25,
+            fetcher=corrupt_release,
+            sleeper=sleeps.append,
         )
     except AcceptanceError:
         pass
     else:
         raise AssertionError("deployed Release/Pages byte substitution was accepted")
+    assert not sleeps and len(immutable_calls) == 4
+    assert all(url.startswith(release_base + "/") for url in immutable_calls)
 
     try:
         exact_url("http://pages.example.invalid", "manifest.json")

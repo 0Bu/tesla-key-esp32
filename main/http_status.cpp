@@ -14,6 +14,7 @@
 #include "diag_crash.hpp"
 #include "heap_trend.hpp"
 #include "safe_mode.hpp"
+#include "runtime_admission.hpp"
 #include "mqtt_ha.hpp"
 #include "logic/status_model.hpp"
 #include "logic/redact.hpp"
@@ -42,7 +43,7 @@ static constexpr const char* TAG = "http-status";
 // ─── POST /scan — start a time-limited BLE discovery scan ─────────────────────
 
 esp_err_t handle_scan(GuardedReq rq) {
-    httpd_req_t* req = rq.req;
+    httpd_req_t* req = rq.req();
     if (!g_vehicle->ble_scan()) {
         tk::JsonBuilder unavailable;
         unavailable.boolean(unavailable.root(), "result", false);
@@ -95,8 +96,10 @@ static cJSON* build_status_object(bool redact) {
     in.key_fingerprint = g_vehicle->key_fingerprint();
     in.key_created     = (long long)g_vehicle->key_created_at();
     in.paired          = g_vehicle->has_session();
+    in.sessions        = g_vehicle->session_availability();
     in.paired_at       = (long long)g_vehicle->paired_at();
     in.reauth          = g_vehicle->reauth_required();
+    in.pairing_block_reason = g_vehicle->pairing_block_reason();
 
     // WiFi: SSID + live signal strength (dBm) of the station link, both from the transport
     // seam, which owns the mid-association guard. All three stay unset on a wired device, so
@@ -114,10 +117,11 @@ static cJSON* build_status_object(bool redact) {
     // why its presence — not a false-valued object — is the signal).
     in.eth_link = (tk::net_kind() == tk::NetLink::Eth);
     if (in.eth_link) tk::net_eth_phy(&in.eth_speed_mbps, &in.eth_full_duplex);
-    // Boot seeds this cache from verified configuration; committed saves refresh it even when
-    // an active OTA check defers the WiFi restart. Polling never reads or allocates an NVS blob.
+    // Boot seeds this cache from verified configuration; confirmed commits refresh it before
+    // fallible mirroring or reply work. Polling never reads or allocates an NVS blob.
     in.wifi_rolled_back = tk::cfg_wifi_rolled_back();
     in.ota_channel = tk::ota_channel_name(ota_get_channel());
+    in.ota_verification = ota_cached_verification_state();
 
     in.mqtt_configured = mqtt_ha_configured();
     in.mqtt_connected  = mqtt_ha_connected();
@@ -132,6 +136,7 @@ static cJSON* build_status_object(bool redact) {
         in.syslog_configured = sy.configured;
         in.syslog_resolved   = sy.resolved;
         in.syslog_reachable  = sy.reachable;
+        in.syslog_dropped_lines = sy.dropped_lines;
         in.syslog_host       = sy.host;
         in.syslog_port       = sy.port;
         in.syslog_error      = sy.error;
@@ -164,7 +169,7 @@ static cJSON* build_status_object(bool redact) {
     }
     in.link        = g_vehicle->link_state();
     in.vcsec_sleep = g_vehicle->vcsec_sleep_raw();
-    in.charge      = g_vehicle->get_cached_charge();
+    in.charge = g_vehicle->get_cached_charge_with_age(in.have_charge_age, in.charge_age_s);
 
     uint32_t ago = 0;
     if (g_vehicle->seconds_since_contact(ago)) { in.have_last_seen = true; in.last_seen_s = ago; }
@@ -192,6 +197,8 @@ static cJSON* build_status_object(bool redact) {
     in.uptime_s        = (uint32_t)(esp_timer_get_time() / 1000000);
     in.wifi_reconnects = tk::net_reconnect_count();
     in.safe_mode       = tk::safe_mode_active();
+    in.runtime_state   = tk::runtime_admission_state();
+    in.diag_dropped_lines = diag_log_dropped_lines();
     in.httpd_stack_min_free_bytes =
         tk::stack_watch_min_free_bytes(tk::StackWatch::Httpd);
     in.vehicle_stack_min_free_bytes =
@@ -202,10 +209,9 @@ static cJSON* build_status_object(bool redact) {
         tk::stack_watch_min_free_bytes(tk::StackWatch::Mqtt);
 
     // ── last_crash ────────────────────────────────────────────────────────────────────────────
-    // diag_crash_info_live() re-reads only the "is a dump still in flash" flag (a 4-byte read), not
-    // the summary parse — GET /coredump?clear=1 can erase the image mid-session, and a cached flag
-    // would leave the UI on a crash banner offering a download that 404s.
-    const tk::CrashInfo ci = tk::diag_crash_info_live();
+    // The live snapshot queries bounded header metadata and rechecks admission after borrowing
+    // immutable boot data. It never reparses the summary or restores invalidated authority.
+    const auto ci = tk::diag_crash_info_live();
     in.reset_reason = tk::reset_reason_slug(ci.reset_code);
     if (tk::crash_is_notable(ci)) {
         in.have_crash        = true;
@@ -213,10 +219,20 @@ static cJSON* build_status_object(bool redact) {
         in.crash_reason_code = ci.reset_code;
         in.crash_fault       = ci.fault;
         in.crash_coredump    = ci.coredump;
+        in.crash_artifact_present = ci.artifact_present;
+        in.crash_raw_available = ci.raw_available;
+        in.crash_query_error = ci.query_error;
+        in.crash_foreign_dump = ci.foreign_dump;
+        in.crash_checksum_verified = ci.checksum_verified;
+        in.crash_dump_identity = ci.dump_identity;
+        in.crash_dump_elf_sha256 = ci.dump_elf_sha256;
+        in.crash_summary_available = ci.summary_available;
+        in.crash_truncated = ci.truncated;
+        in.crash_isr = ci.isr;
         in.crash_corrupted   = ci.corrupted;
         in.crash_task        = ci.task;
         in.crash_pc          = ci.pc;
-        in.crash_backtrace   = ci.backtrace;
+        in.crash_backtrace.assign(ci.backtrace.begin(), ci.backtrace.end());
         in.crash_elf_sha256  = ci.elf_sha256;
     }
 
@@ -233,7 +249,7 @@ static cJSON* build_status_object(bool redact) {
 // copy sticks the hero on a transient state until a manual reload (matches "/" and "/diag") — the
 // poll cache-busts the URL for the same reason.
 esp_err_t handle_status(GuardedReq rq) {
-    httpd_req_t* req = rq.req;
+    httpd_req_t* req = rq.req();
     if (validate_query_string(req) != ESP_OK) {
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid query string");
     }
@@ -248,7 +264,7 @@ esp_err_t handle_status(GuardedReq rq) {
 // ─── GET /diag — in-memory diagnostic log (for on-demand analysis) ────────────
 
 esp_err_t handle_diag(GuardedReq rq) {
-    httpd_req_t* req = rq.req;
+    httpd_req_t* req = rq.req();
     if (validate_query_string(req) != ESP_OK) {
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid query string");
     }
@@ -338,100 +354,72 @@ esp_err_t handle_diag(GuardedReq rq) {
     return httpd_resp_send_chunk(req, nullptr, 0);
 }
 
-// ─── GET /coredump — stream the raw crash image for offline symbolisation ─────
-//
-// The one artifact a panic leaves behind. Streamed in fixed chunks straight from flash: the image
-// is tens of KB and this device's binding limit is the largest CONTIGUOUS free block, so reading it
-// into one buffer is precisely the allocation that would fail on the fragmented heap a crash tends
-// to leave. Decode it offline against the .elf of the SAME build (CI archives one per build);
-// /status.last_crash.elf_sha256 is what identifies which.
-//
-// ?clear=1 erases the partition, freeing the slot for the next panic. Deliberately separate from
-// POST /crash/dismiss: this frees flash and leaves the fault reset on record, while a dismissal
-// says the crash has been dealt with.
-esp_err_t handle_coredump(GuardedReq rq) {
-    httpd_req_t* req = rq.req;
-
-#if !defined(CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH)
-    // This build writes no dumps (CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH off — no current target
-    // does, but see diag_crash.cpp). The route still EXISTS and answers with a reason
-    // rather than 404-ing as "not found": a tool that just read `coredump:false` off /status needs
-    // to be able to tell "this board never captures dumps" from "no crash has happened yet", and
-    // silence cannot carry that difference. The esp_core_dump_image_* symbols are not linked here
-    // at all, so everything below has to be compiled out rather than merely skipped.
+// Coredump access is request-owned. Current-build downloads require boot verification;
+// raw=1 is an explicit bounded forensic download, never a whole-partition fallback.
+static esp_err_t coredump_error(GuardedReq rq, int status, const char* reason) {
     tk::JsonBuilder json;
-    json.string(json.root(), "error", "core dumps are not enabled on this target");
-    return send_json(req, 404, json.release());
-#else
-    if (validate_query_string(req) != ESP_OK) {
-        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid query string");
-    }
-    if (query_param_is(req, "clear", "1")) {
-        esp_err_t err = esp_core_dump_image_erase();
-        tk::JsonBuilder json;
-        json.boolean(json.root(), "ok", err == ESP_OK);
-        if (err != ESP_OK) json.string(json.root(), "error", esp_err_to_name(err));
-        return send_json(req, err == ESP_OK ? 200 : 500, json.release());
-    }
-
-    size_t addr = 0, size = 0;
-    if (!tk::diag_crash_coredump_present() || esp_core_dump_image_get(&addr, &size) != ESP_OK || size == 0) {
-        tk::JsonBuilder json;
-        // 404 with a reason rather than an empty body: on a device flashed before the coredump
-        // partition existed this is the PERMANENT answer, and "no coredump partition" is a very
-        // different thing for the reader to know than "no crash has happened".
-        json.string(json.root(), "error", "no core dump available");
-        return send_json(req, 404, json.release());
-    }
-
-    const esp_partition_t* part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA,
-                                                           ESP_PARTITION_SUBTYPE_DATA_COREDUMP,
-                                                           nullptr);
-    if (!part) {
-        tk::JsonBuilder json;
-        json.string(json.root(), "error", "no coredump partition");
-        return send_json(req, 404, json.release());
-    }
-
-    httpd_resp_set_type(req, "application/octet-stream");
-    httpd_resp_set_hdr(req, "Content-Disposition", "attachment; filename=\"coredump.bin\"");
-    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-
-    // 1 KB of stack, not heap: the read buffer must not compete for the contiguous block, and this
-    // handler runs on the httpd task whose stack budget is hand-counted (see AGENTS.md).
-    char   buf[1024];
-    size_t off = 0;
-    while (off < size) {
-        const size_t n = (size - off) > sizeof(buf) ? sizeof(buf) : (size - off);
-        const esp_err_t read_err = esp_partition_read(part, off, buf, n);
-        if (read_err != ESP_OK) {
-            // Once chunking starts, a terminating zero chunk would make a truncated dump look
-            // complete to the downloader. Return failure without that terminator so httpd closes
-            // the response; the byte offset is the durable clue for flash/read diagnostics.
-            ESP_LOGE(TAG, "coredump read failed at offset %u/%u: %s",
-                     static_cast<unsigned>(off), static_cast<unsigned>(size),
-                     esp_err_to_name(read_err));
-            return ESP_FAIL;
-        }
-        if (httpd_resp_send_chunk(req, buf, n) != ESP_OK) return ESP_FAIL;  // client went away
-        off += n;
-    }
-    return httpd_resp_send_chunk(req, nullptr, 0);
-#endif
+    json.string(json.root(), "error", reason);
+    rq.reply()->state.terminal = true;
+    return send_json(rq.req(), status, json.release());
 }
-
-// ─── POST /crash/dismiss — acknowledge and DELETE this boot's crash report ────
-//
-// POST rather than a GET beside /coredump: it destroys the one artifact a bug report needs, so it
-// must not be reachable by a link, a prefetch or a crawler.
-esp_err_t handle_crash_dismiss(GuardedReq rq) {
-    httpd_req_t* req = rq.req;
-    const bool ok = tk::diag_crash_dismiss();
+static esp_err_t coredump_erase_reply(GuardedReq rq, bool dismiss) {
+    rq.reply()->state.shape = tk::ReplyShape::FlatResult;
+    const auto result = tk::diag_crash_erase(dismiss, rq.reply()->state);
+    const bool ok = tk::crash_erase_permits_dismiss(result);
     tk::JsonBuilder json;
     json.boolean(json.root(), "ok", ok);
-    if (!ok) json.string(json.root(), "error", "core dump erase failed");
-    return send_json(req, ok ? 200 : 500, json.release());
+    json.boolean(json.root(), "result", ok);
+    if (result == tk::CrashEraseResult::Busy) json.string(json.root(), "error", "crash operation busy");
+    else if (!ok) {
+        json.string(json.root(), "outcome", "unknown");
+        json.string(json.root(), "reason", "core dump erase was not confirmed; do not retry automatically");
+    }
+    if (!rq.reply()->state.needs_effect_reply()) rq.reply()->state.terminal = true;
+    return send_effect_json(rq, result == tk::CrashEraseResult::Busy ? 409 : 200, json.release());
 }
+
+esp_err_t handle_coredump(GuardedReq rq) {
+    httpd_req_t* req = rq.req();
+    const size_t length = httpd_req_get_url_query_len(req);
+    if (length > 7) return coredump_error(rq, 400, "invalid core dump query");
+    char query[8]{};
+    if (length && httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK)
+        return coredump_error(rq, 400, "invalid core dump query");
+    const auto mode = tk::coredump_request_mode(std::string_view(query, length));
+    if (mode == tk::CoredumpRequestMode::Invalid)
+        return coredump_error(rq, 400, "invalid core dump query");
+    if (mode == tk::CoredumpRequestMode::Clear) return coredump_erase_reply(rq, false);
+
+    tk::CoredumpLease lease;
+    tk::CoredumpDownload source;
+    const auto opened = tk::diag_crash_open_dump(lease, mode == tk::CoredumpRequestMode::Raw, source);
+    if (opened == tk::CoredumpOpenResult::Busy) return coredump_error(rq, 409, "crash operation busy");
+    if (opened == tk::CoredumpOpenResult::Error) return coredump_error(rq, 503, "core dump query failed");
+    if (opened == tk::CoredumpOpenResult::Absent) return coredump_error(rq, 404, "no core dump available");
+    if (opened != tk::CoredumpOpenResult::Ready)
+        return coredump_error(rq, 409, "core dump is not verified for this firmware");
+
+    // A header/send/read failure is terminal. No JSON fallback or clean terminator follows it.
+    rq.reply()->state.terminal = true;
+    if (httpd_resp_set_type(req, "application/octet-stream") != ESP_OK ||
+        httpd_resp_set_hdr(req, "Content-Disposition", "attachment; filename=\"coredump.bin\"") != ESP_OK ||
+        httpd_resp_set_hdr(req, "Cache-Control", "no-store") != ESP_OK) return ESP_FAIL;
+    tk::CoredumpReadBuffer buffer;
+    for (uint32_t offset = 0; offset < source.bytes;) {
+        const uint32_t remaining = source.bytes - offset;
+        const size_t bytes = remaining < sizeof(buffer.bytes) ? remaining : sizeof(buffer.bytes);
+        const esp_err_t read_err = esp_partition_read(source.partition, offset, buffer.bytes, bytes);
+        if (read_err != ESP_OK) {
+            return ESP_FAIL;
+        }
+        if (httpd_resp_send_chunk(req, buffer.bytes, bytes) != ESP_OK) return ESP_FAIL;
+        offset += bytes;
+    }
+    return httpd_resp_send_chunk(req, nullptr, 0);
+}
+
+// Acknowledgement is published only after confirmed absence or successful erase.
+esp_err_t handle_crash_dismiss(GuardedReq rq) { return coredump_erase_reply(rq, true); }
 
 // ─── GET /heap — the board's own 24-hour memory trend ─────────────────────────
 //
@@ -443,7 +431,7 @@ esp_err_t handle_crash_dismiss(GuardedReq rq) {
 // heap watchdog restarts the device. Neither is visible in any single reading, and both are what
 // precedes the failure this firmware has a whole watchdog for.
 esp_err_t handle_heap(GuardedReq rq) {
-    httpd_req_t* req = rq.req;
+    httpd_req_t* req = rq.req();
 
     // Caller-owned buffers, filled under the ring's lock without allocating there. 2 × 288 ×
     // int16_t = 1152 B of stack, against the httpd task's 8192 (http_server.cpp) — ~14 %, and
@@ -482,7 +470,11 @@ extern const uint8_t index_html_gz_start[] asm("_binary_index_html_gz_start");
 extern const uint8_t index_html_gz_end[]   asm("_binary_index_html_gz_end");
 
 esp_err_t handle_index(GuardedReq rq) {
-    httpd_req_t* req = rq.req;
+    httpd_req_t* req = rq.req();
+    if (httpd_resp_set_hdr(req, "X-Frame-Options", "DENY") != ESP_OK ||
+        httpd_resp_set_hdr(req, "Content-Security-Policy", "frame-ancestors 'none'") != ESP_OK) {
+        return ESP_FAIL;
+    }
     httpd_resp_set_type(req, "text/html");
     // The UI is embedded in the firmware and changes with every flash/OTA. Without
     // this, browsers cache index.html and keep rendering the OLD layout (with live

@@ -87,7 +87,9 @@ config_stamp() {
   {
     for path in sdkconfig.defaults "sdkconfig.defaults.$target" "dependencies.lock.$target" \
         partitions.csv CMakeLists.txt main/CMakeLists.txt main/idf_component.yml \
-        esp-idf-toolchain.txt scripts/apply-tesla-ble-patches.sh; do
+        esp-idf-toolchain.txt scripts/apply-tesla-ble-patches.sh \
+        scripts/apply-tesla-ble-patches.py scripts/tesla-ble-patch-state.json \
+        scripts/check-dependency-contract.py scripts/test-tesla-ble-harness.sh dependencies.lock.*; do
       if [[ -f "$path" ]]; then
         sha256sum "$path"
       fi

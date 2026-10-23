@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <functional>
 
@@ -8,7 +9,11 @@
 // over HTTP (GET /diag) for analysis without a USB cable attached. The buffer
 // WRAPS: once full, the oldest bytes are overwritten, so it always holds the most
 // recent output — best for watching an event happen live. Reboot or ?clear=1 resets it.
-void        diag_log_init();          // install the esp_log capture hook (call early)
+// Boot owner: call before MQTT/HTTP. Sequential retries never chain the hook to itself.
+// Known MQTT URI parse errors are protected even when the optional ring mutex cannot allocate.
+void        diag_log_init();
+// Capture attempts lost to unavailable/contended ring, since boot (modulo 2^32). Clear retains it.
+uint32_t diag_log_dropped_lines() noexcept;
 
 // Stream the captured log to a sink WITHOUT building one big std::string. Dumping the
 // whole buffer as a single contiguous allocation could throw std::bad_alloc when it

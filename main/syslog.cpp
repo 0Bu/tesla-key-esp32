@@ -91,6 +91,8 @@ struct SyslogStartResources {
     }
 };
 
+static std::atomic<uint32_t> s_dropped_lines{0};
+
 static void set_status(bool resolved, bool reachable, const std::string& error) {
     // RAII give — the s_status.error = error assignment can throw bad_alloc.
     tk::SemGuard g(s_status_mtx);
@@ -103,6 +105,7 @@ static void set_status(bool resolved, bool reachable, const std::string& error) 
 SyslogStatus syslog_status() {
     SyslogStatus copy;
     copy.configured = s_configured;
+    copy.dropped_lines = s_dropped_lines.load(std::memory_order_relaxed);
     copy.host        = s_cfg_host;
     copy.port        = s_cfg_port;
     copy.resolved    = false;
@@ -185,7 +188,7 @@ static bool syslog_ensure_socket() {
 // errno decides whether the resolve throttle is cleared (logic/syslog_policy.hpp),
 // so a wrong value costs a probe storm.
 static SendResult syslog_sendto(const struct sockaddr_in& dest, const char* text, size_t len,
-                                 int* out_err = nullptr) {
+                                 int* out_err = nullptr, tk::SyslogRecord record = tk::SyslogRecord::Ordinary) {
     if (out_err) *out_err = 0;
     while (len > 0 && (text[len - 1] == '\n' || text[len - 1] == '\r' || text[len - 1] == ' ')) {
         len--;
@@ -199,13 +202,12 @@ static SendResult syslog_sendto(const struct sockaddr_in& dest, const char* text
 
     char packet[320];
     // RFC 5424: <PRI>1 SP TIMESTAMP HOSTNAME APP PROCID MSGID SD SP MSG.
-    // PRI is derived from the line's own esp_log level (logic/syslog_policy.hpp) rather than
-    // hardcoded to user.info, so the collector's severity field actually discriminates —
-    // see that header for why a constant PRI made `severity:error` useless.
+    // Firmware replay explicitly marks BOOT/CRASH records. Ordinary captured messages keep
+    // the esp_log-prefix classifier; their text alone never grants firmware-record severity.
     // HOSTNAME mirrors main.cpp's MDNS_HOSTNAME ("tesla-key-esp32") so entries
     // correlate with the device as seen over DHCP/mDNS.
     int pkt_len = std::snprintf(packet, sizeof(packet), "<%d>1 - tesla-key-esp32 - - - - %.*s",
-                                 tk::syslog_pri_for_line(text, len),
+                                 tk::syslog_pri_for_record(record, text, len),
                                  static_cast<int>(len), text);
     if (pkt_len <= 0) return SendResult::EncodeFailed;
     // snprintf returns the length it WOULD have written; clamp to what fits or sendto reads OOB.
@@ -271,7 +273,7 @@ static void syslog_replay_boot(const struct sockaddr_in& dest, bool& replayed) {
     if (replayed) return;
     replayed = true;   // set FIRST: a throw below must not re-arm an unbounded retry every 10 s
 
-    const tk::CrashInfo& ci = tk::diag_crash_info();
+    const auto ci = tk::diag_crash_info_live();
 
     std::vector<std::string> lines;
     const esp_app_desc_t* desc = esp_app_get_description();
@@ -282,14 +284,17 @@ static void syslog_replay_boot(const struct sockaddr_in& dest, bool& replayed) {
                                         tk::safe_mode_active()));
     tk::build_crash_log_lines(ci, lines);
 
+    bool boot_record = true;
     for (const std::string& l : lines) {
         int err = 0;
         // Best effort by design: this is UDP and the collector may not be listening yet. A failure
         // here must not disturb the resolve state the caller just established — the ordinary
         // forwarding path below owns that classification.
-        (void)syslog_sendto(dest, l.c_str(), l.size(), &err);
+        const auto record = boot_record ? tk::SyslogRecord::Boot : tk::SyslogRecord::Crash;
+        boot_record = false;
+        (void)syslog_sendto(dest, l.c_str(), l.size(), &err, record);
     }
-    ESP_LOGI(TAG, "replayed %u boot record(s) to the collector", (unsigned)lines.size());
+    ESP_LOGI(TAG, "replayed %u boot records", (unsigned)lines.size());
 }
 
 static void syslog_task(void* raw_start) {
@@ -527,6 +532,7 @@ bool syslog_start(NvsStorageAdapter& config_store) {
 }
 
 void syslog_send(const char* msg, size_t len) {
+    if (!msg || len == 0) return;
     QueueHandle_t const queue = s_queue.load(std::memory_order_acquire);
     if (!queue) return;
 
@@ -550,5 +556,6 @@ void syslog_send(const char* msg, size_t len) {
     std::memcpy(m.text, msg, len);
     m.text[len] = '\0';
     m.len = static_cast<uint16_t>(len);
-    xQueueSend(queue, &m, 0); // non-blocking
+    if (xQueueSend(queue, &m, 0) != pdPASS)
+        s_dropped_lines.fetch_add(1, std::memory_order_relaxed);  // never log from this log sink
 }

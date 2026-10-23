@@ -903,7 +903,7 @@ index 82ffda6..1b69630 100644
 -    mbedtls_gcm_free(&aes_context);
 +  if (status != PSA_SUCCESS) {
 +    // Never hand out plaintext that failed authentication
-+    mbedtls_platform_zeroize(output_buffer, update_length);
++    mbedtls_platform_zeroize(output_buffer, output_buffer_length);
 +    LOG_ERROR("[DecryptResponse] Decryption or authentication failed: %d", static_cast<int>(status));
      return TeslaBLE_Status_E_ERROR_DECRYPT;
    }

@@ -17,6 +17,7 @@
 //     typed, so only a sustained authentication refusal may spend them.
 
 #include "net.hpp"
+#include "logic/device_hostname.hpp"
 #include "logic/wifi_credentials.hpp"
 
 #include <atomic>
@@ -53,11 +54,8 @@
 static const char* TAG = "net";
 
 // The DHCP client hostname, requested BEFORE the lease so the router can register the board for
-// headerless API clients and diagnostics. Browser mutations deliberately use the canonical
-// `tesla-key-esp32.local` name or current IP: accepting an arbitrary router-added DNS suffix as a
-// trusted Host would reopen DNS rebinding. Same base name main.cpp gives mDNS; kept here because it
-// must be set on the netif at creation time.
-static const char* kNetHostname = "tesla-key-esp32";
+// headerless API clients and diagnostics. HTTP checks use this shared name, the live mDNS name
+// and device-owned IPs; arbitrary router-added DNS suffixes remain outside that trust boundary.
 
 namespace tk {
 
@@ -275,8 +273,8 @@ bool net_start_wifi(const char* ssid, const char* password, bool rollback_pendin
     // DHCP client hostname: set BEFORE the lease is requested so the router can register it in
     // its local DNS. Setting it later (at mDNS init, after WiFi is up) is too late — the DHCP
     // DISCOVER has already gone out.
-    if (esp_netif_set_hostname(s_sta_netif, kNetHostname) != ESP_OK)
-        ESP_LOGW(TAG, "could not set DHCP hostname '%s'", kNetHostname);
+    if (esp_netif_set_hostname(s_sta_netif, kDeviceHostname) != ESP_OK)
+        ESP_LOGW(TAG, "could not set DHCP hostname '%s'", kDeviceHostname);
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     net_boot_require(esp_wifi_init(&cfg), "WiFi driver initialization");
@@ -803,8 +801,8 @@ bool net_start_eth() {
     netif_cfg.base = &eth_base;
     r.netif = esp_netif_new(&netif_cfg);
     if (!r.netif) eth_startup_fatal(r, "Ethernet netif");
-    if (esp_netif_set_hostname(r.netif, kNetHostname) != ESP_OK)
-        ESP_LOGW(TAG, "could not set DHCP hostname '%s'", kNetHostname);
+    if (esp_netif_set_hostname(r.netif, kDeviceHostname) != ESP_OK)
+        ESP_LOGW(TAG, "could not set DHCP hostname '%s'", kDeviceHostname);
 
     spi_device_interface_config_t devcfg = {};
     devcfg.mode           = 0;

@@ -122,7 +122,8 @@ struct WakePollState {
         if (armed || pending) {
             return;
         }
-        if (now_s >= next_bootstrap_retry_s) {
+        // Retry intervals are at most 300 seconds, below half the uint32 clock range.
+        if (now_s - next_bootstrap_retry_s < (uint32_t{1} << 31)) {
             armed = true;
             bootstrap_backoff_s = (bootstrap_backoff_s == 0)
                 ? kBootstrapInitialBackoffS

@@ -29,7 +29,7 @@ upstream. The evaluation recorded in #61 found no reason for a fork:
   did on 5.x. Renovate keeps tracking upstream, a tesla-ble change that touches the patched
   lines fails the build instead of silently mis-applying, and the same diff can be offered
   upstream. A fork would carry identical code and flash cost plus a second repository.
-- **Scope of 0006.** `crypto_context.{h,cpp}`, `peer.cpp`, `client.h` and `vin_utils.cpp`: the
+- **Scope of 0006.** `crypto_context.{h,cpp}`, `include/peer.h`, `peer.cpp`, `client.h` and `vin_utils.cpp`: the
   client key lives in the PSA key store (`psa_generate_key`, `psa_raw_key_agreement`,
   `psa_export_public_key`), AES-128-GCM and HMAC-SHA256 use `psa_aead_*`/`psa_mac_compute`,
   SHA-1/SHA-256 use `psa_hash_compute`, and `psa_generate_random` replaces CTR-DRBG.
@@ -52,12 +52,14 @@ upstream. The evaluation recorded in #61 found no reason for a fork:
   ESP-IDF v6.1 pins (`MBEDTLS_REF` in `scripts/test-tesla-ble-harness.sh`; the host builds its
   builtin software drivers, while the firmware sends AES-GCM through the ESP PSA driver): official
   client public key, ECDH session key `SHA1(X)[:16]`, session-info HMAC and the official
-  session-info tag, AES-GCM request bytes and tag against an independent one-shot reference,
+  session-info tag, AES-GCM bytes and tag for prescribed request metadata against an independent one-shot reference,
   response metadata serialized independently from protocol.md with a response counter that
   differs from the request counter (an AAD from the request counter is refused), tampered-tag
-  rejection with plaintext wiping, VIN BLE name, a PEM export byte-identical to the Mbed TLS 3.6
-  export, and a host mirror of the firmware fingerprint (`compute_key_fingerprint_()` itself is
-  IDF code) equal to tesla-ble's key id.
+  rejection with plaintext wiping, VIN BLE name, an export matching the expected legacy SEC1 PEM
+  fixture and successful reload, and a host mirror of the firmware fingerprint
+  (`compute_key_fingerprint_()` itself is IDF code) equal to tesla-ble's key id. These checks do not
+  independently exercise the production request-metadata builder or execute Mbed TLS 3.6 to
+  establish export equivalence. Later native tests have their own source-bound evidence.
 - **Randomness.** ESP-IDF 6 configures `MBEDTLS_PSA_CRYPTO_EXTERNAL_RNG`: every PSA random draw
   (key generation, key-parse blinding, GCM nonces) reads the hardware RNG at call time; there is
   no DRBG seeded once. `main/main.cpp` keeps SAR-ADC entropy enabled across key load and

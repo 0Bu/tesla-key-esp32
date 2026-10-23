@@ -51,6 +51,18 @@ def cpp_code_only(text: str) -> str:
                 i += 2
                 state = "block"
                 continue
+            # C++14 digit separators belong to a numeric token, not a character literal.
+            # Do not apply this to prefixes such as L'a' or u8'x'.
+            if ch == "'" and nxt.isalnum():
+                start = i
+                while start > 0 and (text[start - 1].isalnum() or text[start - 1] in "._'"):
+                    start -= 1
+                token = text[start:i]
+                if token and (token[0].isdigit() or
+                              (token.startswith(".") and len(token) > 1 and token[1].isdigit())):
+                    out.append(ch)
+                    i += 1
+                    continue
             if ch in {'"', "'"}:
                 quote = ch
                 out.append(" ")
@@ -314,6 +326,11 @@ def compile_headers(root: Path) -> None:
 
 
 def self_test(root: Path) -> None:
+    numeric = "constexpr auto n = 10'000'001ULL;\nstatic void test_after_number() {}\n"
+    function_body(cpp_code_only(numeric), "test_after_number", "void")
+    for literal in ("L'a'", "u8'x'", "'z'", "0xAB'CD", "0b10'01", "1'000.0"):
+        function_body(cpp_code_only("auto n = " + literal + ";\nstatic void test_after_literal() {}"),
+                      "test_after_literal", "void")
     validate(root)
 
     def make_fixture(directory: str) -> Path:

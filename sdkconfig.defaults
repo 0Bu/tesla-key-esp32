@@ -131,23 +131,15 @@ CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 CONFIG_FREERTOS_WATCHPOINT_END_OF_STACK=y
 
 # ── Core dump to flash ──
-# Until this existed a PANIC left NO artifact at all: the reset reason was logged on the way back
-# up and everything else — which task died, where, and with what call chain — was gone. The dump
-# lands in the `coredump` partition (partitions.csv, carved from the previously unused
-# 0x12000..0x20000 hole, so it costs no OTA headroom). main/diag_crash.cpp reads only the SUMMARY
-# at the next boot (esp_core_dump_get_summary: task / PC / backtrace / app-elf-sha) and never
-# re-parses it on a request path; GET /coredump streams the raw image for offline symbolisation.
-# ENABLE_TO_FLASH is the line that does the work — it select-s ESP_COREDUMP_ENABLE. ESP-IDF 6 removed
-# the binary format and the CRC32 checksum, so ELF + SHA-256 — what the offline decoder
-# (`esp-coredump info_corefile -c coredump.bin build/tesla-key-esp32.elf`, shipped with ESP-IDF)
-# and espcoredump's image match assume — is the only layout and needs no Kconfig line of its own.
-# Size note: the coredump component + the summary parser cost a few KB of app flash. Re-measure on
-# the LARGEST target (currently esp32c6) rather than
-# on esp32s3, and measure against the 64 KB Secure-Boot padding boundary rather than the gate: an
-# image just over a boundary costs a full 64 KB block plus the 4 KB signature appended after it.
-# That is exactly what pushed esp32c5 past its OTA slot and got the target dropped
-# (docs/adr/0004-drop-esp32c5-target.md).
+# Panic capture writes ELF + SHA-256 into the existing 48 KiB coredump partition.
+# The project reader verifies bounded serialized data once at boot; SDK boot parsing
+# stays disabled. Live requests query only its bounded header or explicitly export it.
+# Task stacks can contain secrets: keep DRAM capture off and exports private.
+# Measure all four targets against the signed-image padding/OTA limit after changes.
 CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
+CONFIG_APP_RETRIEVE_LEN_ELF_SHA=64
+# CONFIG_ESP_COREDUMP_CHECK_BOOT is not set
+# CONFIG_ESP_COREDUMP_CAPTURE_DRAM is not set
 # CONFIG_ESP_COREDUMP_CAPTURE_DRAM must remain off so core dumps capture only task stacks, never
 # full DRAM (which could contain decrypted private keys or credentials).
 
@@ -158,8 +150,8 @@ CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
 # leaves the heap looking perfect and is invisible to it. This is the other half.
 #   TIMEOUT_S=60 — the budget must exceed the LONGEST time a subscribed task can legitimately be
 #     blocked, and here that is not the loop cadence (50 ms) but the vehicle mutex: loop_task waits
-#     on vehicle_mutex_ while a foreground command holds it, which is up to 20 s for a normal
-#     command and 30 s for pair(). 60 s is 2x the worst legitimate hold, so only a real hang fires.
+#     for bounded BLE work rather than its 50 ms polling cadence. Foreground commands have a
+#     20 s budget and automatic enrollment a 6 s budget; the watchdog remains at 60 s.
 #     Setting it near the cadence instead would reboot the device mid-pairing.
 #   PANIC=y — a timeout REBOOTS through the panic handler rather than only printing. That is what
 #     makes it useful here: esp_reset_reason() then reports ESP_RST_TASK_WDT, the crash pipeline

@@ -48,7 +48,8 @@ inline CommandFailureOrigin classify_command_failure(std::string_view err) noexc
         err.find("rejected") != std::string_view::npos ||
         err.find("action failed") != std::string_view::npos ||
         err.find("failed with error status") != std::string_view::npos ||
-        err.find("VCSEC command failed") != std::string_view::npos) {
+        err.find("VCSEC command failed") != std::string_view::npos ||
+        err.find("vehicle fault:") != std::string_view::npos) {
         return CommandFailureOrigin::VehicleResponse;
     }
     return CommandFailureOrigin::TransportOrTimeout;
@@ -56,13 +57,13 @@ inline CommandFailureOrigin classify_command_failure(std::string_view err) noexc
 
 class CommandError {
 public:
-    enum class Severity {
+    enum class Severity : uint8_t {
         Temporary,
         Permanent,
         Unknown
     };
 
-    enum class Outcome {
+    enum class Outcome : uint8_t {
         MayHaveSucceeded,
         DefinitelyFailed,
         Unknown

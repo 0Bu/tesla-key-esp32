@@ -127,6 +127,7 @@ done
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/tesla-mqtt-json.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
+python3 "$repo_root/test/generate_mqtt_discovery_adapter.py" "$work/mqtt_discovery_adapter.generated.hpp"
 
 cc="${CC:-gcc}"
 cxx="${CXX:-g++}"
@@ -138,7 +139,7 @@ fi
 "$cc" -std=c11 -Wall -Wextra -Werror ${sanitize_flags[@]+"${sanitize_flags[@]}"} -I"$cjson_dir" \
     -c "$cjson_source" -o "$work/cJSON.o"
 "$cxx" -std=c++17 -Wall -Wextra -Werror ${sanitize_flags[@]+"${sanitize_flags[@]}"} \
-    -I"$repo_root/main" -I"$cjson_dir" \
+    -I"$repo_root/main" -I"$cjson_dir" -I"$work" \
     "$repo_root/test/test_mqtt_json_publish.cpp" "$work/cJSON.o" -lm \
     -o "$work/test_mqtt_json_publish"
 "$work/test_mqtt_json_publish"

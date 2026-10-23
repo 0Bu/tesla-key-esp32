@@ -1,0 +1,159 @@
+--- a/include/client.h
++++ b/include/client.h
+@@ -137,8 +137,8 @@
+ 
+   const pb_byte_t *get_last_request_hash(UniversalMessage_Domain domain, size_t *length) const;
+   bool get_last_request_uuid(UniversalMessage_Domain domain, pb_byte_t *uuid, size_t *uuid_length) const;
+-  bool verify_session_info_tag(const Signatures_SessionInfo &session_info, const pb_byte_t *session_info_bytes,
+-                               size_t session_info_length, const pb_byte_t *request_uuid, size_t request_uuid_length,
++  bool verify_session_info_tag(UniversalMessage_Domain domain, const Signatures_SessionInfo &session_info, const UniversalMessage_RoutableMessage_session_info_t &session_payload,
++                               const pb_byte_t *request_uuid, size_t request_uuid_length,
+                                const pb_byte_t *tag, size_t tag_length);
+ 
+  private:
+--- a/include/peer.h
++++ b/include/peer.h
+@@ -84,6 +84,8 @@
+   // Session operations
+   uint32_t generate_expires_at(int seconds) const;
+   int generate_nonce(pb_byte_t *nonce) const;
++  // Retained key material remains binding even when the epoch/session validity is cleared.
++  bool accepts_session_key(const uint8_t *public_key_buffer, size_t public_key_size) const;
+   int load_tesla_key(const uint8_t *public_key_buffer, size_t public_key_size);
+   int update_session(Signatures_SessionInfo *session_info);
+ 
+--- a/src/client.cpp
++++ b/src/client.cpp
+@@ -576,10 +576,13 @@
+   return true;
+ }
+ 
+-bool Client::verify_session_info_tag(const Signatures_SessionInfo &session_info, const pb_byte_t *session_info_bytes,
+-                                     size_t session_info_length, const pb_byte_t *request_uuid,
++bool Client::verify_session_info_tag(UniversalMessage_Domain domain, const Signatures_SessionInfo &session_info, const UniversalMessage_RoutableMessage_session_info_t &session_payload,
++                                     const pb_byte_t *request_uuid,
+                                      size_t request_uuid_length, const pb_byte_t *tag, size_t tag_length) {
+-  if (!session_info_bytes || session_info_length == 0 || !request_uuid || request_uuid_length == 0 || !tag ||
++  const pb_byte_t *session_info_bytes = session_payload.bytes;
++  const size_t session_info_length = session_payload.size;
++  if (session_info_length == 0 || session_info_length > sizeof(session_payload.bytes) ||
++      !request_uuid || request_uuid_length == 0 || !tag ||
+       tag_length == 0) {
+     return false;
+   }
+@@ -589,17 +592,25 @@
+     return false;
+   };
+ 
+-  if (session_info.publicKey.size == 0) {
+-    LOG_ERROR("Session info missing public key for HMAC verification");
++  const auto *peer = get_peer(domain);
++  if (!peer || !peer->accepts_session_key(session_info.publicKey.bytes, session_info.publicKey.size)) {
++    LOG_ERROR("Session public key rejected");
+     return false;
+   }
+ 
+   uint8_t session_key[Peer::SHARED_KEY_SIZE_BYTES] = {0};
+-  int status =
+-      crypto_context_.perform_tesla_ecdh(session_info.publicKey.bytes, session_info.publicKey.size, session_key);
+-  if (status != TeslaBLE_Status_E_OK) {
+-    LOG_ERROR("Failed to derive shared key for session info verification: %d", status);
+-    return false;
++  int status = TeslaBLE_Status_E_OK;
++  if (peer->has_shared_secret()) {
++    // vehicle-command UpdateSignedSessionInfo authenticates a refresh with the established
++    // secret, not newly supplied trust material. Temporary epoch invalidity is immaterial.
++    std::memcpy(session_key, peer->get_shared_secret(), sizeof(session_key));
++  } else {
++    status = crypto_context_.perform_tesla_ecdh(session_info.publicKey.bytes, session_info.publicKey.size, session_key);
++    if (status != TeslaBLE_Status_E_OK) {
++      CryptoUtils::clear_sensitive_memory(session_key, sizeof(session_key));
++      LOG_ERROR("Failed to derive shared key for session info verification: %d", status);
++      return false;
++    }
+   }
+ 
+   uint8_t session_info_key[32] = {0};
+--- a/src/peer.cpp
++++ b/src/peer.cpp
+@@ -155,6 +155,11 @@
+   return result;
+ }
+ 
++bool Peer::accepts_session_key(const uint8_t *public_key_buffer, size_t public_key_size) const {
++  return public_key_buffer && public_key_size == tesla_public_key_.size() && public_key_buffer[0] == 0x04 &&
++         (!has_shared_secret_ || std::memcmp(tesla_public_key_.data(), public_key_buffer, public_key_size) == 0);
++}
++
+ int Peer::load_tesla_key(const uint8_t *public_key_buffer, size_t public_key_size) {
+   if (public_key_buffer == nullptr || public_key_size == 0) {
+     LOG_ERROR("Invalid public key buffer");
+@@ -163,6 +168,12 @@
+ 
+   if (crypto_context_ == nullptr) {
+     LOG_ERROR("Crypto context is null");
++    return TeslaBLE_Status_E_ERROR_INVALID_PARAMS;
++  }
++
++  // Existing trust material may only be refreshed with the same vehicle public key.
++  if (!accepts_session_key(public_key_buffer, public_key_size)) {
++    LOG_ERROR("Session public key rejected");
+     return TeslaBLE_Status_E_ERROR_INVALID_PARAMS;
+   }
+ 
+@@ -172,14 +183,6 @@
+   LOG_VERBOSE("Tesla key data: %02x %02x %02x %02x %02x %02x %02x %02x...", public_key_buffer[0], public_key_buffer[1],
+               public_key_buffer[2], public_key_buffer[3], public_key_buffer[4], public_key_buffer[5],
+               public_key_buffer[6], public_key_buffer[7]);
+-
+-  // Validate Tesla public key format (should be 65 bytes uncompressed EC point)
+-  if (public_key_size != 65 || public_key_buffer[0] != 0x04) {
+-    LOG_ERROR(
+-        "Invalid Tesla public key format: expected 65 bytes starting with 0x04, got %zu bytes starting with 0x%02x",
+-        public_key_size, public_key_buffer[0]);
+-    return TeslaBLE_Status_E_ERROR_INVALID_PARAMS;
+-  }
+ 
+   // Use CryptoContext's Tesla ECDH method instead of duplicating crypto initialization
+   LOG_DEBUG("Performing Tesla ECDH during key load using stored private key");
+@@ -203,6 +206,14 @@
+   LOG_DEBUG("Updating session..");
+   if (session_info == nullptr) {
+     LOG_ERROR("Session info is null");
++    return TeslaBLE_Status_E_ERROR_INVALID_SESSION;
++  }
++
++  // Refuse before counter, epoch, clock, response-window or secret changes. Metadata-only
++  // bootstrap stays unauthenticated; retained material requires the complete matching key.
++  if ((has_shared_secret_ || session_info->publicKey.size != 0) &&
++      !accepts_session_key(session_info->publicKey.bytes, session_info->publicKey.size)) {
++    LOG_ERROR("Session public key rejected");
+     return TeslaBLE_Status_E_ERROR_INVALID_SESSION;
+   }
+ 
+@@ -287,6 +298,14 @@
+     return TeslaBLE_Status_E_ERROR_INVALID_SESSION;
+   }
+ 
++  // Refuse before counter, epoch, clock, response-window or secret changes. Metadata-only
++  // bootstrap stays unauthenticated; retained material requires the complete matching key.
++  if ((has_shared_secret_ || session_info->publicKey.size != 0) &&
++      !accepts_session_key(session_info->publicKey.bytes, session_info->publicKey.size)) {
++    LOG_ERROR("Session public key rejected");
++    return TeslaBLE_Status_E_ERROR_INVALID_SESSION;
++  }
++
+   LOG_WARNING("Force updating session (bypassing counter checks): vehicle=%" PRIu32 " local=%" PRIu32 "",
+               session_info->counter, counter_);
+ 
+--- a/src/vehicle.cpp
++++ b/src/vehicle.cpp
+@@ -1086,7 +1086,7 @@
+     return false;
+   }
+ 
+-  if (!client_->verify_session_info_tag(session_info, msg.payload.session_info.bytes, msg.payload.session_info.size,
++  if (!client_->verify_session_info_tag(domain, session_info, msg.payload.session_info,
+                                         context.uuid.data(), context.uuid.size(), tag.bytes, tag.size)) {
+     fail_auth("Session info HMAC verification failed for %s", domain_to_string(domain));
+     return false;

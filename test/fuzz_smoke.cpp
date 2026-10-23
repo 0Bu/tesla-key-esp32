@@ -95,6 +95,13 @@ int main(int argc, char** argv) {
         const std::string bytes = random_string(rng, 512);
 
         const bool json_valid = tk::json_syntax_valid(bytes.data(), bytes.size());
+        const auto generic_syntax = tk::json_syntax_status(bytes.data(), bytes.size());
+        const auto request_syntax = tk::json_syntax_status(
+            bytes.data(), bytes.size(), tk::kJsonMaxRequestValues);
+        if (request_syntax != generic_syntax &&
+            !(generic_syntax == tk::JsonSyntaxStatus::Valid &&
+              request_syntax == tk::JsonSyntaxStatus::TooManyValues))
+            fail("request value budget preserves syntax error priority", seed, iteration);
         std::string json_with_ignored_suffix = bytes;
         json_with_ignored_suffix.push_back(static_cast<char>(rng.next() & 0xffu));
         if (json_valid != tk::json_syntax_valid(bytes.data(), bytes.size()) ||

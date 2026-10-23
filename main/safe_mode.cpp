@@ -99,12 +99,9 @@ bool safe_mode_begin(NvsStorageAdapter& config_store, bool was_fault) {
         s_safe_mode.store(safe);
 
         if (safe) {
-            ESP_LOGE(TAG, "SAFE MODE — %u consecutive crash boots (threshold %u). Starting WiFi, the "
-                          "web UI and OTA ONLY; the BLE/vehicle stack and the MQTT bridge stay DOWN so "
-                          "the device is reachable and fixable in a browser. This also stops each boot "
-                          "re-opening the vehicle polling window, which is what drains a parked car. "
-                          "The latch remains until a non-fault reset or a successful "
-                          "configuration/OTA/power reboot.",
+            ESP_LOGE(TAG, "SAFE MODE — crash boots %u/%u; BLE/vehicle/MQTT disabled. "
+                          "Network/UI/OTA recovery only. Exit needs a non-fault boot "
+                          "and a successful counter read/reset.",
                      now, (unsigned)kBootFailThreshold);
         } else if (now > 0) {
             ESP_LOGW(TAG, "crash boot %u of %u before safe mode latches (last reset was a fault)",
@@ -136,14 +133,12 @@ void safe_mode_arm_healthy_timer(NvsStorageAdapter& config_store) {
     // again, and re-open the car's polling window on 4 boots out of every 5: the drain this guard
     // exists to stop, merely slowed down.
     //
-    // Nothing strands the device here: ANY non-fault reset resets the counter to 0 in
-    // safe_mode_begin (boot_fail_next(was_fault=false)), and every intentional exit is one — an OTA
-    // install, a successfully persisted rebooting configuration/portal save, a power-cycle, or the
-    // reset button. So safe mode ends the moment someone acts on it, and only then.
+    // A non-fault boot resets the count only after safe_mode_begin can read a valid counter
+    // and persist zero. Storage failures keep recovery latched across an intentional restart;
+    // another reset or a firmware rollback cannot repair shared NVS.
     if (s_safe_mode.load()) {
-        ESP_LOGW(TAG, "SAFE MODE — the healthy-boot timer is NOT armed: with the vehicle stack and "
-                      "MQTT down, staying up says nothing about the fault. Install a newer image or "
-                      "fix the configuration; any clean reboot clears the counter.");
+        ESP_LOGW(TAG, "SAFE MODE — healthy timer disabled. Preserve diagnostics; "
+                      "a clean boot exits only if counter storage is healthy.");
         return;
     }
     // 2560 B: the task sleeps, then does one NVS string write and one log line. Deliberately small —

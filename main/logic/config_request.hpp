@@ -20,6 +20,8 @@ enum class ConfigSubmissionStatus {
     JsonNoMemory,
     ObjectRequired,
     StringFieldRequired,
+    JsonTooManyValues,
+    DuplicateJsonKey,
 };
 
 struct ConfigStringSubmission {
@@ -44,6 +46,8 @@ inline constexpr const char* config_submission_reason(ConfigSubmissionStatus sta
          : status == ConfigSubmissionStatus::MalformedJson ? "invalid JSON"
          : status == ConfigSubmissionStatus::JsonTooDeep ? "JSON nesting too deep"
          : status == ConfigSubmissionStatus::JsonUnsupportedNul ? "JSON NUL escape not supported"
+         : status == ConfigSubmissionStatus::JsonTooManyValues ? "too many JSON values"
+         : status == ConfigSubmissionStatus::DuplicateJsonKey ? "duplicate JSON key"
          : status == ConfigSubmissionStatus::ObjectRequired ? "JSON object required"
          : status == ConfigSubmissionStatus::StringFieldRequired ? "required string field missing"
                                                                   : "";

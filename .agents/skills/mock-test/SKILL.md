@@ -8,8 +8,8 @@ additional authorization. Canonical skills live under `.agents/skills/`; hooks e
 
 # mock-test — fast host-side logic, mock, and sanitizer execution
 
-The host-side mock build allows developers and agents to verify changes in seconds without
-Docker, ESP-IDF, or hardware.
+Fast C++ checks use the host toolchain without ESP-IDF or hardware. The strict suite also needs
+a real Linux browser: on macOS it delegates that gate to Docker, never native Chrome.
 
 ## Available Entry Points
 
@@ -30,6 +30,10 @@ Docker, ESP-IDF, or hardware.
      ```bash
      scripts/run-mock-tests.sh --require-all
      ```
+   - On macOS, prepare a cold browser image with `scripts/run-browser-tests-linux.sh` first.
+     Strict mode requires Docker and an actual successful Linux desktop/mobile DOM check within
+     the existing 120-second outer gate. Missing Docker or browser execution fails the suite;
+     controlled launch-policy tests and optional skips do not establish browser coverage.
 
 3. **Linux Address / Undefined-Behavior / Leak Sanitizers (`scripts/run-sanitizer-tests.sh`)**:
    - Executes ASan + UBSan + LSan tripwires on Linux host:

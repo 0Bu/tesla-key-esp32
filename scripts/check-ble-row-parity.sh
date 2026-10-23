@@ -1,12 +1,8 @@
 #!/usr/bin/env bash
-# Verify the web UI's BLE-row decision (the BLE_ROW region of main/www/app.js) against the C++
-# presenter it mirrors (tk::ble::decide in main/logic/ble_row.hpp): compile a tiny host dumper,
-# emit golden decision vectors for an exhaustive input sweep, and have the JavaScript re-decide
-# the same inputs and diff. Fails if the browser and the firmware presenter disagree — so "the
-# row renders what the host-tested rules say" is checked by CI, not by hand.
-#
-# Needs a C++17 compiler + node (both present in the CI logic-test job — ubuntu-26.04 ships
-# Node). Run directly, or automatically at the end of scripts/run-mock-tests.sh.
+# Compare shipped browser BLE decisions, SoC colours and RSSI glyph counts with native helpers.
+# The host dumper produces both input/vector sets; Node evaluates the marked shipped JS and
+# the actual signal SVG builder. This proves the covered presenter decisions, not pixels or
+# physical signal accuracy. The strict mock runner invokes this gate.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -26,4 +22,5 @@ fi
     -o "$OUT/ble_row_golden_dump" test/ble_row_golden_dump.cpp
 "$OUT/ble_row_golden_dump" > "$OUT/ble_row_golden.tsv"
 
-node tools/ble_row_parity.js "$OUT/ble_row_golden.tsv"
+"$OUT/ble_row_golden_dump" --web-presenters > "$OUT/web_presenter_golden.tsv"
+node tools/ble_row_parity.js "$OUT/ble_row_golden.tsv" "$OUT/web_presenter_golden.tsv"

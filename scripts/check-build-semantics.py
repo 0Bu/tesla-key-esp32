@@ -118,6 +118,7 @@ BUILD_INJECTION_ENV = (
     "CPATH", "CPLUS_INCLUDE_PATH", "C_INCLUDE_PATH", "OBJC_INCLUDE_PATH",
     "DEPENDENCIES_OUTPUT", "SUNPRO_DEPENDENCIES", "GCC_EXEC_PREFIX",
     "COMPILER_PATH", "LIBRARY_PATH",
+    "SDKCONFIG_DEFAULTS", "EXTRA_COMPONENT_DIRS", "CFLAGS", "CXXFLAGS", "CPPFLAGS", "LDFLAGS",
 )
 
 
@@ -1162,12 +1163,36 @@ def validate_generated_firmware_sources(
     validate_embedded_binary_assembly(generated["x509_crt_bundle.S"], x509_bundle, "x509_crt_bundle")
 
 
+def validate_tesla_ble_log_level(tokens: list[str]) -> None:
+    # The reviewed CMake PRIVATE definition must reach every object owned by this component.
+    selected = [token for token in tokens if "TESLA_BLE_LOG_LEVEL" in token]
+    if selected != ["-DTESLA_BLE_LOG_LEVEL=2"]:
+        raise SemanticsError("Tesla BLE component must compile with one exact INFO log definition")
+
+
 def validate_root_cmake_link_surface(source_root: Path) -> None:
     cmake = canonical_regular_file(source_root / "CMakeLists.txt", "root CMake contract").read_text(
         encoding="utf-8"
     )
     code = re.sub(r"#[^\n]*", "", cmake)
+    dependency_property = "set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${TESLA_BLE_CONFIGURE_INPUTS})"
+    if code.count(dependency_property) != 1:
+        raise SemanticsError("root CMake configure dependency property drifted")
+    # Whitelist this one configure-input property; every other property remains forbidden.
+    code = code.replace(dependency_property, "", 1)
+    inventory_blocks = re.findall(r"\bfile\s*\((.*?)\)", code, re.I | re.S)
+    expected_inventory = ('GLOB TESLA_BLE_INPUT_INVENTORY CONFIGURE_DEPENDS\n'
+                          '    "${CMAKE_SOURCE_DIR}/patches/tesla-ble/*"\n'
+                          '    "${CMAKE_SOURCE_DIR}/dependencies.lock.*"')
+    if len(inventory_blocks) != 1 or inventory_blocks[0].strip() != expected_inventory:
+        raise SemanticsError("root CMake configure inventory drifted")
+    log_property = 'idf_component_get_property(TESLA_BLE_COMPONENT_LIB yoziru__tesla-ble COMPONENT_LIB)'
+    log_definition = 'target_compile_definitions(${TESLA_BLE_COMPONENT_LIB} PRIVATE TESLA_BLE_LOG_LEVEL=2)'
+    if code.count(log_property) != 1 or code.count(log_definition) != 1:
+        raise SemanticsError("root CMake Tesla BLE INFO logging policy drifted")
+    code = code.replace(log_property, "", 1).replace(log_definition, "", 1)
     forbidden = (
+        "idf_component_get_property", "target_compile_definitions",
         "add_custom_command", "add_custom_target", "add_executable", "add_library",
         "target_link_options", "target_link_libraries", "link_directories", "target_sources",
         "set_property", "set_target_properties", "cmake_language", "configure_file",
@@ -1180,11 +1205,16 @@ def validate_root_cmake_link_surface(source_root: Path) -> None:
             raise SemanticsError(f"root CMake exposes forbidden link mutation token: {token}")
     execute_blocks = re.findall(r"\bexecute_process\s*\((.*?)\)", code, re.I | re.S)
     expected_execute = (
-        'COMMAND "${CMAKE_SOURCE_DIR}/scripts/apply-tesla-ble-patches.sh"\n'
-        "    RESULT_VARIABLE TESLA_BLE_PATCH_RESULT"
+        ('COMMAND "${CMAKE_SOURCE_DIR}/scripts/apply-tesla-ble-patches.sh"\n'
+         '    RESULT_VARIABLE TESLA_BLE_PATCH_RESULT'),
+        ('COMMAND "${CMAKE_SOURCE_DIR}/scripts/apply-tesla-ble-patches.sh" --list-inputs\n'
+         '    OUTPUT_VARIABLE TESLA_BLE_CONFIGURE_INPUTS\n'
+         '    OUTPUT_STRIP_TRAILING_WHITESPACE\n'
+         '    RESULT_VARIABLE TESLA_BLE_INPUT_RESULT'),
     )
-    if len(execute_blocks) != 1 or execute_blocks[0].strip() != expected_execute:
+    if tuple(block.strip() for block in execute_blocks) != expected_execute:
         raise SemanticsError("root CMake execute_process surface drifted")
+
 
 
 def validate_main_cmake_build_surface(source_root: Path) -> None:
@@ -1830,7 +1860,8 @@ def validate(
     graph_validator: GraphValidator | None = validate_build_graph_provenance,
     specs_validator: SpecsValidator = validate_picolibc_specs,
 ) -> int:
-    injected = [name for name in BUILD_INJECTION_ENV if name in os.environ]
+    injected = sorted(name for name in os.environ
+                      if name in BUILD_INJECTION_ENV or name.startswith(("IDF_COMPONENT_", "TESLA_BLE_")))
     if injected:
         raise SemanticsError(
             f"compiler/linker injection environment variables are set: {injected}"
@@ -1943,6 +1974,8 @@ def validate(
         validate_firmware_compile_boundary(
             file_name, tokens, target, source.suffix.lower(), allowed_specs
         )
+        if "/esp-idf/yoziru__tesla-ble/CMakeFiles/__idf_yoziru__tesla-ble.dir/" in ("/" + output.lstrip("/")):
+            validate_tesla_ble_log_level(tokens)
         if allowed_specs is not None and allowed_specs in tokens:
             specs_compilers.add(Path(tokens[0]))
         validate_compile_include_paths(
@@ -2043,7 +2076,24 @@ def self_test_build_graph_contract(repository_root: Path) -> None:
         validate_main_cmake_build_surface(cmake_source)
         root_cmake = cmake_source / "CMakeLists.txt"
         root_cmake_text = root_cmake.read_text(encoding="utf-8")
+        validate_tesla_ble_log_level(["-DTESLA_BLE_LOG_LEVEL=2"])
+        for bad in ([], ["-DTESLA_BLE_LOG_LEVEL=3"], ["-DTESLA_BLE_LOG_LEVEL=4"],
+                    ["-DTESLA_BLE_LOG_LEVEL=2", "-DTESLA_BLE_LOG_LEVEL=4"],
+                    ["-DTESLA_BLE_LOG_LEVEL=2", "-UTESLA_BLE_LOG_LEVEL"]):
+            rejected("Tesla BLE effective INFO level", "exact INFO log definition",
+                     lambda bad=bad: validate_tesla_ble_log_level(bad))
+
         for label, mutation, expected in (
+            (
+                "CMake target property canary",
+                '\nset_property(TARGET app PROPERTY LINK_FLAGS "unreviewed")\n',
+                "forbidden link/source seam",
+            ),
+            (
+                "CMake extra process canary",
+                '\nexecute_process(COMMAND unreviewed)\n',
+                "execute_process surface drifted",
+            ),
             (
                 "CMake RULE_LAUNCH_LINK canary",
                 '\nset(RULE_LAUNCH_LINK "/tmp/unreviewed-link-launcher")\n',
@@ -2061,6 +2111,23 @@ def self_test_build_graph_contract(repository_root: Path) -> None:
             ),
         ):
             root_cmake.write_text(root_cmake_text + mutation, encoding="utf-8")
+            rejected(label, expected, lambda: validate_root_cmake_link_surface(cmake_source))
+            root_cmake.write_text(root_cmake_text, encoding="utf-8")
+
+        for label, before, after, expected in (
+            ("CMake library INFO level substitution", "PRIVATE TESLA_BLE_LOG_LEVEL=2",
+             "PRIVATE TESLA_BLE_LOG_LEVEL=3", "INFO logging policy drifted"),
+            ("CMake library INFO scope substitution", "PRIVATE TESLA_BLE_LOG_LEVEL=2",
+             "PUBLIC TESLA_BLE_LOG_LEVEL=2", "INFO logging policy drifted"),
+            ("CMake configure property substitution", "DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS",
+             "TARGET app PROPERTY LINK_FLAGS", "configure dependency property drifted"),
+            ("CMake configure inventory substitution", "GLOB TESLA_BLE_INPUT_INVENTORY CONFIGURE_DEPENDS",
+             "GLOB TESLA_BLE_INPUT_INVENTORY", "configure inventory drifted"),
+            ("CMake list-input command substitution", 'apply-tesla-ble-patches.sh" --list-inputs',
+             'unreviewed.sh" --list-inputs', "execute_process surface drifted"),
+        ):
+            assert root_cmake_text.count(before) == 1
+            root_cmake.write_text(root_cmake_text.replace(before, after), encoding="utf-8")
             rejected(label, expected, lambda: validate_root_cmake_link_surface(cmake_source))
             root_cmake.write_text(root_cmake_text, encoding="utf-8")
 
@@ -2768,6 +2835,24 @@ def self_test() -> None:
             if previous_library_path is not None:
                 os.environ["LIBRARY_PATH"] = previous_library_path
 
+        # Both empty and nonempty overrides must fail before any build-tree inspection.
+        for name in (*BUILD_INJECTION_ENV, "IDF_COMPONENT_FUTURE", "TESLA_BLE_FUTURE"):
+            previous = os.environ.pop(name, None)
+            try:
+                for value in ("", "untrusted"):
+                    os.environ[name] = value
+                    try:
+                        fixture_validate("esp32c3", sdkconfig, commands, root)
+                    except SemanticsError as exc:
+                        assert "compiler/linker injection environment" in str(exc)
+                        assert name in str(exc)
+                    else:
+                        raise AssertionError(f"build override environment mutation was accepted: {name}")
+            finally:
+                os.environ.pop(name, None)
+                if previous is not None:
+                    os.environ[name] = previous
+
         def prefixed_ninja_command(
             _build_root: Path, outputs: tuple[str, ...]
         ) -> dict[str, tuple[str, ...]]:
@@ -2845,6 +2930,7 @@ def self_test() -> None:
                     "output": managed_output,
                     "arguments": [
                         sample_c_compiler, "-Og", "-fstack-usage",
+                        "-DTESLA_BLE_LOG_LEVEL=2",
                         "-o", managed_output, "-c", str(managed_source),
                     ],
                 },
@@ -2852,6 +2938,26 @@ def self_test() -> None:
             encoding="utf-8",
         )
         assert fixture_validate("esp32c3", sdkconfig, commands, root) == 1
+
+        managed_valid = json.loads(commands.read_text(encoding="utf-8"))
+        for definitions in (
+            [], ["-DTESLA_BLE_LOG_LEVEL=3"],
+            ["-DTESLA_BLE_LOG_LEVEL=2", "-DTESLA_BLE_LOG_LEVEL=2"],
+            ["-DTESLA_BLE_LOG_LEVEL=2", "-UTESLA_BLE_LOG_LEVEL"],
+            ["-DTESLA_BLE_LOG_LEVEL=2", "-DTESLA_BLE_LOG_LEVEL=4"],
+        ):
+            changed = json.loads(json.dumps(managed_valid))
+            tokens = changed[1]["arguments"]
+            index = tokens.index("-DTESLA_BLE_LOG_LEVEL=2")
+            tokens[index:index + 1] = definitions
+            commands.write_text(json.dumps(changed), encoding="utf-8")
+            try:
+                fixture_validate("esp32c3", sdkconfig, commands, root)
+            except SemanticsError as exc:
+                assert "Tesla BLE component must compile" in str(exc)
+            else:
+                raise AssertionError("managed component log definition bypassed top-level validation")
+        commands.write_text(json.dumps(managed_valid), encoding="utf-8")
 
         def managed_prefixed_ninja_command(
             _build_root: Path, outputs: tuple[str, ...]
@@ -2903,6 +3009,7 @@ def self_test() -> None:
                 "output": managed_output,
                 "arguments": [
                     sample_c_compiler, "-Og", "-fstack-usage",
+                    "-DTESLA_BLE_LOG_LEVEL=2",
                     "-o", managed_output, "-c", str(managed_source),
                 ],
             },

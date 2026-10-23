@@ -1,4 +1,5 @@
 #pragma once
+#include "coredump_image.hpp"
 
 #include <cstdint>
 #include <cstdio>
@@ -7,6 +8,10 @@
 #include <vector>
 
 #include "link_state.hpp"
+#include "charge_control.hpp"
+#include "health_gate.hpp"
+#include "session_availability.hpp"
+#include "runtime_admission.hpp"
 #include "vehicle_data.hpp"
 
 // Pure, hardware-free shaping of GET /status — the de-facto contract the web UI
@@ -53,10 +58,16 @@ struct Inputs {
     std::string vin, ip, version;
     bool        key_present{false};
     std::string key_fingerprint;
+    // Charge age uses the existing gap before the aligned timestamp on supported targets.
+    // Inputs are assigned by name; emit_status independently owns JSON field order.
+    uint32_t    charge_age_s{0};
     long long   key_created{0};   // epoch s; emitted only above kEpochPlausibleFloor
     bool        paired{false};
-    long long   paired_at{0};     // epoch s; same plausibility rule
+    tk::SessionAvailability sessions;
+    long long   paired_at{0};     // stored session first observed at NTP time; epoch s, same floor
     bool        reauth{false};
+    tk::OtaVerificationState ota_verification{tk::OtaVerificationState::Unknown}; // cached only
+    const char* pairing_block_reason{nullptr};  // static cached reason; absent during normal pairing
 
     // WiFi (STA link). wifi_connected false ⇒ the wifi object stays empty.
     bool        wifi_connected{false};
@@ -89,6 +100,7 @@ struct Inputs {
     std::string syslog_host;      // empty = omit host+port
     int         syslog_port{0};
     std::string syslog_error;     // empty = omit
+    uint32_t syslog_dropped_lines{0};
 
     // OTA update channel ("release" or "dev"). Empty = omitted.
     std::string ota_channel;
@@ -116,12 +128,13 @@ struct Inputs {
     std::string vcsec_sleep{"UNKNOWN"};
 
     // Cached vehicle data (copies of the last_known_* caches).
-    ChargeStateResult   charge;    // drives "vehicle" (Awake only) and "last"
+    ChargeStateResult   charge;    // "vehicle" needs its own fresh sample; "last" retains the cache
     ClimateStateResult  climate;   // "tele" — emitted only while BLE-connected
     DriveStateResult    drive;
     TirePressureResult  tires;
     ClosuresStateResult closures;
 
+    bool     have_charge_age{false};
     bool     have_last_seen{false};
     uint32_t last_seen_s{0};
 
@@ -148,6 +161,8 @@ struct Inputs {
     uint32_t    wifi_reconnects{0};
     std::string reset_reason;          // logic/reset_reason.hpp slug for THIS boot
     bool        safe_mode{false};      // the latched boot-loop recovery state (safe_mode.cpp)
+    std::optional<tk::RuntimeAdmissionState> runtime_state;
+    uint32_t diag_dropped_lines{0};
     // Historical minimum free stack since boot, sampled by each owning task. nullopt means never
     // sampled and is omitted: safe mode intentionally never starts three of these tasks. An
     // engaged zero is a valid, critical measurement and must remain distinguishable from absence.
@@ -165,6 +180,11 @@ struct Inputs {
     int                   crash_reason_code{0};
     bool                  crash_fault{false};
     bool                  crash_coredump{false};   // a dump for THIS build is downloadable now
+    bool crash_artifact_present{false}, crash_raw_available{false}, crash_query_error{false};
+    bool crash_foreign_dump{false}, crash_checksum_verified{false}, crash_summary_available{false};
+    bool crash_truncated{false}, crash_isr{false};
+    DumpIdentity crash_dump_identity{DumpIdentity::Unverified};
+    std::string crash_dump_elf_sha256;
     bool                  crash_corrupted{false};  // the unwinder flagged the backtrace unreliable
     std::string           crash_task;
     uint32_t              crash_pc{0};
@@ -208,8 +228,21 @@ inline void emit_status(const Inputs& in, E& e) {
     e.str("key_fingerprint", in.key_fingerprint.c_str());
     if (in.key_created > kEpochPlausibleFloor) e.num("key_created", (double)in.key_created);
     e.boolean("paired", in.paired);
+    e.boolean("session_available", in.sessions.vcsec.known && in.sessions.vcsec.usable);
+    e.obj_begin("sessions");
+    const auto emit_session = [&](const char* name, tk::SessionRuntimeState state) {
+        e.obj_begin(name);
+        e.boolean("runtime_known", state.known);
+        e.boolean("runtime_usable", state.known && state.usable);
+        e.str("persistence", tk::session_save_state_name(state.save));
+        e.obj_end();
+    };
+    emit_session("vcsec", in.sessions.vcsec);
+    emit_session("infotainment", in.sessions.infotainment);
+    e.obj_end();
     if (in.paired_at > kEpochPlausibleFloor) e.num("paired_at", (double)in.paired_at);
     e.boolean("reauth", in.reauth);
+    if (in.pairing_block_reason) e.str("pairing_blocked", in.pairing_block_reason);
 
     // ── wifi ──────────────────────────────────────────────────────────────────
     e.obj_begin("wifi");
@@ -251,6 +284,7 @@ inline void emit_status(const Inputs& in, E& e) {
     e.boolean("configured", in.syslog_configured);
     e.boolean("resolved",   in.syslog_resolved);
     e.boolean("reachable",  in.syslog_reachable);
+    if (in.syslog_dropped_lines) e.num("dropped_lines", in.syslog_dropped_lines);
     if (!in.syslog_host.empty()) {
         e.str("host", redacted_or(in.syslog_host, in.redact));
         e.num("port", in.syslog_port);
@@ -262,6 +296,7 @@ inline void emit_status(const Inputs& in, E& e) {
     if (!in.ota_channel.empty()) {
         e.obj_begin("ota");
         e.str("channel", in.ota_channel.c_str());
+        e.str("verification", tk::ota_verification_name(in.ota_verification));
         e.obj_end();
     }
 
@@ -354,9 +389,10 @@ inline void emit_status(const Inputs& in, E& e) {
     e.str("link",        link_state_web_str(in.link));
     e.str("vcsec_sleep", in.vcsec_sleep.c_str());
 
-    // ── vehicle — live awake/SOC view, only with fresh telemetry (link == Awake),
+    // ── vehicle — live awake/SOC view, only with fresh ChargeState telemetry,
     // independent of the momentary BLE link. ──────────────────────────────────
-    if (in.link == LinkState::Awake && in.charge.valid) {
+    if (in.link == LinkState::Awake &&
+        tk::charge_sample_fresh(in.charge.valid, in.have_charge_age, in.charge_age_s)) {
         const ChargeStateResult& cs = in.charge;
         e.obj_begin("vehicle");
         if (cs.has_battery_level)        e.num("soc", cs.battery_level);
@@ -381,6 +417,7 @@ inline void emit_status(const Inputs& in, E& e) {
         e.obj_end();
     }
     if (in.have_last_seen) e.num("last_seen_s", (double)in.last_seen_s);
+    if (in.charge.valid && in.have_charge_age) e.num("charge_age_s", (double)in.charge_age_s);
     if (!in.last_reboot.empty()) e.str("last_reboot", in.last_reboot.c_str());
 
     // ── sys — always present ──────────────────────────────────────────────────
@@ -397,6 +434,8 @@ inline void emit_status(const Inputs& in, E& e) {
     e.num("wifi_reconnects", (double)in.wifi_reconnects);
     e.str("reset_reason",    in.reset_reason.c_str());
     e.boolean("safe_mode",   in.safe_mode);
+    if (in.runtime_state) e.str("runtime_state", tk::runtime_admission_state_name(*in.runtime_state));
+    if (in.diag_dropped_lines) e.num("diag_dropped_lines", in.diag_dropped_lines);
     if (in.httpd_stack_min_free_bytes || in.vehicle_stack_min_free_bytes ||
         in.auto_pair_stack_min_free_bytes || in.mqtt_stack_min_free_bytes) {
         e.obj_begin("stack_min_free_bytes");
@@ -423,22 +462,29 @@ inline void emit_status(const Inputs& in, E& e) {
         e.num("reason_code", (double)in.crash_reason_code);
         e.boolean("fault",     in.crash_fault);
         e.boolean("coredump",  in.crash_coredump);
-        if (!in.crash_task.empty()) e.str("task", in.crash_task.c_str());
-        if (in.crash_pc != 0)       e.num("pc", (double)in.crash_pc);
-        if (!in.crash_backtrace.empty()) {
-            // Hex STRINGS, not numbers: a PC is an address, it is read and pasted as 0x…, and a
-            // JSON number would render it in decimal in every viewer that touches this payload.
-            e.arr_begin("backtrace");
-            for (uint32_t pc : in.crash_backtrace) {
-                char buf[16];
-                std::snprintf(buf, sizeof(buf), "0x%08x", (unsigned)pc);
-                e.str(nullptr, buf);
+        e.boolean("artifact_present", in.crash_artifact_present);
+        e.boolean("raw_available", in.crash_raw_available);
+        e.boolean("query_error", in.crash_query_error);
+        e.boolean("foreign_dump", in.crash_foreign_dump);
+        e.boolean("checksum_verified", in.crash_checksum_verified);
+        e.str("dump_identity", dump_identity_name(in.crash_dump_identity));
+        e.boolean("summary_available", in.crash_summary_available);
+        if (!in.crash_dump_elf_sha256.empty()) e.str("dump_elf_sha256", in.crash_dump_elf_sha256.c_str());
+        if (in.crash_summary_available) {
+            if (!in.crash_task.empty()) e.str("task", in.crash_task.c_str());
+            e.num("pc", static_cast<double>(in.crash_pc));
+            e.boolean("corrupted", in.crash_corrupted);
+            e.boolean("truncated", in.crash_truncated);
+            e.boolean("isr", in.crash_isr);
+            if (!in.crash_backtrace.empty()) {
+                e.arr_begin("backtrace");
+                for (uint32_t pc : in.crash_backtrace) {
+                    char buf[11];
+                    std::snprintf(buf, sizeof(buf), "0x%08x", static_cast<unsigned>(pc));
+                    e.str(nullptr, buf);
+                }
+                e.arr_end();
             }
-            e.arr_end();
-            // Emitted only alongside a backtrace, because that is the only thing it qualifies: it
-            // says the frames below are unreliable, and on its own it would look like a verdict
-            // about the crash itself.
-            if (in.crash_corrupted) e.boolean("corrupted", true);
         }
         if (!in.crash_elf_sha256.empty()) e.str("elf_sha256", in.crash_elf_sha256.c_str());
         e.obj_end();

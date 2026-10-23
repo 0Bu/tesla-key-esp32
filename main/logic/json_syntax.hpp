@@ -12,6 +12,7 @@
 namespace tk {
 
 inline constexpr unsigned kJsonMaxNesting = 16;
+inline constexpr unsigned kJsonMaxRequestValues = 64;
 inline constexpr int64_t kJsonSafeIntegerMax = INT64_C(9007199254740991);
 
 // IEEE-754 doubles preserve every integer in [-2^53+1, 2^53-1] exactly. cJSON materializes
@@ -66,14 +67,16 @@ enum class JsonSyntaxStatus {
     Malformed,
     TooDeep,
     UnsupportedNul,
+    TooManyValues,
 };
 
 namespace json_detail {
 
 class SyntaxCursor {
 public:
-    SyntaxCursor(const char* data, size_t len, JsonRawNumberId* raw_id = nullptr)
-        : cur_(data), end_(data ? data + len : nullptr), raw_id_(raw_id) {}
+    SyntaxCursor(const char* data, size_t len, JsonRawNumberId* raw_id = nullptr,
+                 unsigned max_values = 0)
+        : cur_(data), end_(data ? data + len : nullptr), raw_id_(raw_id), max_values_(max_values) {}
 
     JsonSyntaxStatus document() {
         if (!cur_) return JsonSyntaxStatus::Malformed;
@@ -84,7 +87,8 @@ public:
             return JsonSyntaxStatus::Malformed;
         }
         whitespace();
-        return cur_ == end_ ? JsonSyntaxStatus::Valid : JsonSyntaxStatus::Malformed;
+        if (cur_ != end_) return JsonSyntaxStatus::Malformed;
+        return too_many_values_ ? JsonSyntaxStatus::TooManyValues : JsonSyntaxStatus::Valid;
     }
 
 private:
@@ -93,6 +97,9 @@ private:
     bool        too_deep_{false};
     bool        unsupported_nul_{false};
     JsonRawNumberId* raw_id_{nullptr};
+    unsigned    max_values_{0};  // zero preserves the generic/OTA materializer's unlimited policy
+    unsigned    values_{0};
+    bool        too_many_values_{false};
 
     void whitespace() {
         while (cur_ < end_ && (*cur_ == ' ' || *cur_ == '\t' || *cur_ == '\r' || *cur_ == '\n'))
@@ -320,6 +327,12 @@ private:
             return false;
         }
         if (cur_ == end_) return false;
+        // Count root, containers and scalars, never object names. Saturate and keep validating:
+        // later malformed/NUL/depth errors retain the syntax gate's existing priority.
+        if (max_values_ != 0) {
+            if (values_ < max_values_) ++values_;
+            else too_many_values_ = true;
+        }
         switch (*cur_) {
             case '{':
                 if (depth >= kJsonMaxNesting) {
@@ -344,8 +357,8 @@ private:
 
 }  // namespace json_detail
 
-inline JsonSyntaxStatus json_syntax_status(const char* data, size_t len) {
-    return json_detail::SyntaxCursor(data, len).document();
+inline JsonSyntaxStatus json_syntax_status(const char* data, size_t len, unsigned max_values = 0) {
+    return json_detail::SyntaxCursor(data, len, nullptr, max_values).document();
 }
 
 inline bool json_syntax_valid(const char* data, size_t len) {
@@ -365,6 +378,7 @@ enum class JsonMaterializeStatus {
     TooDeep,
     UnsupportedNul,
     NoMemory,
+    TooManyValues,
 };
 
 template <typename Node>
@@ -377,8 +391,9 @@ struct JsonMaterializeResult {
 // n-th-allocation failpoint in the host gate. Because syntax validation allocates nothing, nullptr
 // after valid syntax is unambiguously a materialisation/resource failure and maps to 503.
 template <typename Node, typename Parse>
-JsonMaterializeResult<Node> json_materialize(const char* data, size_t len, Parse parse) {
-    const JsonSyntaxStatus syntax = json_syntax_status(data, len);
+JsonMaterializeResult<Node> json_materialize(const char* data, size_t len, Parse parse,
+                                            unsigned max_values = 0) {
+    const JsonSyntaxStatus syntax = json_syntax_status(data, len, max_values);
     if (syntax == JsonSyntaxStatus::Malformed) {
         return {nullptr, JsonMaterializeStatus::Malformed};
     }
@@ -387,6 +402,9 @@ JsonMaterializeResult<Node> json_materialize(const char* data, size_t len, Parse
     }
     if (syntax == JsonSyntaxStatus::UnsupportedNul) {
         return {nullptr, JsonMaterializeStatus::UnsupportedNul};
+    }
+    if (syntax == JsonSyntaxStatus::TooManyValues) {
+        return {nullptr, JsonMaterializeStatus::TooManyValues};
     }
     Node* root = parse(data);
     if (!root) return {nullptr, JsonMaterializeStatus::NoMemory};

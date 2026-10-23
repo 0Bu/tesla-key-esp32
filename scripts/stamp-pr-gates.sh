@@ -27,21 +27,70 @@ sha = sys.argv[2]
 raw_gates = sys.argv[3:]
 only_confirmed = not body
 
-# Parse existing evidence comments associated with each gate
-existing_evidence = {}
-gate_re = re.compile(r"[-*+]\s+\[[ xX]\]\s+`?\$([a-z-]+)`?.*")
-comment_re = re.compile(r"^\s*<!--\s*(?:evidence|gate):\s*(?P<ev>.*?)\s*-->")
-current_gate = None
-for line in body.splitlines():
-    m = gate_re.match(line.strip())
-    if m:
-        current_gate = m.group(1)
+gate_specs = [
+    ("skill-audit", "clean", "PR create/push gate"),
+    ("project-review", "clean", "merge gate"),
+    ("pr-hygiene", "clean", "content gate"),
+    ("feature-docs", "synced", "merge gate"),
+    ("vehicle-command-audit", "clean", "merge gate"),
+]
+
+# Only top-level task records outside Markdown examples are owned by this formatter.
+# Evidence belongs to a record only on its immediately following, two-space-indented line.
+lines = body.splitlines()
+fence = None
+raw = None
+eligible = set()
+raw_tags = {"pre", "script", "style", "textarea", "details", "div", "table", "section", "article", "aside", "blockquote", "body", "ul", "ol", "li", "p", "form", "header", "footer", "main", "nav", "figure", "figcaption", "summary"}
+for index, line in enumerate(lines):
+    token = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
+    if fence:
+        if token and token[1][0] == fence[0] and len(token[1]) >= fence[1] and not token[2].strip():
+            fence = None
         continue
-    cm = comment_re.match(line.strip())
-    if cm and current_gate:
-        existing_evidence[current_gate] = cm.group("ev")
-    elif line.strip() and not line.strip().startswith("<!--"):
-        current_gate = None
+    if raw:
+        kind, end = raw
+        if ((kind == "blank" and not line.strip()) or
+            (kind == "delim" and end in line) or
+            (kind == "tag" and re.search(rf"</{end}\s*>", line, re.I))):
+            raw = None
+        continue
+    if token and not (token[1][0] == "`" and "`" in token[2]):
+        fence = (token[1][0], len(token[1]))
+        continue
+    if line.startswith(("    ", "\t")) or line.lstrip().startswith(">"):
+        continue
+    text = line.lstrip(" ")
+    if len(line) - len(text) <= 3:
+        for opener, closer in (("<!--", "-->"), ("<?", "?>"), ("<![CDATA[", "]]>"), ("<!", ">")):
+            if text.startswith(opener):
+                if closer not in text[len(opener):]: raw = ("delim", closer)
+                break
+        else:
+            tag = re.match(r"^</?([A-Za-z][A-Za-z0-9-]*)(?=[\s/>]|$)", text)
+            if tag and (tag[1].lower() in raw_tags or ">" in text):
+                name = tag[1].lower()
+                raw = ("tag", name) if name in {"pre", "script", "style", "textarea"} else ("blank", "")
+                if raw[0] == "tag" and re.search(rf"</{name}\s*>", text, re.I): raw = None
+                continue
+            eligible.add(index)
+        # An HTML comment/declaration line is not a task record.
+        continue
+
+owned = set()
+existing_evidence = {}
+evidence_re = re.compile(r"^  <!--\s*(?:evidence|gate):\s*(?P<ev>.*?)\s*-->\s*$")
+for index in eligible:
+    for name, word, role in gate_specs:
+        pattern = rf"^[-*+]\s+\[[ xX]\]\s+`?[$/]{re.escape(name)}`?\s+{word}\s+—\s+{re.escape(role)}\s+@\s+(?:[0-9a-f]{{40}}|<full-40-hex-sha>)\s*$"
+        if not re.fullmatch(pattern, lines[index]): continue
+        owned.add(index)
+        if index + 1 < len(lines):
+            match = evidence_re.fullmatch(lines[index + 1])
+            if match:
+                owned.add(index + 1)
+                existing_evidence[name] = match["ev"]
+        break
 
 evidence_map = {}
 for item in raw_gates:
@@ -55,13 +104,7 @@ for item in raw_gates:
     else:
         evidence_map[item] = existing_evidence.get(item, "passed")
 
-gate_specs = [
-    ("skill-audit", "clean", "PR create/push gate"),
-    ("project-review", "clean", "merge gate"),
-    ("pr-hygiene", "clean", "content gate"),
-    ("feature-docs", "synced", "merge gate"),
-    ("vehicle-command-audit", "clean", "merge gate"),
-]
+
 
 records = []
 for name, status_word, role in gate_specs:
@@ -78,25 +121,13 @@ if only_confirmed:
     print("\n".join(records))
     sys.exit(0)
 
-patterns = [
-    r"[-*+]\s+\[[ xX]\]\s+`?\$skill-audit`?.*",
-    r"[-*+]\s+\[[ xX]\]\s+`?\$project-review`?.*",
-    r"[-*+]\s+\[[ xX]\]\s+`?\$pr-hygiene`?.*",
-    r"[-*+]\s+\[[ xX]\]\s+`?\$feature-docs`?.*",
-    r"[-*+]\s+\[[ xX]\]\s+`?\$vehicle-command-audit`?.*",
-]
-evidence_re = re.compile(r"^\s*<!--\s*(?:evidence|gate):\s*.*-->")
-
-lines = body.splitlines()
 new_lines = []
 stamped = False
-for line in lines:
-    if any(re.match(p, line.strip()) for p in patterns):
+for index, line in enumerate(lines):
+    if index in owned:
         if not stamped:
             new_lines.extend(records)
             stamped = True
-    elif evidence_re.match(line.strip()):
-        continue
     else:
         new_lines.append(line)
 
@@ -156,6 +187,45 @@ BODY
   local count
   count="$(echo "$restamped" | grep -c "<!-- evidence: " || true)"
   [ "$count" -eq 2 ] || { echo "self-test failed: re-stamping duplicated evidence comments (count=$count)" >&2; exit 1; }
+
+  # Preserve unrelated evidence and every quoted/fenced/indented/HTML example byte-for-byte.
+  local protected_body protected_stamped protected_twice protected_prefix
+  IFS= read -r -d '' protected_prefix <<'PRESERVE' || :
+<!-- evidence: unrelated-review -->
+<!-- gate: unrelated-gate -->
+
+````markdown
+- [ ] `$skill-audit` clean — PR create/push gate @ <full-40-hex-sha>
+  <!-- evidence: fenced-example -->
+```
+- [ ] `$project-review` clean — merge gate @ <full-40-hex-sha>
+````
+
+~~~markdown
+- [ ] `$pr-hygiene` clean — content gate @ <full-40-hex-sha>
+~~~
+
+> - [ ] `$feature-docs` synced — merge gate @ <full-40-hex-sha>
+> <!-- evidence: quoted-example -->
+
+    - [ ] `$vehicle-command-audit` clean — merge gate @ <full-40-hex-sha>
+
+<details>
+- [ ] `$skill-audit` clean — PR create/push gate @ <full-40-hex-sha>
+</details>
+
+<script>
+- [ ] `$project-review` clean — merge gate @ <full-40-hex-sha>
+</script>
+
+<!-- active records below -->
+PRESERVE
+  protected_body="$protected_prefix
+$sample_body"
+  protected_stamped="$(apply_gate_stamps "$protected_body" "$sha" "pr-hygiene=new-evidence")"
+  [[ "$protected_stamped" == "$protected_prefix"* ]] || { echo "self-test: unrelated Markdown/evidence changed" >&2; exit 1; }
+  protected_twice="$(apply_gate_stamps "$protected_stamped" "$sha" "pr-hygiene=new-evidence")"
+  [[ "$protected_twice" == "$protected_stamped" ]] || { echo "self-test: restamp changed preserved content or duplicated evidence" >&2; exit 1; }
 
   # 3. All gates confirmed
   local all_stamped

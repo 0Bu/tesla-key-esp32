@@ -216,28 +216,88 @@ public:
     [[nodiscard]] size_t active_count() const noexcept { return active_count_; }
     [[nodiscard]] const DispatcherStats& stats() const noexcept { return stats_; }
 
-    // Route an incoming response to a registered outstanding request.
+    // Resolve response attribution without changing replay windows, statistics or command state.
     // - from_domain: source domain of response.
     // - uuid_bytes / uuid_len: request UUID from response (can be empty / 0 bytes).
-    // - has_counter: whether response carries an authenticated response counter.
-    // - counter: response counter value (if has_counter).
+    DispatchOutcome match_response(BleDomain from_domain,
+                                   const uint8_t* uuid_bytes, size_t uuid_len) const noexcept {
+        DispatchDropReason reason;
+        const auto* slot = match_slot_(from_domain, uuid_bytes, uuid_len, reason);
+        return slot ? DispatchOutcome{true, DispatchDropReason::None, slot->id, slot->user_data}
+                    : DispatchOutcome{false, reason, 0, nullptr};
+    }
+
+    // The decode shell needs only admission, not the larger result aggregate on its stack.
+    // Share the same matcher; record rejected attribution without consuming replay state.
+    [[nodiscard]] bool match_response_or_record_rejection(
+            BleDomain from_domain, const uint8_t* uuid_bytes, size_t uuid_len) noexcept {
+        DispatchDropReason reason;
+        if (match_slot_(from_domain, uuid_bytes, uuid_len, reason)) return true;
+        record_match_rejection(reason);
+        return false;
+    }
+
+    // Preserve rejection diagnostics when an adapter drops before decryption/dispatch.
+    void record_match_rejection(DispatchDropReason reason) noexcept {
+        switch (reason) {
+            case DispatchDropReason::MissingSource: ++stats_.missing_source_drops; break;
+            case DispatchDropReason::InvalidUuidLength: ++stats_.invalid_uuid_drops; break;
+            case DispatchDropReason::Unmatched: ++stats_.unmatched_drops; break;
+            default: break;
+        }
+    }
+
+    // Route an attributed response and consume its authenticated or plaintext replay window.
     DispatchOutcome dispatch(BleDomain from_domain,
                              const uint8_t* uuid_bytes, size_t uuid_len,
                              bool has_counter, uint32_t counter) noexcept {
+        DispatchDropReason reason;
+        const auto* selected = match_slot_(from_domain, uuid_bytes, uuid_len, reason);
+        if (!selected) {
+            record_match_rejection(reason);
+            return {false, reason, 0, nullptr};
+        }
+        // The helper selects within this owned array; retain that exact slot even when IDs wrap.
+        auto* matched_slot = &slots_[static_cast<size_t>(selected - slots_.data())];
+
+        // 4. Per-request Anti-Replay Validation (dispatcher.go:302-308 & ADR-0005)
+        // Uniform replay protection for authenticated and plaintext responses.
+        if (has_counter) {
+            if (!matched_slot->replay_window.add(counter)) {
+                stats_.replay_drops++;
+                return {false, DispatchDropReason::Replay, matched_slot->id, matched_slot->user_data};
+            }
+        } else {
+            // Plaintext / unauthenticated response without counter:
+            // At most one plaintext response per request. Repeated responses are rejected as replay.
+            if (matched_slot->plaintext_count > 0) {
+                stats_.replay_drops++;
+                return {false, DispatchDropReason::Replay, matched_slot->id, matched_slot->user_data};
+            }
+            matched_slot->plaintext_count++;
+        }
+
+        stats_.routed_count++;
+        return {true, DispatchDropReason::None, matched_slot->id, matched_slot->user_data};
+    }
+
+private:
+    const RequestSlot* match_slot_(BleDomain from_domain, const uint8_t* uuid_bytes,
+                                  size_t uuid_len, DispatchDropReason& reason) const noexcept {
         // 1. Missing source check (dispatcher.go:248-251)
         if (from_domain != BleDomain::VehicleSecurity && from_domain != BleDomain::Infotainment) {
-            stats_.missing_source_drops++;
-            return {false, DispatchDropReason::MissingSource, 0, nullptr};
+            reason = DispatchDropReason::MissingSource;
+            return nullptr;
         }
 
         // 2. Request UUID length check (dispatcher.go:254-258: must be 0 or 16 bytes)
         if (uuid_len != 0 && uuid_len != kBleUuidSize) {
-            stats_.invalid_uuid_drops++;
-            return {false, DispatchDropReason::InvalidUuidLength, 0, nullptr};
+            reason = DispatchDropReason::InvalidUuidLength;
+            return nullptr;
         }
 
         // 3. Match outstanding request
-        RequestSlot* matched_slot = nullptr;
+        const RequestSlot* matched_slot = nullptr;
 
         // Pass 1: exact UUID match across active slots in the same domain
         if (uuid_len == kBleUuidSize && uuid_bytes != nullptr) {
@@ -262,32 +322,13 @@ public:
         }
 
         if (!matched_slot) {
-            stats_.unmatched_drops++;
-            return {false, DispatchDropReason::Unmatched, 0, nullptr};
+            reason = DispatchDropReason::Unmatched;
+            return nullptr;
         }
-
-        // 4. Per-request Anti-Replay Validation (dispatcher.go:302-308 & ADR-0005)
-        // Uniform replay protection for authenticated and plaintext responses.
-        if (has_counter) {
-            if (!matched_slot->replay_window.add(counter)) {
-                stats_.replay_drops++;
-                return {false, DispatchDropReason::Replay, matched_slot->id, matched_slot->user_data};
-            }
-        } else {
-            // Plaintext / unauthenticated response without counter:
-            // At most one plaintext response per request. Repeated responses are rejected as replay.
-            if (matched_slot->plaintext_count > 0) {
-                stats_.replay_drops++;
-                return {false, DispatchDropReason::Replay, matched_slot->id, matched_slot->user_data};
-            }
-            matched_slot->plaintext_count++;
-        }
-
-        stats_.routed_count++;
-        return {true, DispatchDropReason::None, matched_slot->id, matched_slot->user_data};
+        reason = DispatchDropReason::None;
+        return matched_slot;
     }
 
-private:
     std::array<RequestSlot, kMaxRequests> slots_{};
     size_t active_count_{0};
     uint32_t next_request_id_{1};

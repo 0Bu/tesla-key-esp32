@@ -1,8 +1,8 @@
 #pragma once
 
 // Central FreeRTOS task-priority table — the ONE place the firmware's relative task
-// priorities are declared, so they are reviewable at a glance and the narrative task
-// inventory in docs/ARCHITECTURE.md ("Concurrency") cannot drift from the code. Every
+// priorities are declared. Review the narrative task inventory in docs/ARCHITECTURE.md
+// ("Concurrency") alongside changes here; it is not generated from this table. Every
 // xTaskCreate site takes its priority from here; stack sizes stay at the call sites,
 // where each carries its own sizing rationale.
 //
