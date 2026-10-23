@@ -157,7 +157,8 @@ the implementation on that same board. Device delivery after merge remains a sep
 ### Retained-bootloader references
 
 `scripts/check-bootloader-compat.py` compares stable ESP-IDF descriptors before an app-only USB
-write. Some IDF bootloaders omit that descriptor. These require a byte match to
+write. For some bootloaders esptool reports no ESP-IDF version (esptool 5.6.0 on the esp32c6 v6.1
+bootloader, although the image carries a descriptor). These require a byte match to
 [`scripts/bootloader-references.json`](../scripts/bootloader-references.json), never a guessed
 version or the assumption that the current app's bootloader is installed. The selected target's
 reference binds image length/SHA-256, source commit, CI run/artifact identity and ZIP digest,
