@@ -1,6 +1,6 @@
 ---
 name: device-diag
-description: Read-only, cache-only triage of tesla-key-esp32 health from existing evidence or, only with explicit user approval for the live board/target, passive GET /status, /diag, and /heap reads. Never wake or command the vehicle, change diagnostic state, pair, flash, or OTA; diagnose and hand off only.
+description: Read-only, cache-only triage of tesla-key-esp32 health from existing evidence or, only with explicit user approval for the live board/target, passive GET /status, /diag, /heap, /api/proxy/1/version and cache-only vehicle_data reads. Never wake or command the vehicle, change diagnostic state, pair, flash, or OTA; diagnose and hand off only.
 ---
 
 # Device diagnosis

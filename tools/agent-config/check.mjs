@@ -116,22 +116,22 @@ const usbNoApprovalNeeded = /(?:live verification|HTTP requests?|(?:GET|POST|HTT
 const usbOtaNotStateChanging = /(?:GET|POST) \/ota\/check[^.!?]*(?:is not|isn't|not) state-changing/i;
 const usbAbsentApprovalProceeds = /(?:(?:approval|authorization)[^.!?]*(?:absent|missing|not obtained)|without (?:separate )?(?:approval|authorization))[^.!?]*(?:continue|proceed|run|contact|send|request)/i;
 const reviewedSkillSha256 = new Map([
-  ["add-logic-test", "b37264357f243110c29275fb9c4e19dcbaba692920fa248a2ba951632ee6f2ac"],
-  ["ci-heal", "ea3440e3333ff118413f28c88ac0ac71d4d51ab1d62cdadbea5b18d187e72074"],
+  ["add-logic-test", "564c0e171f99e6cb55117c55dcb272f9c07ac0342315b48199274c6c7f347b0a"],
+  ["ci-heal", "e264e8379b61b5f78feb0b478914fa089fe6352ffc4d6984672940f8ac22b7ba"],
   ["deploy", "169d30f409d6a447752b5fc7f3b7579ee6e714df9ce33ecd51cb344dd0d877f0"],
   ["deploy-bench", "0471fee2f77a43b0e3e8292956bb74bc2d08020bd25fe29f416ea5ba609b7e02"],
-  ["device-diag", "76d7a48051049ee0c105531baedbf66841758442b12c463e4ecd9591db95030b"],
+  ["device-diag", "d1da99af7e304ef829614b9580101a1c0b6779e401de5d5f4dea884de708112e"],
   ["display-preview", "32fae92f904a8385ce86f60f7fbd6cbacbd93c6b2a21343c393dece4174ec313"],
   ["feature-docs", "17a486258723b88a5d1257284a33e295529bd52331d3b066335e832b666f1884"],
-  ["flash-esp32", "47085d29aaf104489e6a154b2f59c7a26b3498014ad1cbe14e4ba8ab4e5dc498"],
-  ["mock-test", "394d21dc5b76e529089362f2346c434b0060dd05c0948bf520b1f411cd90f9d3"],
-  ["ota-release-verify", "82fb2844d28f95ba2ea49504202dc8e0dd116a1062d17b59686a6cf46ed3448e"],
+  ["flash-esp32", "938a7422c1530459f3de5e795d21307bd78897dfda5631332c94f8502f89cd11"],
+  ["mock-test", "f211408296d1e21018c37288eb7e6f51226ebb7c5f34e3d9b851b0874aabb17b"],
+  ["ota-release-verify", "d1c988596c27b244cc549712f77b457a037e93241858af4fbf4179280039720f"],
   ["pr-hygiene", "8491da669686acc5e00741e5e1fcfec6d2caf29abb8ebff0479ca973f20e87f1"],
-  ["project-review", "2a9490b88cf001e5e4a72bb309426c90b841c54a94eb7db389d08fef03cbed6b"],
-  ["ship", "f48fe6041073eb930574cacd87aae64c4d954b9683a8c8de9d2b8d1bb958a8fa"],
-  ["skill-audit", "f55998cd31158aed7d8f889d25a5ec3845964693f7dd1b53f1ada944335a51ec"],
-  ["usb-recovery", "02c77d65474e6f426b51eb434e7633d2bb9f189f58ecab2c3110d3fd09325421"],
-  ["vehicle-command-audit", "568eb137f6652f827bddd28152d53c493c9f90a429f73031aaaa69ab72ae981a"],
+  ["project-review", "2f371c33df9fee2d2064cdf93e11e0f30e97ac2295383b100461b81f4c52878a"],
+  ["ship", "58e9b0f6d049e6fc25b6eab784f74b043899d4171d5c4d9f5435e2f386ca7fe6"],
+  ["skill-audit", "c304ac0048085acd9394a1e12462e80b6b6670babf65b770f1efc9ddd0c25325"],
+  ["usb-recovery", "598d19f1d4ef7b036ad0ae2a973ed29d6497ae8a7943bdadb8ea7abbb01816e9"],
+  ["vehicle-command-audit", "c76fd109218ebf2969e1541930b472cc04cf42423d7193aded794ee62edd7c2d"],
 ]);
 const featureDocsScopeTokens = [
   "main/", "test/", "sdkconfig.defaults*", "partitions.csv", "AGENTS.md", ".agents/", ".codex/",
@@ -403,7 +403,7 @@ for (const subagent of subagentsDoc.subagents) {
 const multiTargetReviewerObj = subagentsDoc.subagents.find((s) => s.TypeName === "multi_target_build_reviewer");
 const multiTargetReviewer = normalizeProse(multiTargetReviewerObj?.Prompt || "");
 const multiTargetPublicationContracts = [
-  "prepare -> logic-test + logic-harness + build-target + independent-rebuild-target (concurrent) -> build -> independent-rebuild -> publish -> deploy",
+  "prepare, logic-test and logic-harness start concurrently (the host jobs have no needs); build-target and independent-rebuild-target need only prepare; then build -> independent-rebuild -> publish -> deploy",
   "build needs prepare, logic-test, logic-harness and build-target",
   "independent-rebuild needs build and every independent-rebuild-target leg",
   "SHA/version-bound Actions artifact",

@@ -18,7 +18,7 @@ one page at build time), which is compiled into the app binary. A successful loc
 a flashable artifact: `CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=n` by design.
 
 > This flashes over **USB**. For a remote, no-cable update use OTA (**Check for updates**
-> in the web UI's **Firmware** tab). USB flashing requires physical access and the board plugged in.
+> in the web UI's **Firmware** row). USB flashing requires physical access and the board plugged in.
 
 > **Authorization boundary.** A build request authorizes no signing-key use or USB write. A review,
 > merge, release, or prior flash authorizes no new flash. Before `write-flash`/`write_flash` or
@@ -138,10 +138,10 @@ fi
 > exactly one `PORT=/dev/...`; ambiguity is a hard stop. Install esptool via `pipx install
 > esptool` (no brew).
 
-**Success looks like:** `Hash of data verified.` for each region, then
-`Hard resetting via RTS pin...` → `Done`. The app image lands at `0x20000` (dual-OTA
-layout). After reset the device rejoins WiFi in a few seconds; reload
-`tesla-key-esp32.local` to see UI changes.
+**Success looks like:** `Hash of data verified.` for the app write, then
+`Flash memory region erased successfully …` for the otadata erase and
+`Hard resetting via RTS pin...`. The app image lands at `0x20000` (dual-OTA layout). After reset
+the device rejoins WiFi in a few seconds; reload `tesla-key-esp32.local` to see UI changes.
 
 > ⚠️ **A local (unsigned) build crash-loops at boot — flash a _signed_ image.** Since the
 > signed-OTA config landed (`CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT` in
@@ -256,9 +256,9 @@ if ! esptool --chip "$TARGET" -p "$PORT" --before no-reset --after hard-reset \
 fi
 ```
 
-- **Bonus:** the CI image carries the **CI-stamped version** (e.g. `1.4.22`), whereas a local
-  build reports only the `version.txt` **floor** (e.g. `1.4.0`) — so the signed artifact makes
-  the reported version match the release/manifest.
+- **Bonus:** the CI image carries the **CI-stamped version** (chosen by
+  `scripts/select-release-version.sh`), whereas a local build reports only the `version.txt`
+  **floor** — so the signed artifact makes the reported version match the release/manifest.
 - **Never flash `tesla-key-esp32<sfx>-<ver>-merged.bin`** to preserve NVS — the merged image is a
   single full-flash blob spanning `0x0` and **wipes `nvs@0x9000`** (forces a full re-pair).
 - After flashing, confirm the live device with the global `$tesla-key-e2e-evcc` skill.

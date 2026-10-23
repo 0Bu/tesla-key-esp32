@@ -43,7 +43,8 @@ and owning documents. Audit **all** prerequisites, authorization, required valid
 conditions, commands, outputs and evidence contracts. The bullets below focus coverage; they do not
 replace or relax any workflow requirement.
 
-This is the single per-sibling checklist. `$project-review` uses it by reference. Read current
+This is the per-sibling checklist. `$project-review` uses it by reference and repeats only the
+`$feature-docs` bullet, which the agent-config check requires in both skills. Read current
 workflow scripts and [deep document owners](../../../docs/README.md), not historical skill verdicts.
 
 - **`$project-review`**: whole-tree coverage, current invariants/consumer map, documentation-quality
