@@ -542,7 +542,7 @@ wait_for_records_check() {
 # ─── main flow ────────────────────────────────────────────────────────────────────────────────
 run_heal() {
   local iteration=1 head_sha local_sha branch pr_ref failed_info duration start_time
-  local green=0 records_pending=0 gates rc g
+  local green=0 records_pending=0 review_fix gates rc g
   start_time="$(date +%s)"
   root_cause_detected="None"
   files_changed_count=0
@@ -579,28 +579,38 @@ run_heal() {
     # The records check is not a fixable CI failure; without other failed checks this run cannot
     # identify one (pending, cancelled or API error) and stops below.
     failed_info="$(fetch_failed_runs "$target_pr" | grep -v "^$RECORDS_CHECK | " || true)"
+    review_fix=0
     if ci_green_except_records "$target_pr" records; then
-      echo "ci-heal: every check except $RECORDS_CHECK is green for $head_sha; that check waits"
-      echo "ci-heal: for the gate records and must pass again after stamping."
-      green=1
-      records_pending=1
-      break
+      if [ "$local_sha" = "$head_sha" ]; then
+        echo "ci-heal: every check except $RECORDS_CHECK is green for $head_sha; that check waits"
+        echo "ci-heal: for the gate records and must pass again after stamping."
+        green=1
+        records_pending=1
+        break
+      fi
+      # A fix for a review finding (Phase 4 back to Phase 3) is committed on top of a head whose
+      # only red check is the records check; it takes the same attested pre-push path below.
+      echo "ci-heal: every check except $RECORDS_CHECK is green for $head_sha, and local HEAD"
+      echo "ci-heal: $local_sha differs: treating it as a committed review fix to push."
+      review_fix=1
     fi
 
-    echo "ci-heal: CI checks FAILED or are not green on PR #$target_pr."
-    print_failed_job_logs "$target_pr"
+    if [ "$review_fix" -eq 0 ]; then
+      echo "ci-heal: CI checks FAILED or are not green on PR #$target_pr."
+      print_failed_job_logs "$target_pr"
 
-    if [ -z "$failed_info" ]; then
-      echo "ci-heal: no failed check could be identified (pending, cancelled or API error)." >&2
-      echo "ci-heal: not treating this as a fixable failure — inspect 'gh pr checks $target_pr'." >&2
-      duration=$(( $(date +%s) - start_time ))
-      evaluate_and_optimize "$target_pr" "FAILED" "$iteration" "$max_retries" "$duration" "unidentified" 0 0
-      return 1
+      if [ -z "$failed_info" ]; then
+        echo "ci-heal: no failed check could be identified (pending, cancelled or API error)." >&2
+        echo "ci-heal: not treating this as a fixable failure — inspect 'gh pr checks $target_pr'." >&2
+        duration=$(( $(date +%s) - start_time ))
+        evaluate_and_optimize "$target_pr" "FAILED" "$iteration" "$max_retries" "$duration" "unidentified" 0 0
+        return 1
+      fi
+      root_cause_detected="$(classify_failure "$failed_info")"
     fi
-    root_cause_detected="$(classify_failure "$failed_info")"
 
     if [ "$dry_run" -eq 1 ]; then
-      echo "ci-heal: [dry-run] Stop on CI failure without reproducing or pushing."
+      echo "ci-heal: [dry-run] Stop without reproducing or pushing."
       duration=$(( $(date +%s) - start_time ))
       evaluate_and_optimize "$target_pr" "FAILED" "$iteration" "$max_retries" "$duration" "$root_cause_detected" 0 0
       return 1
@@ -1126,6 +1136,33 @@ self_test() {
   run_case sc_records_only_red 0
   expect_out records_only_red "READY FOR MERGE"; expect_lines records_only_red "$LOG_VERIFY" 0
   expect_lines records_only_red "$LOG_STAMPS" 1; expect_lines records_only_red "$LOG_MERGE" 1
+
+  # A committed review fix ahead of a records-pending head is pushed first, then made ready
+  sc_records_review_fix() {
+    base_attest; STUB_LOCAL="$SHA_B"; STUB_ANCESTOR=1
+    STUB_SEQ="red green"; STUB_FAILED="$RECORDS_CHECK | COMPLETED | FAILURE | u"
+  }
+  run_case sc_records_review_fix 0
+  expect_out records_review_fix "committed review fix"; expect_out records_review_fix "READY FOR MERGE"
+  expect_lines records_review_fix "$LOG_VERIFY" 1; expect_lines records_review_fix "$LOG_PUSH" 1
+  expect_lines records_review_fix "$LOG_STAMPS" 2
+  grep -Fq -- "--head $SHA_B" "$LOG_STAMPS" || { echo "self-test: records_review_fix: stamps not bound to the pushed head" >&2; fail=1; }
+
+  sc_records_review_fix_unattested() {
+    STUB_LOCAL="$SHA_B"; STUB_ANCESTOR=1
+    STUB_SEQ="red"; STUB_FAILED="$RECORDS_CHECK | COMPLETED | FAILURE | u"
+  }
+  run_case sc_records_review_fix_unattested 3
+  expect_out records_review_fix_unattested "no attestation for: skill-audit pr-hygiene"
+  expect_lines records_review_fix_unattested "$LOG_PUSH" 0; expect_lines records_review_fix_unattested "$LOG_STAMPS" 0
+
+  sc_records_review_fix_diverged() {
+    base_attest; STUB_LOCAL="$SHA_B"; STUB_ANCESTOR=0
+    STUB_SEQ="red"; STUB_FAILED="$RECORDS_CHECK | COMPLETED | FAILURE | u"
+  }
+  run_case sc_records_review_fix_diverged 1
+  expect_out records_review_fix_diverged "diverged or behind"
+  expect_lines records_review_fix_diverged "$LOG_PUSH" 0; expect_lines records_review_fix_diverged "$LOG_STAMPS" 0
 
   sc_records_still_red() {
     base_attest; auto_merge=1; STUB_RECORDS_AFTER=FAILURE

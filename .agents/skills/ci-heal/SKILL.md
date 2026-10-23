@@ -47,7 +47,8 @@ drives the real flow with stubbed `git`/`gh` and pins every refusal below.
   failed (skipped and neutral checks are fine, but a skipped or missing `build` never counts).
   Any mismatch stops the run before any merge-readiness record is stamped. `pr-policy /
   current-head-records` validates the records this workflow stamps, so a failure of that check
-  alone counts as "records pending", not as red CI; after stamping, `READY FOR MERGE` and
+  alone counts as "records pending", not as red CI. If local `HEAD` then carries a committed review
+  fix that descends from the PR head, ci-heal first pushes it through Phase 3; after stamping, `READY FOR MERGE` and
   `--auto-merge` also require a new run of that check to pass and every check to be green on the
   unchanged head. A failed stamp, push or merge stops the run. Phase 3 pre-push records instead
   attest the independently reviewed local fix commit before it has green remote CI.
