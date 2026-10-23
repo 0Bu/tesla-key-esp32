@@ -48,7 +48,8 @@ drives the real flow with stubbed `git`/`gh` and pins every refusal below.
   Any mismatch stops the run before any merge-readiness record is stamped. `pr-policy /
   current-head-records` validates the records this workflow stamps, so a failure of that check
   alone counts as "records pending", not as red CI. If local `HEAD` then carries a committed review
-  fix that descends from the PR head, ci-heal first pushes it through Phase 3; after stamping, `READY FOR MERGE` and
+  fix that descends from the PR head, ci-heal pushes it through Phase 3 and stops with exit code 3:
+  merge records for the new head need fresh reviews and a new run. After stamping, `READY FOR MERGE` and
   `--auto-merge` also require a new run of that check to pass and every check to be green on the
   unchanged head. A failed stamp, push or merge stops the run. Phase 3 pre-push records instead
   attest the independently reviewed local fix commit before it has green remote CI.
@@ -138,8 +139,8 @@ treated as fixable; the script stops and points at `gh pr checks`.
      --attest pr-hygiene="<report reference, clean>"
    ```
    ci-heal stamps both records for the local `HEAD`, pushes the branch, waits until GitHub reports
-   that commit as the PR head, and resumes monitoring. A later commit stales every record and needs
-   fresh attestations.
+   that commit as the PR head, and resumes monitoring; after a review fix it stops there instead. A
+   later commit stales every record and needs fresh attestations.
 4. **Iteration Guard.** Iterations beyond the limit (default 3, maximum 5) stop the run.
 
 ---

@@ -117,7 +117,7 @@ const usbOtaNotStateChanging = /(?:GET|POST) \/ota\/check[^.!?]*(?:is not|isn't|
 const usbAbsentApprovalProceeds = /(?:(?:approval|authorization)[^.!?]*(?:absent|missing|not obtained)|without (?:separate )?(?:approval|authorization))[^.!?]*(?:continue|proceed|run|contact|send|request)/i;
 const reviewedSkillSha256 = new Map([
   ["add-logic-test", "b37264357f243110c29275fb9c4e19dcbaba692920fa248a2ba951632ee6f2ac"],
-  ["ci-heal", "184906d52887fc2c73c5397f4be2d9995cf16185b898201c95d5a93c5c4686f6"],
+  ["ci-heal", "818fc0ebcdec853872a7628e35060d78050046cdbd628ce9218bbce348b41113"],
   ["deploy", "169d30f409d6a447752b5fc7f3b7579ee6e714df9ce33ecd51cb344dd0d877f0"],
   ["deploy-bench", "15d3f62be54f14e1f560ab8d711f0d2915d3e1ec20a0cf3f0f962d52a689e30e"],
   ["device-diag", "e07085f76423d48896d76a4730cb63125d993688ba2a81e0a6342438dd276940"],

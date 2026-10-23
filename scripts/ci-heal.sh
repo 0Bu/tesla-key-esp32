@@ -669,6 +669,13 @@ run_heal() {
       echo "ci-heal: error: GitHub did not report $local_sha as the PR head after the push." >&2
       return 1
     fi
+    # The merge attestations of this run describe reviews of the previous head. A review fix
+    # changes the reviewed bytes, so its merge records need fresh reviews and a new run.
+    if [ "$review_fix" -eq 1 ]; then
+      echo "ci-heal: pushed review fix $local_sha. Its merge gate records need fresh independent" >&2
+      echo "ci-heal: reviews of that head; re-run ci-heal with their attestations." >&2
+      return 3
+    fi
     iteration=$((iteration + 1))
   done
 
@@ -1137,16 +1144,18 @@ self_test() {
   expect_out records_only_red "READY FOR MERGE"; expect_lines records_only_red "$LOG_VERIFY" 0
   expect_lines records_only_red "$LOG_STAMPS" 1; expect_lines records_only_red "$LOG_MERGE" 1
 
-  # A committed review fix ahead of a records-pending head is pushed first, then made ready
+  # A committed review fix ahead of a records-pending head is pushed, then the run stops: the
+  # merge attestations named the previous head and never certify the pushed one
   sc_records_review_fix() {
-    base_attest; STUB_LOCAL="$SHA_B"; STUB_ANCESTOR=1
+    base_attest; auto_merge=1; STUB_LOCAL="$SHA_B"; STUB_ANCESTOR=1
     STUB_SEQ="red green"; STUB_FAILED="$RECORDS_CHECK | COMPLETED | FAILURE | u"
   }
-  run_case sc_records_review_fix 0
-  expect_out records_review_fix "committed review fix"; expect_out records_review_fix "READY FOR MERGE"
+  run_case sc_records_review_fix 3
+  expect_out records_review_fix "committed review fix"; expect_out records_review_fix "need fresh independent"
+  expect_no_out records_review_fix "READY FOR MERGE"
   expect_lines records_review_fix "$LOG_VERIFY" 1; expect_lines records_review_fix "$LOG_PUSH" 1
-  expect_lines records_review_fix "$LOG_STAMPS" 2
-  grep -Fq -- "--head $SHA_B" "$LOG_STAMPS" || { echo "self-test: records_review_fix: stamps not bound to the pushed head" >&2; fail=1; }
+  expect_lines records_review_fix "$LOG_STAMPS" 1; expect_lines records_review_fix "$LOG_MERGE" 0
+  grep -Fq -- "--head $SHA_B" "$LOG_STAMPS" || { echo "self-test: records_review_fix: pre-push stamp not bound to the pushed head" >&2; fail=1; }
 
   sc_records_review_fix_unattested() {
     STUB_LOCAL="$SHA_B"; STUB_ANCESTOR=1
