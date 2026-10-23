@@ -84,9 +84,9 @@ inline int scroll_offset(uint32_t tick, int span) {
     return o > 0 ? o : 0;
 }
 
-// Which big centre element is shown, by priority: network search > pairing > BLE search >
+// Which big centre element is shown, by priority: SafeMode > network search > pairing > BLE search >
 // battery. (Net/BLE "search" = the ping-pong sweep; pairing = the animated "Pairing…".)
-enum class Hero : uint8_t { NetSearch, Pairing, BleSearch, Battery };
+enum class Hero : uint8_t { NetSearch, Pairing, BleSearch, Battery, SafeMode };
 
 // The fully-decided frame. The renderer draws exactly this — it branches on nothing else.
 struct Model {
@@ -124,9 +124,11 @@ struct Model {
 // Compose one frame from a snapshot. `tick` is a monotonic frame counter driving the search
 // sweep, the pairing dots and the SSID marquee. `orient` picks the layout: only the SSID clip
 // width + scale (hence its marquee) differ — every other decision (hero, battery, bars) is
-// orientation-independent. Pure — no side effects, no I/O — a faithful extraction of
+// orientation-independent. `safe_mode` is the caller's latched recovery input; it overrides
+// vehicle heroes without sampling vehicle state. Pure — no side effects, no I/O — a faithful extraction of
 // display.cpp compose()'s decision half.
-inline Model compose(const UiSnapshot& s, uint32_t tick, Orient orient = Orient::Landscape) {
+inline Model compose(const UiSnapshot& s, uint32_t tick, Orient orient = Orient::Landscape,
+                     bool safe_mode = false) {
     Model m;
 
     const bool unreachable   = (s.link_state == LinkState::Unreachable);
@@ -134,9 +136,10 @@ inline Model compose(const UiSnapshot& s, uint32_t tick, Orient orient = Orient:
     const bool pairing       = s.ble_connected && !s.paired;   // BLE up, not yet paired
     const bool battery_ok    = !unreachable && s.have_soc;
     // BLE search bars appear ONLY when nothing else claims the centre (car out of range).
-    const bool ble_bars      = !(net_searching || pairing || battery_ok);
+    const bool ble_bars      = !safe_mode && !(net_searching || pairing || battery_ok);
 
-    if      (net_searching) m.hero = Hero::NetSearch;
+    if      (safe_mode)     m.hero = Hero::SafeMode;
+    else if (net_searching) m.hero = Hero::NetSearch;
     else if (pairing)       m.hero = Hero::Pairing;
     else if (!battery_ok)   m.hero = Hero::BleSearch;
     else                    m.hero = Hero::Battery;
@@ -155,7 +158,7 @@ inline Model compose(const UiSnapshot& s, uint32_t tick, Orient orient = Orient:
             avail = kPortraitSsidAvail;
             scale = kPortraitSsidScale;
         } else {                                   // landscape: shares its row with the BLE cluster
-            avail = ble_bars ? (kPanelRight - kSsidX)
+            avail = (ble_bars || safe_mode) ? (kPanelRight - kSsidX)
                              : (kPanelRight - kSsidX - kBleReserve);
             scale = kSsidScale;
         }
@@ -167,7 +170,7 @@ inline Model compose(const UiSnapshot& s, uint32_t tick, Orient orient = Orient:
         }
     }
     // ── header: BLE bars + BT glyph (hidden when BLE is the search hero) ──
-    m.show_ble = !ble_bars;
+    m.show_ble = !safe_mode && !ble_bars;
     if (m.show_ble) {
         m.ble_bars     = s.ble_rssi_valid ? rssi_bars(s.ble_rssi) : 0;
         m.ble_glyph_on = s.ble_connected;
@@ -193,9 +196,9 @@ inline Model compose(const UiSnapshot& s, uint32_t tick, Orient orient = Orient:
         m.show_bolt = s.charging && soc < 100 && !m.asleep;
     }
 
-    // Search/pairing heroes animate continuously; the battery view only needs fast refresh
+    // Search/pairing heroes animate continuously; battery/recovery only refresh quickly
     // while the SSID marquee is moving.
-    m.animating = (m.hero != Hero::Battery) || m.ssid_scrolling;
+    m.animating = (m.hero != Hero::Battery && m.hero != Hero::SafeMode) || m.ssid_scrolling;
     return m;
 }
 

@@ -8,11 +8,12 @@
 // Pure, hardware-free model for the on-device status LED (the single APA102 RGB pixel on the
 // underside of the LilyGo T-Dongle-S3). It maps the firmware's cached state to
 // ONE colour + animation. It reads the SAME shared UiSnapshot the ST7735 presenter consumes
-// (logic/display_model.hpp) — so the LED, the panel, the web-UI hero and MQTT never disagree
-// about the car's state — plus a small set of LED-only LATCHED alert flags. led_status.cpp
+// (logic/display_model.hpp), plus LED-only LATCHED alerts. Consumers sample at different times
+// and apply different presentation priorities, so simultaneous output equality is not promised. led_status.cpp
 // gathers the live state and calls led_pattern(); the host mock build tests the priority
 // ladder here without a board (see test/test_logic.cpp). Keep this a pure function of its
-// inputs: the sampling layer (led_status.cpp) owns latching/timing, this owns the mapping.
+// inputs: the task owns samples and latch state, led_driver.hpp supplies timing decisions, and this owns
+// the priority mapping.
 //
 // It is a SINGLE pixel, so a spatially "running" wave is impossible — the wave the design
 // calls for is temporal: LedAnim::Breathe (a sine brightness swell) reads as a pulsing wave
@@ -23,7 +24,7 @@ namespace tk {
 // the most important condition wins. Colours carry UI-convention meaning (blue=network,
 // green=healthy/charging, amber=warning, red=error); the animation is a second, colour-
 // blind-safe channel (breathe vs pulse vs blink vs solid). SocGradient renders via the
-// shared logic/soc_gradient.hpp ramp (led_status.cpp resolves the colour).
+// shared logic/soc_gradient.hpp ramp (led_driver.hpp resolves the colour).
 enum class LedColor { Off, Blue, Teal, Magenta, Green, Amber, Red, SocGradient };
 enum class LedAnim  { Off, Solid, Breathe, Pulse, Blink };
 
@@ -32,7 +33,7 @@ struct LedPattern {
     LedAnim  anim  = LedAnim::Off;
     // Resting states (parked, known SoC) render at reduced brightness so the dongle isn't a
     // bright dot in a dark garage; alerts/searches/charging use full brightness. Asleep is
-    // Off entirely (LedColor::Off). The concrete dim/full levels live in led_status.cpp.
+    // Off entirely (LedColor::Off). The concrete dim/full levels live in led_driver.hpp.
     bool     dim   = false;
 };
 
@@ -46,7 +47,7 @@ inline bool operator!=(const LedPattern& a, const LedPattern& b) { return !(a ==
 // are deliberately kept OUT of UiSnapshot: unlike the momentary shared facts the snapshot
 // carries, they are stateful and specific to the LED, so they travel in their own tiny struct.
 struct LedAlerts {
-    bool error           = false;  // needs attention: reauth_required() OR OTA failed (latched)
+    bool error           = false;  // needs attention: SafeMode, reauth or OTA failure (latched)
     bool ota_downloading = false;  // OtaState::Downloading — self-update in flight, reboot imminent
     bool warn            = false;  // self-recovering: repeated BLE connect failures (latched)
 };
@@ -57,7 +58,7 @@ struct LedAlerts {
 // error/OTA/asleep tiers the LED adds on top. ("Network search" was "WiFi search" until the
 // transport seam landed; the tier is unchanged, only its input stopped assuming a radio.)
 inline LedPattern led_pattern(const UiSnapshot& s, const LedAlerts& a) {
-    // 1. Attention required — a re-pair is pending or an OTA install failed. Red blink is the
+    // 1. Attention required — SafeMode, a pending re-pair or an OTA install failure. Red blink is the
     //    only "you must do something" signal, so it outranks everything.
     if (a.error)                            return {LedColor::Red,     LedAnim::Blink,   false};
     // 2. OTA download in progress — the device is about to reboot into new firmware; make it
@@ -73,8 +74,10 @@ inline LedPattern led_pattern(const UiSnapshot& s, const LedAlerts& a) {
     if (!s.net_up())                        return {LedColor::Blue,    LedAnim::Breathe, false};
     // 5. BLE link up but no session — waiting for the NFC-card pairing to complete.
     if (s.ble_connected && !s.paired)       return {LedColor::Magenta, LedAnim::Pulse,   false};
-    // 6. Charging — the primary evcc event; a green swell that's visible across the room.
-    if (s.charging)                         return {LedColor::Green,   LedAnim::Breathe, false};
+    // 6. Charging needs the awake charge presentation. A retained flag cannot override
+    //    Asleep, Unknown, Unreachable or missing SoC. This is not a charge-domain age proof.
+    if (s.charging && s.have_soc && s.link_state == LinkState::Awake)
+        return {LedColor::Green, LedAnim::Breathe, false};
     // 7. Provably asleep — go dark (user choice: off when asleep). Debounced upstream, so a
     //    single ASLEEP blip won't flick the LED off.
     if (s.link_state == LinkState::Asleep)  return {LedColor::Off,     LedAnim::Off,     false};

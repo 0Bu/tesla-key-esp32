@@ -15,6 +15,16 @@ enum class RuntimeAdmissionState : std::uint8_t {
     Fatal,
 };
 
+constexpr const char* runtime_admission_state_name(RuntimeAdmissionState state) noexcept {
+    switch (state) {
+        case RuntimeAdmissionState::Booting: return "booting";
+        case RuntimeAdmissionState::Ready: return "ready";
+        case RuntimeAdmissionState::SafeMode: return "safe_mode";
+        case RuntimeAdmissionState::Fatal: return "fatal";
+    }
+    return "fatal";
+}
+
 enum class RuntimeAdmissionAction : std::uint8_t {
     Wait,
     Run,

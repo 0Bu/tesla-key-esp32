@@ -11,11 +11,17 @@ namespace tk {
 // can sleep without being woken by read-only evcc polling.
 inline constexpr uint32_t kActiveChargeStateMaxAgeS = 30;
 
+// Live presentation needs the ChargeState's own timestamp even when unrelated
+// infotainment data keeps the link awake. Last-known cache consumers remain separate.
+inline bool charge_sample_fresh(bool valid, bool have_sample_age, uint32_t sample_age_s) {
+    return valid && have_sample_age && sample_age_s <= kActiveChargeStateMaxAgeS;
+}
+
 inline bool charge_cache_usable(bool valid, bool active_window,
                                 bool have_sample_age, uint32_t sample_age_s) {
     if (!valid) return false;
     if (!active_window) return true;
-    return have_sample_age && sample_age_s <= kActiveChargeStateMaxAgeS;
+    return charge_sample_fresh(valid, have_sample_age, sample_age_s);
 }
 
 enum class ChargingAmpsReadback {

@@ -5,8 +5,9 @@
 
 // Single source of truth for the state-of-charge colour ramp — red → amber → light-green →
 // green → deep-green over 0..100 %. Shared by the ST7735 battery fill (logic/display_model.hpp)
-// and the underside status LED (logic/led_status.hpp) so the panel and the LED show the SAME
-// colour for a given charge (they used to carry two identical copies of this table). Pure and
+// and the underside status LED (logic/led_driver.hpp) so the panel and the LED show the SAME
+// colour for a given charge. The browser mirrors this function under the native/JS presenter
+// parity gate (scripts/check-ble-row-parity.sh). Pure and
 // host-tested; output is 8-bit RGB (0..255) per channel, clamped to 0..100 %.
 namespace tk {
 

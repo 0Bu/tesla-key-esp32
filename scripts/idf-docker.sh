@@ -21,7 +21,7 @@
 #   scripts/idf-docker.sh --self-test        # offline check of the daemon-reuse contract
 set -euo pipefail
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 image="$("$repo_root/scripts/idf-version.sh" --image)"
 echo "idf-docker: using ${image} (from esp-idf-toolchain.txt)" >&2
 
@@ -31,23 +31,29 @@ tty_flags=()
 if [ -t 0 ] && [ -t 1 ]; then tty_flags=(-it); fi
 
 mount_flags=(-v "$repo_root":/project)
-git_common="$(git -C "$repo_root" rev-parse --git-common-dir 2>/dev/null || true)"
-if [ -n "$git_common" ]; then
-  git_common_abs="$(cd "$repo_root" && cd "$git_common" && pwd -P 2>/dev/null || true)"
-  if [ -n "$git_common_abs" ]; then
-    case "$git_common_abs" in
-      "$repo_root"/*) ;;
-      *)
-        git_parent="$(dirname "$git_common_abs")"
-        mount_flags+=(-v "$git_parent":"$git_parent")
-        ;;
-    esac
-  fi
+git_common_abs=""
+if [ -e "$repo_root/.git" ] || [ -L "$repo_root/.git" ]; then
+  git_common="$(git -C "$repo_root" rev-parse --git-common-dir 2>/dev/null)" || {
+    echo "idf-docker: cannot inspect the checkout's Git metadata" >&2; exit 1;
+  }
+  [ -n "$git_common" ] || { echo "idf-docker: empty Git common directory" >&2; exit 1; }
+  git_common_abs="$(cd "$repo_root" && cd "$git_common" && pwd -P)" || {
+    echo "idf-docker: cannot resolve the Git common directory" >&2; exit 1;
+  }
+  case "$git_common_abs" in
+    "$repo_root"/*) ;;
+    *) mount_flags+=(-v "$git_common_abs":"$git_common_abs":ro) ;;
+  esac
 fi
+# A source archive without a .git marker has no external metadata mount. Authoritative provenance
+# still requires a real Git checkout in check-build-artifact-inventory.py.
 
 repo_hash="$(printf '%s' "$repo_root" | shasum 2>/dev/null | cut -c1-8 || md5 -qs "$repo_root" 2>/dev/null | cut -c1-8 || echo "default")"
 daemon_name="idf-daemon-${repo_hash}"
 build_vol_name="idf-build-${repo_hash}"
+mount_contract=(python3 "$repo_root/scripts/check-idf-container-mounts.py"
+  --repo-root "$repo_root" --git-common "$git_common_abs" --build-volume "$build_vol_name")
+mount_label="$("${mount_contract[@]}" --label)"
 
 # The daemon name depends only on the checkout path, so a daemon created before esp-idf-toolchain.txt
 # moved would keep serving builds from the PREVIOUS toolchain while this wrapper prints the new pin.
@@ -57,13 +63,17 @@ IDF_DAEMON_NANO_CPUS=1500000000       # --cpus 1.5
 IDF_DAEMON_MEMORY_BYTES=1887436800    # --memory 1800m
 
 daemon_matches_contract() {
-  local daemon_image nano_cpus memory
+  local daemon_image nano_cpus memory daemon_mount_label daemon_mounts
   daemon_image="$(docker inspect -f '{{.Config.Image}}' "$daemon_name" 2>/dev/null)" || return 1
   nano_cpus="$(docker inspect -f '{{.HostConfig.NanoCpus}}' "$daemon_name" 2>/dev/null)" || return 1
   memory="$(docker inspect -f '{{.HostConfig.Memory}}' "$daemon_name" 2>/dev/null)" || return 1
+  daemon_mount_label="$(docker inspect -f '{{index .Config.Labels "org.tesla-key.idf-mount-contract"}}' "$daemon_name" 2>/dev/null)" || return 1
+  daemon_mounts="$(docker inspect -f '{{json .Mounts}}' "$daemon_name" 2>/dev/null)" || return 1
   [ "$daemon_image" = "$image" ] \
     && [ "$nano_cpus" = "$IDF_DAEMON_NANO_CPUS" ] \
-    && [ "$memory" = "$IDF_DAEMON_MEMORY_BYTES" ]
+    && [ "$memory" = "$IDF_DAEMON_MEMORY_BYTES" ] \
+    && [ "$daemon_mount_label" = "$mount_label" ] \
+    && printf '%s\n' "$daemon_mounts" | "${mount_contract[@]}" --inspect
 }
 
 idf_docker_self_test() {
@@ -80,10 +90,14 @@ idf_docker_self_test() {
       *:'{{.Config.Image}}') printf '%s\n' "${fake_image_value}" ;;
       *:'{{.HostConfig.NanoCpus}}') printf '%s\n' "${fake_cpus_value}" ;;
       *:'{{.HostConfig.Memory}}') printf '%s\n' "${fake_memory_value}" ;;
+      *:'{{index .Config.Labels "org.tesla-key.idf-mount-contract"}}') printf '%s\n' "$fake_mount_label" ;;
+      *:'{{json .Mounts}}') printf '%s\n' "$fake_mounts" ;;
       *) return 1 ;;
     esac
   }
   local fake_image_value fake_cpus_value fake_memory_value
+  local fake_mount_label="$mount_label" fake_mounts
+  fake_mounts="$("${mount_contract[@]}" --expected)"
   expect() {
     local want="$1" label="$2" rc=0
     daemon_matches_contract || rc=$?
@@ -105,6 +119,18 @@ idf_docker_self_test() {
   expect reject "a daemon without the memory ceiling must not be reused"
   fake_memory_value="$IDF_DAEMON_MEMORY_BYTES"; fake_state=absent
   expect reject "a missing daemon must not count as matching"
+  fake_state=present; fake_mount_label=""
+  expect reject "a daemon without the mount contract label must not be reused"
+  fake_mount_label=stale
+  expect reject "a daemon with a stale mount contract label must not be reused"
+  fake_mount_label="$mount_label"; fake_mounts='[]'
+  expect reject "a correct label cannot authorize missing actual mounts"
+  fake_mounts="$("${mount_contract[@]}" --expected | python3 -c 'import json,sys; m=json.load(sys.stdin); m.append({"Type":"bind","Source":"/primary","Destination":"/primary","RW":True}); print(json.dumps(m))')"
+  expect reject "a correct label cannot authorize the old broad primary mount"
+  fake_mounts="$("${mount_contract[@]}" --expected)"
+  expect match "actual exact mounts and the current label must be reusable"
+  "${mount_contract[@]}" --self-test
+  python3 "$repo_root/test/test_idf_wrapper_runtime.py"
   echo "idf-docker self-test: PASS"
 }
 
@@ -149,7 +175,10 @@ vol_flags=()
 if [ "${IDF_FAST_BUILD:-0}" = "1" ] || [ "${1:-}" = "daemon" ]; then
   if ! docker volume inspect "$build_vol_name" >/dev/null 2>&1; then
     docker volume create "$build_vol_name" >/dev/null
-    docker run --rm -v "$build_vol_name":/b alpine chmod 777 /b >/dev/null 2>&1 || true
+    # Use the pinned toolchain image and normal resource ceiling even for volume setup.
+    # Refuse setup failure before a daemon or build can start.
+    docker run --rm --cpus 1.5 --memory 1800m --user 0:0 --entrypoint /bin/chmod \
+      -v "$build_vol_name":/b "$image" 777 /b >/dev/null
   fi
   vol_flags=(-v "$build_vol_name":/build_cache)
 fi
@@ -173,6 +202,7 @@ if [ "${1:-}" = "daemon" ]; then
       echo "idf-docker: starting background daemon ($daemon_name)..."
       docker run -d --name "$daemon_name" \
         --cpus 1.5 --memory 1800m \
+        --label "org.tesla-key.idf-mount-contract=$mount_label" \
         ${vol_flags[@]+"${vol_flags[@]}"} \
         "${mount_flags[@]}" -w /project \
         -u "$(id -u):$(id -g)" -e HOME=/tmp \
@@ -184,7 +214,7 @@ if [ "${1:-}" = "daemon" ]; then
         -e CCACHE_MAXSIZE="${CCACHE_MAXSIZE:-2G}" \
         -e NINJA_STATUS="${NINJA_STATUS:-[%f/%t (%r running)] }" \
         ${extra_env[@]+"${extra_env[@]}"} \
-        "$image" bash -c '. /opt/esp/idf/export.sh >/dev/null 2>&1 && export -p > /tmp/esp_env.sh && sleep infinity' >/dev/null
+        "$image" bash -c '. /opt/esp/idf/export.sh >/dev/null 2>&1 && export -p > /tmp/esp_env.sh.tmp && mv /tmp/esp_env.sh.tmp /tmp/esp_env.sh && sleep infinity' >/dev/null
       echo "idf-docker: daemon started. Future commands will use 'docker exec' with zero startup latency."
       exit 0
       ;;
@@ -243,7 +273,7 @@ if [ "$is_authoritative_gate" -eq 0 ] && ([ "${IDF_DOCKER_DAEMON:-0}" = "1" ] ||
   exec docker exec ${tty_flags[@]+"${tty_flags[@]}"} \
     ${extra_env[@]+"${extra_env[@]}"} \
     "$daemon_name" \
-    bash -c 'if [ -f /tmp/esp_env.sh ]; then . /tmp/esp_env.sh; else . /opt/esp/entrypoint.sh true; fi; exec "$@"' -- "${run_cmd[@]}"
+    bash -c 'if [ -f /tmp/esp_env.sh ]; then . /tmp/esp_env.sh; else . /opt/esp/idf/export.sh >/dev/null 2>&1; fi; exec "$@"' -- "${run_cmd[@]}"
 fi
 
 # Hard limits keep a local ESP-IDF build from starving co-resident services. They are explicit
