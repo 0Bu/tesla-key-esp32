@@ -138,7 +138,8 @@ mixed/corrupt downloads, but USB still trusts the chosen Pages origin. Vendored 
 `esptool-js@0.7.0` runs under `script-src 'self'`, with no CDN execution. **Flash** is offered only
 when the device's own partition table places `nvs` at `0x9000`/`0x6000` and its boot slot runs
 `tesla-key-esp32`; this read-only check is a safeguard, not an authorization, and a device that
-cannot be read keeps both choices.
+cannot be read keeps both choices. Writes require the flasher stub: the ROM loader erases 16 KiB
+blocks, so the partition-table write would reach into `nvs`.
 
 ## Signed OTA images
 
