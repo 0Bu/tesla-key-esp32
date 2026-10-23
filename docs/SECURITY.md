@@ -159,8 +159,8 @@ Counts and file sets are enforced by validators: 53 allowlisted unsigned payload
 files, 28 diagnostics, 40 stable Release assets and 16 manifest parts. Do not use globs to broaden them.
 The main DAG starts prepare and both host gates concurrently; the two per-target build legs need
 prepare, then the build and independent-rebuild joins → publish → deploy. `build` requires prepare,
-both host jobs (`logic-test` and `logic-harness`) and target builds. It is the only required status
-check, and GitHub treats a check skipped because a need failed as passed, so `build` runs with
+both host jobs (`logic-test` and `logic-harness`) and target builds. It is a required status check,
+and GitHub treats a check skipped because a need failed as passed, so `build` runs with
 `if: ${{ always() }}` and fails first unless every need succeeded. The independent join has no key.
 Producer/independent target compiles run concurrently before protected publication.
 

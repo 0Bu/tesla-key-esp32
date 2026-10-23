@@ -424,15 +424,21 @@ def validate(root: Path) -> None:
             "build.yml:build must need logic-harness")
     require(job_has_need(build["build"], "build-target"),
             "build.yml:build must need build-target")
-    # `build` is the only required status check, and GitHub treats a job skipped because a need
-    # failed as a passed required check. The join must therefore always run and fail first unless
-    # every need succeeded.
+    # `build` is a required status check, and GitHub treats a job skipped because a need failed as
+    # a passed required check. The join must therefore always run, and its first, unconditional and
+    # fatal step must fail unless every need succeeded.
     require(re.search(r"^    if: \$\{\{ always\(\) \}\}\s*$", build["build"], re.MULTILINE)
             is not None,
             "build.yml:build must run with if: ${{ always() }} so a failed need fails the required check")
-    needs_gate = build["build"].find("      - name: Require every needed job to succeed\n")
-    require(needs_gate != -1 and needs_gate < build["build"].find("actions/checkout@"),
+    gate_marker = "    steps:\n      - name: Require every needed job to succeed\n"
+    gate_start = build["build"].find(gate_marker)
+    require(gate_start != -1,
             "build.yml:build must check every need result before any other step")
+    gate_body = build["build"][gate_start + len(gate_marker):]
+    gate_end = re.search(r"^      - ", gate_body, re.MULTILINE)
+    gate_step = gate_body[: gate_end.start()] if gate_end else gate_body
+    require(re.search(r"^        (if|continue-on-error):", gate_step, re.MULTILINE) is None,
+            "build.yml:build need-result check must be unconditional and fatal")
     for need, variable in (("prepare", "NEEDS_PREPARE"), ("logic-test", "NEEDS_LOGIC_TEST"),
                            ("logic-harness", "NEEDS_LOGIC_HARNESS"),
                            ("build-target", "NEEDS_BUILD_TARGET")):
@@ -1295,6 +1301,18 @@ def self_test(root: Path) -> None:
         ("build-needs-gate-late", "build.yml",
          "      - name: Require every needed job to succeed\n",
          "      - name: Check needs later\n", "check every need result before any other step"),
+        ("build-step-before-needs-gate", "build.yml",
+         "    steps:\n      - name: Require every needed job to succeed\n",
+         "    steps:\n      - run: \"true\"\n      - name: Require every needed job to succeed\n",
+         "check every need result before any other step"),
+        ("build-needs-gate-nonfatal", "build.yml",
+         "      - name: Require every needed job to succeed\n        env:\n",
+         "      - name: Require every needed job to succeed\n        continue-on-error: true\n        env:\n",
+         "need-result check must be unconditional and fatal"),
+        ("build-needs-gate-conditional", "build.yml",
+         "      - name: Require every needed job to succeed\n        env:\n",
+         "      - name: Require every needed job to succeed\n        if: ${{ false }}\n        env:\n",
+         "need-result check must be unconditional and fatal"),
         ("repro-leg-dropped", "build.yml", "|| '[\"primary\",\"reproduction\"]'", "|| '[\"primary\"]'",
          "parallel reproduction leg"),
         ("repro-skip-dropped", "build.yml", "            --skip-repro\n", "",

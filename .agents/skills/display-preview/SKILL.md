@@ -69,7 +69,7 @@ python3 tools/display_sim.py search build/display-preview/display_search.png
 # too-long SSID at several marquee offsets — verify horizontal scroll + clipping
 python3 tools/display_sim.py scroll build/display-preview/display_scroll.png
 
-# single charging "hero" preview frame (Jupiter / 64% / charging)
+# single charging "hero" preview frame (sample SSID / 64% / charging)
 python3 tools/display_sim.py png build/display-preview/display_preview.png
 ```
 

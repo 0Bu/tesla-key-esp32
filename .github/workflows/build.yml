@@ -283,7 +283,7 @@ jobs:
           path: _repro/
 
   build:
-    # `build` is the only required status check. GitHub skips a job whose needs did not succeed and
+    # `build` is a required status check. GitHub skips a job whose needs did not succeed and
     # treats a skipped required check as passed, so this job always runs and its first step fails
     # unless every needed job succeeded: a red, cancelled or skipped host gate or target leg must
     # fail the required check instead of skipping it.
