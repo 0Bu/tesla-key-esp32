@@ -108,7 +108,7 @@ export async function forgetSerialPort(serial, port, { controller = null } = {})
       const granted = await nativeReleaseGrants(serial, request);
       checkReleaseAllowed(controller);
       if (!granted.includes(port)) throw namedError("NotFoundError", "This port is not paired with this page.");
-      if (serialPortIsOpen(port)) throw namedError("InvalidStateError", "The serial port is still open. Stop its monitor or installer first.");
+      if (serialPortIsOpen(port)) throw namedError("InvalidStateError", "The serial port is still open. Disconnect it first.");
       await awaitNativeReleaseStep(request, () => port.forget(), "Removing the serial-port permission");
       return port;
     } finally {

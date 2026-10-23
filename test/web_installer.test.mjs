@@ -223,7 +223,8 @@ function fakeEsptool(chipFamily = "ESP32-S3", options = {}) {
       calls.push("loader");
       loaderOptions.push(options);
     }
-    async main() { calls.push("main"); }
+    // Like esptool-js: main() uploads and starts the flasher stub.
+    async main() { calls.push("main"); this.IS_STUB = true; }
     async flashId() { calls.push("flashId"); }
     async detectFlashSize() { calls.push("detectFlashSize"); return flashSize; }
     async eraseFlash() { calls.push("erase"); }
@@ -481,6 +482,16 @@ test("installed firmware inspection follows the ESP-IDF partition, otadata and a
   assert.deepEqual(erasedReads, [0x8000], "an erased table ends in its first step");
   const short = { async readFlash() { return new Uint8Array(4); } };
   await assert.rejects(inspectInstalledFirmware(short, PARTITION_TABLE, "4MB"), { name: "FlashReadError" });
+  // An older 8 MB layout booting from a slot above 4 MB on a board whose flash ID is not recognised.
+  const highSlot = partitionTableBytes(partitionRows().map((row) => row[0] === "ota_1" ? [...row.slice(0, 3), "0x410000", row[4]] : row));
+  const highLoader = { async readFlash(offset, length) {
+    return flashImage({ 0x8000: highSlot, 0xf000: otadataEntry(2), 0x410000: appHead() })(offset, length);
+  } };
+  await assert.rejects(inspectInstalledFirmware(highLoader, PARTITION_TABLE, ""),
+    { name: "FlashReadError", message: /0x410000 lies beyond the assumed 4MB flash/ });
+  assert.equal(configurationKeepable({ error: "0x410000 lies beyond the assumed 4MB flash." }), true,
+    "unread is unknown, not foreign");
+  assert.equal((await inspectInstalledFirmware(highLoader, PARTITION_TABLE, "8MB")).firmware.project, "tesla-key-esp32");
   assert.equal((await inspectInstalledFirmware(loader, PARTITION_TABLE, "")).slot, "ota_1", "an undetected size reads within 4 MB");
 });
 
@@ -582,6 +593,120 @@ test("device probing times out without closing or releasing a still-running nati
     /stays reserved/.test(error.message));
   assert.deepEqual(fake.calls, ["transport", "loader", "main"]);
   assert.equal(serialPortLease(port).phase, "probe", "the pending startup keeps the port reserved");
+});
+
+// esptool-js 0.7.0's connect loop: up to seven attempts, each pulsing the reset lines through the
+// transport (IO0 low: download mode) and then waiting for a sync answer whose failure it swallows.
+function connectLoopEsptool() {
+  const calls = [];
+  const started = deferred();
+  class Transport {
+    constructor(port) { this.port = port; this.device = port; }
+    async setDTR(value) { await this.port.setSignals({ dataTerminalReady: value }); }
+    async setRTS(value) { await this.port.setSignals({ requestToSend: value }); }
+    async write() { calls.push("sync-write"); }
+    read() { return new Promise(() => {}); }
+    async disconnect() { calls.push("disconnect"); await this.port.close(); }
+  }
+  class Loader {
+    constructor(options) { this.options = options; }
+    async main() {
+      const transport = this.options.transport;
+      for (let attempt = 1; attempt <= 7; attempt++) {
+        await transport.setDTR(false);
+        calls.push(`attempt ${attempt}`);
+        await transport.setRTS(true);
+        await transport.setDTR(true);
+        await transport.setRTS(false);
+        try {
+          await transport.write(Uint8Array.of(0xc0));
+          started.resolve();
+          await transport.read(100);
+        } catch (_error) { /* esptool-js retries a failed sync */ }
+      }
+      throw new Error("Failed to connect with the device");
+    }
+  }
+  return { calls, started, Transport, Loader };
+}
+
+test("a cancelled check stops esptool's reset pulses and leaves the chip in its firmware", async () => {
+  const fake = connectLoopEsptool();
+  const port = openPort();
+  let operation;
+  const probing = probeDevice({
+    port, manifest: firmwareFixture().document, TransportCtor: fake.Transport, ESPLoaderCtor: fake.Loader,
+    delay: noDelay, onOwnership: (state) => { operation = state; }
+  });
+  await fake.started.promise;
+  const signalsBeforeCancel = port.signals.length;
+  operation.cancel(Object.assign(new Error("USB disconnected"), { name: "DeviceProbeAbortedError" }));
+  await assert.rejects(probing, { name: "DeviceProbeAbortedError" });
+  await operation.settled;
+  assert.deepEqual(fake.calls.filter((call) => call.startsWith("attempt")), ["attempt 1"],
+    "no further connect attempt after the cancellation");
+  assert.deepEqual(port.signals.slice(signalsBeforeCancel), EN_PULSE,
+    "the only line change afterwards is the firmware-mode reset");
+  assert.equal(port.readable, null);
+  assert.equal(serialPortLease(port), undefined);
+});
+
+test("a check that never synchronises still resets the chip out of download mode", async () => {
+  const fake = connectLoopEsptool();
+  fake.Transport.prototype.read = async () => { throw new Error("no sync answer"); };
+  const port = openPort();
+  await assert.rejects(probeDevice({
+    port, manifest: firmwareFixture().document, TransportCtor: fake.Transport, ESPLoaderCtor: fake.Loader, delay: noDelay
+  }), /Failed to connect with the device/);
+  assert.equal(fake.calls.filter((call) => call.startsWith("attempt")).length, 7);
+  assert.deepEqual(port.signals.slice(-2), EN_PULSE, "the wrong port of a dual-port board is not left halted");
+});
+
+test("an install without the running flasher stub writes nothing", async () => {
+  const fixture = firmwareFixture();
+  const offer = await fixture.load();
+  const fake = fakeEsptool();
+  fake.Loader.prototype.main = async function main() { fake.calls.push("main"); };
+  await assert.rejects(flashDevice({ port: openPort(), offer, eraseFirst: true, TransportCtor: fake.Transport,
+    ESPLoaderCtor: fake.Loader, fetchImpl: fixture.fetch, delay: noDelay }),
+  { name: "FlasherStubError", message: /ROM loader could erase NVS/ });
+  assert.equal(fixture.seen.length, 1, "nothing downloaded");
+  assert.equal(fake.calls.includes("erase"), false);
+  assert.deepEqual(writesOf(fake.calls), []);
+});
+
+test("a cancellation ends esptool's long buffered read at once and releases the port", async () => {
+  const fixture = firmwareFixture();
+  const offer = await fixture.load();
+  const fake = fakeEsptool();
+  const eraseStarted = deferred();
+  // A chip erase waits up to 120 s for its answer in esptool-js's read loop.
+  fake.Transport.prototype.read = () => new Promise(() => {});
+  fake.Loader.prototype.eraseFlash = async function eraseFlash() {
+    fake.calls.push("erase");
+    eraseStarted.resolve();
+    await this.options.transport.read(120000);
+  };
+  const port = openPort();
+  let operation;
+  const flashing = flashDevice({ port, offer, eraseFirst: true, TransportCtor: fake.Transport, ESPLoaderCtor: fake.Loader,
+    fetchImpl: fixture.fetch, delay: noDelay, onOwnership: (state) => { operation = state; } });
+  await eraseStarted.promise;
+  operation.cancel(Object.assign(new Error("USB disconnected"), { name: "FlashAbortedError" }));
+  await assert.rejects(flashing, { name: "FlashAbortedError" });
+  const startedAt = Date.now();
+  await operation.settled;
+  assert.ok(Date.now() - startedAt < 250, "the port is not held for the command timeout");
+  assert.equal(serialPortLease(port), undefined);
+  assert.deepEqual(writesOf(fake.calls), []);
+});
+
+test("a cancelled reset pulse still releases EN", async () => {
+  const signals = [];
+  let cancelled = false;
+  const port = { async setSignals(value) { signals.push(value); cancelled = true; } };
+  await assert.rejects(resetToUserFirmware(port, noDelay, () => { if (cancelled) throw new Error("cancelled"); }), /cancelled/);
+  assert.deepEqual(signals, EN_PULSE, "the chip is never left held in reset");
 });
 
 test("a stuck transport cleanup cannot leave the page busy forever", async () => {
@@ -927,6 +1052,7 @@ function lifecycleEsptool() {
       this.port.mainEntered?.resolve();
       if (this.port.mainWait) await this.port.mainWait.promise;
       this.chip = { CHIP_NAME: "ESP32-S3" };
+      this.IS_STUB = true;
       this.options.terminal.writeLine(`native ${this.port.name}`);
     }
     async flashId() { this.port.flashIds++; }
@@ -941,6 +1067,7 @@ function lifecycleEsptool() {
       options.reportProgress(0, 1, 1);
       this.options.terminal.writeLine(`late write ${this.port.name}`);
       if (this.port.writeError) throw this.port.writeError;
+      if (this.port.writeErrorAt === options.fileArray[0].address) throw new Error(`write at 0x${this.port.writeErrorAt.toString(16)} failed`);
     }
   }
   return { Transport, Loader };
@@ -967,7 +1094,9 @@ test("a check or install with keepOpen hands the open port on without a reset or
   port.mainError = new Error("no answer");
   await assert.rejects(probeDevice({ port, manifest: offer.manifest, TransportCtor: fake.Transport,
     ESPLoaderCtor: fake.Loader, keepOpen: true, delay: noDelay }), /no answer/);
-  assert.deepEqual(use(), [2, 2, 2, false, false], "a failed check never hands a port on");
+  assert.deepEqual(use(), [2, 2, 4, false, false],
+    "a failed check never hands a port on, and still resets the chip out of download mode");
+  assert.deepEqual(port.signals.slice(-2), EN_PULSE);
 });
 
 test("the shared transport uses an open port and ends esptool-js's read loop without closing", async () => {
@@ -1136,6 +1265,50 @@ test("the boot check warns about another version or none within 20 seconds", asy
   await controller.disconnect();
   t.mock.timers.tick(20000);
   assert.equal(logLines(dom, "warning").length, 2, "a disconnect ends the pending check silently");
+});
+
+test("the boot check reads the device's own lines, even when an installer line splits the display", async (t) => {
+  const a = lifecyclePort("A");
+  const { controller, dom } = await attachedLifecycle(t, [a], { followLog: true });
+  await controller.connect();
+  await controller.install();
+  a.readController.enqueue(encode("I (105) app_init: App vers"));
+  await drainNativeTasks();
+  await controller.reset();
+  a.readController.enqueue(encode("ion:      1.6.3\n"));
+  await drainNativeTasks();
+  assert.match(logLines(dom, "ok").at(-1), /\] Booted 1\.6\.3$/);
+  assert.deepEqual(logLines(dom, "warning"), []);
+});
+
+test("a failure while the OTA selector is written says the new firmware may already be selected", async (t) => {
+  const a = lifecyclePort("A");
+  a.writeErrorAt = 0xf000;
+  const { controller, dom } = await attachedLifecycle(t, [a], { followLog: true });
+  await controller.connect();
+  await controller.install();
+  assert.match(logLines(dom, "error").at(-1), /\] Flash failed: write at 0xf000 failed$/);
+  assert.match(logLines(dom, "warning").at(-1), /\] The OTA selector was being written; 1\.6\.3 may already be selected\. Press Reset and read the version in the log$/);
+  a.writeErrorAt = 0x20000;
+  await controller.install();
+  assert.equal(logLines(dom, "warning").filter((line) => /OTA selector/.test(line)).length, 1,
+    "a failure before the selector write makes no such claim");
+});
+
+test("Disconnect waits for a reset pulse on the live log", async (t) => {
+  const a = lifecyclePort("A");
+  const { controller, dom } = await attachedLifecycle(t, [a], { followLog: true });
+  await controller.connect();
+  a.signalWait = deferred();
+  a.signalEntered = deferred();
+  const resetting = controller.reset();
+  await a.signalEntered.promise;
+  assert.equal(dom.element("disconnect-button").disabled, true);
+  a.signalWait.resolve();
+  a.signalWait = null;
+  await resetting;
+  assert.equal(dom.element("disconnect-button").disabled, false);
+  assert.deepEqual(a.signals.slice(-2), EN_PULSE);
 });
 
 test("the subtitle shows version, channel and source commit once the offer is verified", async (t) => {

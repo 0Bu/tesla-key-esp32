@@ -184,8 +184,10 @@ function terminalAdapter(onLog) {
 }
 
 // Cancellation must stop the active Web Serial write or read, not only the next loader command:
-// esptool-js keeps writing a block until its writer resolves. After an abort the transport rejects
-// every further write and read, so a late loader step cannot reach the device.
+// esptool-js keeps writing a block until its writer resolves, polls its read buffer until its own
+// command timeout, and its connect loop keeps pulsing the reset lines through up to seven
+// attempts. After an abort the transport rejects every further write, read and line change, so a
+// late loader step can neither reach the device nor leave it in download mode.
 function makeAbortableTransport(transport, signal) {
   const originalWrite = typeof transport.write === "function"
     ? transport.write.bind(transport)
@@ -255,13 +257,33 @@ function makeAbortableTransport(transport, signal) {
     }
   };
 
+  const aborted = new Promise((_, reject) => {
+    const rejectWithReason = () => reject(signal.reason instanceof Error
+      ? signal.reason
+      : errorWithName("AbortError", "The serial operation was cancelled."));
+    if (signal.aborted) rejectWithReason();
+    else signal.addEventListener("abort", rejectWithReason, { once: true });
+  });
+  aborted.catch(() => {});
+
   if (originalRead) {
     transport.read = async (...args) => {
       throwIfAborted(signal, "The serial operation was cancelled.");
       if (stopped) throw errorWithName("AbortError", "Further serial reads were stopped.");
-      const result = await originalRead(...args);
+      // esptool-js's read polls its own buffer until its timeout; the abort ends the wait at once.
+      const result = await Promise.race([originalRead(...args), aborted]);
       throwIfAborted(signal, "The serial operation was cancelled.");
       return result;
+    };
+  }
+
+  for (const name of ["setSignals", "setRTS", "setDTR"]) {
+    if (typeof transport[name] !== "function") continue;
+    const original = transport[name].bind(transport);
+    transport[name] = async (...args) => {
+      throwIfAborted(signal, "The serial operation was cancelled.");
+      if (stopped) throw errorWithName("AbortError", "Further reset-line changes were stopped.");
+      return original(...args);
     };
   }
 
@@ -404,10 +426,13 @@ export async function resetToUserFirmware(port, delay = sleep, guard = () => {})
   // leaving the chip in the flasher stub after the compatibility probe.
   guard();
   await port.setSignals({ dataTerminalReady: false, requestToSend: true });
-  guard();
-  await delay(100);
-  guard();
-  await port.setSignals({ dataTerminalReady: false, requestToSend: false });
+  try {
+    guard();
+    await delay(100);
+  } finally {
+    // Once asserted, EN is always released: a cancelled pulse must not hold the chip in reset.
+    await port.setSignals({ dataTerminalReady: false, requestToSend: false });
+  }
   guard();
   await delay(250);
   guard();
@@ -875,18 +900,24 @@ export function partitionTableLength(bytes) {
 export async function inspectInstalledFirmware(loader, expectedTable, flashSize, guard = () => {}) {
   const limit = flashBytes(flashSize) || MIN_FLASH_BYTES;
   const tableBytes = expectedTable?.length || MAX_PARTITION_TABLE_BYTES;
+  // A read that is skipped or comes back short leaves the installed firmware unknown, never foreign:
+  // an unusual flash ID must not push a valid installation into Clean flash.
   const read = async (offset, length) => {
-    if (!(offset + length <= limit)) return null;
+    if (!(offset + length <= limit)) {
+      throw errorWithName("FlashReadError", `0x${offset.toString(16)} lies beyond the ${flashSize || "assumed 4MB"} flash.`);
+    }
     const bytes = await withTimeout(loader.readFlash(offset, length), FLASH_READ_STEP_TIMEOUT_MS,
       errorWithName("FlashReadTimeoutError", `Reading flash at 0x${offset.toString(16)} timed out.`));
     guard();
-    return bytes instanceof Uint8Array && bytes.length >= length ? bytes.subarray(0, length) : null;
+    if (!(bytes instanceof Uint8Array) || bytes.length < length) {
+      throw errorWithName("FlashReadError", `Reading flash at 0x${offset.toString(16)} returned too few bytes.`);
+    }
+    return bytes.subarray(0, length);
   };
   let table = new Uint8Array(0);
   while (partitionTableLength(table) === undefined && table.length < tableBytes) {
     const chunk = await read(FLASH_LAYOUT.partitionTable.offset + table.length,
       Math.min(FLASH_READ_CHUNK_BYTES, tableBytes - table.length));
-    if (!chunk) throw errorWithName("FlashReadError", "The installed partition table could not be read.");
     const joined = new Uint8Array(table.length + chunk.length);
     joined.set(table);
     joined.set(chunk, table.length);
@@ -1015,9 +1046,11 @@ export async function probeDevice({
   }, async (operation) => {
     if (operation.cancelled && abortable) await abortable.settleAbort();
     abortable?.dispose();
+    // esptool-js's connect attempts pulse EN with IO0 low; even a check that never reached the chip
+    // may have left it in download mode, so an open port is always reset into the firmware.
     return settleTransport(port, transport, {
       keepOpen: probed && keepOpen && !operation.cancelled,
-      reset: loader?.chip ? () => resetToUserFirmware(port, delay) : null
+      reset: () => resetToUserFirmware(port, delay)
     });
   }, onOwnership);
   return awaitPortOperation(state, timeoutMs, errorWithName(
@@ -1058,6 +1091,12 @@ export async function flashDevice({
     operation.guard();
     await requireFlashCapacity(loader);
     operation.guard();
+    // The ROM loader erases in 16 KiB blocks: the partition table write would reach into nvs and
+    // the OTA selector into phy_init. Only the flasher stub keeps the erase within each part.
+    if (loader.IS_STUB !== true) {
+      throw errorWithName("FlasherStubError",
+        "The flasher stub is not running; writing through the ROM loader could erase NVS, so nothing was written.");
+    }
     report({ stage: "preparing", percentage: 0, message: "Loading firmware" });
     const fileArray = await fetchFirmwareParts(build, offer, fetchImpl, operation.signal);
     operation.guard();
@@ -1073,6 +1112,8 @@ export async function flashDevice({
       const message = activating ? "Activating firmware" : "Writing firmware";
       // report() checks for cancellation, so a range never starts after the previous one was stopped.
       report({ stage, percentage: combinedProgress(fileArray, index, 0, file.data.length), message });
+      // From here on the stub may erase the OTA selector, which already selects the new app.
+      if (activating) operation.activationStarted = true;
       // esptool-js loops over every entry of one writeFlash call; one part per call returns control
       // between address ranges, so a cancellation never starts the next range.
       await loader.writeFlash({
@@ -1093,7 +1134,7 @@ export async function flashDevice({
     abortable?.dispose();
     return settleTransport(port, transport, {
       keepOpen: keepOpen && !operation.cancelled,
-      reset: loader?.chip ? () => resetToUserFirmware(port, delay) : null,
+      reset: () => resetToUserFirmware(port, delay),
       onResetError: (error) => {
         if (outcome.value && operation.foreground) onLog(`Automatic restart unavailable: ${errorMessage(error)}\n`);
       }
@@ -1196,21 +1237,31 @@ export function attachWebInstaller({
     }, BOOT_VERIFICATION_TIMEOUT_MS);
   };
 
+  // The boot check follows the device's own line breaks, so an installer line shown in between
+  // cannot split the one console line that names the version.
+  const scanBootVersion = (text, flush) => {
+    if (!bootCheck || !isCurrent(bootCheck.session)) return "";
+    const parsed = splitSerialChunk(bootCheck.pending, text, flush);
+    bootCheck.pending = parsed.pending.slice(-512);
+    for (const line of parsed.lines) {
+      const seen = bootVersion(line.text);
+      if (seen) return seen;
+    }
+    return "";
+  };
+
   const appendMonitor = (text, { flush = false } = {}) => {
     if (!text && !flush) return;
+    const seen = scanBootVersion(text, flush);
     const parsed = splitSerialChunk(monitorPendingLine, text, flush);
     monitorPendingLine = parsed.pending;
-    for (const line of parsed.lines) {
-      appendRenderedMonitorLine(line);
-      if (!line.terminated || !bootCheck || !isCurrent(bootCheck.session)) continue;
-      const seen = bootVersion(line.text);
-      if (!seen) continue;
-      const expected = bootCheck.version;
-      clearBootCheck();
-      if (seen === expected) appendStatusLine(`Booted ${seen}`, "ok");
-      else appendStatusLine(`Booted ${seen}, expected ${expected}`, "warning");
-    }
+    parsed.lines.forEach((line) => appendRenderedMonitorLine(line));
     settleMonitor();
+    if (!seen) return;
+    const expected = bootCheck.version;
+    clearBootCheck();
+    if (seen === expected) appendStatusLine(`Booted ${seen}`, "ok");
+    else appendStatusLine(`Booted ${seen}, expected ${expected}`, "warning");
   };
 
   // The log follows new lines only while it is scrolled to its end. Scrolling up holds the view
@@ -1271,7 +1322,8 @@ export function attachWebInstaller({
     connectButton.hidden = linked;
     connectButton.disabled = !offer || !expectedTables || !serialSupported || Boolean(foreground);
     disconnectButton.hidden = !linked;
-    disconnectButton.disabled = foreground?.kind === "flash";
+    // A flash or a reset pulse owns native calls the log's lease does not cover; they finish first.
+    disconnectButton.disabled = foreground?.kind === "flash" || foreground?.resetting === true;
     resetButton.hidden = false;
     resetButton.disabled = !portReady;
     // Firmware that cannot keep the configuration leaves nothing worth keeping: only Clean flash remains.
@@ -1550,7 +1602,7 @@ export function attachWebInstaller({
       if (!monitor) await startMonitor();
       return;
     }
-    const token = { kind: "monitor", session, operation: monitor };
+    const token = { kind: "monitor", session, operation: monitor, resetting: true };
     foreground = token;
     syncControls();
     try {
@@ -1617,6 +1669,9 @@ export function attachWebInstaller({
       setProgress(null);
       setLive("stopped", "Stopped");
       appendStatusLine(`Flash failed: ${errorMessage(error)}`, "error");
+      if (flashOperation?.activationStarted) {
+        appendStatusLine(`The OTA selector was being written; ${version} may already be selected. Press Reset and read the version in the log`, "warning");
+      }
       // A write that finishes after its deadline has still selected the new app.
       flashOperation?.settled.then((outcome) => {
         if (outcome.value && isCurrent(session)) {
@@ -1629,7 +1684,7 @@ export function attachWebInstaller({
     }
     // Follow the boot of the new firmware, or of whatever a failed install left, on the same port.
     if (!followLog || !isCurrent(session)) return;
-    if (installed) bootCheck = { session, version, timer: null };
+    if (installed) bootCheck = { session, version, timer: null, pending: "" };
     if (serialPortIsOpen(session.port) && !serialPortLease(session.port)) await startMonitor();
   };
   // The Disconnect button also unpairs: after the port is closed, the browser forgets this page's
