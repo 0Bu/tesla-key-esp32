@@ -4,6 +4,7 @@
 #include "ping_probe.hpp"
 #include "reboot_reason.hpp"
 #include "safe_mode.hpp"
+#include "ota_update.hpp"
 #include "runtime_fault_log.hpp"
 #include "vehicle_ctrl_internal.hpp"
 #include "stack_watch.hpp"
@@ -150,14 +151,6 @@ void reset_storage(const char* value) {
     stored_present = value && *value != '\0';
     saved_counts.clear();
     remove_calls = 0;
-}
-
-void reset_task_capture() {
-    created_task = nullptr;
-    created_task_arg = nullptr;
-    task_create_result = pdPASS;
-    deleted_tasks = 0;
-    last_delay = 0;
 }
 
 void reset_ping_capture(PingScenario scenario) {
@@ -397,6 +390,8 @@ void syslog_send(const char* data, size_t len) {
         captured_syslog.assign(data, len);
     }
 }
+
+tk::OtaVerificationState ota_verification_state() { return tk::OtaVerificationState::Stable; }
 
 // Minimal deterministic NvsStorageAdapter implementation for the real safe_mode.cpp glue. The
 // storage methods are fault seams: they can fail normally or throw, proving no exception can
@@ -1563,40 +1558,40 @@ int main() {
 
     // Real safe_mode_begin: ordinary progression still works and persists the exact next count.
     reset_storage("3");
-    CHECK(tk::safe_mode_begin(storage, true));
+    CHECK(tk::safe_mode_begin(storage, tk::BootCounterCause::Fault, tk::RebootReasonState::Missing));
     CHECK(saved_counts.size() == 1 && saved_counts[0] == "4");
     CHECK(tk::safe_mode_active());
 
     for (unsigned prior : {0u, 1u, 2u, 3u}) {
         const std::string before = std::to_string(prior);
         reset_storage(before.c_str());
-        CHECK(tk::safe_mode_begin(storage, true) == (prior == 3));
+        CHECK(tk::safe_mode_begin(storage, tk::BootCounterCause::Fault, tk::RebootReasonState::Missing) == (prior == 3));
         CHECK(saved_counts.size() == 1);
         CHECK(saved_counts[0] == std::to_string(prior + 1));
         CHECK(tk::safe_mode_active() == (prior == 3));
     }
 
     reset_storage("3");
-    CHECK(!tk::safe_mode_begin(storage, false));
+    CHECK(!tk::safe_mode_begin(storage, tk::BootCounterCause::Clean, tk::RebootReasonState::Missing));
     CHECK(saved_counts.size() == 1 && saved_counts[0] == "0");
     CHECK(!tk::safe_mode_active());
 
     // An intentional reset cannot bypass failed counter storage or hide a malformed record.
     reset_storage("3");
     load_ok = false;
-    CHECK(tk::safe_mode_begin(storage, false));
+    CHECK(tk::safe_mode_begin(storage, tk::BootCounterCause::Clean, tk::RebootReasonState::Missing));
     CHECK(saved_counts.empty());
     CHECK(tk::safe_mode_active());
 
     reset_storage("broken");
     stored_present = true;
-    CHECK(tk::safe_mode_begin(storage, false));
+    CHECK(tk::safe_mode_begin(storage, tk::BootCounterCause::Clean, tk::RebootReasonState::Missing));
     CHECK(saved_counts.empty());
     CHECK(tk::safe_mode_active());
 
     reset_storage("3");
     save_ok = false;
-    CHECK(tk::safe_mode_begin(storage, false));
+    CHECK(tk::safe_mode_begin(storage, tk::BootCounterCause::Clean, tk::RebootReasonState::Missing));
     CHECK(saved_counts.size() == 1 && saved_counts[0] == "0");
     CHECK(tk::safe_mode_active());
 
@@ -1604,7 +1599,7 @@ int main() {
         reset_storage("3");
         throw_on_load = fail_read;
         throw_on_save = !fail_read;
-        CHECK(tk::safe_mode_begin(storage, false));
+        CHECK(tk::safe_mode_begin(storage, tk::BootCounterCause::Clean, tk::RebootReasonState::Missing));
         CHECK(tk::safe_mode_active());
     }
 
@@ -1612,30 +1607,30 @@ int main() {
     // through app_main's boot decision.
     reset_storage("0");
     throw_on_load = true;
-    CHECK(tk::safe_mode_begin(storage, true));
+    CHECK(tk::safe_mode_begin(storage, tk::BootCounterCause::Fault, tk::RebootReasonState::Missing));
     CHECK(tk::safe_mode_active());
 
     reset_storage("0");
     throw_on_save = true;
-    CHECK(tk::safe_mode_begin(storage, true));
+    CHECK(tk::safe_mode_begin(storage, tk::BootCounterCause::Fault, tk::RebootReasonState::Missing));
     CHECK(tk::safe_mode_active());
 
     reset_storage("0");
     throw_other_on_load = true;
-    CHECK(tk::safe_mode_begin(storage, true));
+    CHECK(tk::safe_mode_begin(storage, tk::BootCounterCause::Fault, tk::RebootReasonState::Missing));
     CHECK(tk::safe_mode_active());
 
     // Ordinary NVS failures do not throw, but are just as safety-relevant: neither an unreadable
     // nor an unwritable crash counter may authorize the BLE/MQTT stack on a possible reboot loop.
     reset_storage("0");
     load_ok = false;
-    CHECK(tk::safe_mode_begin(storage, true));
+    CHECK(tk::safe_mode_begin(storage, tk::BootCounterCause::Fault, tk::RebootReasonState::Missing));
     CHECK(saved_counts.empty());
     CHECK(tk::safe_mode_active());
 
     reset_storage("0");
     save_ok = false;
-    CHECK(tk::safe_mode_begin(storage, true));
+    CHECK(tk::safe_mode_begin(storage, tk::BootCounterCause::Fault, tk::RebootReasonState::Missing));
     CHECK(saved_counts.size() == 1 && saved_counts[0] == "1");
     CHECK(tk::safe_mode_active());
 
@@ -1645,42 +1640,20 @@ int main() {
                                   "999999999999999999999999"}) {
         reset_storage(malformed);
         stored_present = true;
-        CHECK(tk::safe_mode_begin(storage, true));
+        CHECK(tk::safe_mode_begin(storage, tk::BootCounterCause::Fault, tk::RebootReasonState::Missing));
         CHECK(saved_counts.empty());
         CHECK(tk::safe_mode_active());
     }
 
-    // The healthy timer is a FreeRTOS C entry. A throwing NVS save is contained, the task deletes
-    // itself, and the counter remains armed instead of turning the exception into an abort loop.
+    // The independent supervisor now owns the qualified long-run clear. These real startup
+    // tests establish its pending work; actual owner/health/time/failure cases live in
+    // test_heap_supervisor.cpp, not an obsolete one-shot timer fixture.
     reset_storage("0");
-    CHECK(!tk::safe_mode_begin(storage, false));
-    reset_task_capture();
-    tk::safe_mode_arm_healthy_timer(storage);
-    CHECK(created_task != nullptr);
-    CHECK(created_task_arg == &storage);
-    throw_on_save = true;
-    created_task(created_task_arg);
-    CHECK(last_delay == 30000);
-    CHECK(deleted_tasks == 1);
-
-    // The catch-all is executable policy, not just source spelling: a non-allocation exception is
-    // contained by the same C task frame and still reaches vTaskDelete.
-    reset_storage("0");
-    CHECK(!tk::safe_mode_begin(storage, false));
-    reset_task_capture();
-    tk::safe_mode_arm_healthy_timer(storage);
-    CHECK(created_task != nullptr);
-    throw_other_on_save = true;
-    created_task(created_task_arg);
-    CHECK(deleted_tasks == 1);
-
-    // A latched safe mode intentionally does not arm the timer: survival with BLE/MQTT disabled
-    // is not evidence that the failing full stack recovered.
+    CHECK(!tk::safe_mode_begin(storage, tk::BootCounterCause::Fault, tk::RebootReasonState::Missing));
+    CHECK(tk::safe_mode_healthy_clear_pending());
     reset_storage("3");
-    CHECK(tk::safe_mode_begin(storage, true));
-    reset_task_capture();
-    tk::safe_mode_arm_healthy_timer(storage);
-    CHECK(created_task == nullptr);
+    CHECK(tk::safe_mode_begin(storage, tk::BootCounterCause::Fault, tk::RebootReasonState::Missing));
+    CHECK(!tk::safe_mode_healthy_clear_pending());
 
     // The heap watchdog may reboot only after the next counter is durable. Exercise the real
     // noexcept glue against normal failures and both exception classes; no failure can be

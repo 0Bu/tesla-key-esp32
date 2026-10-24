@@ -9,6 +9,8 @@
 #include "runtime_admission.hpp"
 #include "logic/vin.hpp"
 #include "logic/heap_watchdog.hpp"
+#include "logic/boot_guard.hpp"
+#include "diag_crash.hpp"
 #include "task_config.hpp"
 #include <cmath>
 #include <cstring>
@@ -200,19 +202,13 @@ bool VehicleController::init(const std::string& vin,
     ble_->set_connected_cb(&VehicleController::ble_link_event_cb_, this);
     ble_->set_rx_data_cb(&VehicleController::ble_rx_event_cb_, this);
 
-    // Seed the active window open at boot so evcc gets a warm cache for the first few
-    // minutes after start; it then backs off if the car stays idle (no command, not charging).
-    //
-    // NOT after a heap-watchdog restart. That seeding is what makes a restart LOOP expensive: the
-    // window re-opens on every boot, so a device restarting every ~10 minutes would poll
-    // infotainment forever and a parked car next to it would never sleep. A device that just
-    // self-healed has no user waiting on a warm cache anyway — the first evcc command re-opens
-    // the window in the normal way.
-    if (boot_heap_restarts() == 0) {
+    // Seed only a known clean boot with verified absent reboot evidence. Fault, heap and
+    // uncertain boots leave the window closed; explicit foreground commands retain their own
+    // normal admission and may reopen it. RAM-only budget decay never changes this boot fact.
+    if (tk::boot_activity_seed_allowed(tk::diag_crash_reset_info().code, boot_reason_slot().state)) {
         last_cmd_ticks_.store(xTaskGetTickCount());
     } else {
-        ESP_LOGW(TAG, "boot after %u heap-watchdog restart(s) — leaving the active window CLOSED "
-                      "so a parked car can still sleep", (unsigned) boot_heap_restarts());
+        ESP_LOGW(TAG, "recovery/uncertain boot — leaving automatic vehicle activity window CLOSED");
     }
 
     if (!start_tasks) {

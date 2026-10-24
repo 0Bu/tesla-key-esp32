@@ -219,7 +219,7 @@ ALL_CODE = "\n".join(MAIN_CODE.values())
 EXPECTED_TASKS = {
     "publisher_task",
     "ota_health_gate_task",
-    "healthy_timer_task",
+    "heap_supervisor_task",
     "ota_check_task",
     "ota_task",
     "syslog_task",
@@ -260,7 +260,7 @@ EXPECTED_CALLBACKS = {
 # inspects the body rather than trusting this list alone, so deleting the catch makes it red.
 CONTAINED = {
     "publisher_task",
-    "healthy_timer_task",
+    "heap_supervisor_task",
     "ota_check_task",
     "ota_task",
     "syslog_task",
@@ -1507,7 +1507,7 @@ def require_unlocked_diagnostic_logging(heap: str, telemetry: str) -> None:
     if "ESP_LOG" in adoption:
         raise AssertionError("heap adoption logs while its caller holds the trend mutex")
     # Locate the lexical scope owning each guard, including nested try/catch blocks.
-    for source, name, marker in ((heap, "heap_trend_record", "SemGuard g(m);"),
+    for source, name, marker in ((heap, "heap_trend_record", "SemGuard g(m, 0);"),
                                  (heap, "heap_trend_snapshot", "SemGuard g(m);"),
                                  (telemetry, "enqueue_telemetry_round_", "tk::SemGuard g(self->vehicle_mutex_);"),
                                  (telemetry, "loop_task_fn_", "tk::SemGuard g(self->vehicle_mutex_);")):
@@ -1780,12 +1780,10 @@ def require_operation_wrapper_contract(ota_source: str) -> None:
     ):
         raise AssertionError("FaultRestart cancel wrapper does not owner-release the shared gate")
     constructor = re.search(
-        r"OtaHealthCommitGuard::OtaHealthCommitGuard\s*\(\s*\)\s*:\s*"
-        r"held_\s*\(\s*s_operation_gate\.try_begin\s*\(\s*"
-        r"tk::OtaIdentityGateState::HealthCommit\s*\)\s*\)\s*\{\s*\}",
-        ota_source,
-        re.DOTALL,
-    )
+        r"OtaHealthCommitGuard::OtaHealthCommitGuard\s*\(\s*\)\s*\{\s*"
+        r"const auto acquired = s_operation_gate\.try_begin_observed\(tk::OtaIdentityGateState::HealthCommit\);\s*"
+        r"held_ = acquired\.acquired;\s*observed_ = acquired\.observed;\s*\}",
+        ota_source, re.DOTALL)
     destructor = re.search(
         r"OtaHealthCommitGuard::~OtaHealthCommitGuard\s*\(\s*\)\s*\{\s*"
         r"if\s*\(\s*held_\s*\)\s*finish_operation\s*\(\s*"
@@ -1806,7 +1804,7 @@ def require_operation_wrapper_contract(ota_source: str) -> None:
         raise AssertionError("ConfigRestart ownership requires this guard and current gate")
     cleanup = code[code.index("OtaConfigRestartGuard::~OtaConfigRestartGuard()"):
                    code.index("bool OtaConfigRestartGuard::try_begin()")]
-    for token in ("noexcept", "if (held_)", "held_ = false;",
+    for token in ("noexcept", "if (held_ && !sealed_)", "held_ = false;",
                   "s_operation_gate.finish(tk::OtaIdentityGateState::ConfigRestart)"):
         if token not in cleanup: raise AssertionError("ConfigRestart cleanup missing " + token)
     if "ESP_LOG" in cleanup or "finish_operation" in cleanup:
@@ -2028,7 +2026,7 @@ def require_vin_transition_cleanup_contract(main_source: str) -> None:
     require_before(
         "VIN transition completion gate before marker removal",
         branch,
-        'boot_fatal("VIN transition completion")',
+        'return "VIN transition completion"',
         "config_store.remove(tk::nvs_contract::kVinTransition)",
     )
     require_before(
@@ -2209,9 +2207,12 @@ def require_runtime_admission_contract(logic_header: str, facade_header: str,
 
     if main_source.count("tk::runtime_admission_mark_ready()") != 1:
         raise AssertionError("app_main must publish Ready exactly once")
-    require_before("late essential failure closes admission", main_source,
-                   "tk::runtime_admission_mark_fatal();",
-                   "esp_ota_get_running_partition()")
+    fatal = function_body_in(main_source.replace("[[noreturn]]", ""), "boot_fatal")
+    require_before("late essential failure closes admission", fatal,
+                   "tk::runtime_admission_mark_fatal();", "fatal_startup_rollback();")
+    rollback = function_body_in(main_source, "fatal_startup_rollback")
+    require_before("fatal rollback owns before metadata query", rollback,
+                   "OtaFaultRestartGuard owner;", "esp_ota_get_running_partition()")
     require_before("vehicle tasks allocated before Ready", main_source,
                    "vehicle.start_tasks()", "tk::runtime_admission_mark_ready()")
     require_before("safe-mode latch before Ready branch", main_source,
@@ -2260,7 +2261,8 @@ def require_nimble_safe_mode_start_contract(main_source: str) -> None:
     code = scrub_cpp_preserving_layout(function_body_in(main_source, "app_main"))
     declarations = list(re.finditer(
         r"\bconst\s+bool\s+safe_mode\s*=\s*tk::safe_mode_begin\s*\(\s*"
-        r"config_store\s*,\s*tk::diag_crash_reset_info\s*\(\s*\)\s*\.\s*fault\s*\)\s*;", code))
+        r"config_store\s*,\s*tk::boot_counter_cause\s*\(\s*tk::diag_crash_reset_info"
+        r"\s*\(\s*\)\s*\.\s*code\s*,\s*boot_reboot_record\.state\s*\)\s*,\s*boot_reboot_record\.state\s*\)\s*;", code))
     if len(declarations) != 1 or len(re.findall(r"\bbool\s+safe_mode\b", code)) != 1:
         raise AssertionError("NimBLE SafeMode input is not the single durable boot verdict")
     call = re.search(r"\bble_client\s*\.\s*start\s*\(", code)
@@ -3921,63 +3923,94 @@ def require_crash_dismiss_atomic_contract(crash_source: str) -> None:
         raise AssertionError("boot capture may erase crash evidence")
 
 
-def require_heap_restart_gate_contract(telemetry: str) -> None:
-    restart_marker = "if (v.action == tk::HeapAction::Restart)"
-    code = scrub_cpp_preserving_layout(telemetry)
-    if code.count(restart_marker) != 1:
-        raise AssertionError("heap restart action must have one actual branch")
-    restart_at = code.index(restart_marker)
-    _, opening, closing = if_statement_at(code, restart_at, "heap restart action")
-    branch = code[opening + 1:closing]
-    if re.search(r"(?m)^\s*#", branch):
-        raise AssertionError("heap restart branch has unsupported conditional preprocessing")
-    declaration = re.match(
-        r"\s*uint8_t\s+prior\s*=\s*VehicleController::boot_heap_restarts\s*\(\s*\)\s*;\s*", branch)
-    if declaration is None or branch.count("boot_heap_restarts") != 1:
-        raise AssertionError("heap cap must consume the current durable restart count once")
-    condition, cap_open, cap_close = if_statement_at(
-        branch, declaration.end(), "heap restart cap")
-    if re.sub(r"\s+", "", condition) != "!tk::heap_may_restart(prior)":
-        raise AssertionError("heap restart cap admission is bypassed or inverted")
-    else_at = skip_space(branch, cap_close + 1, len(branch))
-    if not re.match(r"else\b", branch[else_at:]):
-        raise AssertionError("heap cap needs a distinct permitted else branch")
-    else_open = skip_space(branch, else_at + 4, len(branch))
-    else_close = balanced_end(branch, else_open, "{", "}", "heap cap permitted branch")
-    if branch[else_close + 1:].strip():
-        raise AssertionError("heap restart has work outside the cap branches")
-    allowed = branch[else_open + 1:else_close]
-    denied = branch[cap_open + 1:cap_close]
-    for operation in ("ota_fault_restart_begin", "persist_reboot_reason_", "esp_restart"):
-        if operation in denied or allowed.count(operation) != 1:
-            raise AssertionError(f"heap cap does not exclusively own {operation}")
-    if re.search(r"\bprior\s*(?:=(?!=)|\+\+|--|[+*/%&|^-]=)", branch[declaration.end():]):
-        raise AssertionError("heap cap counter is reassigned after the durable read")
-    restart_branch = telemetry[restart_at:]
-    require_before(
-        "heap restart operation admission",
-        restart_branch,
-        "if (!ota_fault_restart_begin())",
-        "self->persist_reboot_reason_(why.text)",
-    )
-    busy_branch = restart_branch[
-        restart_branch.find("if (!ota_fault_restart_begin())") :
-        restart_branch.find("if (!self->persist_reboot_reason_(why.text))")
-    ]
-    if "continue;" not in busy_branch:
-        raise AssertionError("occupied heap restart gate no longer postpones the reboot")
-    persist_gate = "if (!self->persist_reboot_reason_(why.text))"
-    persist_at = restart_branch.find(persist_gate)
-    if persist_at < 0:
-        raise AssertionError("heap reboot persistence authority is missing")
-    persist_branch = restart_branch[persist_at:]
-    require_before("heap reboot persistence release", persist_branch,
-                   "ota_fault_restart_cancel();", "continue;")
-    require_before("heap reboot persistence", persist_branch, persist_gate, "continue;")
-    require_before("heap reboot action", persist_branch, "continue;", "esp_restart();")
-    success_tail = persist_branch[persist_branch.find("continue;") + len("continue;"):]
-    if "ota_fault_restart_cancel" in success_tail:
-        raise AssertionError("successful heap restart releases FaultRestart before esp_restart")
+def require_heap_supervisor_start_contract(main_source: str) -> None:
+    """Bind the essential checked admission to the real unconditional early app_main scope."""
+    raw = function_body_in(main_source, "app_main")
+    code = scrub_cpp_preserving_layout(raw)
+    record = re.search(
+        r"\bconst\s+tk::RebootReasonRecord\s+boot_reboot_record\s*=\s*"
+        r"VehicleController::take_reboot_reason\s*\(\s*config_store\s*\)\s*;", code)
+    call = r"tk::heap_supervisor_start\s*\(\s*config_store\s*,\s*boot_reboot_record\s*\)"
+    checked = list(re.finditer(r"\bif\s*\(\s*!\s*" + call + r"\s*\)\s*\{", code))
+    if record is None or len(checked) != 1 or len(re.findall(r"\bheap_supervisor_start\s*\(", code)) != 1:
+        raise AssertionError("essential Heap startup needs one typed reason and one checked real call")
+    match = checked[0]
+    condition, opening, closing = if_statement_at(code, match.start(), "essential Heap startup")
+    if re.sub(r"\s+", "", condition) != "!tk::heap_supervisor_start(config_store,boot_reboot_record)":
+        raise AssertionError("essential Heap startup condition is not the checked real call")
+    if not re.fullmatch(r'\s*boot_fatal\s*\(\s*"heap supervisor"\s*\)\s*;\s*', raw[opening + 1:closing]):
+        raise AssertionError("essential Heap startup failure must be boot-fatal")
+    if (enclosing_scope(code, record.start(), "Heap reason") !=
+            enclosing_scope(code, match.start(), "Heap admission")):
+        raise AssertionError("essential Heap startup is hidden in another conditional scope")
+    previous = code[:match.start()].rstrip()
+    if not previous or previous[-1] not in ";}":
+        raise AssertionError("essential Heap startup is controlled by an unbraced outer statement")
+    verdict = code.find("const bool safe_mode")
+    if not record.end() < verdict < match.start():
+        raise AssertionError("essential Heap startup must follow typed reason and BootGuard verdict")
+    for token in (r"\bsyslog_start\s*\(", r"\bnet_eth_probe\s*\(",
+                  r"\bnet_start_eth\s*\(", r"\bnet_start_wifi\s*\(",
+                  r"\bprovisioning_run(?:_with_retry)?\s*\(", r"\bhttp_server_start\s*\("):
+        sites = list(re.finditer(token, code))
+        if not sites or any(site.start() <= closing for site in sites):
+            raise AssertionError("essential Heap startup must precede every optional/network/portal entry")
+
+
+def require_heap_restart_gate_contract(supervisor: str) -> None:
+    """Pin actual independent restart admission; native tests execute all effects/owners."""
+    body = scrub_cpp_preserving_layout(function_body_in(supervisor, "attempt_heap_restart"))
+    guards = ("!s.budget.may_restart()", "!s.restart_write.due(now_ms)", "!owner.held()",
+              "largest>=kHeapCriticalBytes||ota_is_busy()",
+              "!safe_mode_prepare_heap_restart(*s.cfg,owner)",
+              "!persist_reboot_reason(s.cfg,why.text)")
+    positions = []
+    for expected in guards:
+        matches = []
+        for found in re.finditer(r"\bif\s*\(", body):
+            paren = body.index("(", found.start())
+            condition_end = balanced_end(body, paren, "(", ")", expected)
+            condition = "".join(body[paren + 1:condition_end].split())
+            if condition != expected:
+                continue
+            opening = skip_space(body, condition_end + 1, len(body))
+            closing = (balanced_end(body, opening, "{", "}", expected)
+                       if body[opening] == "{" else body.index(";", opening))
+            matches.append((found.start(), opening, closing))
+        if len(matches) != 1:
+            raise AssertionError("heap restart guard missing/duplicated: " + expected)
+        at, opening, closing = matches[0]
+        if enclosing_scope(body, at, expected) != (0, len(body) - 1):
+            raise AssertionError("heap restart refusal hidden in another branch: " + expected)
+        refusal = body[opening + 1:closing] if body[opening] == "{" else body[opening:closing + 1]
+        if not refusal.strip().endswith("return;") or re.search(r"\b(?:if|for|while|goto)\b", refusal):
+            raise AssertionError("heap restart guard does not return directly: " + expected)
+        positions.append(at)
+    if positions != sorted(positions):
+        raise AssertionError("heap restart guard order drifted")
+    for token in ("OtaFaultRestartGuard owner;", "s.restart_write.attempt(fresh_ms);",
+                  "const uint8_t next = static_cast<uint8_t>(s.budget.effective + 1);",
+                  "const HeapReason why = heap_reason_format(next);", "owner.seal();",
+                  "s.shutdown_committed = true;", "esp_restart();", "park_recovery();"):
+        if body.count(token) != 1:
+            raise AssertionError("heap restart authority missing/duplicated: " + token)
+    if re.search(r"s\.budget\.(?:effective|trusted)\s*(?:=(?!=)|[+*/%-]=|\+\+|--)", body):
+        raise AssertionError("heap restart overwrites its verified effective budget")
+    require_before("heap cap before lease", body, "!s.budget.may_restart()", "OtaFaultRestartGuard owner;")
+    require_before("heap lease before post-CAS sample", body, "!owner.held()", "const size_t largest")
+    require_before("write cadence before fallible latch", body, "s.restart_write.attempt(fresh_ms);",
+                   "safe_mode_prepare_heap_restart")
+    require_before("confirmed reason before seal", body, "persist_reboot_reason", "owner.seal();")
+    require_before("sealed owner before shutdown", body, "owner.seal();", "s.shutdown_committed = true;")
+    require_before("shutdown before restart", body, "s.shutdown_committed = true;", "esp_restart();")
+    require_before("returning restart parks", body, "esp_restart();", "park_recovery();")
+    iteration = " ".join(scrub_cpp(function_body_in(supervisor, "supervisor_iteration")).split())
+    direct = "if (verdict.action == HeapAction::Restart) attempt_heap_restart(s, now_ms, verdict);"
+    if iteration.count(direct) != 1:
+        raise AssertionError("independent critical verdict must call the admitted restart directly")
+    start = " ".join(scrub_cpp(function_body_in(supervisor, "heap_supervisor_start")).split())
+    if "boot_reason.heap_restarts, boot_reason.state != RebootReasonState::Error" not in start:
+        raise AssertionError("heap allowance must seed from complete immutable boot evidence")
 
 
 HTTP_ROUTE_DISPATCH = {
@@ -4047,7 +4080,7 @@ def require_safe_mode_source_contract(source: str) -> None:
     if "Clears itself after a boot that stays up" in source:
         raise AssertionError("safe-mode operator text still promises an unarmed auto-clear timer")
     operator_text = "".join(re.findall(r'"([^"\\]*(?:\\.[^"\\]*)*)"', strip_cpp_comments(source)))
-    for phrase in ("Exit needs a non-fault boot and a successful counter read/reset.",
+    for phrase in ("Exit needs a known clean boot and a successful counter read/reset.",
                    "a clean boot exits only if counter storage is healthy."):
         if phrase not in operator_text:
             raise AssertionError("safe-mode operator text lost the storage condition for leaving recovery")
@@ -4245,7 +4278,7 @@ def require_runtime_source_contracts() -> None:
     require_telemetry_poll_schedule(SOURCES["vehicle_telemetry.cpp"])
     require_drive_poll_builder(SOURCES["vehicle_telemetry.cpp"])
     require_unlocked_diagnostic_logging(SOURCES["heap_trend.cpp"], SOURCES["vehicle_telemetry.cpp"])
-    require_long_uptime_clocks(SOURCES["vehicle_telemetry.cpp"], SOURCES["heap_trend.cpp"])
+    require_long_uptime_clocks(SOURCES["vehicle_telemetry.cpp"], SOURCES["heap_trend.cpp"], SOURCES["heap_supervisor.cpp"])
     require_diag_dump_completion_contract(
         function_body("handle_diag"),
         (MAIN / "diag_log.hpp").read_text(encoding="utf-8"),
@@ -4394,8 +4427,8 @@ def require_runtime_source_contracts() -> None:
     # The heap watchdog must atomically exclude OTA/identity before reboot_why becomes durable.
     # A busy owner postpones the attempt; a failed persistence releases FaultRestart, while the
     # success path deliberately reaches esp_restart without releasing its owner.
-    telemetry = function_body("loop_task_fn_")
-    require_heap_restart_gate_contract(telemetry)
+    require_heap_restart_gate_contract(SOURCES["heap_supervisor.cpp"])
+    require_heap_supervisor_start_contract(SOURCES["main.cpp"])
 
     require_safe_mode_source_contract(SOURCES["safe_mode.cpp"])
     for filename, task, loop, delay in ITERATION_FAULT_TASKS:
@@ -5571,27 +5604,44 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
         else:
             raise AssertionError(f"provisioning {label} mutation passed unexpectedly")
 
-    telemetry = function_body("loop_task_fn_")
-    for old, replacement, label in (
-        ("if (!tk::heap_may_restart(prior))", "if (false)", "restart cap bypass"),
-        ("if (!tk::heap_may_restart(prior))", "if (tk::heap_may_restart(prior))", "restart cap inversion"),
-        ("VehicleController::boot_heap_restarts()", "0", "constant restart count"),
-        ("if (!tk::heap_may_restart(prior))", "prior = 0; if (!tk::heap_may_restart(prior))", "overwritten restart count"),
-        ("if (!tk::heap_may_restart(prior))", "if (false) /* if (!tk::heap_may_restart(prior)) */", "comment-only cap decoy"),
-        ("if (v.action == tk::HeapAction::Restart)", "if (v.action == tk::HeapAction::Restart) if (false)", "dead nested cap"),
-        ("if (!ota_fault_restart_begin())", "if (false)", "operation admission"),
-        ("ota_fault_restart_cancel();", "", "persistence-failure release"),
-        ("if (!self->persist_reboot_reason_(why.text))", "if (false)", "persistence authority"),
+    startup = SOURCES["main.cpp"]
+    checked_start = ('if (!tk::heap_supervisor_start(config_store, boot_reboot_record)) {\n'
+                     '        boot_fatal("heap supervisor");\n    }')
+    if startup.count(checked_start) != 1:
+        raise AssertionError("essential Heap startup canary seam is missing/ambiguous")
+    for label, mutated in (
+        ("missing essential Heap startup", startup.replace(checked_start, "", 1)),
+        ("disabled essential Heap startup", startup.replace(checked_start, "if (false) {\n" + checked_start + "\n}", 1)),
+        ("unbraced disabled Heap startup", startup.replace(checked_start, "if (false) " + checked_start, 1)),
+        ("false conjunction Heap startup", startup.replace("if (!tk::heap_supervisor_start", "if (false && !tk::heap_supervisor_start", 1)),
+        ("unchecked essential Heap startup", startup.replace(checked_start, "tk::heap_supervisor_start(config_store, boot_reboot_record);", 1)),
+        ("duplicate essential Heap startup", startup.replace(checked_start, checked_start + "\n" + checked_start, 1)),
+        ("wrong essential Heap reason", startup.replace("heap_supervisor_start(config_store, boot_reboot_record)", "heap_supervisor_start(config_store, {})", 1)),
+        ("late essential Heap startup", startup.replace(checked_start, "", 1).replace("const bool have_wire", checked_start + "\nconst bool have_wire", 1)),
+        ("nonfatal essential Heap startup", startup.replace('boot_fatal("heap supervisor");', 'ESP_LOGE(TAG, "heap supervisor");', 1)),
     ):
-        mutated_telemetry = telemetry.replace(old, replacement, 1)
-        if mutated_telemetry == telemetry:
-            raise AssertionError(f"heap restart {label} mutation did not apply")
-        try:
-            require_heap_restart_gate_contract(mutated_telemetry)
-        except AssertionError:
-            pass
-        else:
-            raise AssertionError(f"heap restart {label} bypass passed unexpectedly")
+        if mutated == startup:
+            raise AssertionError(label + ": mutation did not apply")
+        require_mutation_rejected(label,
+            lambda changed=mutated: require_heap_supervisor_start_contract(changed))
+    require_heap_supervisor_start_contract(startup)
+
+    supervisor = SOURCES["heap_supervisor.cpp"]
+    for old, replacement, label in (
+        ("if (!s.budget.may_restart())", "if (false)", "restart cap bypass"),
+        ("if (!s.budget.may_restart())", "if (s.budget.may_restart())", "restart cap inversion"),
+        ("boot_reason.heap_restarts, boot_reason.state", "0, boot_reason.state", "constant restart seed"),
+        ("s.budget.effective + 1", "0 + 1", "overwritten restart count"),
+        ("if (!s.budget.may_restart())", "if (false) /* if (!s.budget.may_restart()) */", "comment cap decoy"),
+        ("if (verdict.action == HeapAction::Restart) attempt_heap_restart", "if (verdict.action == HeapAction::Restart) if (false) attempt_heap_restart", "dead nested restart"),
+        ("if (!owner.held())", "if (false)", "operation admission"),
+        ("OtaFaultRestartGuard owner;", "OtaFaultRestartGuard owner; owner.seal();", "precommit retained lease"),
+        ("if (!persist_reboot_reason(s.cfg, why.text))", "if (false)", "persistence authority"),
+    ):
+        if supervisor.count(old) != 1:
+            raise AssertionError("heap restart mutation missing/ambiguous: " + label)
+        changed = supervisor.replace(old, replacement, 1)
+        require_mutation_rejected(label, lambda changed=changed: require_heap_restart_gate_contract(changed))
 
     diag_handler = function_body("handle_diag")
     redactor_header = (MAIN / "logic/redact.hpp").read_text(encoding="utf-8")
@@ -5911,7 +5961,7 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
         ("SafeMode NimBLE comment-only guard", main_source.replace(nimble_marker,
             "if (true) { /* if (!safe_mode) { ble_client.start(); } */\n        if (!ble_client.start())", 1)),
         ("SafeMode NimBLE fabricated input", main_source.replace(
-            "const bool safe_mode = tk::safe_mode_begin(config_store, tk::diag_crash_reset_info().fault);",
+            "const bool safe_mode = tk::safe_mode_begin(config_store,\n        tk::boot_counter_cause(tk::diag_crash_reset_info().code, boot_reboot_record.state), boot_reboot_record.state);",
             "const bool safe_mode = false;", 1)),
     ):
         if mutated == main_source:
@@ -7904,18 +7954,22 @@ def self_test_config_encode_lease_contract(parts: dict[str, str]) -> None:
     require_mutation_rejected("legacyrefusalaftercomparison", lambda: require_config_encode_lease_contract(mutated))
 
 
-def require_long_uptime_clocks(telemetry: str, trend: str) -> None:
-    """PKG-13: the tested long-lived clock must be the one the firmware actually uses."""
+def require_long_uptime_clocks(telemetry: str, trend: str, supervisor: str) -> None:
+    """PKG-13: long-lived clocks stay at their actual migrated consumers."""
     loop = scrub_cpp(function_body_in(telemetry, "loop_task_fn_"))
     clock = "tk::uptime_seconds(static_cast<uint64_t>(esp_timer_get_time()))"
-    flat = " ".join(loop.split())
-    if f"const uint32_t now_s = {clock};" not in flat:
-        raise AssertionError("bootstrap seconds must come from the production 64-bit timer conversion")
-    calls = call_arguments(loop, "tk::heap_trend_record")
-    if len(calls) != 1 or calls[0][0].strip() != clock:
-        raise AssertionError("heap history must use the same long-lived timer conversion")
-    if "heap_wd, {largest, (uint32_t) pdTICKS_TO_MS(hb_now), ota_is_busy()}" not in loop:
-        raise AssertionError("long-lived clock changes must preserve the short heap-watchdog tick clock")
+    if f"const uint32_t now_s = {clock};" not in " ".join(loop.split()):
+        raise AssertionError("bootstrap seconds must use the production 64-bit timer conversion")
+    iteration = scrub_cpp(function_body_in(supervisor, "supervisor_iteration"))
+    calls = call_arguments(iteration, "heap_trend_record")
+    if len(calls) != 1 or calls[0][0].strip() != "uptime_seconds(static_cast<uint64_t>(esp_timer_get_time()))":
+        raise AssertionError("independent heap history must use the long-lived timer conversion")
+    monotonic = " ".join(scrub_cpp(function_body_in(supervisor, "monotonic_ms")).split())
+    if monotonic != "{ return static_cast<uint64_t>(esp_timer_get_time()) / 1000; }":
+        raise AssertionError("supervisor maintenance clock must preserve 64-bit monotonic milliseconds")
+    short = "{largest, static_cast<uint32_t>(now_ms), ota_is_busy()}"
+    if short not in " ".join(iteration.split()):
+        raise AssertionError("critical hold must retain wrap-safe low-32-bit millisecond differences")
     adoption = " ".join(scrub_cpp(function_body_in(trend, "adopt_or_reset")).split())
     if "heap_persist_valid(persist()) && heap_carry_fits(persist().ring)" not in adoption:
         raise AssertionError("retained history adoption must reject an overflowing carry")
@@ -7925,23 +7979,22 @@ def require_long_uptime_clocks(telemetry: str, trend: str) -> None:
 
 
 def self_test_long_uptime_clocks() -> None:
-    telemetry, trend = SOURCES["vehicle_telemetry.cpp"], SOURCES["heap_trend.cpp"]
-    for label, old, new, in_telemetry in (
-        ("bootstrap tick rollover", "const uint32_t now_s = tk::uptime_seconds(static_cast<uint64_t>(esp_timer_get_time()));",
-         "const uint32_t now_s = now_ticks / configTICK_RATE_HZ;", True),
-        ("heap millisecond rollover", "tk::heap_trend_record(tk::uptime_seconds(static_cast<uint64_t>(esp_timer_get_time())),",
-         "tk::heap_trend_record((uint32_t) pdTICKS_TO_MS(hb_now) / 1000,", True),
-        ("unchecked retained carry", " && heap_carry_fits(persist().ring)", "", False),
-        ("unchecked retained sum", "if (!heap_timeline_fits(monotonic_s, s_carry_s))", "if (false)", False),
-    ):
-        source = telemetry if in_telemetry else trend
-        assert old in source, f"PKG-13 canary did not apply: {label}"
-        mutated = source.replace(old, new, 1) + "\n// decoy: " + old + "\n"
-        require_mutation_rejected(
-            f"PKG-13 {label}",
-            lambda changed=mutated, use_telemetry=in_telemetry: require_long_uptime_clocks(
-                changed if use_telemetry else telemetry, trend if use_telemetry else changed),
-        )
+    parts = {name: SOURCES[name + ".cpp"] for name in
+             ("vehicle_telemetry", "heap_trend", "heap_supervisor")}
+    variants = (
+        ("bootstrap tick rollover", "vehicle_telemetry", "const uint32_t now_s = tk::uptime_seconds(static_cast<uint64_t>(esp_timer_get_time()));", "const uint32_t now_s = now_ticks / configTICK_RATE_HZ;"),
+        ("heap millisecond rollover", "heap_supervisor", "heap_trend_record(uptime_seconds(static_cast<uint64_t>(esp_timer_get_time())),", "heap_trend_record(static_cast<uint32_t>(now_ms) / 1000,"),
+        ("supervisor millisecond rollover", "heap_supervisor", "return static_cast<uint64_t>(esp_timer_get_time()) / 1000;", "return static_cast<uint32_t>(esp_timer_get_time() / 1000);"),
+        ("unchecked retained carry", "heap_trend", " && heap_carry_fits(persist().ring)", ""),
+        ("unchecked retained sum", "heap_trend", "if (!heap_timeline_fits(monotonic_s, s_carry_s))", "if (false)"),
+    )
+    for label, owner, before, after in variants:
+        changed = dict(parts)
+        if changed[owner].count(before) != 1:
+            raise AssertionError("PKG-13 canary missing/ambiguous: " + label)
+        changed[owner] = changed[owner].replace(before, after, 1) + "\n// decoy: " + before + "\n"
+        require_mutation_rejected("PKG-13 " + label, lambda c=changed: require_long_uptime_clocks(
+            c["vehicle_telemetry"], c["heap_trend"], c["heap_supervisor"]))
 
 
 def require_ota_download_chain(source: str) -> None:

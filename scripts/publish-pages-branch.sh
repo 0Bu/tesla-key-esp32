@@ -23,7 +23,7 @@
 # fast-forward push, no binary-merge conflicts.
 #
 # Env (CI): GITHUB_TOKEN (contents:write), GITHUB_REPOSITORY, optionally GITHUB_SERVER_URL.
-# Dev publication also requires SOURCE_SHA, bound to the manifest and current remote main
+# Root and Dev publication require SOURCE_SHA, bound to the manifest and current remote main
 # immediately before each push (including retries) or unchanged-byte build request.
 set -euo pipefail
 
@@ -141,6 +141,18 @@ EOF
   local src="$tmp/site"
   mkdir -p "$src"
   echo "hello pages" > "$src/index.html"
+  local seed="$tmp/main-seed"
+  git init --quiet "$seed"
+  git -C "$seed" config user.name "github-actions[bot]"
+  git -C "$seed" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+  echo "source fixture" > "$seed/SOURCE_ONLY"
+  git -C "$seed" add -A
+  git -C "$seed" commit --quiet -m "Main source fixture"
+  git -C "$seed" push --quiet "$bare_repo" HEAD:main
+  git --git-dir="$bare_repo" symbolic-ref HEAD refs/heads/main
+  export SOURCE_SHA
+  SOURCE_SHA="$(git -C "$seed" rev-parse HEAD)"
+  printf '{"sourceSha":"%s"}\n' "$SOURCE_SHA" > "$src/manifest.json"
 
   # Initial publish with working gh
   (
@@ -328,14 +340,16 @@ if [ -n "$num" ] && ! [[ "$num" =~ ^[0-9]+$ ]]; then
 fi
 [ -n "$src" ] && [ ! -d "$src" ] && { echo "source dir '$src' not found" >&2; exit 1; }
 
-validate_dev_candidate() {
-  [ "$mode" = dev ] || return 0
-  local work="$1" main_row main_sha
+validate_channel_candidate() {
+  case "$mode" in root|dev) ;; *) return 0 ;; esac
+  local work="$1" main_row main_sha manifest
+  manifest="$work/manifest.json"
+  [ "$mode" != dev ] || manifest="$work/dev/manifest.json"
   if ! [[ "${SOURCE_SHA:-}" =~ ^[0-9a-f]{40}$ ]]; then
-    echo "ERROR: dev publication requires an exact SOURCE_SHA" >&2
+    echo "ERROR: $mode publication requires an exact SOURCE_SHA" >&2
     return 1
   fi
-  if ! python3 - "$work/dev/manifest.json" "$SOURCE_SHA" <<'PY'
+  if ! python3 - "$manifest" "$SOURCE_SHA" <<'PY'
 import json, sys
 try:
     with open(sys.argv[1]) as stream:
@@ -343,7 +357,7 @@ try:
     if not isinstance(manifest, dict) or manifest.get('sourceSha') != sys.argv[2]:
         raise ValueError('source mismatch')
 except (OSError, ValueError):
-    print('ERROR: dev manifest does not match SOURCE_SHA', file=sys.stderr)
+    print('ERROR: channel manifest does not match SOURCE_SHA', file=sys.stderr)
     sys.exit(1)
 PY
   then
@@ -352,13 +366,13 @@ PY
   # Query the same remote as the Pages push; a fresh clone alone only protects
   # the branch topology, not the age of the candidate being reapplied onto it.
   main_row="$(git ls-remote --exit-code "$remote" refs/heads/main 2>/dev/null)" || {
-    echo "ERROR: cannot verify current main for dev publication" >&2
+    echo "ERROR: cannot verify current main for $mode publication" >&2
     return 1
   }
   main_sha="${main_row%%$'\t'*}"
   if [ "$main_row" != "$main_sha"$'\t'"refs/heads/main" ] ||
      [ "$main_sha" != "$SOURCE_SHA" ]; then
-    echo "ERROR: refusing stale dev publication" >&2
+    echo "ERROR: refusing stale $mode publication" >&2
     return 1
   fi
 }
@@ -450,7 +464,7 @@ for attempt in 1 2 3 4 5; do
   diff_rc=0
   git -C "$work" diff --cached --quiet || diff_rc=$?
   if [ "$diff_rc" -eq 0 ]; then
-    if ! validate_dev_candidate "$work"; then
+    if ! validate_channel_candidate "$work"; then
       rm -rf "$work"
       exit 1
     fi
@@ -470,7 +484,7 @@ for attempt in 1 2 3 4 5; do
     exit 1
   fi
 
-  if ! validate_dev_candidate "$work"; then
+  if ! validate_channel_candidate "$work"; then
     rm -rf "$work"
     exit 1
   fi

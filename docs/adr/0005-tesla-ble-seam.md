@@ -28,6 +28,16 @@ Tesla's official [`teslamotors/vehicle-command`](https://github.com/teslamotors/
 
 **Own the BLE orchestration layer in this firmware, replacing `vehicle.cpp`, while retaining `yoziru/tesla-ble`'s protocol crypto core upstream.**
 
+### Dependency source provenance
+
+Repository consumers admit the already selected nanopb commit before IDF component configuration
+and before incremental component compilation. The native harness uses complete exact-commit
+pristine caches and a separately verified Tesla patch work copy. The
+[Development source/cache contract](../DEVELOPMENT.md#exact-dependency-source-admission) owns the
+failure and offline rules. This is a build-provenance boundary: the Tesla pin, five patch bytes,
+seven nanopb runtime digests, generated protocol bytes and wire/key/session behavior are unchanged.
+It does not correct the upstream standalone tag-fetch path or establish hardware acceptance.
+
 ### Pairing recovery and enrollment (2026-10-20)
 
 Remote VCSEC faults and command error text are advisory recovery signals, not authority to replace

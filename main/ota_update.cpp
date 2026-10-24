@@ -113,15 +113,31 @@ void ota_fault_restart_cancel() {
     finish_operation(tk::OtaIdentityGateState::FaultRestart);
 }
 
-OtaHealthCommitGuard::OtaHealthCommitGuard()
-    : held_(s_operation_gate.try_begin(tk::OtaIdentityGateState::HealthCommit)) {}
+OtaFaultRestartGuard::OtaFaultRestartGuard() noexcept
+    : acquisition_(s_operation_gate.try_begin_observed(tk::OtaIdentityGateState::FaultRestart)) {}
+
+OtaFaultRestartGuard::~OtaFaultRestartGuard() noexcept {
+    if (held() && !sealed_) {
+        try {
+            finish_operation(tk::OtaIdentityGateState::FaultRestart);
+        } catch (...) {
+            // Owner-checked CAS precedes any fallible mismatch diagnostic.
+        }
+    }
+}
+
+OtaHealthCommitGuard::OtaHealthCommitGuard() {
+    const auto acquired = s_operation_gate.try_begin_observed(tk::OtaIdentityGateState::HealthCommit);
+    held_ = acquired.acquired;
+    observed_ = acquired.observed;
+}
 
 OtaHealthCommitGuard::~OtaHealthCommitGuard() {
     if (held_) finish_operation(tk::OtaIdentityGateState::HealthCommit);
 }
 
 OtaConfigRestartGuard::~OtaConfigRestartGuard() noexcept {
-    if (held_) {
+    if (held_ && !sealed_) {
         held_ = false;
         // No logging or other fallible diagnostics in noexcept cleanup.
         (void)s_operation_gate.finish(tk::OtaIdentityGateState::ConfigRestart);

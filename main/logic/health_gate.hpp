@@ -109,16 +109,39 @@ enum class OtaIdentityGateState : uint8_t {
     ConfigRestart,
 };
 
+inline const char* operation_owner_name(OtaIdentityGateState state) noexcept {
+    switch (state) {
+        case OtaIdentityGateState::Idle: return "idle";
+        case OtaIdentityGateState::Ota: return "ota";
+        case OtaIdentityGateState::IdentityMutation: return "identity";
+        case OtaIdentityGateState::FaultRestart: return "fault_restart";
+        case OtaIdentityGateState::HealthCommit: return "health_maintenance";
+        case OtaIdentityGateState::ConfigRestart: return "config_restart";
+    }
+    return "unknown";
+}
+
+struct OperationAcquisition {
+    bool acquired;
+    OtaIdentityGateState observed;
+};
+
 // The executable CAS seam shared by firmware and host tests. Acquiring always compares directly
 // against Idle; a preceding state sample is never authority to overwrite a winner. Releasing is
 // equally owner-checked, so one cleanup path cannot accidentally clear another operation's gate.
 class OtaIdentityOperationGate {
 public:
     bool try_begin(OtaIdentityGateState owner) noexcept {
-        if (owner == OtaIdentityGateState::Idle) return false;
+        return try_begin_observed(owner).acquired;
+    }
+
+    OperationAcquisition try_begin_observed(OtaIdentityGateState owner) noexcept {
+        if (owner == OtaIdentityGateState::Idle) return {false, OtaIdentityGateState::Idle};
         auto expected = OtaIdentityGateState::Idle;
-        return state_.compare_exchange_strong(
+        const bool acquired = state_.compare_exchange_strong(
             expected, owner, std::memory_order_acq_rel, std::memory_order_acquire);
+        // Failed strong CAS returns its observed winner through expected. Do not reload later.
+        return {acquired, expected};
     }
 
     bool finish(OtaIdentityGateState owner) noexcept {

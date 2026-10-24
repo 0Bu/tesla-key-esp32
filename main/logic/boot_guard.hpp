@@ -1,84 +1,61 @@
 #pragma once
-// The boot-loop safe-mode decision: count CRASH-ONLY boots and, past a threshold, latch a
-// degraded recovery mode. Pure, IDF-free, host-testable.
+// Pure, hardware-free crash-loop policy, shared with test/test_logic.cpp.
+// BootGuard owns the decimal NVS counter; the independent heap supervisor drives its long
+// healthy interval. Faults increment, verified heap SW restarts preserve, and uncertain evidence
+// cannot lower a verified count. Known clean resets retain the explicit recovery-exit policy.
 //
-// WHY THIS EXISTS. Configuration and private pairing material live in NVS. A startup fault can
-// prevent the network/HTTP recovery surface from coming up before the next crash. Safe mode
-// disables vehicle work so supported configuration repair or signed OTA can remain reachable
-// when their own initialization succeeds. Identity mutation stays blocked while recovery is
-// active; the web UI is not a general VIN/key repair tool in that state.
-// If networking cannot start, use an identified, signed app-only USB recovery that preserves
-// NVS. A whole-flash erase is not the default exit: it destroys keys/configuration and needs its
-// own backup/recovery authorization. See docs/USER_GUIDE.md and docs/SECURITY.md.
-//
-// So: count boots that ended in a CRASH, and once enough of them have accumulated with no healthy
-// run in between, come up MINIMALLY — WiFi + web UI + OTA only, with the risky subsystems (the BLE
-// client, vehicle tasks, auto-pair and MQTT bridge) disabled; the controller is inert. Safe mode
-// is useless as an evcc proxy and that is the point: it is reachable, it says why, and the setting
-// or firmware cause can be investigated through the supported recovery procedures.
-//
-// WHY THE CONSEQUENCE IS SHARPER HERE THAN ON A BOARD THAT ONLY LOSES ITS OWN SERVICE. A reboot
-// re-opens the active vehicle-polling window (vehicle_ctrl seeds it at boot), so a device that
-// reboots in a loop can repeatedly contact a parked car, delay sleep and increase battery use.
-// That physical effect depends on reachability and the failure timing; it is not proved for every
-// boot loop. vehicle_ctrl.cpp suppresses its boot activity window after a recorded
-// heap-watchdog restart; the same argument applies to a loop nobody chose. A
-// latched, boring safe mode is therefore strictly better than continuing to crash: it stops the
-// cycling, and the car gets to sleep while the operator works out what happened.
-//
-// TWO RESTART COUNTERS, DELIBERATELY SEPARATE — do not merge them.
-//   * logic/heap_watchdog.hpp caps ITS OWN restarts at kHeapMaxConsecutiveRestarts (5). That
-//     counter is persisted as the `heap:<n>` breadcrumb and counts exactly one thing: restarts WE
-//     chose, after five unbroken minutes of an unusable heap. It is a bound on a deliberate
-//     self-heal.
-//   * This counter covers the other, much larger class: restarts the SYSTEM forced — a panic, an
-//     interrupt/task watchdog, a brownout. Nothing counts those today, so a firmware that panics
-//     four seconds into every boot loops forever with no ceiling and no breadcrumb.
-// Keeping them apart matters in both directions. Folding the heap watchdog's restarts in here
-// would push a device that legitimately self-healed twice toward safe mode, i.e. punish the
-// recovery; folding a panic loop into the heap counter would attribute it to a heap verdict the
-// watchdog never reached. One counts an action, the other counts an accident.
-//
-// WHAT COUNTS AS A CRASH IS THE CALLER'S CALL — and it is the correctness point. `was_fault` is
-// passed in as a bool rather than derived from a reset code here, so this header stays free of
-// esp_system.h; the device glue maps esp_reset_reason() and must map it NARROWLY:
-//   count    — ESP_RST_PANIC, ESP_RST_INT_WDT, ESP_RST_TASK_WDT, ESP_RST_WDT, ESP_RST_BROWNOUT.
-//   ignore   — ESP_RST_POWERON, ESP_RST_EXT, ESP_RST_USB/JTAG, ESP_RST_DEEPSLEEP, and above all
-//              ESP_RST_SW: /set_vin, /set_mqtt, /set_syslog, /set_wifi and the setup portal each
-//              persist-and-reboot, and an OTA install reboots too, so ordinary provisioning is a
-//              BURST of software reboots. Read
-//              as crashes they would latch safe mode on a device nobody has broken — the one
-//              failure this guard must never have.
-//   ignore   — the heap watchdog's own restart (also ESP_RST_SW, and identifiable by the
-//              `reboot_why=heap:<n>` breadcrumb): it is bounded by its own cap, see above.
-//
-// WHAT IT DOES NOT COVER, stated rather than implied. The counter is cleared once a boot has run
-// healthily for kBootHealthyS, so a loop whose crashes arrive LATER than that is invisible to it —
-// by construction, this is an instrument for a crash during start-up. The other class, an image
-// that boots and then dies under load, is what the OTA rollback health gate handles
-// (ota_health_gate_task defers esp_ota_mark_app_valid_cancel_rollback() by ~90 s, so the bootloader
-// reverts it). The two are complementary and neither subsumes the other: rollback only arms after
-// an update and can only undo an IMAGE, while both OTA slots read the same `tesla_cfg` NVS — so a
-// bad persisted setting survives every rollback and needs this instead.
+// Four fault boots before a qualified 30-minute normal run latch Safe Mode. This bounds repeated
+// faults below that healthy interval, not arbitrary faults after a completed healthy run. Safe
+// Mode/portal/Fatal, stale Vehicle progress, host reset, OTA and low INTERNAL heap earn no clear.
+// The separate five-step heap budget is never added to this crash counter. Recovery, shared-NVS
+// and rollback limits are owned by docs/ARCHITECTURE.md and docs/SECURITY.md.
+#include "logic/heap_watchdog.hpp"
+#include "logic/reset_reason.hpp"
 #include <cstdint>
 
 namespace tk {
 
-// Crash boots needed to latch safe mode. Four, not one: a single panic is an event (a cosmic ray,
-// a brownout on a marginal USB supply, one unlucky allocation) and coming up degraded because of it
-// would cost the user their evcc integration for no reason. Four consecutive crash boots with no
-// healthy run in between is a pattern, and the device reaches it in well under a minute — the loop
-// is not left running for long.
+// The fourth consecutive fault boot enters recovery before starting vehicle work.
 inline constexpr unsigned kBootFailThreshold = 4;
 
-// Continuous uptime that proves THIS boot is good, after which the glue clears the counter. Long
-// enough to be past everything a bad configuration crashes in — NVS load, WiFi association, the
-// BLE stack and the first pairing/telemetry pass all complete in a few seconds — and deliberately
-// short, because the window cuts both ways: a value large enough to span a working device's normal
-// operation would let unrelated crashes weeks apart accumulate to the threshold and latch safe mode
-// on a healthy board. Shorter than the ~90 s OTA health gate on purpose; they answer different
-// questions (see the header note).
-inline constexpr uint32_t kBootHealthyS = 30;
+// Elapsed qualified normal-runtime evidence, not raw uptime or the OTA confirmation timer.
+inline constexpr uint32_t kBootHealthyS = 1800;
+
+enum class BootCounterCause : uint8_t { Clean, Fault, HeapRecovery, Uncertain };
+
+// A real fault still increments beside corrupt reboot evidence. Keep the separate trust veto so
+// that fact cannot accidentally authorize a time-based clear of an uncertain recovery boot.
+inline bool boot_healthy_clear_allowed(BootCounterCause cause, RebootReasonState reason) noexcept {
+    return cause != BootCounterCause::Uncertain && reason != RebootReasonState::Error;
+}
+
+inline BootCounterCause boot_counter_cause(int reset_code, RebootReasonState reason) noexcept {
+    if (reset_is_fault(reset_code)) return BootCounterCause::Fault;
+    if (reason == RebootReasonState::Error) return BootCounterCause::Uncertain;
+    if (reason == RebootReasonState::Present) {
+        return reset_code == static_cast<int>(ResetCode::Sw)
+            ? BootCounterCause::HeapRecovery : BootCounterCause::Uncertain;
+    }
+    switch (static_cast<ResetCode>(reset_code)) {
+        case ResetCode::PowerOn:
+        case ResetCode::Ext:
+        case ResetCode::Sw:
+        case ResetCode::DeepSleep:
+        case ResetCode::Sdio:
+        case ResetCode::Usb:
+        case ResetCode::Jtag:
+            return BootCounterCause::Clean;
+        default:
+            return BootCounterCause::Uncertain;
+    }
+}
+
+// An uncertain code is not called a fault, but it grants no automatic vehicle activity either.
+// A later explicit foreground command keeps its existing independent admission.
+inline bool boot_activity_seed_allowed(int reset_code, RebootReasonState reason) noexcept {
+    return reason == RebootReasonState::Missing &&
+           boot_counter_cause(reset_code, reason) == BootCounterCause::Clean;
+}
 
 // Where the stored counter saturates. It exists so a long loop cannot overflow the persisted value
 // and wrap back under the threshold — the one arithmetic accident that would silently un-latch
@@ -107,30 +84,24 @@ inline bool boot_fail_parse(const char* raw, unsigned& out) noexcept {
     return true;
 }
 
-// The next value of the persisted crash counter. A fault boot increments (saturating); ANY other
-// boot resets to 0, because the reset is what makes this a consecutive-failure counter rather than
-// a lifetime crash tally — a device that crashed twice last winter and has run since is not in a
-// loop, and must not be one panic away from coming up crippled.
-//
-// Production calls this only after boot_fail_parse. The defensive clamp still fails toward the
-// latch if another caller ever passes an out-of-contract value directly.
-inline constexpr unsigned boot_fail_next(unsigned stored, bool was_fault) {
-    if (!was_fault) return 0;
+// Only a known clean cause clears at boot. A fault increments; heap/uncertain causes preserve.
+// The storage adapter must first validate the existing decimal record and confirm its commit.
+inline constexpr unsigned boot_fail_next(unsigned stored, BootCounterCause cause) {
     const unsigned cur = (stored > kBootFailMax) ? kBootFailMax : stored;
+    if (cause == BootCounterCause::Clean) return 0;
+    if (cause != BootCounterCause::Fault) return cur;
     return (cur >= kBootFailMax) ? kBootFailMax : cur + 1u;
 }
 
 // Latched once the count reaches the threshold — and it stays latched on every subsequent boot,
-// since only a healthy run (or a clean reset) ever writes the counter back down. No off-by-one:
+// since only a qualified healthy run (or a known clean reset) ever writes the counter back down. No off-by-one:
 // the glue increments FIRST and asks about the result, so with a threshold of 4 the 4th crash boot
 // comes up in safe mode.
 inline constexpr bool boot_safe_mode(unsigned count) {
     return count >= kBootFailThreshold;
 }
 
-// Has this boot earned the right to clear the counter? Sampled from a timer/task against monotonic
-// uptime. Not a one-shot at start-up: the point is that the device SURVIVED the window, so it can
-// only be answered by still being alive at the end of it.
+// Called on the elapsed qualified interval; raw boot uptime alone grants no counter clear.
 inline constexpr bool boot_healthy_elapsed(uint32_t uptime_s) {
     return uptime_s >= kBootHealthyS;
 }

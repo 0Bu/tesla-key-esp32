@@ -28,6 +28,7 @@
           "/COMPONENT_MAIN_DIR/diag_log.cpp :: int diag_vprintf_(const char*, va_list)": 320
         },
         "CMakeFiles/__idf_main.dir/display.cpp.su": {},
+        "CMakeFiles/__idf_main.dir/heap_supervisor.cpp.su": {},
         "CMakeFiles/__idf_main.dir/heap_trend.cpp.su": {},
         "CMakeFiles/__idf_main.dir/http_api.cpp.su": {
           "/COMPONENT_MAIN_DIR/http_api.cpp :: esp_err_t handle_command(GuardedReq)": 336,
@@ -137,6 +138,7 @@
           "/COMPONENT_MAIN_DIR/diag_log.cpp :: int diag_vprintf_(const char*, va_list)": 320
         },
         "CMakeFiles/__idf_main.dir/display.cpp.su": {},
+        "CMakeFiles/__idf_main.dir/heap_supervisor.cpp.su": {},
         "CMakeFiles/__idf_main.dir/heap_trend.cpp.su": {},
         "CMakeFiles/__idf_main.dir/http_api.cpp.su": {
           "/COMPONENT_MAIN_DIR/http_api.cpp :: esp_err_t handle_command(GuardedReq)": 336,
@@ -245,6 +247,7 @@
           "/COMPONENT_MAIN_DIR/diag_log.cpp :: int diag_vprintf_(const char*, va_list)": 272
         },
         "CMakeFiles/__idf_main.dir/display.cpp.su": {},
+        "CMakeFiles/__idf_main.dir/heap_supervisor.cpp.su": {},
         "CMakeFiles/__idf_main.dir/heap_trend.cpp.su": {},
         "CMakeFiles/__idf_main.dir/http_api.cpp.su": {
           "/COMPONENT_MAIN_DIR/http_api.cpp :: esp_err_t handle_command(GuardedReq)": 320,
@@ -349,6 +352,7 @@
           "/COMPONENT_MAIN_DIR/diag_log.cpp :: int diag_vprintf_(const char*, va_list)": 272
         },
         "CMakeFiles/__idf_main.dir/display.cpp.su": {},
+        "CMakeFiles/__idf_main.dir/heap_supervisor.cpp.su": {},
         "CMakeFiles/__idf_main.dir/heap_trend.cpp.su": {},
         "CMakeFiles/__idf_main.dir/http_api.cpp.su": {
           "/COMPONENT_MAIN_DIR/http_api.cpp :: esp_err_t handle_command(GuardedReq)": 320,

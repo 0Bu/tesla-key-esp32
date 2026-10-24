@@ -58,12 +58,14 @@
 #include "logic/ble_phase.hpp"
 #include "logic/ble_row.hpp"
 #include "logic/ha_templates.hpp"
+#include "logic/mqtt_discovery_registry.hpp"
 #include "logic/http_body.hpp"
 #include "logic/http_route.hpp"
 #include "logic/json_syntax.hpp"
 #include "logic/config_request.hpp"
 #include "logic/heap_json_stream.hpp"
 #include "logic/heap_watchdog.hpp"
+#include "logic/heap_supervision.hpp"
 #include "logic/ota_contract.hpp"
 #include "logic/ota_changelog_range.hpp"
 #include "logic/task_start_gate.hpp"
@@ -3856,6 +3858,72 @@ static void test_json_materialize() {
             std::string("{\"x\":\"") + std::string(raw.bytes, raw.length) + "\"}";
         CHECK(json_syntax_status(document.data(), document.size()) == JsonSyntaxStatus::Malformed);
     }
+
+    // Independent decode-based oracle: shortest scalar value, rather than the production
+    // parser's restricted second-byte ranges. Exercise every non-ASCII lead/second byte and
+    // both sides of the continuation range at each remaining position, including truncation.
+    const auto scalar = [](const unsigned char* bytes, size_t size) {
+        unsigned width = 0;
+        uint32_t value = 0;
+        uint32_t minimum = 0;
+        if ((bytes[0] & 0xe0) == 0xc0) {
+            width = 2; value = bytes[0] & 0x1f; minimum = 0x80;
+        } else if ((bytes[0] & 0xf0) == 0xe0) {
+            width = 3; value = bytes[0] & 0x0f; minimum = 0x800;
+        } else if ((bytes[0] & 0xf8) == 0xf0) {
+            width = 4; value = bytes[0] & 0x07; minimum = 0x10000;
+        } else return false;
+        if (size != width) return false;
+        for (unsigned i = 1; i < width; ++i) {
+            if ((bytes[i] & 0xc0) != 0x80) return false;
+            value = (value << 6) | (bytes[i] & 0x3f);
+        }
+        return value >= minimum && value <= 0x10ffff &&
+               !(value >= 0xd800 && value <= 0xdfff);
+    };
+    const auto check_scalar = [&](const unsigned char* bytes, size_t size) {
+        char document[6] = {'"'};
+        for (size_t i = 0; i < size; ++i) document[i + 1] = static_cast<char>(bytes[i]);
+        document[size + 1] = '"';
+        CHECK((json_syntax_status(document, size + 2) == JsonSyntaxStatus::Valid) ==
+              scalar(bytes, size));
+    };
+    constexpr unsigned char tails[] = {0x7f, 0x80, 0xbf, 0xc0};
+    for (unsigned lead = 0x80; lead <= 0xff; ++lead) {
+        unsigned char bytes[4] = {static_cast<unsigned char>(lead), 0, 0, 0};
+        check_scalar(bytes, 1);
+        for (unsigned second = 0; second <= 0xff; ++second) {
+            bytes[1] = static_cast<unsigned char>(second);
+            check_scalar(bytes, 2);
+            if (lead < 0xe0) continue;
+            for (unsigned char third : tails) {
+                bytes[2] = third;
+                check_scalar(bytes, 3);
+                if (lead < 0xf0) continue;
+                for (unsigned char fourth : tails) {
+                    bytes[3] = fourth;
+                    check_scalar(bytes, 4);
+                }
+            }
+        }
+    }
+    // Cover every representable non-ASCII scalar, including noncharacters; JSON accepts
+    // Unicode scalar values rather than imposing a text-language or character-assignment filter.
+    for (uint32_t value = 0x80; value <= 0x10ffff; ++value) {
+        if (value >= 0xd800 && value <= 0xdfff) continue;
+        unsigned char bytes[4]{};
+        size_t size = 0;
+        if (value < 0x800) {
+            size = 2; bytes[0] = static_cast<unsigned char>(0xc0 | (value >> 6));
+        } else if (value < 0x10000) {
+            size = 3; bytes[0] = static_cast<unsigned char>(0xe0 | (value >> 12));
+        } else {
+            size = 4; bytes[0] = static_cast<unsigned char>(0xf0 | (value >> 18));
+        }
+        for (size_t i = 1; i < size; ++i)
+            bytes[i] = static_cast<unsigned char>(0x80 | ((value >> (6 * (size - 1 - i))) & 0x3f));
+        check_scalar(bytes, size);
+    }
     std::string max_depth(kJsonMaxNesting, '[');
     max_depth += '0';
     max_depth.append(kJsonMaxNesting, ']');
@@ -4050,6 +4118,41 @@ static void test_ha_templates() {
     CHECK(soc == "{% if value_json.battery_level is defined and value_json.battery_level is not none %}"
                  "{{ value_json.battery_level }}{% else %}None{% endif %}");
     CHECK(soc.find("{% else %}None{% endif %}") != std::string::npos);
+
+    // Golden grammar uses the old concatenation model independently of the append builder.
+    // Bind every shipped discovery field, both boolean polarities and non-registry edge lengths.
+    const auto check_field = [](const std::string& field) {
+        const std::string present = "value_json." + field +
+            " is defined and value_json." + field + " is not none";
+        CHECK(tk::ha_field_present_expr(field.c_str()) == present);
+        CHECK(tk::ha_value_template(field.c_str()) ==
+              "{% if " + present + " %}{{ value_json." + field +
+              " }}{% else %}None{% endif %}");
+        for (bool invert : {false, true}) {
+            const std::string on = invert ? "OFF" : "ON";
+            const std::string off = invert ? "ON" : "OFF";
+            CHECK(tk::ha_binary_value_template(field.c_str(), invert) ==
+                  "{% if " + present + " %}{{ '" + on + "' if value_json." + field +
+                  " else '" + off + "' }}{% else %}None{% endif %}");
+        }
+    };
+    for (const auto& entry : tk::mqtt::kDiscoveryEntries) check_field(std::string(entry.field));
+    for (const std::string& field : {std::string{}, std::string(300, 'x'),
+                                     std::string("field_with_underscore")}) check_field(field);
+    std::string unchanged = "before";
+    bool refused = false;
+    try {
+        tk::ha_detail::reserve_fields(unchanged, 0, SIZE_MAX / 3 + 1, 3);
+    } catch (const std::length_error&) { refused = true; }
+    CHECK(refused && unchanged == "before");
+    refused = false;
+    try {
+        tk::ha_detail::reserve_fields(unchanged, SIZE_MAX, 1, 1);
+    } catch (const std::length_error&) { refused = true; }
+    CHECK(refused && unchanged == "before");
+    std::string zero_occurrences;
+    tk::ha_detail::reserve_fields(zero_occurrences, 5, SIZE_MAX, 0);
+    CHECK(zero_occurrences.empty() && zero_occurrences.capacity() >= 5);
 }
 
 // ── Retained MQTT state lifecycle (logic/mqtt_state_lifecycle.hpp) — stale broker values ───────
@@ -5281,17 +5384,17 @@ static void test_boot_guard() {
 
     // A clean boot RESETS the count. Without that, four crashes spread over a year would latch
     // safe mode on a device that has been healthy the whole time.
-    CHECK(tk::boot_fail_next(3, false) == 0);
-    CHECK(tk::boot_fail_next(0, false) == 0);
+    CHECK(tk::boot_fail_next(3, tk::BootCounterCause::Clean) == 0);
+    CHECK(tk::boot_fail_next(0, tk::BootCounterCause::Clean) == 0);
 
-    CHECK(tk::boot_fail_next(0, true) == 1);
-    CHECK(tk::boot_fail_next(2, true) == 3);
+    CHECK(tk::boot_fail_next(0, tk::BootCounterCause::Fault) == 1);
+    CHECK(tk::boot_fail_next(2, tk::BootCounterCause::Fault) == 3);
 
     // Saturating: the counter must never wrap around into "healthy".
-    CHECK(tk::boot_fail_next(tk::kBootFailMax, true) == tk::kBootFailMax);
+    CHECK(tk::boot_fail_next(tk::kBootFailMax, tk::BootCounterCause::Fault) == tk::kBootFailMax);
     // Defensive direct callers fail toward the latch even though production parses first.
-    CHECK(tk::boot_fail_next(tk::kBootFailMax + 1u, true) == tk::kBootFailMax);
-    CHECK(tk::boot_fail_next(999999u, true) == tk::kBootFailMax);
+    CHECK(tk::boot_fail_next(tk::kBootFailMax + 1u, tk::BootCounterCause::Fault) == tk::kBootFailMax);
+    CHECK(tk::boot_fail_next(999999u, tk::BootCounterCause::Fault) == tk::kBootFailMax);
 
     CHECK(!tk::boot_safe_mode(0));
     CHECK(!tk::boot_safe_mode(tk::kBootFailThreshold - 1));
@@ -10348,7 +10451,131 @@ static void test_iteration_fault() {
     }
 }
 
+// Combined long healthy interval, effective heap budget and typed boot causes.
+static void test_heap_supervision() {
+    using namespace tk;
+    CHECK(kBootHealthyS == 1800);
+    CHECK(kRecoverySampleMs == 30000);
+    CHECK(kRecoveryFreshMs == 60000);
+    CHECK(kRecoveryRetryMs == 300000);
+    CHECK(vehicle_iteration_successful(false, false));
+    CHECK(!vehicle_iteration_successful(true, false));
+    CHECK(!vehicle_iteration_successful(false, true));
+    CHECK(!vehicle_iteration_successful(true, true));
+    RecoveryHealthyRun run{};
+    CHECK(!run.sample(0, true));
+    for (uint64_t now = 30000; now <= 1770000; now += 30000) CHECK(!run.sample(now, true));
+    CHECK(!run.sample(1799999, true));
+    CHECK(run.sample(1800000, true));
+    CHECK(run.sample(1830000, true));
+    CHECK(!run.sample(1860000, false));
+    CHECK(!run.sample(1890000, true));
+    CHECK(!run.sample(3690000, true));  // a final good sample cannot credit an unobserved stall
+    CHECK(!run.sample(0, true));       // a backward clock restarts the evidence window
+    const uint64_t wide = uint64_t{1} << 40;
+    run = {};
+    for (uint64_t elapsed = 0; elapsed < 1800000; elapsed += 30000)
+        CHECK(!run.sample(wide + elapsed, true));
+    CHECK(run.sample(wide + 1800000, true));
+    RecoveryHealth healthy{true, true, true, true, true, false, 4096};
+    CHECK(recovery_health_eligible(healthy));
+    for (unsigned missing = 0; missing != 7; ++missing) {
+        auto bad = healthy;
+        switch (missing) {
+            case 0: bad.ready = false; break;
+            case 1: bad.host_synced = false; break;
+            case 2: bad.host_reset_free = false; break;
+            case 3: bad.vehicle_progress_fresh = false; break;
+            case 4: bad.network_up = false; break;
+            case 5: bad.ota_busy = true; break;
+            default: bad.largest_internal = 4095; break;
+        }
+        CHECK(!recovery_health_eligible(bad));
+        RecoveryHealthyRun interrupted{};
+        for (uint64_t now = 0; now <= 1770000; now += 30000) CHECK(!interrupted.sample(now, true));
+        CHECK(!interrupted.sample(1800000, recovery_health_eligible(bad)));
+        CHECK(!interrupted.sample(1830000, true));
+    }
+    VehicleProgress progress;
+    CHECK(!progress.fresh(0));
+    progress.publish(0);
+    CHECK(progress.fresh(0));
+    CHECK(progress.fresh(60000));
+    CHECK(!progress.fresh(60001));
+    progress.publish(wide);
+    CHECK(!progress.fresh(wide - 1));
+    CHECK(progress.fresh(wide + 60000));
+    CHECK(!progress.fresh(wide + 60001));
+    for (uint8_t count : {uint8_t{0}, uint8_t{4}, uint8_t{5}}) {
+        auto budget = HeapRecoveryBudget::seed(count, true);
+        CHECK(budget.effective == count && budget.trusted);
+        CHECK(budget.may_restart() == (count < 5));
+        CHECK(!budget.decay_after_healthy_run(false));
+        CHECK(budget.effective == count);
+        CHECK(budget.decay_after_healthy_run(true) == (count != 0));
+        CHECK(budget.effective == 0 && budget.may_restart());
+    }
+    for (uint8_t count : {uint8_t{0}, uint8_t{5}, uint8_t{255}}) {
+        auto unknown = HeapRecoveryBudget::seed(count, false);
+        CHECK(unknown.effective == 5 && !unknown.trusted && !unknown.may_restart());
+        CHECK(!unknown.decay_after_healthy_run(true));
+        CHECK(unknown.effective == 5);
+    }
+    CHECK(!HeapRecoveryBudget::seed(6, true).trusted);
+    CHECK(boot_counter_cause(3, RebootReasonState::Present) == BootCounterCause::HeapRecovery);
+    CHECK(boot_fail_next(4, BootCounterCause::HeapRecovery) == 4);
+    CHECK(boot_fail_next(0, BootCounterCause::HeapRecovery) == 0);
+    for (int code = -1; code <= 16; ++code) {
+        for (auto reason : {RebootReasonState::Missing, RebootReasonState::Present, RebootReasonState::Error}) {
+            const auto cause = boot_counter_cause(code, reason);
+            CHECK(boot_healthy_clear_allowed(cause, reason) ==
+                  (reason != RebootReasonState::Error && cause != BootCounterCause::Uncertain));
+            if (reset_is_fault(code)) {
+                CHECK(cause == BootCounterCause::Fault);
+                CHECK(boot_fail_next(3, cause) == 4);
+                CHECK(!boot_activity_seed_allowed(code, reason));
+            }
+            if (reason != RebootReasonState::Missing) CHECK(!boot_activity_seed_allowed(code, reason));
+            if (cause == BootCounterCause::Uncertain) {
+                CHECK(boot_fail_next(4, cause) == 4);
+                CHECK(!boot_activity_seed_allowed(code, reason));
+            }
+        }
+    }
+    for (int code : {1, 2, 3, 8, 10, 11, 12}) {
+        CHECK(boot_activity_seed_allowed(code, RebootReasonState::Missing));
+        CHECK(boot_fail_next(4, boot_counter_cause(code, RebootReasonState::Missing)) == 0);
+    }
+    for (uint64_t lifetime : {uint64_t{60000}, uint64_t{120000}}) {
+        unsigned failures = 0;
+        for (unsigned boot = 1; boot <= 4; ++boot) {
+            failures = boot_fail_next(failures, BootCounterCause::Fault);
+            RecoveryHealthyRun current{};
+            for (uint64_t now = 0; now <= lifetime; now += 30000) CHECK(!current.sample(now, true));
+            CHECK(failures == boot);
+            CHECK(boot_safe_mode(failures) == (boot == 4));
+        }
+    }
+    RecoveryWriteCadence writes{};
+    CHECK(writes.due(0)); writes.attempt(0);
+    CHECK(!writes.due(299999)); CHECK(writes.due(300000));
+    writes.attempt(wide); CHECK(!writes.due(wide - 1)); CHECK(writes.due(wide + 300000));
+    RecoveryDiagnostic logs{};
+    uint32_t suppressed = 42;
+    CHECK(logs.emit(0, suppressed) && suppressed == 0);
+    CHECK(!logs.emit(1, suppressed));
+    CHECK(!logs.emit(299999, suppressed));
+    CHECK(logs.emit(300000, suppressed) && suppressed == 2);
+    CHECK(!logs.emit(300001, suppressed));
+    CHECK(logs.emit(600000, suppressed) && suppressed == 1);
+    logs.suppressed = UINT32_MAX;
+    CHECK(!logs.emit(600001, suppressed));
+    CHECK(logs.suppressed == UINT32_MAX);
+    CHECK(logs.emit(900000, suppressed) && suppressed == UINT32_MAX);
+}
+
 int main() {
+    test_heap_supervision();
     test_iteration_fault();
     test_coredump_image();
     test_uptime_rollovers();

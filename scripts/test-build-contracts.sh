@@ -42,6 +42,8 @@ python3 "$repo_root/scripts/report-firmware-size.py" --self-test
 "$repo_root/scripts/precheck-firmware.sh" --self-test
 python3 "$repo_root/scripts/check-release-assets.py" --self-test
 python3 "$repo_root/scripts/check-signed-root-inventory.py" --self-test
+python3 "$repo_root/test/test_signer_output_admission.py"
+python3 "$repo_root/test/test_deploy_candidate.py"
 python3 "$repo_root/scripts/prepare-reused-release.py" --self-test
 python3 "$repo_root/scripts/wait-pages-build.py" --self-test
 python3 "$repo_root/scripts/check-published-release.py" --self-test
@@ -50,6 +52,7 @@ python3 "$repo_root/scripts/check-dev-pages.py" --self-test
 python3 "$repo_root/scripts/check-pages-manifest.py" --self-test
 python3 "$repo_root/scripts/check-release-pages-bytes.py" --self-test
 python3 "$repo_root/scripts/generate-ota-changelog.py" --self-test
+python3 "$repo_root/test/test_pages_changelog.py"
 python3 "$repo_root/scripts/check-stack-usage.py" --self-test
 python3 "$repo_root/scripts/check-build-gate-contract.py" --self-test
 "$repo_root/scripts/e2e_evcc.sh" --self-test
