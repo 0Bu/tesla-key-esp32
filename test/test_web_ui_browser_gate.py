@@ -4,6 +4,7 @@
 import contextlib
 import importlib.util
 import io
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -56,7 +57,7 @@ class BrowserLaunchPolicyTests(unittest.TestCase):
     def test_direct_macos_profile_is_refused_before_spawn(self):
         with mock.patch.object(gate.sys, "platform", "darwin"):
             with self.assertRaisesRegex(RuntimeError, "only on Linux"):
-                gate.run_profile("/configured/browser", Path("/tmp/page.html"), "desktop", "1200,900", Path("/tmp/profile"))
+                gate.run_profile(None, Path("/tmp/page.html"), gate.PROFILES[0])
         self.spawn.assert_not_called()
 
     def test_missing_linux_browser_fails_strict(self):
@@ -73,64 +74,125 @@ class BrowserLaunchPolicyTests(unittest.TestCase):
         self.assertIn("SKIP", output)
         self.spawn.assert_not_called()
 
-    def test_linux_main_requires_both_real_profile_calls(self):
+    def test_linux_main_requires_real_browser_runner(self):
         with mock.patch.object(gate, "browser_binary", return_value="/usr/bin/chromium"), \
                 mock.patch.object(gate, "assembled_page", return_value="<html>fixture</html>"), \
-                mock.patch.object(gate, "run_profile") as profile:
+                mock.patch.object(gate, "run_browser") as browser:
             result, output = self.run_main("linux", strict=True)
         self.assertEqual(result, 0)
-        self.assertEqual([call.args[2:4] for call in profile.call_args_list],
-                         [("desktop", "1200,900"), ("mobile", "390,844")])
+        self.assertEqual(browser.call_count, 1)
         self.assertIn("PASS", output)
 
-    def test_linux_profile_retains_process_and_complete_dom_validation(self):
-        def process(command, **kwargs):
-            self.assertIn("--headless", command)
-            self.assertIn("--dump-dom", command)
-            self.assertEqual("--force-dark-mode" in command, command[-1].endswith("?profile=mobile"))
-            self.assertTrue(command[-1].startswith("file://"))
-            self.assertTrue(kwargs["start_new_session"])
-            kwargs["stdout"].write('<html><div id="browser-gate-result" data-result="pass"></div></html>')
-            return mock.Mock(wait=mock.Mock(return_value=0))
-        self.spawn.side_effect = process
-        with mock.patch.object(gate.sys, "platform", "linux"), tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            gate.run_profile("/usr/bin/chromium", root / "page.html", "desktop", "1200,900", root / "profile")
-            gate.run_profile("/usr/bin/chromium", root / "page.html", "mobile", "390,844", root / "mobile-profile")
-        self.assertEqual(self.spawn.call_count, 2)
-
-    def test_linux_timeout_terminates_only_its_own_process_group(self):
-        process = mock.Mock(pid=24680)
-        process.wait.side_effect = [gate.subprocess.TimeoutExpired("controlled", 45), 0]
-        self.spawn.side_effect = lambda *args, **kwargs: process
+    def test_linux_browser_uses_one_bounded_pipe_owner_and_three_profiles(self):
+        connection = mock.MagicMock()
+        owner = mock.MagicMock()
+        owner.return_value.__enter__.return_value = connection
         with mock.patch.object(gate.sys, "platform", "linux"), \
-                mock.patch.object(gate.os, "killpg") as kill, tempfile.TemporaryDirectory() as directory:
+                mock.patch.object(gate, "cdp_type", return_value=owner), \
+                mock.patch.object(gate, "run_profile") as profile, \
+                mock.patch.object(gate, "report"), tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            with self.assertRaisesRegex(RuntimeError, "timed out before a complete DOM"):
-                gate.run_profile("/usr/bin/chromium", root / "page.html", "desktop", "1200,900", root / "profile")
-        kill.assert_called_once_with(24680, gate.signal.SIGTERM)
-        self.assertEqual(process.wait.call_args_list, [mock.call(timeout=45), mock.call(timeout=2)])
+            gate.run_browser("/usr/bin/chromium", root / "page.html", root)
+        self.assertEqual(owner.call_count, 1)
+        self.assertIn("--remote-debugging-pipe", owner.call_args.args[1])
+        self.assertNotIn("--dump-dom", owner.call_args.args[1])
+        self.assertEqual([call.args[2] for call in profile.call_args_list], list(gate.PROFILES))
+        self.assertEqual([p[1:] for p in gate.PROFILES], [(390,844,"light"),(768,900,"light"),(1200,900,"dark")])
+        connection.call.assert_called_once_with("Browser.getVersion", seconds=45)
+        owner.return_value.__exit__.assert_called_once()
 
-    def test_linux_stuck_process_group_has_bounded_kill_escalation(self):
-        process = mock.Mock(pid=24680)
-        process.wait.side_effect = [gate.subprocess.TimeoutExpired("controlled", 45),
-                                    gate.subprocess.TimeoutExpired("controlled", 2), 0]
-        self.spawn.side_effect = lambda *args, **kwargs: process
+    def test_profile_omission_and_failure_cannot_pass(self):
+        owner = mock.MagicMock()
         with mock.patch.object(gate.sys, "platform", "linux"), \
-                mock.patch.object(gate.os, "killpg") as kill, tempfile.TemporaryDirectory() as directory:
+                mock.patch.object(gate, "cdp_type", return_value=owner), \
+                mock.patch.object(gate, "report"), tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            with self.assertRaisesRegex(RuntimeError, "timed out before a complete DOM"):
-                gate.run_profile("/usr/bin/chromium", root / "page.html", "desktop", "1200,900", root / "profile")
-        self.assertEqual(kill.call_args_list, [mock.call(24680, gate.signal.SIGTERM),
-                                              mock.call(24680, gate.signal.SIGKILL)])
-        self.assertEqual(process.wait.call_args_list, [mock.call(timeout=45), mock.call(timeout=2), mock.call(timeout=2)])
+            with mock.patch.object(gate, "run_profile"), mock.patch.object(gate,"PROFILES",gate.PROFILES[:2]):
+                with self.assertRaisesRegex(RuntimeError,"three populated"):
+                    gate.run_browser("/usr/bin/chromium",root/"page.html",root)
+            with mock.patch.object(gate,"run_profile",side_effect=RuntimeError("controlled DOM failure")):
+                with self.assertRaisesRegex(RuntimeError,"controlled DOM failure"):
+                    gate.run_browser("/usr/bin/chromium",root/"page.html",root)
+        self.assertEqual(owner.return_value.__exit__.call_count, 2)
 
-    def test_linux_profile_without_dom_marker_fails(self):
-        self.spawn.side_effect = lambda *args, **kwargs: mock.Mock(wait=mock.Mock(return_value=0))
-        with mock.patch.object(gate.sys, "platform", "linux"), tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            with self.assertRaisesRegex(RuntimeError, "DOM/accessibility gate failed"):
-                gate.run_profile("/usr/bin/chromium", root / "page.html", "desktop", "1200,900", root / "profile")
+    def test_runner_failure_is_reported_without_pass(self):
+        with mock.patch.object(gate, "browser_binary", return_value="/usr/bin/chromium"), \
+                mock.patch.object(gate, "assembled_page", return_value="<html>fixture</html>"), \
+                mock.patch.object(gate, "run_browser", side_effect=RuntimeError("controlled deadline")):
+            result, output = self.run_main("linux", strict=True)
+        self.assertEqual(result, 1)
+        self.assertIn("controlled deadline",output)
+        self.assertNotIn("PASS",output)
+
+    def test_each_keyboard_key_is_sent_as_distinct_down_up_with_default_text(self):
+        connection=mock.Mock()
+        gate.dispatch_key(connection,"owned","Enter","Enter",13,"\r")
+        gate.dispatch_key(connection,"owned"," ","Space",32," ")
+        calls=connection.call.call_args_list
+        self.assertEqual([call.args[1]["type"] for call in calls],["keyDown","keyUp","keyDown","keyUp"])
+        self.assertEqual([call.args[1]["key"] for call in calls],["Enter","Enter"," "," "])
+        self.assertEqual(calls[0].args[1]["text"],"\r")
+        self.assertEqual(calls[2].args[1]["text"]," ")
+        self.assertTrue(all(call.args[0]=="Input.dispatchKeyEvent" and call.args[2]=="owned" for call in calls))
+
+
+class ProfileProtocolTests(unittest.TestCase):
+    """Controlled CDP state, separate from actual Linux/browser acceptance."""
+
+    class Peer:
+        def __init__(self, fault=None):
+            self.fault=fault
+            self.calls=[]
+            self.actions=0
+            self.keys=[]
+            self.clicks=[]
+
+        def call(self, method, parameters=None, session=None):
+            self.calls.append((method,parameters,session))
+            if method=="Target.createTarget": return {"targetId":"owned"}
+            if method=="Target.attachToTarget": return {"sessionId":"session"}
+            if method=="Input.dispatchKeyEvent":
+                key=parameters["key"]
+                self.keys.append({"type":parameters["type"].lower(),
+                                  "key":key,"trusted":self.fault!="untrusted"})
+                if parameters["type"]=="keyUp" and key!="Tab":
+                    count=0 if self.fault=="missing-action" else (2 if self.fault=="double-action" else 1)
+                    self.actions+=count
+                    self.clicks.extend([{"trusted":True}]*count)
+            return {}
+
+        def evaluate(self, expression, session):
+            if expression==gate.KEYBOARD_SETUP:
+                return {"bodyFocused":self.fault!="body","requests":2}
+            if expression==gate.KEYBOARD_SNAPSHOT:
+                result={"actions":self.actions,"keys":self.keys,"clicks":self.clicks,"requests":2,
+                        "errors":[],"viewport":390,"documentWidth":390,
+                        "focus":{"active":True,"visible":self.fault!="focus","name":"Start charging",
+                                 "style":"solid","width":2,"contrast":5},
+                        "boxes":[{"left":0,"right":390,"width":390,"scrollWidth":390,"clientWidth":390}]*4}
+                if self.fault=="request": result["requests"]=3
+                if self.fault=="overflow": result["documentWidth"]=500
+                return json.loads(json.dumps(result))
+            if "document.activeElement===" in expression: return True
+            return {"result":"fail" if self.fault=="dom" else "pass","text":"controlled","width":390,"dark":False}
+
+    def test_full_phase_sequence_and_both_native_keys_are_required(self):
+        peer=self.Peer()
+        with mock.patch.object(gate.sys,"platform","linux"),mock.patch.object(gate,"report") as report:
+            gate.run_profile(peer,Path("/tmp/offline.html"),gate.PROFILES[0])
+        self.assertEqual([call.args[1] for call in report.call_args_list],
+                         ["assembled-dom","keyboard-setup","trusted-tab","trusted-Enter","trusted-Space"])
+        self.assertEqual(peer.actions,2)
+        self.assertEqual([event["key"] for event in peer.keys],["Tab","Tab","Enter","Enter"," "," "])
+        self.assertEqual(peer.calls[-1][0],"Target.closeTarget")
+        self.assertTrue(any(call[0]=="Emulation.setDeviceMetricsOverride" for call in peer.calls))
+        self.assertTrue(any(call[0]=="Emulation.setEmulatedMedia" for call in peer.calls))
+
+    def test_each_required_runtime_refusal_is_effective(self):
+        for fault in ("dom","body","focus","missing-action","double-action","untrusted","request","overflow"):
+            with self.subTest(fault=fault),mock.patch.object(gate.sys,"platform","linux"), \
+                    mock.patch.object(gate,"report"),self.assertRaises(RuntimeError):
+                gate.run_profile(self.Peer(fault),Path("/tmp/offline.html"),gate.PROFILES[0])
 
 
 if __name__ == "__main__":

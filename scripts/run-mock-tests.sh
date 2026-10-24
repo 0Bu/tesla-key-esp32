@@ -72,6 +72,9 @@ if [ "$REQUIRE_ALL" = 1 ]; then
         test/test_diagnostic_export_guidance.py \
         test/test_runtime_boundary_contract.py \
         test/test_charge_presentation.py \
+        test/test_command_outcomes.py \
+        test/test_inline_assets.py \
+        main/www/prune_css_comments.py \
         test/generate_ota_admission_adapter.py \
         test/generate_mqtt_discovery_adapter.py \
         test/test_ota_admission.cpp \
@@ -89,6 +92,8 @@ if [ "$REQUIRE_ALL" = 1 ]; then
         test/test_patch_incremental.py \
         test/test_dependency_guards.py \
         scripts/reconcile-pr-previews.sh \
+        scripts/check-pr-preview-served.py \
+        test/test_pr_preview_served.py \
         scripts/verify-vendored-esptool-js.sh \
         scripts/check-bench-acceptance.py \
         scripts/check-release-assets.py \
@@ -113,6 +118,8 @@ if [ "$REQUIRE_ALL" = 1 ]; then
         scripts/run-browser-tests-linux.sh \
         tools/browser/Dockerfile \
         test/test_web_ui_browser_gate.py \
+        test/test_browser_cdp.py \
+        test/browser_cdp.py \
         test/web_ui_browser_gate.py; do
         gate_file "$required"
     done
@@ -189,6 +196,8 @@ if command -v python3 >/dev/null 2>&1; then
     run_gate "diagnostic export guidance" 120 python3 test/test_diagnostic_export_guidance.py
     run_gate "runtime C-boundary inventory" 120 python3 test/test_runtime_boundary_contract.py
     run_gate "coherent charge presentation snapshot" 120 python3 test/test_charge_presentation.py
+    run_gate "contextual charging command outcomes" 120 python3 test/test_command_outcomes.py
+    run_gate "CSS bytes and actual inline generation" 120 python3 test/test_inline_assets.py
     run_gate "optional LED driver decisions and GPIO" 120 python3 test/test_led_driver_contract.py
     run_gate "locked cJSON intake and OOM" 120 bash test/run-cjson-oom-tests.sh
     run_gate "native Codex hook payload contract" 120 python3 test/test_codex_setup.py
@@ -201,6 +210,7 @@ if command -v python3 >/dev/null 2>&1; then
     run_gate "tesla-ble patch applicability" 120 scripts/apply-tesla-ble-patches.sh --self-test
     run_gate "tesla-ble incremental source admission" 120 python3 test/test_patch_incremental.py
     run_gate "preview reconciliation contract" 120 scripts/reconcile-pr-previews.sh --self-test
+    run_gate "served PR preview and removal acceptance" 120 python3 test/test_pr_preview_served.py
     run_gate "vendored esptool-js contract" 120 scripts/verify-vendored-esptool-js.sh
     run_gate "bench acceptance validator contract" 120 \
         python3 scripts/check-bench-acceptance.py --self-test
@@ -217,6 +227,7 @@ if command -v python3 >/dev/null 2>&1; then
     run_gate "exact NVS namespace/key/owner/retention contract" 120 \
         python3 scripts/check-nvs-contract.py --self-test
     run_gate "browser launch policy" 120 python3 test/test_web_ui_browser_gate.py
+    run_gate "browser pipe transport" 120 python3 test/test_browser_cdp.py
     run_gate "deterministic parser fuzz smoke" 120 scripts/run-fuzz-smoke.sh
 else
     echo "run-mock-tests: python3 not found — skipping display-sim parity check" >&2

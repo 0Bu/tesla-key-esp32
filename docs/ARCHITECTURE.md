@@ -53,8 +53,13 @@ Synchronous tesla-ble callbacks copy fixed nanopb state into latest-value mailbo
 `cache_mutex_`. Callbacks neither allocate nor acquire the cache lock.
 
 A non-empty CarServer request UUID must match the outstanding domain request; late/foreign replies
-are dropped. Nominal `already_set` errors make idempotent setpoints succeed through the shared
-`command_result.hpp` policy.
+are dropped. The existing exact `already_set` compatibility rule is shared through
+`command_result.hpp`. Each queued request separately defaults to that rule alone. Only actual
+charge-start/stop producers select contextual charging no-ops: an authenticated current
+Infotainment ERROR with counter evidence may normalize a matching reason once, before the runner
+completion callback. REST/MCP consume that completion; they do not broadly reinterpret nominal
+errors. [API](API.md#commands) owns the accepted reason pairs and their meaning. No new retry,
+telemetry update or late-response admission follows from normalization.
 
 `set_charging_amps` owns one complete action → ACK → independent ChargeState readback transaction.
 Success requires a newer feedback generation, a present current field and an exact requested-current

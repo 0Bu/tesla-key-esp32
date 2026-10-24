@@ -263,6 +263,8 @@ uniquely named digest/size-bearing merged assets; it does not scan for a newer e
 byte-validate that numeric base's assets. Refetch default-branch head before key,
 upload and Pages boundaries; main advancement retires stale runs. Per-PR concurrency couples publisher
 and trusted-base cleanup on close/force-push/unlabel; daily reconciliation removes stale manifests.
+Key-free [served preview acceptance](DEVELOPMENT.md#served-pr-preview-acceptance) compares all 16
+published parts and checks bounded URL absence after removal; a branch write alone is not acceptance.
 
 The only serving authority is branch-backed `gh-pages:/`: root Release, `dev/`, `PR/<N>/`.
 Check API Pages mode/source/URL before signing, before invoking branch publication/deletion and
