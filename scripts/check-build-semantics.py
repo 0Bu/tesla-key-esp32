@@ -39,13 +39,20 @@ MANAGED_SUBLIBRARY_OBJECT_DIRS = {
         "/esp-idf/espressif__mqtt/lib/mqtt_outbox/CMakeFiles/mqtt_outbox_lib.dir/",
     ),
 }
+def nanopb_provenance() -> dict[str, Any]:
+    path = Path(__file__).resolve().parent
+    spec = importlib.util.spec_from_file_location("effective_build_source_contract", path / "dependency_source.py")
+    if spec is None or spec.loader is None:
+        raise RuntimeError("missing dependency source contract")
+    source = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(source)
+    return source.read_nanopb_record(path / "nanopb-source.json")
+
+
+NANOPB_PROVENANCE = nanopb_provenance()
 NANOPB_GENERATED_SOURCES = {
-    "_deps/nanopb-src/pb_common.c":
-        "8d2ec28baaaf2b7a5e90e4cb2fa9700d21cef7f826f051a637c30b7a1e6a0516",
-    "_deps/nanopb-src/pb_decode.c":
-        "6c2fc2f357bffdb774c1d329b533e981498d58405c0b1ef066f5a87fd46b5a17",
-    "_deps/nanopb-src/pb_encode.c":
-        "d8dff2a1acc58683095a41b0dc3103ba46248e4a8d8c4e20f5810be04127b650",
+    "_deps/nanopb-src/" + name: digest
+    for name, digest in NANOPB_PROVENANCE["files"].items() if name.endswith(".c")
 }
 # ESP-IDF v6.1 default full bundle: gen_crt_bundle.py over its cacrt_all.pem + cacrt_local.pem.
 X509_BUNDLE_SHA256 = "b3e27ad072b398df1404c73493e6441ef4929e523f944cc37423e0e4b86c6fb0"
@@ -93,14 +100,8 @@ EXPECTED_RANLIB = {
 }
 ALLOWED_GENERATED_MAIN_HEADERS = {
     "config/sdkconfig.h": None,
-    "_deps/nanopb-src/pb.h":
-        "a2ecdca9fdaeef5f4972ed983540c0d6fb0a5c402a2e0b0349d7e1bc5e188d29",
-    "_deps/nanopb-src/pb_common.h":
-        "6495a691aca68d6973f2274b5dd54b74fbb57f6b019c45fff255a857fe1abcfd",
-    "_deps/nanopb-src/pb_decode.h":
-        "1747746e5961de5789bcf0795588da0790cd18b2e4e706ad9c7099a0fa1cc83f",
-    "_deps/nanopb-src/pb_encode.h":
-        "9aa00fee4ff08adf0da16e33a55be08810ea657800a648dc78f82e89c60c10cf",
+    **{"_deps/nanopb-src/" + name: digest
+       for name, digest in NANOPB_PROVENANCE["files"].items() if name.endswith(".h")},
 }
 DependencyLoader = Callable[[Path, tuple[str, ...]], dict[str, tuple[Path, ...]]]
 CommandLoader = Callable[[Path, tuple[str, ...]], dict[str, tuple[str, ...]]]

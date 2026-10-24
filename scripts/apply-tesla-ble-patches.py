@@ -80,7 +80,7 @@ def validate_manifest(manifest):
         require(names == sorted(set(names)), "duplicate or unordered patch-state inventory")
 
 
-def apply_series(component, patch_dir, manifest):
+def apply_series(component, patch_dir, manifest, *, quiet=False):
     validate_manifest(manifest)
     component, patch_dir = real_directory(component), real_directory(patch_dir)
     require(sorted(p.name for p in patch_dir.iterdir()) == [r["name"] for r in manifest["patches"]],
@@ -107,13 +107,15 @@ def apply_series(component, patch_dir, manifest):
         require(regular_leaf(component, MARKER).read_bytes() == expected_marker,
                 "patch-state marker differs from the complete current series")
         require(is_after, "recorded patch postimage drifted; rematerialise the component")
-        print("tesla-ble patch series: exact recorded postimages verified")
+        if not quiet:
+            print("tesla-ble patch series: exact recorded postimages verified")
         return
     require(is_before or is_after, "unknown or mixed source state; rematerialise the component")
     if is_before and not is_after:
         for row in manifest["patches"]:
-            subprocess.run(["patch", "-f", "-N", "-F0", "-p1", "-d", str(component),
-                            "-i", str(patch_dir / row["name"])], check=True)
+            subprocess.run(["patch", "-f", "-N", "-F0", "-V", "none", "-p1", "-d", str(component),
+                            "-i", str(patch_dir / row["name"])], check=True,
+                           stdout=subprocess.DEVNULL if quiet else None)
         require(all(digest(regular_leaf(component, r["path"])) == r["afterSha256"]
                     for r in manifest["files"]), "patched source differs from reviewed postimages")
     # mkstemp owns its unpredictable, exclusive regular file. replace never follows a marker link.
@@ -125,7 +127,8 @@ def apply_series(component, patch_dir, manifest):
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
-    print("tesla-ble patch series: exact postimages verified and recorded")
+    if not quiet:
+        print("tesla-ble patch series: exact postimages verified and recorded")
 
 
 def load_canonical(root):

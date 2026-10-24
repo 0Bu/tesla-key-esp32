@@ -4,6 +4,8 @@ cmake_minimum_required(VERSION 3.16)
 # graph; everything main actually needs is pulled in through REQUIRES or idf_component.yml.
 set(COMPONENTS main)
 
+include("${CMAKE_CURRENT_LIST_DIR}/cmake/admit-dependency-sources.cmake")
+
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
 # Component Manager lockfiles encode the selected chip target. A single shared lockfile would be
@@ -18,6 +20,8 @@ idf_build_set_property(DEPENDENCIES_LOCK "dependencies.lock.${IDF_TARGET}")
 idf_build_set_property(COMPILE_OPTIONS "-Wno-error=format" APPEND)
 
 project(tesla-key-esp32)
+
+tesla_bind_dependency_admission()
 
 # Exclude library debug/verbose argument evaluation and formatting from firmware builds.
 idf_component_get_property(TESLA_BLE_COMPONENT_LIB yoziru__tesla-ble COMPONENT_LIB)

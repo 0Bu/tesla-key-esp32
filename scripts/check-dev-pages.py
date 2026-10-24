@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import re
 import sys
@@ -43,6 +44,30 @@ def expected_build_parts(target: str, suffix: str, boot_offset: int) -> tuple[tu
 
 class AcceptanceError(RuntimeError):
     pass
+
+
+def changelog_policy() -> Any:
+    path = Path(__file__).resolve().parent / "generate-ota-changelog.py"
+    spec = importlib.util.spec_from_file_location("dev_ota_changelog_policy", path)
+    if spec is None or spec.loader is None:
+        raise AcceptanceError("cannot load the trusted changelog validator")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def read_expected_changelog(path: Path, version: str) -> bytes:
+    try:
+        return changelog_policy().read_validated_document(path, version)
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise AcceptanceError(f"invalid expected changelog: {exc}") from exc
+
+
+def require_expected_identity(version: str, source_sha: str) -> None:
+    if not isinstance(version, str) or len(version) > 31 or not VERSION_RE.fullmatch(version):
+        raise AcceptanceError(f"invalid version format or descriptor length: {version!r}")
+    if not isinstance(source_sha, str) or not SOURCE_RE.fullmatch(source_sha):
+        raise AcceptanceError(f"invalid source SHA format: {source_sha!r}")
 
 
 def exact_url(base: str, name: str, cache_key: str | None = None) -> str:
@@ -101,6 +126,7 @@ def parse_dev_manifest_parts(raw: bytes, version: str, source_sha: str) -> list[
     Enforces exactly the four targets in TARGETS order, each with the four canonical parts in
     expected_build_parts order, matching paths, offsets, size bounds, and SHA-256.
     """
+    require_expected_identity(version, source_sha)
     try:
         manifest = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -121,7 +147,7 @@ def parse_dev_manifest_parts(raw: bytes, version: str, source_sha: str) -> list[
         raise AcceptanceError("deployed dev manifest does not contain exactly four builds")
     parts: list[tuple[str, int, str]] = []
     for build, (chip, target, suffix, boot_offset) in zip(builds, TARGETS, strict=True):
-        if not isinstance(build, dict):
+        if not isinstance(build, dict) or set(build) != {"chipFamily", "parts"}:
             raise AcceptanceError("invalid build entry in dev manifest")
         if build.get("chipFamily") != chip:
             raise AcceptanceError(f"build order/chipFamily mismatch: expected {chip}, got {build.get('chipFamily')!r}")
@@ -130,7 +156,7 @@ def parse_dev_manifest_parts(raw: bytes, version: str, source_sha: str) -> list[
             raise AcceptanceError(f"each dev manifest build must carry exactly four parts for {chip}")
         expected_parts = expected_build_parts(target, suffix, boot_offset)
         for part, (expected_name, expected_offset, min_size, max_size) in zip(build_parts, expected_parts, strict=True):
-            if not isinstance(part, dict):
+            if not isinstance(part, dict) or set(part) != {"path", "offset", "size", "sha256"}:
                 raise AcceptanceError(f"invalid part entry in dev manifest for {chip}")
             path = part.get("path")
             offset = part.get("offset")
@@ -181,6 +207,8 @@ def verify_dev_channel_live(
     fetcher: Fetcher,
     expected_manifest_sha: str | None = None,
     sleeper: Callable[[float], None] = time.sleep,
+    *,
+    expected_changelog: bytes,
 ) -> int:
     """Fetch the served dev manifest and EVERY part; each must match its declared size and SHA-256.
 
@@ -188,13 +216,19 @@ def verify_dev_channel_live(
     (a lagging or partially propagated deploy) is not a baseline; the caller must keep the
     reconciliation open instead of skipping it.
     """
-    if not VERSION_RE.match(version):
-        raise AcceptanceError(f"invalid version format: {version!r}")
-    if not SOURCE_RE.match(source_sha):
-        raise AcceptanceError(f"invalid source SHA format: {source_sha!r}")
-    if expected_manifest_sha is not None and not SHA256_RE.match(expected_manifest_sha):
+    require_expected_identity(version, source_sha)
+    if expected_manifest_sha is not None and (
+        not isinstance(expected_manifest_sha, str) or not SHA256_RE.fullmatch(expected_manifest_sha)
+    ):
         raise AcceptanceError(f"invalid expected manifest SHA format: {expected_manifest_sha!r}")
     require_polling_bounds(attempts, interval)
+    metadata_policy = changelog_policy()
+    try:
+        if not isinstance(expected_changelog, bytes):
+            raise AcceptanceError("expected changelog must be immutable bytes")
+        metadata_policy.validate_document_bytes(expected_changelog, version)
+    except (ValueError, RuntimeError) as exc:
+        raise AcceptanceError(f"invalid expected changelog: {exc}") from exc
     dev_base = pages_base_url.rstrip("/") + "/dev"
     last_error: AcceptanceError | None = None
     for attempt in range(1, attempts + 1):
@@ -208,7 +242,13 @@ def verify_dev_channel_live(
                         f"dev manifest SHA-256 mismatch: expected {expected_manifest_sha}, got {actual_manifest_sha}"
                     )
             parts = parse_dev_manifest_parts(raw_manifest, version, source_sha)
-            return verify_remote_parts(dev_base, parts, cache_key, fetcher)
+            count = verify_remote_parts(dev_base, parts, cache_key, fetcher)
+            served_changelog = fetcher(
+                exact_url(dev_base, "changelog.json", cache_key), metadata_policy.MAX_DOCUMENT_BYTES
+            )
+            if served_changelog != expected_changelog:
+                raise AcceptanceError("deployed dev changelog bytes do not match the expected snapshot")
+            return count
         except AcceptanceError as exc:
             last_error = exc
             if attempt < attempts:
@@ -226,10 +266,7 @@ def verify_dev_pages(
     fetcher: Fetcher,
     sleeper: Callable[[float], None] = time.sleep,
 ) -> int:
-    if not VERSION_RE.match(version):
-        raise AcceptanceError(f"invalid version format: {version!r}")
-    if not SOURCE_RE.match(source_sha):
-        raise AcceptanceError(f"invalid source SHA format: {source_sha!r}")
+    require_expected_identity(version, source_sha)
     require_polling_bounds(attempts, interval)
     if staged_site.is_symlink() or not staged_site.is_dir():
         raise AcceptanceError(f"staged site must be a valid directory: {staged_site}")
@@ -240,6 +277,8 @@ def verify_dev_pages(
     staged_manifest_bytes = staged_manifest_path.read_bytes()
     # Immutable local inputs must fail before any remote polling, rather than consuming retries.
     parts = parse_dev_manifest_parts(staged_manifest_bytes, version, source_sha)
+    expected_changelog = read_expected_changelog(staged_site / "changelog.json", version)
+    metadata_policy = changelog_policy()
     for part_name, size, digest in parts:
         local_path = staged_site / part_name
         if local_path.is_symlink() or not local_path.is_file():
@@ -256,7 +295,13 @@ def verify_dev_pages(
             raw_manifest = fetcher(exact_url(dev_base, "manifest.json", cache_key), MANIFEST_MAX)
             if hashlib.sha256(raw_manifest).digest() != hashlib.sha256(staged_manifest_bytes).digest():
                 raise AcceptanceError("deployed dev manifest bytes do not match staged manifest.json")
-            return verify_remote_parts(dev_base, parts, cache_key, fetcher)
+            count = verify_remote_parts(dev_base, parts, cache_key, fetcher)
+            served_changelog = fetcher(
+                exact_url(dev_base, "changelog.json", cache_key), metadata_policy.MAX_DOCUMENT_BYTES
+            )
+            if served_changelog != expected_changelog:
+                raise AcceptanceError("deployed dev changelog bytes do not match staged changelog.json")
+            return count
         except AcceptanceError as exc:
             last_error = exc
             if attempt < attempts:
@@ -265,10 +310,98 @@ def verify_dev_pages(
     raise AcceptanceError(f"dev served-byte snapshot failed to settle after {attempts} attempts: {last_error}")
 
 
+def self_test_identity_schema() -> None:
+    import copy
+    import tempfile
+
+    source_sha = "a" * 40
+    files: dict[str, bytes] = {}
+    builds = []
+    for chip, target, suffix, boot_offset in TARGETS:
+        parts = []
+        for name, offset, minimum, _maximum in expected_build_parts(target, suffix, boot_offset):
+            content = b"x" * minimum
+            files[name] = content
+            parts.append({"path": name, "offset": offset, "size": len(content),
+                          "sha256": hashlib.sha256(content).hexdigest()})
+        builds.append({"chipFamily": chip, "parts": parts})
+    base = {"name": "tesla-key-esp32", "layoutVersion": 2, "sourceSha": source_sha,
+            "version": "1.2.3-" + "a" * 25, "new_install_prompt_erase": True, "builds": builds}
+    assert len(base["version"]) == 31
+    cases = [("valid-31-byte-version", base, False)]
+    long_version = copy.deepcopy(base)
+    long_version["version"] += "a"
+    cases.append(("32-byte-version", long_version, True))
+    for field in ("version", "sourceSha"):
+        bad = copy.deepcopy(base)
+        bad[field] = "1.2.3\n" if field == "version" else source_sha + "\n"
+        cases.append((field + "-trailing-newline", bad, True))
+    for build_index in range(4):
+        bad = copy.deepcopy(base)
+        bad["builds"][build_index]["unexpected"] = True
+        cases.append((f"extra-build-key-{build_index}", bad, True))
+        for part_index in range(4):
+            bad = copy.deepcopy(base)
+            bad["builds"][build_index]["parts"][part_index]["unexpected"] = True
+            cases.append((f"extra-part-key-{build_index}-{part_index}", bad, True))
+    for label, document, should_refuse in cases:
+        raw = json.dumps(document).encode()
+        expected_changelog = json.dumps({"version": document["version"], "changelog": "One bounded change."}).encode()
+        for mode in ("parser", "staged", "live"):
+            calls: list[str] = []
+            def fetch(url: str, _maximum: int) -> bytes:
+                name = Path(urllib.parse.urlsplit(url).path).name
+                calls.append(name)
+                return raw if name == "manifest.json" else (expected_changelog if name == "changelog.json" else files[name])
+            refused = False
+            try:
+                if mode == "parser":
+                    assert len(parse_dev_manifest_parts(raw, document["version"], document["sourceSha"])) == 16
+                elif mode == "live":
+                    assert verify_dev_channel_live("https://example.com/firmware", document["version"],
+                                                   document["sourceSha"], 1, 0, fetch, expected_changelog=expected_changelog) == 16
+                else:
+                    with tempfile.TemporaryDirectory(prefix="dev-schema-") as temporary:
+                        staged = Path(temporary)
+                        (staged / "changelog.json").write_bytes(expected_changelog)
+                        (staged / "manifest.json").write_bytes(raw)
+                        for name, content in files.items():
+                            (staged / name).write_bytes(content)
+                        assert verify_dev_pages("https://example.com/firmware", staged, document["version"],
+                                                document["sourceSha"], 1, 0, fetch) == 16
+            except AcceptanceError:
+                refused = True
+            assert refused == should_refuse, (label, mode, "wrong admission result")
+            if should_refuse:
+                assert not calls or (mode == "live" and calls == ["manifest.json"]), (label, mode, calls)
+    raw = json.dumps(base).encode()
+    expected_changelog = json.dumps({"version": base["version"], "changelog": "One bounded change."}).encode()
+    calls = []
+    def expected_digest_fetch(url: str, _maximum: int) -> bytes:
+        name = Path(urllib.parse.urlsplit(url).path).name
+        calls.append(name)
+        return raw if name == "manifest.json" else (expected_changelog if name == "changelog.json" else files[name])
+    digest = hashlib.sha256(raw).hexdigest()
+    assert verify_dev_channel_live("https://example.com/firmware", base["version"], source_sha,
+                                   1, 0, expected_digest_fetch, expected_changelog=expected_changelog, expected_manifest_sha=digest) == 16
+    for invalid in (digest + "\n", "a" * 63, "g" * 64, True):
+        calls.clear()
+        try:
+            verify_dev_channel_live("https://example.com/firmware", base["version"], source_sha,
+                                    1, 0, expected_digest_fetch, expected_changelog=expected_changelog, expected_manifest_sha=invalid)
+        except AcceptanceError:
+            pass
+        else:
+            raise AssertionError("invalid expected digest was admitted")
+        assert not calls, "invalid expected digest reached remote polling"
+
+
 def self_test() -> None:
     import tempfile
 
+    self_test_identity_schema()
     version = "1.5.0-dev.1"
+    expected_changelog = json.dumps({"version": version, "changelog": "One bounded change."}).encode()
     source_sha = "a" * 40
     pages_base = "https://0bu.github.io/tesla-key-esp32"
     dev_base = pages_base + "/dev"
@@ -309,6 +442,7 @@ def self_test() -> None:
 
     with tempfile.TemporaryDirectory(prefix="dev-pages-test-") as tmpdir:
         staged = Path(tmpdir)
+        (staged / "changelog.json").write_bytes(expected_changelog)
         (staged / "manifest.json").write_text(json.dumps(manifest_data), encoding="utf-8")
         for name, content in files.items():
             (staged / name).write_bytes(content)
@@ -316,6 +450,7 @@ def self_test() -> None:
         remote_files: dict[str, bytes] = {
             urllib.parse.urlsplit(exact_url(dev_base, "manifest.json", source_sha)).path: json.dumps(manifest_data).encode("utf-8")
         }
+        remote_files[urllib.parse.urlsplit(exact_url(dev_base, "changelog.json", source_sha)).path] = expected_changelog
         for name, content in files.items():
             remote_files[urllib.parse.urlsplit(exact_url(dev_base, name, source_sha)).path] = content
 
@@ -411,6 +546,8 @@ def self_test() -> None:
             name = urllib.parse.urlsplit(url).path.rsplit("/", 1)[-1]
             if name == "manifest.json":
                 return json.dumps(manifest).encode("utf-8")
+            if name == "changelog.json" and name not in served:
+                return expected_changelog
             if name in served:
                 return served[name]
             raise AcceptanceError(f"404 not found: {url}")
@@ -419,13 +556,13 @@ def self_test() -> None:
     valid_manifest_sha = hashlib.sha256(json.dumps(live_manifest()).encode("utf-8")).hexdigest()
     assert verify_dev_channel_live(
         pages_base, version, source_sha, 1, 0, live_fetcher(live_manifest(), live_files),
-        expected_manifest_sha=valid_manifest_sha,
+        expected_changelog=expected_changelog, expected_manifest_sha=valid_manifest_sha,
     ) == 16
 
     try:
         verify_dev_channel_live(
             pages_base, version, source_sha, 1, 0, live_fetcher(live_manifest(), live_files),
-            expected_manifest_sha="0" * 64,
+            expected_changelog=expected_changelog, expected_manifest_sha="0" * 64,
         )
     except AcceptanceError:
         pass
@@ -434,7 +571,7 @@ def self_test() -> None:
 
     def must_fail(manifest: dict[str, Any], served: dict[str, bytes], label: str) -> None:
         try:
-            verify_dev_channel_live(pages_base, version, source_sha, 1, 0, live_fetcher(manifest, served))
+            verify_dev_channel_live(pages_base, version, source_sha, 1, 0, live_fetcher(manifest, served), expected_changelog=expected_changelog)
         except AcceptanceError:
             return
         raise AssertionError(f"--verify-live accepted: {label}")
@@ -511,6 +648,7 @@ def self_test() -> None:
     # Exercise real acceptance functions, including a same-size stale object and a transient 404.
     with tempfile.TemporaryDirectory(prefix="dev-pages-propagation-") as directory:
         staged = Path(directory)
+        (staged / "changelog.json").write_bytes(expected_changelog)
         raw_manifest = json.dumps(live_manifest()).encode()
         (staged / "manifest.json").write_bytes(raw_manifest)
         for name, data in files.items():
@@ -520,7 +658,7 @@ def self_test() -> None:
                 if mode == "live":
                     return verify_dev_channel_live(
                         pages_base, version, source_sha, attempts, 0.25, fetch,
-                        expected_manifest_sha=hashlib.sha256(raw_manifest).hexdigest(), sleeper=sleeps.append,
+                        expected_changelog=expected_changelog, expected_manifest_sha=hashlib.sha256(raw_manifest).hexdigest(), sleeper=sleeps.append,
                     )
                 return verify_dev_pages(
                     pages_base, staged, version, source_sha, attempts, 0.25, fetch, sleeper=sleeps.append,
@@ -539,7 +677,7 @@ def self_test() -> None:
                         calls.append((attempt, name))
                         if name == "manifest.json":
                             return raw_manifest
-                        data = files[name]
+                        data = expected_changelog if name == "changelog.json" else files[name]
                         if attempt == 1 and name == lagging:
                             if failure == "404":
                                 raise AcceptanceError("not propagated")
@@ -548,7 +686,7 @@ def self_test() -> None:
 
                     assert accept(propagating, sleeps) == 16
                     assert sleeps == [0.25]
-                    assert [name for attempt, name in calls if attempt == 2] == ["manifest.json", *part_names]
+                    assert [name for attempt, name in calls if attempt == 2] == ["manifest.json", *part_names, "changelog.json"]
 
             # No attempt is complete: successes from different attempts must never be accumulated.
             calls = []
@@ -563,7 +701,7 @@ def self_test() -> None:
                     return raw_manifest
                 if name == part_names[attempt % 2]:
                     raise AcceptanceError("each attempt has a missing part")
-                return files[name]
+                return expected_changelog if name == "changelog.json" else files[name]
 
             try:
                 accept(alternating, sleeps, 3)
@@ -586,11 +724,11 @@ def self_test() -> None:
                 name = urllib.parse.urlsplit(url).path.rsplit("/", 1)[-1]
                 if name == "manifest.json":
                     return json.dumps(stale_identity).encode() if clock[0] < 60 else raw_manifest
-                return files[name]
+                return expected_changelog if name == "changelog.json" else files[name]
             if mode == "live":
                 count = verify_dev_channel_live(
                     pages_base, version, source_sha, 6, 10, delayed,
-                    expected_manifest_sha=hashlib.sha256(raw_manifest).hexdigest(), sleeper=advance,
+                    expected_changelog=expected_changelog, expected_manifest_sha=hashlib.sha256(raw_manifest).hexdigest(), sleeper=advance,
                 )
             else:
                 count = verify_dev_pages(pages_base, staged, version, source_sha, 6, 10, delayed, sleeper=advance)
@@ -611,6 +749,129 @@ def self_test() -> None:
             raise AssertionError("invalid immutable staged bytes were accepted")
         assert not external_calls and not sleeps
 
+    with tempfile.TemporaryDirectory(prefix="dev-changelog-snapshot-") as directory:
+        staged = Path(directory)
+        raw_manifest = json.dumps(live_manifest()).encode()
+        (staged / "manifest.json").write_bytes(raw_manifest)
+        metadata_file = staged / "changelog.json"
+        metadata_file.write_bytes(expected_changelog)
+        for name, data in files.items():
+            (staged / name).write_bytes(data)
+
+        def accept_metadata(mode: str, fetch: Fetcher, *, attempts: int = 2,
+                            expected: bytes = expected_changelog, override: Any = None) -> int:
+            function = override or (verify_dev_channel_live if mode == "live" else verify_dev_pages)
+            if mode == "live":
+                return function(
+                    pages_base, version, source_sha, attempts, 0, fetch,
+                    expected_manifest_sha=hashlib.sha256(raw_manifest).hexdigest(),
+                    expected_changelog=expected, sleeper=lambda _: None,
+                )
+            return function(pages_base, staged, version, source_sha, attempts, 0, fetch,
+                            sleeper=lambda _: None)
+
+        good = live_fetcher(live_manifest(), live_files)
+        for invalid in (
+            b"", b"{", b"[]", b"x" * 1026, "not bytes",
+            json.dumps({"version": "1.5.0-dev.2", "changelog": "Wrong version."}).encode(),
+        ):
+            external: list[str] = []
+            try:
+                accept_metadata("live", lambda url, _max: external.append(url) or b"", expected=invalid)
+            except AcceptanceError:
+                pass
+            else:
+                raise AssertionError("invalid immutable live changelog was admitted")
+            assert not external
+            if isinstance(invalid, bytes):
+                metadata_file.write_bytes(invalid)
+                try:
+                    accept_metadata("staged", lambda url, _max: external.append(url) or b"")
+                except AcceptanceError:
+                    pass
+                else:
+                    raise AssertionError("invalid immutable staged changelog was admitted")
+                assert not external
+        metadata_file.write_bytes(expected_changelog)
+        held = staged / "held-changelog.json"
+        metadata_file.rename(held)
+        for kind in ("missing", "symlink", "directory"):
+            if kind == "symlink":
+                metadata_file.symlink_to(held)
+            elif kind == "directory":
+                metadata_file.mkdir()
+            external = []
+            try:
+                accept_metadata("staged", lambda url, _max: external.append(url) or b"")
+            except AcceptanceError:
+                pass
+            else:
+                raise AssertionError("foreign immutable staged changelog was admitted: " + kind)
+            assert not external
+            if kind == "directory":
+                metadata_file.rmdir()
+            elif kind == "symlink":
+                metadata_file.unlink()
+        held.rename(metadata_file)
+
+        different_notes = json.dumps({"version": version, "changelog": "Different valid notes."}).encode()
+        for mode in ("live", "staged"):
+            assert accept_metadata(mode, good) == 16
+            drift = live_fetcher(live_manifest(), {**live_files, "changelog.json": different_notes})
+            try:
+                accept_metadata(mode, drift)
+            except AcceptanceError:
+                pass
+            else:
+                raise AssertionError(mode + " admitted same-version different note bytes")
+            import inspect
+            original = verify_dev_channel_live if mode == "live" else verify_dev_pages
+            body = inspect.getsource(original)
+            needle = "            if served_changelog != expected_changelog:"
+            assert body.count(needle) == 1
+            scope = dict(globals())
+            exec(compile(body.replace(needle, "            if False:"),
+                         "<omitted-dev-served-changelog-comparison>", "exec"), scope)
+            assert accept_metadata(mode, drift, override=scope[original.__name__]) == 16
+            assert accept_metadata(mode, good) == 16
+
+            for failure in ("length", "content", "404"):
+                events: list[tuple[int, str]] = []
+                def propagating_metadata(url: str, maximum: int) -> bytes:
+                    parsed = urllib.parse.urlsplit(url)
+                    attempt = int(urllib.parse.parse_qs(parsed.query)["accept"][0].removeprefix(source_sha + "-"))
+                    name = parsed.path.rsplit("/", 1)[-1]
+                    events.append((attempt, name))
+                    if attempt == 1 and name == "changelog.json":
+                        if failure == "404":
+                            raise AcceptanceError("metadata is not propagated")
+                        return expected_changelog[:-1] if failure == "length" else different_notes
+                    return good(url, maximum)
+                assert accept_metadata(mode, propagating_metadata) == 16
+                assert [name for attempt, name in events if attempt == 2] == [
+                    "manifest.json", *part_names, "changelog.json"
+                ]
+
+            events = []
+            def alternating_metadata(url: str, maximum: int) -> bytes:
+                parsed = urllib.parse.urlsplit(url)
+                attempt = int(urllib.parse.parse_qs(parsed.query)["accept"][0].removeprefix(source_sha + "-"))
+                name = parsed.path.rsplit("/", 1)[-1]
+                events.append((attempt, name))
+                if (attempt % 2 == 1 and name == part_names[0]) or (
+                    attempt % 2 == 0 and name == "changelog.json"
+                ):
+                    raise AcceptanceError("no attempt has complete firmware and metadata")
+                return good(url, maximum)
+            try:
+                accept_metadata(mode, alternating_metadata, attempts=4)
+            except AcceptanceError:
+                pass
+            else:
+                raise AssertionError(mode + " accumulated firmware and metadata across attempts")
+            assert [attempt for attempt, name in events if name == "manifest.json"] == [1, 2, 3, 4]
+            assert accept_metadata(mode, good) == 16
+
     print("check-dev-pages self-test: PASS")
 
 
@@ -624,6 +885,8 @@ def main() -> int:
     parser.add_argument("--source-sha")
     parser.add_argument("--expected-manifest-sha",
                         help="expected SHA-256 of the served dev manifest.json")
+    parser.add_argument("--expected-changelog-file", type=Path,
+                        help="trusted expected changelog snapshot; required with --verify-live")
     parser.add_argument("--attempts", type=int, default=6)
     parser.add_argument("--interval", type=float, default=10.0)
     parser.add_argument("--timeout", type=float, default=20.0)
@@ -634,14 +897,14 @@ def main() -> int:
         self_test()
         return 0
 
-    if args.expected_manifest_sha is not None and not SHA256_RE.match(args.expected_manifest_sha):
+    if args.expected_manifest_sha is not None and not SHA256_RE.fullmatch(args.expected_manifest_sha):
         parser.error(f"--expected-manifest-sha must be 64 lowercase hex characters: {args.expected_manifest_sha!r}")
 
     if args.verify_live:
-        if None in (args.pages_base_url, args.version, args.source_sha) or args.staged_site is not None:
-            parser.error("--verify-live needs --pages-base-url, --version and --source-sha, "
+        if None in (args.pages_base_url, args.version, args.source_sha, args.expected_changelog_file) or args.staged_site is not None:
+            parser.error("--verify-live needs --pages-base-url, --version, --source-sha and --expected-changelog-file, "
                          "and no --staged-site")
-    elif None in (args.pages_base_url, args.staged_site, args.version, args.source_sha):
+    elif None in (args.pages_base_url, args.staged_site, args.version, args.source_sha) or args.expected_changelog_file is not None:
         parser.error("--pages-base-url, --staged-site, --version and --source-sha are required")
 
     def network_fetch(url: str, maximum: int) -> bytes:
@@ -657,11 +920,12 @@ def main() -> int:
 
     try:
         if args.verify_live:
+            expected_changelog = read_expected_changelog(args.expected_changelog_file, args.version)
             count = verify_dev_channel_live(
                 args.pages_base_url,
                 args.version,
                 args.source_sha,
-                attempts=args.attempts,
+                expected_changelog=expected_changelog, attempts=args.attempts,
                 interval=args.interval,
                 fetcher=network_fetch,
                 expected_manifest_sha=args.expected_manifest_sha,
@@ -679,7 +943,7 @@ def main() -> int:
     except (OSError, UnicodeError, AcceptanceError) as exc:
         print(f"dev Pages acceptance failed: {exc}", file=sys.stderr)
         return 1
-    print(f"dev Pages acceptance: PASS ({count} byte-bound parts)")
+    print(f"dev Pages acceptance: PASS ({count}/16 byte-bound parts plus changelog metadata)")
     return 0
 
 

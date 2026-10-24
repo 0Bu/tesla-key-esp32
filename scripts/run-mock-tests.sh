@@ -81,6 +81,7 @@ if [ "$REQUIRE_ALL" = 1 ]; then
         test/run-cjson-oom-tests.sh \
         test/test_codex_setup.py \
         scripts/test-build-contracts.sh \
+        test/test_deploy_candidate.py \
         scripts/check-dependency-contract.py \
         scripts/check-bootloader-compat.py \
         scripts/bootloader-references.json \
@@ -90,6 +91,13 @@ if [ "$REQUIRE_ALL" = 1 ]; then
         scripts/apply-tesla-ble-patches.py \
         scripts/tesla-ble-patch-state.json \
         test/test_patch_incremental.py \
+        test/test_dependency_sources.py \
+        test/test_dependency_cmake.py \
+        test/test_dependency_harness.py \
+        test/test_dependency_process.py \
+        scripts/dependency_source.py \
+        scripts/nanopb-source.json \
+        cmake/admit-dependency-sources.cmake \
         test/test_dependency_guards.py \
         scripts/reconcile-pr-previews.sh \
         scripts/check-pr-preview-served.py \
@@ -209,6 +217,10 @@ if command -v python3 >/dev/null 2>&1; then
         python3 scripts/check-otadata-contract.py --self-test
     run_gate "tesla-ble patch applicability" 120 scripts/apply-tesla-ble-patches.sh --self-test
     run_gate "tesla-ble incremental source admission" 120 python3 test/test_patch_incremental.py
+run_gate "exact dependency source admission" 120 python3 test/test_dependency_sources.py
+run_gate "dependency source build ordering" 120 python3 test/test_dependency_cmake.py
+run_gate "dependency harness source ordering" 120 python3 test/test_dependency_harness.py
+run_gate "dependency query process lifetime" 120 python3 test/test_dependency_process.py
     run_gate "preview reconciliation contract" 120 scripts/reconcile-pr-previews.sh --self-test
     run_gate "served PR preview and removal acceptance" 120 python3 test/test_pr_preview_served.py
     run_gate "vendored esptool-js contract" 120 scripts/verify-vendored-esptool-js.sh

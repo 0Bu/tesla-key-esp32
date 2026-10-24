@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from functools import lru_cache
 from pathlib import Path
 import shutil
 import sys
@@ -14,6 +15,8 @@ import subprocess
 import re
 import shlex
 
+DEPLOY_FLOW_VALIDATED: set[str] = set()
+
 
 class ContractError(RuntimeError):
     pass
@@ -22,6 +25,53 @@ class ContractError(RuntimeError):
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise ContractError(message)
+
+
+def probe_deploy_consumer_invocations(source: str) -> None:
+    """Exercise the shipped shell prefix with inert tools and a failing consumer."""
+    boundary = 'python3 "$repo_root/scripts/prepare-reused-release.py" --self-test'
+    require(source.count(boundary) == 1, "signed deploy consumer flow boundary is missing")
+    prefix = source.split(boundary, 1)[0]
+    with tempfile.TemporaryDirectory(prefix="deploy-consumer-flow-") as temporary:
+        work = Path(temporary).resolve()
+        scripts, tools = work / "scripts", work / "tools"
+        scripts.mkdir(); tools.mkdir()
+        # Only this prefix is executed. Direct prerequisite shell commands are inert stubs;
+        # Python prerequisites and the embedded entry-point fixture are intercepted below.
+        for name in re.findall(r'^"\$repo_root/(scripts/[A-Za-z0-9_.-]+)"', prefix, re.MULTILINE):
+            file = work / name
+            file.write_text("#!/bin/sh\nexit 0\n"); file.chmod(0o700)
+        trace = work / "trace.bin"
+        python = tools / "python3"
+        python.write_text('''#!/bin/sh
+printf '%s\\000' "$@" '' >> "$DEPLOY_FLOW_TRACE"
+case "${1-}" in
+  */test_deploy_candidate.py) if [ "$DEPLOY_FLOW_FAIL" = 1 ]; then exit 37; fi ;;
+esac
+''')
+        python.chmod(0o700)
+        script = scripts / "test-build-contracts.sh"
+        script.write_text(prefix + 'python3 __deploy_flow_after__\n')
+        env = {k: v for k, v in os.environ.items() if k not in
+               ("ENV", "BASH_ENV", "OTA_SIGNING_KEY", "OTA_SIGNING_KEY_FILE", "GH_TOKEN", "GITHUB_TOKEN")
+               and not k.startswith(("BASH_FUNC_", "PYTHON", "LD_", "DYLD_"))}
+        env.update(PATH=str(tools) + os.pathsep + env.get("PATH", os.defpath),
+                   DEPLOY_FLOW_TRACE=str(trace))
+        for fail in (False, True):
+            if trace.exists(): trace.unlink()
+            try:
+                result = subprocess.run(["bash", str(script)], cwd=work,
+                                        env={**env, "DEPLOY_FLOW_FAIL": str(int(fail))},
+                                        capture_output=True, timeout=10)
+            except subprocess.TimeoutExpired as error:
+                raise ContractError("actual signed deploy consumer flow timed out") from error
+            calls = [[os.fsdecode(arg) for arg in block.split(b'\0')]
+                     for block in trace.read_bytes().split(b'\0\0') if block] if trace.exists() else []
+            target = [str(work / "test/test_deploy_candidate.py")]
+            relevant = [args for args in calls if args == target or args == ["__deploy_flow_after__"]]
+            require(result.returncode == (37 if fail else 0) and
+                    relevant == ([target] if fail else [target, ["__deploy_flow_after__"]]),
+                    "actual signed deploy consumer must run once in order and propagate failure")
 
 
 def probe_sanitizer_invocations(source: str) -> None:
@@ -80,6 +130,9 @@ elif name == "compiler" and "-o" in args:
         ], "sanitizer invocation flow did not execute both actual native-probe commands")
 
 
+# These isolated passive fixtures depend only on the complete shell text. Reuse a successful
+# result within this process; changed text reruns, and failures are never cached.
+@lru_cache(maxsize=8)
 def probe_browser_invocations(source: str) -> None:
     """Execute the actual strict shell flow with passive tools, without compiling or a browser."""
     inventory = re.search(r"for required in (.*?)\s*; do", source, re.DOTALL)
@@ -125,7 +178,11 @@ if sys.argv[1:2] != ['-c']:
             env.update(PATH=str(binaries) + os.pathsep + os.defpath,
                        TESLA_BROWSER_FLOW_TRACE=str(trace))
             prefix = ["tools/agent-hooks/run_with_timeout.py", "120"]
-            expected = [prefix + ["python3", "test/test_inline_assets.py"],
+            expected = [prefix + ["python3", "test/test_dependency_sources.py"],
+                        prefix + ["python3", "test/test_dependency_cmake.py"],
+                        prefix + ["python3", "test/test_dependency_harness.py"],
+                        prefix + ["python3", "test/test_dependency_process.py"],
+                        prefix + ["python3", "test/test_inline_assets.py"],
                         prefix + ["python3", "test/test_web_ui_browser_gate.py"],
                         prefix + ["python3", "test/test_browser_cdp.py"],
                         prefix + (["scripts/run-browser-tests-linux.sh"] if platform == "Darwin" else
@@ -164,6 +221,13 @@ def validate(root: Path) -> None:
             '    test_current_discovery_address();' in mqtt_test,
             "actual MQTT discovery address fixture is missing from the retained JSON gate")
     publication_gate = (root / "scripts/test-build-contracts.sh").read_text()
+    require('        test/test_deploy_candidate.py \\\n' in run_mock,
+            "actual signed deploy consumer tests are missing from the mandatory host gate")
+    # Other mutation cases retain this exact shell body. Cache only an already executed
+    # complete input, never a path/name; every changed shell must exercise the real flow.
+    if publication_gate not in DEPLOY_FLOW_VALIDATED:
+        probe_deploy_consumer_invocations(publication_gate)
+        DEPLOY_FLOW_VALIDATED.add(publication_gate)
     for validator in ("check-pages-manifest.py", "check-release-pages-bytes.py"):
         require(f'python3 "$repo_root/scripts/{validator}" --self-test' in publication_gate,
                 f"publication validator self-test is not executed: {validator}")
@@ -209,6 +273,13 @@ def validate(root: Path) -> None:
         "scripts/bootloader-references.json",
         "test/test_bootloader_preflight.py",
         "test/test_patch_incremental.py",
+        "test/test_dependency_sources.py",
+        "test/test_dependency_cmake.py",
+        "test/test_dependency_harness.py",
+        "test/test_dependency_process.py",
+        "scripts/dependency_source.py",
+        "scripts/nanopb-source.json",
+        "cmake/admit-dependency-sources.cmake",
         "test/test_dependency_guards.py",
         "scripts/check-host-gate-contract.py",
         "scripts/check-logic-test-ownership.py",
@@ -242,6 +313,14 @@ def validate(root: Path) -> None:
             "run-mock-tests.sh does not execute the dependency contract gate")
     require('run_gate "tesla-ble incremental source admission" 120 python3 test/test_patch_incremental.py' in run_mock,
             "run-mock-tests.sh does not execute incremental patch admission")
+    require('run_gate "exact dependency source admission" 120 python3 test/test_dependency_sources.py' in run_mock,
+            "run-mock-tests.sh does not execute exact dependency source admission")
+    require('run_gate "dependency source build ordering" 120 python3 test/test_dependency_cmake.py' in run_mock,
+            "run-mock-tests.sh does not execute dependency source build ordering")
+    require('run_gate "dependency harness source ordering" 120 python3 test/test_dependency_harness.py' in run_mock,
+            "run-mock-tests.sh does not execute dependency harness source ordering")
+    require('run_gate "dependency query process lifetime" 120 python3 test/test_dependency_process.py' in run_mock,
+            "run-mock-tests.sh does not execute dependency query process lifetime")
     require("python3 scripts/check-otadata-contract.py --self-test" in run_mock,
             "run-mock-tests.sh does not execute the otadata contract gate")
     require("python3 scripts/prepare-reused-release.py --self-test" in run_mock,
@@ -443,6 +522,18 @@ def self_test(root: Path) -> None:
          '# removed empty golden controls', "display native font/provenance/golden controls"),
         ("scripts/test-build-contracts.sh", 'python3 "$repo_root/scripts/check-pages-manifest.py" --self-test',
          '# removed Pages self-test', "publication validator self-test is not executed"),
+        ("scripts/test-build-contracts.sh", 'python3 "$repo_root/test/test_deploy_candidate.py"',
+         '# removed deploy consumer test', "actual signed deploy consumer must run once"),
+        ("scripts/test-build-contracts.sh", 'python3 "$repo_root/test/test_deploy_candidate.py"',
+         'if false; then python3 "$repo_root/test/test_deploy_candidate.py"; fi', "actual signed deploy consumer must run once"),
+        ("scripts/test-build-contracts.sh", 'python3 "$repo_root/test/test_deploy_candidate.py"',
+         'exit 0\npython3 "$repo_root/test/test_deploy_candidate.py"', "actual signed deploy consumer must run once"),
+        ("scripts/test-build-contracts.sh", 'python3 "$repo_root/test/test_deploy_candidate.py"',
+         'python3 "$repo_root/test/test_deploy_candidate.py" &', "actual signed deploy consumer must run once"),
+        ("scripts/test-build-contracts.sh", 'python3 "$repo_root/test/test_deploy_candidate.py"',
+         'python3 "$repo_root/test/test_deploy_candidate.py" || true', "actual signed deploy consumer must run once"),
+        ("scripts/run-mock-tests.sh", '        test/test_deploy_candidate.py \\\n',
+         '', "actual signed deploy consumer tests are missing"),
         ("scripts/test-build-contracts.sh", 'python3 "$repo_root/scripts/check-release-pages-bytes.py" --self-test',
          '# removed byte-binding self-test', "publication validator self-test is not executed"),
         ("scripts/check-ble-row-parity.sh", '"$OUT/ble_row_golden_dump" --web-presenters',
@@ -551,6 +642,38 @@ def self_test(root: Path) -> None:
          "python3 scripts/missing-dependency-contract.py --self-test", "dependency contract gate"),
         ("scripts/run-mock-tests.sh", 'run_gate "tesla-ble incremental source admission" 120 python3 test/test_patch_incremental.py',
          '# removed incremental patch admission', "does not execute incremental patch admission"),
+        ("scripts/run-mock-tests.sh", 'run_gate "exact dependency source admission" 120 python3 test/test_dependency_sources.py',
+         '# removed exact dependency source admission', "does not execute exact dependency source admission"),
+        ("scripts/run-mock-tests.sh", 'run_gate "dependency source build ordering" 120 python3 test/test_dependency_cmake.py',
+         '# removed dependency source build ordering', "does not execute dependency source build ordering"),
+        ("scripts/run-mock-tests.sh", 'run_gate "dependency harness source ordering" 120 python3 test/test_dependency_harness.py',
+         '# removed dependency harness source ordering', "does not execute dependency harness source ordering"),
+        ("scripts/run-mock-tests.sh", 'run_gate "dependency query process lifetime" 120 python3 test/test_dependency_process.py',
+         '# removed dependency query process lifetime', "does not execute dependency query process lifetime"),
+        ("scripts/run-mock-tests.sh", 'run_gate "dependency query process lifetime" 120 python3 test/test_dependency_process.py',
+         '# run_gate "dependency query process lifetime" 120 python3 test/test_dependency_process.py', "strict browser invocation flow"),
+        ("scripts/run-mock-tests.sh", 'run_gate "dependency query process lifetime" 120 python3 test/test_dependency_process.py',
+         'if false; then\nrun_gate "dependency query process lifetime" 120 python3 test/test_dependency_process.py\nfi', "strict browser invocation flow"),
+        ("scripts/run-mock-tests.sh", 'run_gate "dependency query process lifetime" 120 python3 test/test_dependency_process.py',
+         'exit 0\nrun_gate "dependency query process lifetime" 120 python3 test/test_dependency_process.py', "strict browser invocation flow"),
+        ("scripts/run-mock-tests.sh", 'run_gate "exact dependency source admission" 120 python3 test/test_dependency_sources.py',
+         '# run_gate "exact dependency source admission" 120 python3 test/test_dependency_sources.py', "strict browser invocation flow"),
+        ("scripts/run-mock-tests.sh", 'run_gate "exact dependency source admission" 120 python3 test/test_dependency_sources.py',
+         'if false; then\nrun_gate "exact dependency source admission" 120 python3 test/test_dependency_sources.py\nfi', "strict browser invocation flow"),
+        ("scripts/run-mock-tests.sh", 'run_gate "exact dependency source admission" 120 python3 test/test_dependency_sources.py',
+         'exit 0\nrun_gate "exact dependency source admission" 120 python3 test/test_dependency_sources.py', "strict browser invocation flow"),
+        ("scripts/run-mock-tests.sh", 'run_gate "dependency source build ordering" 120 python3 test/test_dependency_cmake.py',
+         '# run_gate "dependency source build ordering" 120 python3 test/test_dependency_cmake.py', "strict browser invocation flow"),
+        ("scripts/run-mock-tests.sh", 'run_gate "dependency source build ordering" 120 python3 test/test_dependency_cmake.py',
+         'if false; then\nrun_gate "dependency source build ordering" 120 python3 test/test_dependency_cmake.py\nfi', "strict browser invocation flow"),
+        ("scripts/run-mock-tests.sh", 'run_gate "dependency source build ordering" 120 python3 test/test_dependency_cmake.py',
+         'exit 0\nrun_gate "dependency source build ordering" 120 python3 test/test_dependency_cmake.py', "strict browser invocation flow"),
+        ("scripts/run-mock-tests.sh", 'run_gate "dependency harness source ordering" 120 python3 test/test_dependency_harness.py',
+         '# run_gate "dependency harness source ordering" 120 python3 test/test_dependency_harness.py', "strict browser invocation flow"),
+        ("scripts/run-mock-tests.sh", 'run_gate "dependency harness source ordering" 120 python3 test/test_dependency_harness.py',
+         'if false; then\nrun_gate "dependency harness source ordering" 120 python3 test/test_dependency_harness.py\nfi', "strict browser invocation flow"),
+        ("scripts/run-mock-tests.sh", 'run_gate "dependency harness source ordering" 120 python3 test/test_dependency_harness.py',
+         'exit 0\nrun_gate "dependency harness source ordering" 120 python3 test/test_dependency_harness.py', "strict browser invocation flow"),
         ("scripts/run-mock-tests.sh", "python3 scripts/check-otadata-contract.py --self-test",
          "python3 scripts/missing-otadata-contract.py --self-test", "otadata contract gate"),
         ("scripts/run-mock-tests.sh", "python3 scripts/prepare-reused-release.py --self-test",

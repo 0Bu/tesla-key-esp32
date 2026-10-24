@@ -38,6 +38,48 @@ For linked worktrees, only the external Git common directory is mounted read-onl
 checkout's source files are not exposed. Daemon reuse checks the actual mount inventory as well
 as its image, resource limits and mount-policy label. An older, broader daemon is recreated.
 
+## Exact dependency source admission
+
+[`scripts/nanopb-source.json`](../scripts/nanopb-source.json) owns the existing nanopb 0.4.9.1
+commit and seven runtime digests. Root CMake admits its complete owned Git tree before IDF
+component processing, declares that exact commit, and marks it globally populated without
+configuring nanopb. The unchanged component's later tag declaration cannot select another source.
+Unsupported FetchContent/provider overrides fail. Reconfiguration watches the admitted inputs;
+an always-run existing-only prerequisite also guards component and ELF targets when file size or
+mtime is preserved. A warm configure with missing admitted state fails instead of fetching again.
+
+The host harness selects only its owned `nanopb-pristine`, `tesla-pristine` and `tesla-patched`
+caches. Tesla's source commit comes from all four validated locks. Raw Git objects establish the
+complete pristine path/body/mode inventory; VERSION text, a parent repository and a managed archive
+are insufficient. Only exact committed links to direct regular tracked files are allowed; all seven
+nanopb runtime inputs remain regular files. The separate Tesla work copy admits the complete
+pristine tree plus exactly the reviewed patch transformation, including untouched files.
+
+An existing foreign, modified, aliased, partial or failed cache is never adopted, repaired or silently
+retried. Failure leaves its owned state for inspection; select a new empty build/cache directory or
+remove that dedicated generated state deliberately after inspecting it. Only legitimate optional
+cold-network absence may skip the harness; strict mode, unknown commits and every provenance
+mismatch fail. Existing caches are checked before a different cold fetch can skip. Git selectors,
+configuration, hooks, filters and automatic maintenance cannot supply alternate source material.
+The existing harness Mbed TLS selection is unchanged.
+
+Each Git query has bounded data pipes and a separate bounded leader-status channel. An owned
+guardian watches a liveness pipe whose writer belongs only to the admission process. If an outer
+timeout or SIGKILL kills admission, EOF makes the guardian terminate its own group, including Git
+and pipe-holding descendants after the Git leader exits. Normal cleanup kills that entire group
+atomically before closing the liveness writer, keeping ownership through parent cancellation.
+The guardian holds no data-output writer.
+Normal success and internal failure also confirm group cleanup; malformed or missing leader status
+refuses immediately. This does not authorize killing unrelated process groups.
+
+Source/patch identity and compiler-selector salts separate owned object namespaces even when
+source mtimes match. This does not authenticate compiler binaries or cached object contents.
+[`test_dependency_sources.py`](../test/test_dependency_sources.py) exercises local Git/cache
+admission; [`test_dependency_cmake.py`](../test/test_dependency_cmake.py) exercises real root CMake
+and passive consumer targets with Make and Ninja. These fixtures are distinct from the required
+pinned IDF builds and protocol vectors. This correction covers repository consumers; upstream's
+standalone tag-fetch CMake path remains unchanged.
+
 ## Embedded web assets
 
 `main/www/inline_assets.cmake` inserts the CSS and JavaScript into the HTML marker lines,
@@ -171,6 +213,16 @@ Tesla/Daikin firmware, flashes a signed PR preview or development-key image thro
 or an already-published image through `$usb-recovery`'s provenance and app-only steps, and tests
 the implementation on that same board. Device delivery after merge remains a separately requested
 `$ship` operation.
+
+Pages acceptance requires a bounded, validated expected `changelog.json` and exact served bytes
+within the same complete attempt as the manifest and 16 firmware parts. The root checker takes
+`--expected-changelog-file`; staged Dev checks derive it from the candidate directory, while live
+Dev checks require that argument. Relevance baselines read both files from one exact branch commit.
+Changes to shipped top-level `docs/*.md` select the normal four-target build and Dev publication;
+they do not reuse older firmware under the newer source SHA. Stable publication remains manual.
+Before either Pages branch write, the downloaded candidate passes four key-free RSA-PSS checks
+against the production public pin. The offline deploy-consumer test executes this YAML step with
+disposable signed fixtures and confirms that each target failure stops before publication.
 
 ### Served PR preview acceptance
 
