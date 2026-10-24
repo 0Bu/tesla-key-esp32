@@ -41,6 +41,9 @@ const PORT_RELEASE_WAIT_MS = 15000;
 // check of a paired port is retried.
 const PAIRED_OPEN_ATTEMPTS = 3;
 const PAIRED_OPEN_RETRY_MS = 500;
+// A board that re-enumerates on its reset pulse reports a new USB connect. Checking it again would
+// reset it again; a connect this soon after the installer's own port activity waits for a click.
+const RECONNECT_GRACE_MS = 5000;
 const ANSI_CONTROL_SEQUENCE = /\x1B\[[0-?]*[ -/]*[@-~]/g;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const MAX_MANIFEST_BYTES = 65536;
@@ -466,8 +469,8 @@ export function combinedProgress(fileArray, fileIndex, written, total) {
   return Math.min(100, Math.max(0, Math.floor(((completedBytes + currentBytes) / totalBytes) * 100)));
 }
 
-// The schema-v2 part order is also the write order: the OTA selector is written last and activates
-// the new app only after every preceding part has been written.
+// The schema-v2 part order is also the write order: the OTA selector is written last, so a stopped
+// update keeps the previous boot selection; the bootloader's image check guards everything else.
 function expectedPartLayout(chipFamily) {
   return [
     { role: "bootloader", offset: chipFamily === "ESP32" ? 0x1000 : 0, maxSize: chipFamily === "ESP32" ? 0x7000 : 0x8000 },
@@ -1060,7 +1063,8 @@ export async function probeDevice({
 }
 
 // Writes the verified parts one address range at a time and the OTA selector last, so a stopped
-// install never activates a partially written app. With `keepOpen`, the port stays open for the live
+// update keeps the previous boot selection; after an erase, or when that selection already names
+// ota_0, the bootloader's image check is the guard. With `keepOpen`, the port stays open for the live
 // log, which starts the firmware; otherwise the install resets the chip itself and closes the port.
 export async function flashDevice({
   port, offer, eraseFirst, TransportCtor, ESPLoaderCtor, fetchImpl = fetch, trace = false, keepOpen = false,
@@ -1157,6 +1161,7 @@ export function attachWebInstaller({
   followLog = true, // open the live log after connecting and after installing
   trace = false, // also log esptool-js's packet trace (diagnostics; the page enables it with ?trace)
   delay = sleep, // reset pulses and retry pauses
+  now = () => Date.now(), // the reconnect grace clock
   // Clean flash deletes the configuration and pairing; it needs its own confirmation.
   confirmEraseImpl = (message) => globalThis.confirm?.(message) === true
 }) {
@@ -1232,7 +1237,7 @@ export function attachWebInstaller({
       if (bootCheck !== check) return;
       bootCheck = null;
       if (isCurrent(session)) {
-        appendStatusLine(`${check.version} not seen within ${BOOT_VERIFICATION_TIMEOUT_MS / 1000} s; press Reset or check the board`, "warning");
+        appendStatusLine(`${check.version} not seen within ${BOOT_VERIFICATION_TIMEOUT_MS / 1000} s; press Reset or the board's RESET button, or reconnect the cable`, "warning");
       }
     }, BOOT_VERIFICATION_TIMEOUT_MS);
   };
@@ -1339,7 +1344,13 @@ export function attachWebInstaller({
       button.setAttribute("aria-busy", foreground?.kind === kind || (nativePending && lease.kind === kind) ? "true" : "false");
     }
   };
-  subscribeSerialOwnership(syncControls);
+  // Every lease change is the installer touching a port, including the cleanup after a USB
+  // disconnect that precedes a re-enumerated board's connect; it opens the reconnect grace window.
+  let lastPortActivity = -Infinity;
+  subscribeSerialOwnership(() => {
+    lastPortActivity = now();
+    syncControls();
+  });
   const captureOwnership = (session) => (operation) => {
     session.operation = operation;
     operation.settled.then(() => {
@@ -1566,7 +1577,7 @@ export function attachWebInstaller({
       if (!installed) {
         // The offer always carries its partition tables; without one the device was not inspected.
       } else if (installed.error) {
-        appendStatusLine(`Installed firmware unknown: ${installed.error}`, "warning");
+        appendStatusLine(`Installed firmware unknown: ${installed.error} Use Flash only if the board already runs tesla-key-esp32`, "warning");
       } else {
         appendStatusLine(describeInstalled(installed));
         if (!session.device.keepable) appendStatusLine("Clean flash required", "warning");
@@ -1741,7 +1752,13 @@ export function attachWebInstaller({
   flashButton.addEventListener("click", () => install());
   cleanFlashButton.addEventListener("click", () => install({ eraseFirst: true }));
   if (typeof serial?.addEventListener === "function") {
-    serial.addEventListener("connect", () => reconnectPaired());
+    serial.addEventListener("connect", () => {
+      if (now() - lastPortActivity < RECONNECT_GRACE_MS) {
+        if (serialSupported && !current?.compatible) appendStatusLine("USB device reappeared right after a reset; click Connect to check it");
+        return;
+      }
+      return reconnectPaired();
+    });
     serial.addEventListener("disconnect", (event) => {
       const port = event.port || event.target;
       if (port === current?.port) {

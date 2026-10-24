@@ -1176,14 +1176,17 @@ async function attachedLifecycle(t, ports, options = {}) {
     }
   };
   for (const port of ports) port.onForget = () => { serial.grants = serial.grants.filter((granted) => granted !== port); };
+  // The reconnect grace clock; tests that replug a board advance it past the grace window.
+  const clock = { ms: 0, advance(ms = 60000) { this.ms += ms; } };
   const controller = attachWebInstaller({
     root: dom.root, serial, TransportCtor: fake.Transport, ESPLoaderCtor: fake.Loader,
     fetchImpl: fetchImpl || fixture.fetch, cryptoImpl, followLog, trace, delay: noDelay, confirmEraseImpl,
+    now: () => clock.ms,
     locationImpl: { href: `https://example.test${pathname}`, pathname },
     SerialPortCtor: forget ? { prototype: { forget() {} } } : undefined
   });
   await controller.ready;
-  return { controller, serial, dom, fixture, fake };
+  return { controller, serial, dom, fixture, fake, clock };
 }
 
 function lifecycleUi(dom) {
@@ -1260,7 +1263,7 @@ test("the boot check warns about another version or none within 20 seconds", asy
   await drainNativeTasks();
   assert.equal(logLines(dom, "warning").length, 1);
   t.mock.timers.tick(1);
-  assert.match(logLines(dom, "warning").at(-1), /\] 1\.6\.3 not seen within 20 s; press Reset or check the board$/);
+  assert.match(logLines(dom, "warning").at(-1), /\] 1\.6\.3 not seen within 20 s; press Reset or the board's RESET button, or reconnect the cable$/);
   await controller.install();
   await controller.disconnect();
   t.mock.timers.tick(20000);
@@ -1421,7 +1424,8 @@ test("a stuck flash read leaves the firmware unknown, keeps both actions and rel
   assert.deepEqual(reads, [0x8000], "no further reads after a timeout");
   assert.equal(dom.root.dataset.connected, "true");
   assert.equal(serialPortLease(a), undefined, "the probe closed the port normally");
-  assert.match(logLines(dom, "warning").join("\n"), /\] Installed firmware unknown: Reading flash at 0x8000 timed out\.$/);
+  assert.match(logLines(dom, "warning").join("\n"),
+    /\] Installed firmware unknown: Reading flash at 0x8000 timed out\. Use Flash only if the board already runs tesla-key-esp32$/);
   assert.deepEqual(["flash-button", "clean-flash-button"].map((id) => [dom.element(id).hidden, dom.element(id).disabled]),
     [[false, false], [false, false]], "unknown is not foreign: Flash and Clean flash stay available");
   a.flash = null;
@@ -1992,7 +1996,9 @@ test("?trace adds esptool-js's packet trace to the log as whole lines, and only 
 
 test("a single paired port reconnects without the chooser after a reload or a replug", async (t) => {
   const [a, b] = ["A", "B"].map((name) => lifecyclePort(name));
-  const { controller, serial, dom } = await attachedLifecycle(t, [a, b], { forget: true });
+  const { controller, serial, dom, clock } = await attachedLifecycle(t, [a, b], { forget: true });
+  // A real replug happens well after the installer's last port activity.
+  const plugIn = async () => { clock.advance(); await serial.listeners.get("connect")[0](); };
   await controller.reconnectPaired();
   assert.deepEqual([controller.getSelectedPort(), serial.chooserCalls], [null, 0], "two paired ports are left to the chooser");
   serial.grants = [];
@@ -2008,10 +2014,10 @@ test("a single paired port reconnects without the chooser after a reload or a re
   assert.equal(b.opens, 1, "an existing connection is kept");
 
   await dom.element("disconnect-button").listeners.get("click")();
-  await serial.listeners.get("connect")[0]();
+  await plugIn();
   assert.equal(controller.getSelectedPort(), null, "Disconnect unpaired B, so plugging it in again does nothing");
   serial.grants = [a];
-  await serial.listeners.get("connect")[0]();
+  await plugIn();
   assert.equal(controller.getSelectedPort(), a, "plugging in a paired device reconnects it");
 
   await controller.disconnect();
@@ -2025,8 +2031,27 @@ test("a single paired port reconnects without the chooser after a reload or a re
   assert.equal(controller.getSelectedPort(), a);
   assert.match(logLines(dom, "error").at(-1), /Probe failed: no answer from the bootloader/);
   a.mainError = null;
-  await serial.listeners.get("connect")[0]();
+  await plugIn();
   assert.equal(controller.isConnected(), true, "after a failed check, plugging the device in again retries");
+});
+
+test("a board that re-enumerates on the installer's reset is not checked and reset again", async (t) => {
+  const a = lifecyclePort("A");
+  const { controller, serial, dom, clock } = await attachedLifecycle(t, [a], { followLog: true, forget: true });
+  await controller.reconnectPaired();
+  assert.equal(controller.isConnected(), true);
+  const settled = { opens: a.opens, signals: a.signals.length };
+  // The reset pulse makes the USB device disappear and come back a moment later.
+  clock.advance(1500);
+  await serial.listeners.get("disconnect")[0]({ port: a });
+  await serial.listeners.get("connect")[0]();
+  assert.equal(controller.isConnected(), false);
+  assert.deepEqual({ opens: a.opens, signals: a.signals.length }, settled, "no second check, so no second reset");
+  assert.match(logLines(dom, "status").at(-1), /\] USB device reappeared right after a reset; click Connect to check it$/);
+  clock.advance(6000);
+  await serial.listeners.get("connect")[0]();
+  assert.equal(controller.isConnected(), true, "a later plug-in reconnects as usual");
+  assert.equal(a.opens, settled.opens + 1);
 });
 
 test("a busy paired port is retried quietly by the check itself and gets one line", async (t) => {

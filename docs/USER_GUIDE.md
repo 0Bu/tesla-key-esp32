@@ -84,20 +84,26 @@ The update dialog shows up to five change entries at once. Scroll inside the lis
 
 For USB recovery, **Connect** checks the chip and reads the installed partition table and firmware
 without writing. This restarts the board through its bootloader; the log then follows its boot.
-**Flash** writes the bootloader, partition table and app and keeps WiFi, VIN, pairing and sessions;
-it is offered only for tesla-key-esp32 on a layout with the same NVS partition. Otherwise only
-**Clean flash** remains. Clean flash and a merged-image write erase WiFi, VIN and pairing, and
+**Flash** writes the bootloader, partition table, app and OTA selector and keeps WiFi, VIN, pairing
+and sessions; it is offered for tesla-key-esp32 on a layout with the same NVS partition. Otherwise
+only **Clean flash** remains. Clean flash and a merged-image write erase WiFi, VIN and pairing, and
 Clean flash asks for confirmation first; back up secret NVS before an intentional destructive
-recovery. If the device cannot be read, both choices stay available.
+recovery. If the log reports `Installed firmware unknown`, both choices stay available: use Flash
+only when the board already runs tesla-key-esp32, because Flash over another firmware's data can
+stop the new firmware at boot.
 
-After an install the log waits up to 20 s for the new version. **Disconnect** also removes the
-browser's permission for the port where the browser supports it. A single port that is still paired
-reconnects, and so restarts the board, when the page loads or the board is plugged in. If an
-installation times out or USB disconnects, the installer aborts the active serial read or write and
-keeps the port reserved until the operation and its cleanup settle; the buttons stay disabled
-meanwhile. Keep the board connected and retry once **Flash** or **Clean flash** is enabled again; if
-the log says the port remains reserved, reconnect the board and reload the page. Never flash an
-unsigned local build: it cannot boot. [Verified delivery procedures](DEVELOPMENT.md#delivery).
+- After an install the log shows `Booted <version>`, or a warning after 20 s.
+- **Disconnect** also removes the browser's permission for the port where the browser supports it.
+  A single port that is still paired reconnects when the page loads or the board is plugged in;
+  that check restarts the board.
+- After a timeout, **Reset**, **Flash** and **Clean flash** stay disabled until the stopped serial
+  operation has released the port; then retry.
+- After a USB disconnect, plug the board back in. A single paired port reconnects by itself;
+  otherwise click **Connect**.
+- If the log says the port remains reserved, reconnect the board and reload the page.
+- Add `?trace` to the installer address to log esptool-js's packet trace.
+
+Never flash an unsigned local build: it cannot boot. [Verified delivery procedures](DEVELOPMENT.md#delivery).
 
 A reviewed same-repository PR with the `signed-preview` label may offer a signed installer at
 `https://0bu.github.io/tesla-key-esp32/PR/<N>/`. Its version is `<stable>-PR-<N>` and it remains on
@@ -158,7 +164,7 @@ change state; distinguish them from reading an existing log or cached status.
 | Symptom | Check | Next step |
 |---|---|---|
 | Installer has no serial port | Data cable, browser Web Serial support, port already in use | Close other serial programs or tabs; hold BOOT while connecting or use BOOT + RESET. |
-| Installer: version not seen within 20 s | Adapter without reset lines, a native USB port that reconnected late, or an image that does not boot | The firmware is already on flash: press **Reset** or reconnect the cable and read the log. If it still does not start, reinstall with **Flash** rather than **Clean flash**. |
+| Installer: version not seen within 20 s | Adapter without reset lines, a native USB port that reconnected late, or an image that does not boot | The firmware is already on flash: press **Reset** or the board's RESET button, or reconnect the cable, and read the log. If it still does not start, reinstall with **Flash** rather than **Clean flash**. |
 | `.local` will not load | DHCP lease in router | Open the current IP. Use that IP or `.local` for browser saves. |
 | No WiFi | SSID/password, open or WPA2 network | Use setup AP or `provision.py`; do not write partial NVS images. Failed LAN credential changes roll back once. With saved credentials the device keeps retrying them and the setup AP closes after 10 minutes without a client (30 minutes at most); power-cycle to reopen it. |
 | No pairing prompt | VIN configured, `key_present`, BLE range, NFC card on reader | Place the keycard on the reader and wait for the automatic same-key retry with backoff, then confirm on the touchscreen. |
