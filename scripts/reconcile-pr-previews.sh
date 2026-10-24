@@ -82,6 +82,23 @@ current_eligibility() {
   eligible_json "$pr_json" "$manifest_json" "$GITHUB_REPOSITORY"
 }
 
+decision() {
+  jq -cn --argjson pr "$number" --arg result "$1" --argjson paths "${2:-[]}" \
+    '{pr:$pr,result:$result,paths:$paths}'
+}
+
+deletion_inventory() {
+  printf '%s' "$tree" | jq -ce --arg prefix "PR/$number/" '
+    [.tree[]? | select(.type == "blob" and (.path | startswith($prefix)))
+     | .path | ltrimstr($prefix)]
+    | select(length <= 256 and (unique | length) == length)
+    | select(all(.[]; length > 0 and length <= 200
+      and test("^[A-Za-z0-9_./-]+$")
+      and (split("/") | all(. != "" and . != "." and . != ".."))))
+    | select((map(length) | add // 0) <= 32768)
+  '
+}
+
 case "$mode" in
   list)
     tree="$(load_tree)"
@@ -100,21 +117,27 @@ case "$mode" in
     ;;
   remove-if-stale)
     number="${2:?remove-if-stale needs a PR number}"
-    [[ "$number" =~ ^[0-9]+$ ]] || { echo "PR number must be digits" >&2; exit 2; }
+    [[ "$number" =~ ^[1-9][0-9]{0,9}$ ]] && [[ "$number" -le 2147483647 ]] || {
+      echo "PR number must be a positive canonical integer" >&2; exit 2;
+    }
     tree="$(load_tree)"
     if ! preview_numbers "$tree" | grep -qx "$number"; then
-      echo "PR $number preview is already absent"
+      echo "PR $number preview is already absent" >&2
+      decision already-absent
       exit 0
     fi
     if current_eligibility "$number" "$tree"; then
-      echo "PR $number preview became eligible/current; keeping it"
+      echo "PR $number preview became eligible/current; keeping it" >&2
+      decision kept-eligible
       exit 0
     else
       status=$?
       [[ "$status" == 1 ]] || { echo "could not revalidate PR $number" >&2; exit "$status"; }
     fi
+    paths="$(deletion_inventory)" || { echo "unsafe preview deletion inventory" >&2; exit 1; }
     : "${GITHUB_TOKEN:?GITHUB_TOKEN required for removal}"
-    "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/publish-pages-branch.sh" rm "$number"
+    "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/publish-pages-branch.sh" rm "$number" >&2
+    decision removed "$paths"
     ;;
   *) echo "unknown mode: $mode" >&2; exit 2 ;;
 esac

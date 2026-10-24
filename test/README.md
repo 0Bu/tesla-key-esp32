@@ -183,6 +183,13 @@ case-sensitive configured-VIN acceptance, null/mismatched VIN refusal, and `404`
 VIN tokenization is a passive fixture here; these cases do not validate the real URI parser or
 contact a vehicle.
 
+Changed-VIN admission also checks the actual handler with its identity guard refused: no reset
+transaction, persistence, effects or restart may begin. Literal fault counts and elapsed times pin
+the four-fault SafeMode threshold and five-minute heap hold independently of their constants.
+Heap-ring cases retain the open bucket and minima across decreasing timestamps. Structural source
+checks bind the heap restart cap to its durable counter and the sole NimBLE start to the actual
+SafeMode branch; they do not execute the ESP-IDF scheduler or radios.
+
 Provisioning fixtures derive their wrapper and field keys from the actual straight-line
 `http_common.cpp` `make_response` producer and fail closed if its shape changes. LAN WiFi/VIN
 successes must read the nested boolean; refusals, misleading flat success and wrong-typed values
@@ -215,7 +222,8 @@ even if a producer accidentally leaves its telemetry flags set. Existing pure ca
 cover the active-window age boundary and deliberate idle last-known data.
 
 The diagnostic adapter exercises actual formatted capture, RAM ring, chunk framing and fixed-buffer
-redaction with embedded CR/LF, forged prefixes, wrap and truncation. It checks that ordinary raw sinks receive the original bytes and known MQTT URI parser errors
+redaction for connection and WiFi block-ack AP addresses, with embedded CR/LF, forged prefixes, wrap
+and truncation. It checks that ordinary raw sinks receive the original bytes and known MQTT URI parser errors
 reach all three sinks only as a fixed replacement, including failed ring allocation and repeated
 initialization. The host log stub maps the early `vprintf` fallback to a named test facade;
 it does not depend on libc symbol interposition or disable fortified stdio or sanitizers.
@@ -229,6 +237,7 @@ WiFi-driver callback framing, a physical exported log or complete sanitation.
 | HTTP security contract and UI request tests | Actual POST gate ordering, bounded provenance headers, socket/live-mDNS ownership, diagnostic Host checks, redaction selectors, exact UI proof header, no CORS grant and both anti-framing headers; 16 source mutations must fail. IPv6 enablement is rejected; these checks do not establish live network/browser attack behavior. |
 | `test_runtime_boundary_contract.py` | Shipped CMake source closure and actual task/callback registration; contained or mechanically bounded C boundaries; fixed mailbox/completion ownership, no forbidden work under locks, production JSON/OTA/MQTT wiring and closed source/flag surface |
 | `test_charge_presentation.py` | Compiled actual cache/indicator methods with passive RTOS facades: coherent value/stamp, tick zero/wrap, missing sample, lock failure and post-unlock publication. Pure status fixtures independently age charge while common contact stays fresh; browser fixtures verify the retained-data presentation without commands. |
+| `test_command_outcomes.py` | Actual start/stop/default producer bodies and both enqueue helpers feed the real runner with passive RTOS/completion/builders. Matching, inverse, default, missing-counter and unauthenticated outcomes retain one callback and no additional payload. Pure runner tests cover queued-ID policy guards, slot reuse and expired/cancelled/cleared requests; actual REST/MCP emitters print and reparse their completion results. No live command or cryptographic frame is sent. |
 | `test_patch_incremental.py` | Shipped CMake admission block and unchanged validator functions with synthetic digest constants; ordinary incremental input/inventory changes stop before the forced compiler, while valid revalidation proceeds. Does not compile tesla-ble or establish real dependency bytes. |
 | `run-cjson-oom-tests.sh` | Rehashed pinned cJSON; real producers/parser, finite evcc numeric wire fields, every allocation failpoint, exact IDs, ownership and early input release. Effect-aware reply renderer and extracted real handlers/outer catch exercise degraded outcomes, clock-plus-refused-OTA, typed identity recovery, original restart admission and terminal transport failures. |
 | `run-mqtt-json-publish-tests.sh` | Every production discovery/state factory, full/minimal branches and all registry rows; build/print/publish faults cannot replace retained data and rearm discovery. Extracted real discovery rounds refresh the configuration address without changing identity/state topics; missing/racing/failed address reads omit it. Network and broker adapters remain passive. |
@@ -237,19 +246,25 @@ WiFi-driver callback framing, a physical exported log or complete sanitation.
 | `tools/agent-config/selftest.sh` / `test_codex_setup.py` | Canonical skills/reviewers/hooks, native adapter parity/trust boundaries, read-only scopes, owner contracts, exact content and approval/artifact canaries |
 | `scripts/test-build-contracts.sh` | Targets, pins, partitions, generated artifacts, size/stack/effective-build and publication contracts; validator self-tests isolate offsets, digest syntax, unsigned-prefix/size reuse, production pins, signed padding/image binding and complete Release/Pages bytes with deterministic disposable fixtures. Pages controls cover build-state/CLI consumption, bounded backoff beyond 50 seconds, delayed size/hash/404 failures for each of 16 parts, independent complete retries, bounded persistent failures, separate manifest/Release-byte delegation and immutable-input rejection before polling; no real signing key |
 | `scripts/test-pr-gates.sh` | Exact-head review records, relevance, canonical Git command boundaries and shared-library loss using fixtures; `ci-heal.sh` refusals with stubbed `git`/`gh` |
-| `web_ui_browser_gate.py` / `test_web_ui_browser_gate.py` | Linux-only browser launch policy plus the actual assembled page in Chrome/Chromium: console/request failures, degraded poller, escaping, DOM focus, actual CSS focus/hover rules under deterministic pseudo-state emulation, computed unfiltered control/icon contrast in light/dark themes, and desktop/mobile layout |
+| `test_inline_assets.py` | Bounded CSS byte fixtures, legal/annotation/HTML-context preservation, exact CMake output and unchanged JavaScript, raw-marker rejection, stale-output cleanup and real incremental helper dependency. The Linux browser fixture reuses the helper API but independently compares the ordered raw CSSOM with its actual DOM stylesheet; host CMake tests and target build semantics cover the production generator. |
+| `web_ui_browser_gate.py` / `browser_cdp.py` and their policy/transport tests | Linux-only assembled page in Chrome/Chromium: console/request failures, degraded poller, escaping, computed contrast, OTA notes and uncertainty; populated 390/light, 768/light and 1200/dark layouts; real trusted CDP Tab navigation, focus-visible ring and exactly one action each for Enter and Space. Controlled Python peers test pipe framing/limits/FD ownership and cleanup separately from DOM behavior; the host contract executes the actual strict shell with passive tools on Linux/Darwin branches and rejects commented, disabled or early-exit test invocations |
 | `web_installer.test.mjs` | Actual installer with passive serial/flasher adapters: phase ordering, abort/release, explicit erase confirmation, and `eraseAll:false` on every Keep write. No physical flash or NVS-preservation proof. |
 
 Automatic browser processes run only on Linux. macOS is refused before binary lookup or process
 creation, including an explicit `BROWSER_BIN`. Optional local mode reports a skip; `--require-all`
 on macOS invokes the Linux container and fails if it cannot complete the actual browser check. `scripts/run-browser-tests-linux.sh` builds a local
-Chromium test image and runs the real desktop/mobile gate with no network and a read-only source
+Chromium test image and runs the real three-width gate with no network and a read-only source
 mount. The image build needs package access; Docker is required. Run the wrapper once to
 prepare a cold image before the strict suite, whose container sub-gate retains a 120 s deadline. Linux CI runs the same DOM gate
 in the strict host suite. Launch-policy unit tests use controlled processes and do not prove DOM
 behavior. Use the provided in-app Browser for an optional offline visual inspection on macOS.
 
-Browser profiles have a 45 s cold-start/DOM deadline within the 120 s outer gate. Missing browser
+One isolated browser uses a local CDP pipe (no TCP listener) and a 110 s absolute work deadline,
+including its 45 s startup allowance; bounded process-group termination fits within the 120 s outer
+gate. CSS hover/focus emulation is restored before trusted keyboard events. The keyboard fixture
+starts from the document, retains the actual button handler, replaces only its action with a passive
+spy and refuses extra requests. This is browser default activation, not physical typing or a full
+accessibility audit. Missing browser
 capability must be reported and fails strict mode. Deterministic DOM/presenter tests do not replace
 real-browser evidence. Validator `--self-test` modes use representative mutations to show rejection;
 firmware compilation and signed-artifact checks remain independent.
@@ -280,6 +295,13 @@ declarations. Final normal-workload stack floors are httpd/vehicle ≥1024 B, MQ
 auto-pair ≥1024 B. Recovery starts/ends with zero boot-failure count, includes ≥4 fault resets to latch
 safe mode, then a distinct non-fault reboot (≥5 planned), with final normal stack evidence. These are
 policy margins, not hardware-derived alarm thresholds.
+
+`test_pr_preview_served.py` exercises the actual key-free served-preview helper and cleanup
+decision producer with injected HTTP/time and an inert local GitHub/publisher facade. It checks
+four-target signed fixture admission, source/version/authority pins, complete fresh retries,
+end-manifest consistency, response/deadline bounds, and required 404/410 evidence after removal.
+The build-gate contract also rejects omitted publication and both cleanup invocation points.
+These tests do not publish a preview, remove real Pages content or establish live CDN propagation.
 
 ## Adding to it
 

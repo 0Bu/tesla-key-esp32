@@ -118,6 +118,7 @@ REQUIRED_FILES = (
     ".gitignore",
     ".github/workflows/build.yml",
     ".github/workflows/signed-pr-preview.yml",
+    ".github/workflows/pr-preview-cleanup.yml",
     "scripts/build-pages.sh",
     "scripts/check-dependency-contract.py",
     "scripts/check-build-artifact-inventory.py",
@@ -129,6 +130,7 @@ REQUIRED_FILES = (
     "scripts/check-pages-source.py",
     "scripts/check-otadata-contract.py",
     "scripts/check-published-release.py",
+    "scripts/check-pr-preview-served.py",
     "scripts/wait-pages-build.py",
     "scripts/check-release-assets.py",
     "scripts/check-signed-root-inventory.py",
@@ -363,6 +365,7 @@ def validate(root: Path) -> None:
     run_mock = read(root, "scripts/run-mock-tests.sh")
     build_workflow = read(root, ".github/workflows/build.yml")
     preview_workflow = read(root, ".github/workflows/signed-pr-preview.yml")
+    cleanup_workflow = read(root, ".github/workflows/pr-preview-cleanup.yml")
     cjson_test = read(root, "test/run-cjson-oom-tests.sh")
     mqtt_json_test = read(root, "test/run-mqtt-json-publish-tests.sh")
     gitignore = read(root, ".gitignore")
@@ -1293,6 +1296,28 @@ def validate(root: Path) -> None:
         ("Validate build provenance", "--verify --artifact-root . --compare-to _ci-independent",
          "Provision OTA signing key", "./scripts/ci-sign-artifacts.sh"),
     )
+    served_call = "python3 scripts/check-pr-preview-served.py"
+    key_free = "env -u GH_TOKEN -u GITHUB_TOKEN -u OTA_SIGNING_KEY -u OTA_SIGNING_KEY_FILE"
+    require_order(preview_workflow, "key-free served preview acceptance",
+                  ("Remove OTA signing key", "./scripts/publish-pages-branch.sh pr", key_free, served_call))
+    require(preview_workflow.count(served_call) == 1 and
+            '--site ./_pr_site --source-sha "$SOURCE_SHA" --version "$DISPLAY_VERSION"' in preview_workflow and
+            '--pages-metadata "$pages_json" --repository "$GITHUB_REPOSITORY" --pr "$PR_NUMBER"' in preview_workflow,
+            "signed preview served acceptance must bind site, source, version, PR and authority")
+    for job in ("cleanup-event", "reconcile-stale"):
+        start = cleanup_workflow.find("  " + job + ":")
+        # Top-level job starts have exactly two spaces; nested keys have four or more.
+        following = re.search(r"\n  [a-z][a-z-]+:\n", cleanup_workflow[start + 3:])
+        segment = cleanup_workflow[start:start + 3 + following.start()] if following else cleanup_workflow[start:]
+        require(start >= 0 and segment.count(served_call) == 1 and key_free in segment and
+                '--cleanup-decision "$evidence/decision.json"' in segment and
+                '> "$evidence/decision.json"' in segment and
+                'gh api "repos/$GITHUB_REPOSITORY/pages" > "$evidence/pages.json"' in segment,
+                job + ": key-free served absence acceptance is missing")
+        require_order(segment, job + " decision before served acceptance",
+                      ("./scripts/reconcile-pr-previews.sh remove-if-stale", key_free, served_call))
+    require('run_gate "served PR preview and removal acceptance" 120 python3 test/test_pr_preview_served.py' in run_mock,
+            "served preview controls must run in the full host gate")
 
 
 def replace_once(path: Path, old: str, new: str) -> None:
@@ -1313,6 +1338,21 @@ def copy_fixture(root: Path, destination: Path) -> None:
 def self_test(root: Path) -> None:
     validate(root)
     mutations = (
+        ("served-preview-call", ".github/workflows/signed-pr-preview.yml",
+         "python3 scripts/check-pr-preview-served.py", "true # removed served preview acceptance",
+         "key-free served preview acceptance"),
+        ("served-event-cleanup-call", ".github/workflows/pr-preview-cleanup.yml",
+         "python3 scripts/check-pr-preview-served.py", "true # removed event absence acceptance",
+         "cleanup-event: key-free served absence"),
+        ("served-reconcile-cleanup-call", ".github/workflows/pr-preview-cleanup.yml",
+         '--pr "${{ matrix.pr }}" --cleanup-decision "$evidence/decision.json"',
+         '--pr "${{ matrix.pr }}"', "reconcile-stale: key-free served absence"),
+        ("served-preview-token-strip", ".github/workflows/signed-pr-preview.yml",
+         "env -u GH_TOKEN -u GITHUB_TOKEN -u OTA_SIGNING_KEY -u OTA_SIGNING_KEY_FILE", "env",
+         "key-free served preview acceptance"),
+        ("served-preview-host-controls", "scripts/run-mock-tests.sh",
+         'run_gate "served PR preview and removal acceptance" 120 python3 test/test_pr_preview_served.py',
+         "true # removed preview controls", "served preview controls"),
         ("led-sdk-unsigned-cli", "scripts/ci-build-led-variant.sh",
          '--bootloader "$work/build/bootloader/bootloader.bin" --app "$work/build/tesla-key-esp32.bin"',
          '--app-only --app "$work/build/tesla-key-esp32.bin"', "optional LED SDK variant"),

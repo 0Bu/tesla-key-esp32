@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -17,9 +18,34 @@
 namespace tk {
 
 // Evaluates whether an error string represents a nominal already_set response from the vehicle
-// (teslamotors/vehicle-command NominalError, treated as idempotent success by caller).
+// (a local compatibility decision, not a general NominalError success rule).
 inline bool is_nominal_already_set(std::string_view err) noexcept {
     return err == "already_set";
+}
+
+enum class CommandOutcomePolicy : uint8_t {
+    AlreadySetOnly,
+    ChargeStart,
+    ChargeStop,
+};
+
+// Only an authenticated current-request Infotainment rejection may use this decision.
+// The runner owns that admission. REST/MCP consume its completed result, never arbitrary
+// reason text. A successful no-op does not assert physical charging or refresh telemetry.
+inline bool is_nominal_charge_outcome(CommandOutcomePolicy policy, std::string_view reason) noexcept {
+    constexpr char prefix[] = "Infotainment action failed: ";
+    constexpr auto prefix_size = sizeof(prefix) - 1;
+    const char* data = reason.data();
+    auto size = reason.size();
+    if (size >= prefix_size && std::memcmp(data, prefix, prefix_size) == 0) {
+        data += prefix_size;
+        size -= prefix_size;
+    }
+    if (policy == CommandOutcomePolicy::ChargeStart)
+        return (size == sizeof("is_charging") - 1 && std::memcmp(data, "is_charging", sizeof("is_charging") - 1) == 0) ||
+               (size == sizeof("complete") - 1 && std::memcmp(data, "complete", sizeof("complete") - 1) == 0);
+    return policy == CommandOutcomePolicy::ChargeStop && size == sizeof("not_charging") - 1 &&
+           std::memcmp(data, "not_charging", sizeof("not_charging") - 1) == 0;
 }
 
 inline const char* command_result_text(bool ok, const std::string& err) {

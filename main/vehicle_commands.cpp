@@ -452,7 +452,7 @@ VehicleController::CommandOutcome VehicleController::send_vcsec_locked_(
 }
 
 bool VehicleController::send_infotainment_(const std::string& name, Builder builder,
-                                            int timeout_ms, WakePolicy wp) {
+                                            int timeout_ms, WakePolicy wp, tk::CommandOutcomePolicy policy) {
     CommandOutcome out;
     if (timeout_ms <= 0) {
         out.error = "command deadline exhausted";
@@ -468,14 +468,14 @@ bool VehicleController::send_infotainment_(const std::string& name, Builder buil
     }
     tk::InFlightGuard inflight(cmd_in_flight_);
     last_cmd_ticks_.store(xTaskGetTickCount());
-    out = send_infotainment_locked_(name, std::move(builder), deadline, wp);
+    out = send_infotainment_locked_(name, std::move(builder), deadline, wp, tk::CommandEffect::Mutating, policy);
     publish_command_outcome_(out);
     return out.success;
 }
 
 VehicleController::CommandOutcome VehicleController::send_infotainment_locked_(
         const std::string& name, Builder builder, uint32_t deadline,
-        WakePolicy wp, tk::CommandEffect effect) {
+        WakePolicy wp, tk::CommandEffect effect, tk::CommandOutcomePolicy policy) {
     CommandOutcome out;
     if (!command_identity_ready_()) {
         out.error = "runtime key is not verified; reboot or regenerate required";
@@ -521,7 +521,7 @@ VehicleController::CommandOutcome VehicleController::send_infotainment_locked_(
         cmd_id = command_runner_.enqueue(
             name, tk::BleDomain::Infotainment, wp, timeout_ms, now_ms, {}, std::move(on_done));
         completion->command_id = cmd_id;
-        command_runner_.set_command_effect(cmd_id, effect);
+        command_runner_.set_command_effect(cmd_id, effect, policy);
         if (cmd_id == 0) {
             out.error = "command queue full";
             return out;
@@ -628,7 +628,7 @@ bool VehicleController::charge_start(int timeout_ms) {
         bool enable = true;
         return c->build_car_server_vehicle_action_message(
             b, l, CarServer_VehicleAction_chargingStartStopAction_tag, &enable);
-    }, timeout_ms);
+    }, timeout_ms, WakePolicy::WakeIfNeeded, tk::CommandOutcomePolicy::ChargeStart);
 }
 
 bool VehicleController::charge_stop(int timeout_ms) {
@@ -636,7 +636,7 @@ bool VehicleController::charge_stop(int timeout_ms) {
         bool enable = false;
         return c->build_car_server_vehicle_action_message(
             b, l, CarServer_VehicleAction_chargingStartStopAction_tag, &enable);
-    }, timeout_ms);
+    }, timeout_ms, WakePolicy::WakeIfNeeded, tk::CommandOutcomePolicy::ChargeStop);
 }
 
 bool VehicleController::set_charging_amps(int amps, int timeout_ms) {

@@ -197,11 +197,11 @@ SIGNING_ENVIRONMENT_JOBS = {
 EXPECTED_PRIVILEGED_JOB_SHA256 = {
     ('build.yml', 'publish'): "3d8071b2e6361b0d013b5a07e6f598ff5152245e64eda83f4f031ba2f4850180",
     ('build.yml', 'deploy'): "4bf4e43925d0fec42a726061437ce9eb78579b15371c57096ae4fd7aa482b341",
-    ('signed-pr-preview.yml', 'sign-preview'): "d99d4fc66df82378b9f0ab716d26288a819b5700d4ad5eb9c3fb58868464b7d2",
+    ('signed-pr-preview.yml', 'sign-preview'): "e44a21370d774b00b10dafcd11ff44a1d590485aeb8e03f62d600c3829f90925",
     ('signed-pr-preview.yml', 'validate'): "44f1065eb3e479f4363e2fba6c10b29ae814cb01fe4ea4f0482f6b548f63511b",
-    ('pr-preview-cleanup.yml', 'cleanup-event'): "5a57a8ff2ff4efbccf040fc6fe23d85caed7ba5edce20fe360f8c39a5ce1e79c",
+    ('pr-preview-cleanup.yml', 'cleanup-event'): "444dac196ca71ad9b7875975bceae73b8a4fc6acf36325da7766d0ef8a66467f",
     ('pr-preview-cleanup.yml', 'discover-stale'): "8669d8d2c7f0d295d9291e4b54dd19126ed549e9b82862d4747972bf64ab2b7e",
-    ('pr-preview-cleanup.yml', 'reconcile-stale'): "014f4bda84ed72cdf998852f0c9c0e615c06fd9833b4f036d9f21edba6586a77",
+    ('pr-preview-cleanup.yml', 'reconcile-stale'): "9869eb7b4c3405527941a3c6120e1792701bffc571564ed4fc2092d54064d91d",
 }
 # Canonical JSON of the scalar-preserving `on` subtree. Changing event types, dispatch inputs or
 # schedules requires reviewing and updating this inventory; comments do not affect these digests.

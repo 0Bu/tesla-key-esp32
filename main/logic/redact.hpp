@@ -215,6 +215,7 @@ inline constexpr DiagLibraryIdentifier kDiagLibraryIdentifiers[] = {
     {"esp-tls:", "couldn't get hostname for :"},
     {"mqtt_client:", "Error parse uri ("},
     {"wifi:", "connected with "},
+    {"wifi:", "<ba-add>idx:"},
     {"wifi:", "Invalid AP("},
     {"wifi:", "Using per-SSID MAC [idx:"},
     {"wifi:", "addba response cb: bssid change from "},

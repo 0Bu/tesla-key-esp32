@@ -38,6 +38,24 @@ For linked worktrees, only the external Git common directory is mounted read-onl
 checkout's source files are not exposed. Daemon reuse checks the actual mount inventory as well
 as its image, resource limits and mount-policy label. An older, broader daemon is recreated.
 
+## Embedded web assets
+
+`main/www/inline_assets.cmake` inserts the CSS and JavaScript into the HTML marker lines,
+then the build uses `gzip -9 -n`. Raw marker checks precede any transformation. The bounded,
+standard-library `prune_css_comments.py` helper blanks documentation text only in whole-line
+CSS comments outside strings and parentheses; it preserves whitespace, inline comments,
+legal/tooling notices, escapes and HTML style-end sequences. It accepts bounded UTF-8 without
+NUL, refuses unfinished syntax, and leaves markup and JavaScript bytes unchanged. Source comments
+remain available for editing. This is a narrow repository CSS subset, not general minification.
+The helper is an explicit generator dependency. It rejects output/input aliases before cleanup,
+removes the validated old output before generation and publishes complete bytes atomically.
+CMake refuses helper startup, generation and timeout failures; retained files are never a success.
+
+The effective-build gate compares the actual generated page and gzip with canonical inputs.
+Host tests execute the real CMake generator and its incremental helper dependency. Linux Chromium
+independently compares ordered raw CSS rules with the generated fixture's DOM stylesheet before
+layout and trusted-keyboard checks; this is modern-browser evidence, not every-browser equivalence.
+
 ## Validate a change
 
 Start with checks relevant to the diff. Host suite scope and prerequisites are in the
@@ -153,6 +171,23 @@ Tesla/Daikin firmware, flashes a signed PR preview or development-key image thro
 or an already-published image through `$usb-recovery`'s provenance and app-only steps, and tests
 the implementation on that same board. Device delivery after merge remains a separately requested
 `$ship` operation.
+
+### Served PR preview acceptance
+
+After signed preview publication, `scripts/check-pr-preview-served.py` runs trusted default-branch
+code without keys or repository tokens. It validates the local signed four-target site against the
+source, canonical PR version and production public-key pin, then compares the served manifest,
+all 16 parts and a final manifest from the API-confirmed `PR/<N>/` authority. Each retry starts a
+complete fresh snapshot. Redirects, non-200 status, mixed or incomplete bytes and expired deadlines
+fail acceptance. At most 20 attempts share a 180-second network deadline and 10-second request caps.
+
+Cleanup emits one JSON decision: `kept-eligible`, `already-absent` or `removed`. Eligible previews
+are retained without an absence claim. The other decisions require 404/410 for the manifest,
+installer entrypoint, all 16 canonical parts and every validated path collected before deletion.
+Both the ordinary URL and a fresh cache key must be absent. DNS/TLS errors and 5xx do not prove
+absence. This proves only the reported URL observations, not
+eviction of arbitrary historical CDN cache keys. Publication/removal and served acceptance remain
+separate results; a failed acceptance does not repeat signing or grant a recovery operation.
 
 ### Retained-bootloader references
 

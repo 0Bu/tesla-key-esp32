@@ -482,14 +482,16 @@ private:
                      bool auth_fail_is_health_probe, tk::CompletionTimeoutPolicy timeout_policy,
                      bool completes_on_transmit, tk::CommandEffect effect, tk::VcsecReplyKind kind);
     bool send_infotainment_(const std::string& name, Builder builder, int timeout_ms,
-                            WakePolicy wp = WakePolicy::WakeIfNeeded);
+                            WakePolicy wp = WakePolicy::WakeIfNeeded,
+                            tk::CommandOutcomePolicy policy = tk::CommandOutcomePolicy::AlreadySetOnly);
     // Same runner with command_mutex_ + cmd_in_flight_ already held. The absolute deadline
     // includes connection setup and all preceding work in the transaction. Used by
     // set_charging_amps to keep the action and its independent ChargeState readback
     // in one serialized transaction, with no background poll inserted between them.
     CommandOutcome send_infotainment_locked_(const std::string& name, Builder builder,
                                               uint32_t deadline, WakePolicy wp,
-                                              tk::CommandEffect effect = tk::CommandEffect::Mutating);
+                                              tk::CommandEffect effect = tk::CommandEffect::Mutating,
+                                              tk::CommandOutcomePolicy policy = tk::CommandOutcomePolicy::AlreadySetOnly);
 
     CommandOutcome send_vcsec_locked_(const std::string& name, Builder builder,
                                       WakePolicy wp, uint32_t deadline,
