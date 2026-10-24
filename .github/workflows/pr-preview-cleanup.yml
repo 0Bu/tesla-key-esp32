@@ -53,7 +53,16 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: ./scripts/reconcile-pr-previews.sh remove-if-stale "${{ github.event.pull_request.number }}"
+        run: |
+          set -euo pipefail
+          evidence="$(mktemp -d)"
+          trap 'rm -rf "$evidence"' EXIT
+          ./scripts/reconcile-pr-previews.sh remove-if-stale "${{ github.event.pull_request.number }}" > "$evidence/decision.json"
+          gh api "repos/$GITHUB_REPOSITORY/pages" > "$evidence/pages.json"
+          env -u GH_TOKEN -u GITHUB_TOKEN -u OTA_SIGNING_KEY -u OTA_SIGNING_KEY_FILE \
+            python3 scripts/check-pr-preview-served.py \
+            --pages-metadata "$evidence/pages.json" --repository "$GITHUB_REPOSITORY" \
+            --pr "${{ github.event.pull_request.number }}" --cleanup-decision "$evidence/decision.json"
 
   discover-stale:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
@@ -114,4 +123,13 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: ./scripts/reconcile-pr-previews.sh remove-if-stale "${{ matrix.pr }}"
+        run: |
+          set -euo pipefail
+          evidence="$(mktemp -d)"
+          trap 'rm -rf "$evidence"' EXIT
+          ./scripts/reconcile-pr-previews.sh remove-if-stale "${{ matrix.pr }}" > "$evidence/decision.json"
+          gh api "repos/$GITHUB_REPOSITORY/pages" > "$evidence/pages.json"
+          env -u GH_TOKEN -u GITHUB_TOKEN -u OTA_SIGNING_KEY -u OTA_SIGNING_KEY_FILE \
+            python3 scripts/check-pr-preview-served.py \
+            --pages-metadata "$evidence/pages.json" --repository "$GITHUB_REPOSITORY" \
+            --pr "${{ matrix.pr }}" --cleanup-decision "$evidence/decision.json"

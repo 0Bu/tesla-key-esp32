@@ -2252,6 +2252,36 @@ def require_runtime_admission_contract(logic_header: str, facade_header: str,
                    "tk::http_route_requires_vehicle_runtime(route)", "switch (route)")
 
 
+def require_nimble_safe_mode_start_contract(main_source: str) -> None:
+    """Pin the actual start call to the branch controlled by the durable boot verdict."""
+    whole = scrub_cpp_preserving_layout(main_source)
+    if len(re.findall(r"\bble_client\s*\.\s*start\s*\(", whole)) != 1:
+        raise AssertionError("NimBLE must have exactly one production start call")
+    code = scrub_cpp_preserving_layout(function_body_in(main_source, "app_main"))
+    declarations = list(re.finditer(
+        r"\bconst\s+bool\s+safe_mode\s*=\s*tk::safe_mode_begin\s*\(\s*"
+        r"config_store\s*,\s*tk::diag_crash_reset_info\s*\(\s*\)\s*\.\s*fault\s*\)\s*;", code))
+    if len(declarations) != 1 or len(re.findall(r"\bbool\s+safe_mode\b", code)) != 1:
+        raise AssertionError("NimBLE SafeMode input is not the single durable boot verdict")
+    call = re.search(r"\bble_client\s*\.\s*start\s*\(", code)
+    if call is None:
+        raise AssertionError("NimBLE start is outside app_main")
+    owner = enclosing_scope(code, call.start(), "NimBLE start scope")
+    guards = []
+    for match in re.finditer(r"\bif\s*\(\s*!safe_mode\s*\)\s*\{", code):
+        _, opening, closing = if_statement_at(code, match.start(), "NimBLE SafeMode branch")
+        if (opening, closing) == owner:
+            guards.append((match.start(), opening, closing))
+    if len(guards) != 1:
+        raise AssertionError("NimBLE start must be inside the true !safe_mode body")
+    guard, opening, closing = guards[0]
+    if enclosing_scope(code, guard, "NimBLE guard scope") != enclosing_scope(
+            code, declarations[0].start(), "SafeMode verdict scope"):
+        raise AssertionError("NimBLE SafeMode guard is hidden in another control scope")
+    if re.search(r"(?m)^\s*#", code[opening:closing]):
+        raise AssertionError("NimBLE SafeMode branch has unsupported conditional preprocessing")
+
+
 def require_nimble_start_ack_contract(gate_header: str, client_header: str,
                                       client_source: str, main_source: str,
                                       logic_tests: str, runtime_tests: str) -> None:
@@ -2351,6 +2381,7 @@ def require_nimble_start_ack_contract(gate_header: str, client_header: str,
     if "g_instance->on_sync()" not in on_sync_callback:
         raise AssertionError("registered NimBLE on_sync callback bypasses BleClient acknowledgement")
 
+    require_nimble_safe_mode_start_contract(main_source)
     start_failure = re.search(
         r"if\s*\(\s*!ble_client\.start\(\)\s*\)\s*"
         r"boot_fatal\s*\(\s*\"NimBLE\"\s*\)\s*;",
@@ -3892,9 +3923,36 @@ def require_crash_dismiss_atomic_contract(crash_source: str) -> None:
 
 def require_heap_restart_gate_contract(telemetry: str) -> None:
     restart_marker = "if (v.action == tk::HeapAction::Restart)"
-    restart_at = telemetry.find(restart_marker)
-    if restart_at < 0:
-        raise AssertionError("heap restart action branch is missing")
+    code = scrub_cpp_preserving_layout(telemetry)
+    if code.count(restart_marker) != 1:
+        raise AssertionError("heap restart action must have one actual branch")
+    restart_at = code.index(restart_marker)
+    _, opening, closing = if_statement_at(code, restart_at, "heap restart action")
+    branch = code[opening + 1:closing]
+    if re.search(r"(?m)^\s*#", branch):
+        raise AssertionError("heap restart branch has unsupported conditional preprocessing")
+    declaration = re.match(
+        r"\s*uint8_t\s+prior\s*=\s*VehicleController::boot_heap_restarts\s*\(\s*\)\s*;\s*", branch)
+    if declaration is None or branch.count("boot_heap_restarts") != 1:
+        raise AssertionError("heap cap must consume the current durable restart count once")
+    condition, cap_open, cap_close = if_statement_at(
+        branch, declaration.end(), "heap restart cap")
+    if re.sub(r"\s+", "", condition) != "!tk::heap_may_restart(prior)":
+        raise AssertionError("heap restart cap admission is bypassed or inverted")
+    else_at = skip_space(branch, cap_close + 1, len(branch))
+    if not re.match(r"else\b", branch[else_at:]):
+        raise AssertionError("heap cap needs a distinct permitted else branch")
+    else_open = skip_space(branch, else_at + 4, len(branch))
+    else_close = balanced_end(branch, else_open, "{", "}", "heap cap permitted branch")
+    if branch[else_close + 1:].strip():
+        raise AssertionError("heap restart has work outside the cap branches")
+    allowed = branch[else_open + 1:else_close]
+    denied = branch[cap_open + 1:cap_close]
+    for operation in ("ota_fault_restart_begin", "persist_reboot_reason_", "esp_restart"):
+        if operation in denied or allowed.count(operation) != 1:
+            raise AssertionError(f"heap cap does not exclusively own {operation}")
+    if re.search(r"\bprior\s*(?:=(?!=)|\+\+|--|[+*/%&|^-]=)", branch[declaration.end():]):
+        raise AssertionError("heap cap counter is reassigned after the durable read")
     restart_branch = telemetry[restart_at:]
     require_before(
         "heap restart operation admission",
@@ -5515,6 +5573,12 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
 
     telemetry = function_body("loop_task_fn_")
     for old, replacement, label in (
+        ("if (!tk::heap_may_restart(prior))", "if (false)", "restart cap bypass"),
+        ("if (!tk::heap_may_restart(prior))", "if (tk::heap_may_restart(prior))", "restart cap inversion"),
+        ("VehicleController::boot_heap_restarts()", "0", "constant restart count"),
+        ("if (!tk::heap_may_restart(prior))", "prior = 0; if (!tk::heap_may_restart(prior))", "overwritten restart count"),
+        ("if (!tk::heap_may_restart(prior))", "if (false) /* if (!tk::heap_may_restart(prior)) */", "comment-only cap decoy"),
+        ("if (v.action == tk::HeapAction::Restart)", "if (v.action == tk::HeapAction::Restart) if (false)", "dead nested cap"),
         ("if (!ota_fault_restart_begin())", "if (false)", "operation admission"),
         ("ota_fault_restart_cancel();", "", "persistence-failure release"),
         ("if (!self->persist_reboot_reason_(why.text))", "if (false)", "persistence authority"),
@@ -5820,6 +5884,41 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
                     gate, header, source, app, logic_tests, runtime_tests
                 ),
         )
+
+    nimble_marker = "if (!safe_mode) {\n        if (!ble_client.start())"
+    if main_source.count(nimble_marker) != 1:
+        raise AssertionError("NimBLE SafeMode mutation target is ambiguous")
+    guard_at = main_source.index(nimble_marker)
+    guard_code = scrub_cpp_preserving_layout(main_source)
+    _, guard_open, guard_close = if_statement_at(guard_code, guard_at, "NimBLE test guard")
+    else_at = skip_space(guard_code, guard_close + 1, len(guard_code))
+    if not guard_code.startswith("else", else_at):
+        raise AssertionError("NimBLE SafeMode mutation needs the actual else branch")
+    else_open = skip_space(guard_code, else_at + 4, len(guard_code))
+    chain_end = balanced_end(guard_code, else_open, "{", "}", "NimBLE test else") + 1
+    chain = main_source[guard_at:chain_end]
+    for label, mutated in (
+        ("SafeMode NimBLE condition bypass", main_source.replace(nimble_marker,
+            "if (true) {\n        if (!ble_client.start())", 1)),
+        ("SafeMode NimBLE condition inversion", main_source.replace(nimble_marker,
+            "if (safe_mode) {\n        if (!ble_client.start())", 1)),
+        ("SafeMode NimBLE unwrapped start", main_source[:guard_at] +
+            main_source[guard_open + 1:guard_close] + main_source[chain_end:]),
+        ("SafeMode NimBLE additional outside start", main_source[:guard_at] +
+            "ble_client.start();\n" + main_source[guard_at:]),
+        ("SafeMode NimBLE dead nested guard", main_source[:guard_at] +
+            "if (false) {\n" + chain + "\n}" + main_source[chain_end:]),
+        ("SafeMode NimBLE comment-only guard", main_source.replace(nimble_marker,
+            "if (true) { /* if (!safe_mode) { ble_client.start(); } */\n        if (!ble_client.start())", 1)),
+        ("SafeMode NimBLE fabricated input", main_source.replace(
+            "const bool safe_mode = tk::safe_mode_begin(config_store, tk::diag_crash_reset_info().fault);",
+            "const bool safe_mode = false;", 1)),
+    ):
+        if mutated == main_source:
+            raise AssertionError(f"{label}: mutation did not apply")
+        require_mutation_rejected(label,
+            lambda changed=mutated: require_nimble_safe_mode_start_contract(changed))
+    require_nimble_safe_mode_start_contract(main_source)
 
     ota_source = SOURCES["ota_update.cpp"]
     for label, header, source, app, ota in (

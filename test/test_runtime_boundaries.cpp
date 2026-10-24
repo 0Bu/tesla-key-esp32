@@ -1427,11 +1427,17 @@ int main() {
     // Real formatted-callback -> ring -> chunk framing -> fixed redactor. Embedded CR/LF,
     // including a forged log prefix, must not expose a second markerless value. Private Serial
     // and Syslog receive the original bytes; only the ring copy is normalized.
+    for (const char* network_record : {
+            "I (1) wifi:connected with example",
+            "I (1) wifi:<ba-add>idx:0 (ifx:0, 02:00:00:00:00:01), tid:6, ssn:0, winSize:64"})
+    for (const char* ending : {"\n", "\r\n"})
     for (bool wrapped : {false, true}) for (bool truncated : {false, true}) {
         diag_log_clear();
-        std::string record = "I (1) wifi:connected with example\r\nI (0) fake: private-tail";
+        const char* private_tail = std::string_view(network_record).find("<ba-add>") !=
+            std::string_view::npos ? "block-ack-private-tail" : "private-tail";
+        std::string record = std::string(network_record) + "\r\nI (0) fake: " + private_tail;
         if (truncated) record += std::string(240, 'X');
-        record += "\r\n";
+        record += ending;
         capture_log_sinks = true;
         captured_serial.clear(); captured_syslog.clear();
         emit_log("%s", record.c_str());
@@ -1450,10 +1456,13 @@ int main() {
         CHECK(diag_log_dump_chunks([&](const char* data, size_t len) {
             CHECK(!last_mutex->held); raw.append(data, len); return true;
         }, DiagDumpStart::AfterWrappedLineBoundary) == DiagDumpResult::Complete);
-        CHECK(raw.find("example  I (0) fake: private-tail") != std::string::npos);
+        CHECK(raw.find(std::string(network_record) + "  I (0) fake: " + private_tail) != std::string::npos);
         CHECK(raw.find("\nI (0) fake:") == std::string::npos);
         const std::string exported = export_diag_capture();
         CHECK(exported.find("example") == std::string::npos);
+        CHECK(exported.find("02:00:00:00:00:01") == std::string::npos);
+        CHECK(exported.find("<ba-add>") == std::string::npos);
+        CHECK(exported.find("block-ack-private-tail") == std::string::npos);
         CHECK(exported.find("private-tail") == std::string::npos);
         CHECK(exported.find(tk::kRedacted) != std::string::npos);
     }
@@ -1557,6 +1566,15 @@ int main() {
     CHECK(tk::safe_mode_begin(storage, true));
     CHECK(saved_counts.size() == 1 && saved_counts[0] == "4");
     CHECK(tk::safe_mode_active());
+
+    for (unsigned prior : {0u, 1u, 2u, 3u}) {
+        const std::string before = std::to_string(prior);
+        reset_storage(before.c_str());
+        CHECK(tk::safe_mode_begin(storage, true) == (prior == 3));
+        CHECK(saved_counts.size() == 1);
+        CHECK(saved_counts[0] == std::to_string(prior + 1));
+        CHECK(tk::safe_mode_active() == (prior == 3));
+    }
 
     reset_storage("3");
     CHECK(!tk::safe_mode_begin(storage, false));

@@ -34,7 +34,7 @@
 //     NoWakeFail: Fails if vehicle is asleep without sending wake or command.
 //     WakeIfNeeded: Automatically coordinates wake-up sequence before infotainment commands.
 // - Outcome classification:
-//     Uses is_nominal_already_set() to treat nominal already_set vehicle responses as idempotent success.
+//     Preserves exact already_set compatibility and applies explicit request-context charging no-ops.
 // - Retry and timeout arbitration:
 //     Tracks per-command deadline, phase duration, and response timeout with bounded exponential backoff.
 namespace tk {
@@ -218,6 +218,7 @@ struct CommandRequest {
     BleDomain domain{BleDomain::VehicleSecurity};
     WakePolicy wake_policy{WakePolicy::WakeIfNeeded};
     VcsecReplyKind vcsec_reply_kind{VcsecReplyKind::Action};
+    CommandOutcomePolicy outcome_policy{CommandOutcomePolicy::AlreadySetOnly};
     BleUuid uuid{};
     uint32_t dispatcher_request_id{0};
 
@@ -327,11 +328,14 @@ public:
         return cmd.id;
     }
 
-    bool set_command_effect(uint32_t id, CommandEffect effect) noexcept {
+    // Configure effect and local outcome policy before dispatch, under the owner lock.
+    bool set_command_effect(uint32_t id, CommandEffect effect,
+                            CommandOutcomePolicy outcome_policy = CommandOutcomePolicy::AlreadySetOnly) noexcept {
         for (size_t i = 0; i < queue_count_; ++i) {
             auto& cmd = queue_[(queue_head_ + i) % kMaxQueueSize];
             if (cmd.id == id && cmd.state == CommandState::Idle && !cmd.payload_maybe_sent) {
                 cmd.effect = effect;
+                cmd.outcome_policy = outcome_policy;
                 return true;
             }
         }
@@ -727,8 +731,12 @@ public:
         }
 
         if (!is_success && authenticated_rejection) cmd->payload_maybe_sent = false;
-        // Evaluate outcome with normative already_set mapping
-        if (is_nominal_already_set(error_string)) {
+        // Local no-op policy is applied only after current-request routing. Expanded charging
+        // reasons additionally require an authenticated Infotainment application rejection
+        // with counter evidence; a contradictory direct caller tuple cannot assert a no-op.
+        if (is_nominal_already_set(error_string) ||
+            (!is_success && authenticated_rejection && has_counter && from_domain == BleDomain::Infotainment &&
+             is_nominal_charge_outcome(cmd->outcome_policy, error_string))) {
             cmd->is_already_set = true;
             finish_command_(cmd, true, "command executed successfully", TerminalReason::AlreadySet);
         } else if (is_success) {

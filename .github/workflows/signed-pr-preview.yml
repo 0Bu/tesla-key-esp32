@@ -402,3 +402,19 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ needs.validate.outputs.pr }}
         run: ./scripts/publish-pages-branch.sh pr ./_pr_site "$PR_NUMBER"
+
+      - name: Accept all served signed preview bytes without keys or tokens
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ needs.validate.outputs.pr }}
+          SOURCE_SHA: ${{ needs.validate.outputs.head-sha }}
+          DISPLAY_VERSION: ${{ steps.metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          pages_json="$(mktemp)"
+          trap 'rm -f "$pages_json"' EXIT
+          gh api "repos/$GITHUB_REPOSITORY/pages" > "$pages_json"
+          env -u GH_TOKEN -u GITHUB_TOKEN -u OTA_SIGNING_KEY -u OTA_SIGNING_KEY_FILE \
+            python3 scripts/check-pr-preview-served.py \
+            --pages-metadata "$pages_json" --repository "$GITHUB_REPOSITORY" --pr "$PR_NUMBER" \
+            --site ./_pr_site --source-sha "$SOURCE_SHA" --version "$DISPLAY_VERSION"

@@ -2035,6 +2035,38 @@ static void test_mcp() {
     CHECK(!tk::is_nominal_already_set("foo_already_set_bar"));
     CHECK_STR(tk::command_result_text(false, "already_set"), "command executed successfully");
 
+    // Charging no-ops are an explicit request-context policy, never a global reason rule.
+    using OutcomePolicy = tk::CommandOutcomePolicy;
+    struct NoopCase { const char* reason; bool start; bool stop; };
+    const NoopCase noops[] = {
+        {"is_charging",true,false}, {"complete",true,false}, {"not_charging",false,true},
+        {"Infotainment action failed: is_charging",true,false},
+        {"Infotainment action failed: complete",true,false},
+        {"Infotainment action failed: not_charging",false,true},
+        {"already_set",false,false}, {"requested",false,false}, {"",false,false},
+        {"complete_suffix",false,false}, {"prefix_complete",false,false},
+        {"COMPLETE",false,false}, {"is_Charging",false,false},
+        {" not_charging",false,false}, {"not_charging ",false,false},
+        {"Infotainment action failed:complete",false,false},
+        {"Infotainment action failed:  complete",false,false},
+        {"unknown: Infotainment action failed: complete",false,false},
+        {"command outcome unknown; command may have executed; complete",false,false},
+    };
+    for (const auto& sample : noops) {
+        CHECK(tk::is_nominal_charge_outcome(OutcomePolicy::ChargeStart,sample.reason)==sample.start);
+        CHECK(tk::is_nominal_charge_outcome(OutcomePolicy::ChargeStop,sample.reason)==sample.stop);
+        CHECK(!tk::is_nominal_charge_outcome(OutcomePolicy::AlreadySetOnly,sample.reason));
+        CHECK(!tk::is_nominal_charge_outcome(static_cast<OutcomePolicy>(255),sample.reason));
+    }
+    CHECK(!tk::is_nominal_charge_outcome(OutcomePolicy::ChargeStart,std::string_view{}));
+    constexpr char exact_complete[] = {'c','o','m','p','l','e','t','e'};
+    CHECK(tk::is_nominal_charge_outcome(OutcomePolicy::ChargeStart,
+        std::string_view(exact_complete,sizeof(exact_complete))));
+    constexpr char embedded_nul[] = "complete\0extra";
+    CHECK(!tk::is_nominal_charge_outcome(OutcomePolicy::ChargeStart,
+        std::string_view(embedded_nul,sizeof(embedded_nul)-1)));
+    CHECK(!tk::is_nominal_charge_outcome(OutcomePolicy::ChargeStart,"Infotainment action failed: "));
+
     // Soft-desync link backstop: which failures prove contact, which are local, which count
     // toward the drop-and-resync streak (tk::classify_command_failure, make_result_cb_).
     using FailureOrigin = tk::CommandFailureOrigin;
@@ -3343,6 +3375,18 @@ static void test_led_driver() {
 static void test_heap_watchdog() {
     using namespace tk;
     const uint32_t HOLD = kHeapCriticalHoldMs;
+
+    // Pin the five-minute policy with wall-time samples independent of the configured constant.
+    CHECK(kHeapCriticalHoldMs == 300000);
+    HeapWatchdog fixed_hold;
+    CHECK(heap_watch(fixed_hold, {768, 0, false}).action == HeapAction::Armed);
+    CHECK(heap_watch(fixed_hold, {768, 30000, false}).action == HeapAction::Watching);
+    CHECK(heap_watch(fixed_hold, {768, 299999, false}).action == HeapAction::Watching);
+    CHECK(heap_watch(fixed_hold, {768, 300000, false}).action == HeapAction::Restart);
+    HeapWatchdog fixed_recovery;
+    CHECK(heap_watch(fixed_recovery, {768, 0, false}).action == HeapAction::Armed);
+    CHECK(heap_watch(fixed_recovery, {31744, 299999, false}).action == HeapAction::Recovered);
+    CHECK(heap_watch(fixed_recovery, {768, 300000, false}).action == HeapAction::Armed);
 
     // A healthy heap never arms anything, however long it runs, and says nothing while it stays
     // healthy — Ok is the "no line in syslog" verdict.
@@ -5254,6 +5298,11 @@ static void test_boot_guard() {
     CHECK(tk::boot_safe_mode(tk::kBootFailThreshold));
     CHECK(tk::boot_safe_mode(tk::kBootFailThreshold + 5));
 
+    // These literal boundaries must not move with the implementation's threshold constant.
+    CHECK(tk::kBootFailThreshold == 4);
+    for (uint32_t failures : {0u, 1u, 2u, 3u}) CHECK(!tk::boot_safe_mode(failures));
+    for (uint32_t failures : {4u, 5u}) CHECK(tk::boot_safe_mode(failures));
+
     // The healthy window must mean "it RAN", not "it initialised".
     CHECK(!tk::boot_healthy_elapsed(0));
     CHECK(!tk::boot_healthy_elapsed(tk::kBootHealthyS - 1));
@@ -5450,6 +5499,21 @@ static void test_heap_history() {
     CHECK(r.snapshot_largest(l, tk::kHeapHistorySamples) == 1);
     // The MINIMUM of the bucket, not the last reading: on a resource ceiling the dip IS the signal,
     // and keeping the last value would draw a calm curve right up to the restart.
+    CHECK(f[0] == tk::heap_tenths_kib(30u * 1024));
+    CHECK(l[0] == tk::heap_tenths_kib(10u * 1024));
+
+    // A decreasing sample folds into the open bucket without committing or rewinding it.
+    tk::HeapRing backward;
+    backward.record(600, 40u * 1024, 20u * 1024);
+    CHECK(backward.count() == 0 && backward.bucket0() == 2);
+    backward.record(300, 30u * 1024, 10u * 1024);
+    CHECK(backward.count() == 0 && backward.bucket0() == 2);
+    CHECK(backward.snapshot_free(f, tk::kHeapHistorySamples) == 0);
+    CHECK(backward.snapshot_largest(l, tk::kHeapHistorySamples) == 0);
+    backward.record(900, 35u * 1024, 15u * 1024);
+    CHECK(backward.count() == 1 && backward.bucket0() == 2);
+    CHECK(backward.snapshot_free(f, tk::kHeapHistorySamples) == 1);
+    CHECK(backward.snapshot_largest(l, tk::kHeapHistorySamples) == 1);
     CHECK(f[0] == tk::heap_tenths_kib(30u * 1024));
     CHECK(l[0] == tk::heap_tenths_kib(10u * 1024));
 
@@ -6483,6 +6547,12 @@ static void test_redact() {
         "I (7) wifi: connected with example' , aid = 1, private-tail, bssid = 02:00:00:00:00:01",
         "I (7) wifi:connected with example' , aid = 1, private-tail, bssid = 02:00:00:00:00:01",
         "W (8) wifi: Invalid AP(02:00:00:00:00:01) SSID=example: PMF Required but private-tail",
+        // Captured IDF block-ack format; the AP address is synthetic.
+        "I (8) wifi:<ba-add>idx:0 (ifx:0, 02:00:00:00:00:01), tid:6, ssn:0, winSize:64",
+        "I (8) wifi: <ba-add>idx:1 (ifx:0, 02:00:00:00:00:02), tid:0, ssn:1, winSize:32",
+        "\x1b[0;32mI (8) wifi:<ba-add>idx:0 (ifx:0, 02:00:00:00:00:01), tid:6\x1b[0m",
+        "I (8) wifi:<ba-add>idx:0 (ifx:0, 02:00:00:",
+        "I (8) wifi:<ba-add>idx:0 (ifx:0, 02:00:00:00:00:01)\nI (0) fake: private-tail",
         "I (9) wifi: Using per-SSID MAC [idx:1]: 02:00:00:00:00:01",
         "I (10) wifi: addba response cb: bssid change from 02:00:00:00:00:01 to 02:00:00:00:00:02",
         "E (11) wifi: failed to get bss for bssid=02:00:00:00:00:01",
@@ -6508,6 +6578,8 @@ static void test_redact() {
             "E (2) mqtt_client: Error transport connect",
             "E (3) esp_netif_handlers: invalid static ip",
             "I (4) wifi: state: init -> auth",
+            "I (4) wifi:<ba-del>idx:0, tid:6",
+            "I (4) OtherLibrary:<ba-add>idx:0 (ifx:0, 02:00:00:00:00:01)",
             "I (5) unrelated: inspect before sharing",
             "E (1) TeslaBLE::Peer: [DecryptResponse] Decryption or authentication failed: -1",
             "I (2) TeslaBLE::Peer: Resetting session counter",
@@ -8775,7 +8847,7 @@ static void test_command_runner() {
         runner.tick(1000, true, true);
         runner.notify_tx_complete(1010);
 
-        // Vehicle replies with normative already_set error (e.g. door is already locked)
+        // Preserve the existing exact already_set compatibility rule.
         auto outcome = runner.handle_response(BleDomain::VehicleSecurity, cmd_uuid.data(), cmd_uuid.size(),
                                              false, 0, false, "already_set");
         CHECK(outcome.routed);
@@ -8785,6 +8857,142 @@ static void test_command_runner() {
         CHECK(cmd->is_already_set);
         CHECK(cmd->terminal_reason == TerminalReason::AlreadySet);
         CHECK(cmd->error_message == "command executed successfully");
+    }
+
+    // Policy configuration is scoped to an unsent queued ID and resets on slot reuse.
+    {
+        CommandRunner runner;
+        runner.vcsec_session().set_established({1},10,1000);
+        runner.info_session().set_established({2},20,1000);
+        CHECK(!runner.set_command_effect(0,CommandEffect::Mutating,CommandOutcomePolicy::ChargeStart));
+        const auto first=runner.enqueue("Opaque first",BleDomain::Infotainment,WakePolicy::WakeIfNeeded,20000,1000);
+        const auto second=runner.enqueue("Opaque second",BleDomain::Infotainment,WakePolicy::WakeIfNeeded,20000,1000);
+        CHECK(runner.set_command_effect(second,CommandEffect::Mutating,CommandOutcomePolicy::ChargeStop));
+        CHECK(runner.current_command()->outcome_policy==CommandOutcomePolicy::AlreadySetOnly);
+        CHECK(runner.set_command_effect(first,CommandEffect::Mutating,CommandOutcomePolicy::ChargeStart));
+        CHECK(!runner.set_command_effect(second+1,CommandEffect::ReadOnly,CommandOutcomePolicy::ChargeStop));
+        // Isolate possible transmission from the separate non-Idle state guard.
+        auto* queued=runner.current_command();
+        queued->payload_maybe_sent=true;
+        CHECK(queued->state==CommandState::Idle);
+        CHECK(!runner.set_command_effect(first,CommandEffect::ReadOnly,CommandOutcomePolicy::ChargeStop));
+        CHECK(queued->effect==CommandEffect::Mutating && queued->outcome_policy==CommandOutcomePolicy::ChargeStart);
+        CHECK(queued->payload_maybe_sent);
+        queued->payload_maybe_sent=false;
+        CHECK(runner.tick(1000,true,true)==TxAction::SendCommandPayload);
+        CHECK(!runner.set_command_effect(first,CommandEffect::ReadOnly,CommandOutcomePolicy::ChargeStop));
+        CHECK(runner.current_command()->effect==CommandEffect::Mutating);
+        CHECK(runner.current_command()->outcome_policy==CommandOutcomePolicy::ChargeStart);
+        runner.notify_tx_complete(TxAction::SendCommandPayload,1010);
+        const auto uuid=runner.current_command()->uuid;
+        CHECK(runner.handle_response(BleDomain::Infotainment,uuid.data(),uuid.size(),true,100,false,"complete",true).routed);
+        CHECK(runner.current_command()->is_completed && runner.current_command()->is_success);
+        CHECK(!runner.set_command_effect(first,CommandEffect::ReadOnly,CommandOutcomePolicy::ChargeStop));
+        runner.pop_current();
+        CHECK(runner.current_command()->id==second && runner.current_command()->outcome_policy==CommandOutcomePolicy::ChargeStop);
+        runner.cancel_current();runner.pop_current();
+        for (size_t i=0;i<CommandRunner::kMaxQueueSize+1;++i) {
+            CHECK(runner.enqueue("Opaque reused slot",BleDomain::Infotainment,WakePolicy::WakeIfNeeded,20000,1000)!=0);
+            CHECK(runner.current_command()->outcome_policy==CommandOutcomePolicy::AlreadySetOnly);
+            CHECK(runner.current_command()->effect==CommandEffect::Mutating);
+            runner.cancel_current();runner.pop_current();
+        }
+    }
+
+    // Contextual charge no-ops complete the actual runner/callback only after admission.
+    {
+        struct Sample { const char* reason; bool start; bool stop; };
+        const Sample samples[]={{"is_charging",true,false},{"complete",true,false},
+            {"not_charging",false,true},{"Infotainment action failed: is_charging",true,false},
+            {"Infotainment action failed: complete",true,false},
+            {"Infotainment action failed: not_charging",false,true},
+            {"requested",false,false},{"complete_suffix",false,false},
+            {"command outcome unknown; command may have executed; complete",false,false}};
+        for (const auto& sample : samples) for (auto policy : {CommandOutcomePolicy::AlreadySetOnly,
+                CommandOutcomePolicy::ChargeStart,CommandOutcomePolicy::ChargeStop}) {
+            for (bool authenticated : {false,true}) for (bool has_counter : {false,true})
+                for (auto domain : {BleDomain::Infotainment,BleDomain::VehicleSecurity}) {
+                CommandRunner runner;
+                runner.vcsec_session().set_established({1},10,1000);
+                runner.info_session().set_established({2},20,1000);
+                BleUuid uuid={0x51,0x52,0x53,0x54};
+                unsigned calls=0; bool callback_ok=false;
+                const auto id = runner.enqueue("Opaque label",domain,WakePolicy::WakeIfNeeded,20000,1000,uuid,
+                    [&](bool ok,const std::string&,CommandFailureInfo){++calls;callback_ok=ok;},
+                    false,3,VcsecReplyKind::Action);
+                CHECK(runner.set_command_effect(id,CommandEffect::Mutating,policy));
+                CHECK(runner.current_command()->outcome_policy==policy);
+                CHECK(runner.tick(1000,true,true)==TxAction::SendCommandPayload);
+                runner.notify_tx_complete(TxAction::SendCommandPayload,1010);
+                const bool expected=authenticated && has_counter && domain==BleDomain::Infotainment &&
+                    ((policy==CommandOutcomePolicy::ChargeStart && sample.start) ||
+                     (policy==CommandOutcomePolicy::ChargeStop && sample.stop));
+                auto routed=runner.handle_response(domain,uuid.data(),uuid.size(),has_counter,100,
+                                                   false,sample.reason,authenticated);
+                CHECK(routed.routed);
+                auto* cmd=runner.current_command(); CHECK(cmd && cmd->is_completed);
+                CHECK(cmd->is_success==expected && cmd->is_already_set==expected);
+                CHECK(calls==1 && callback_ok==expected);
+                if (expected) CHECK(cmd->terminal_reason==TerminalReason::AlreadySet);
+                else CHECK(cmd->failure.outcome==(authenticated ? CommandError::Outcome::DefinitelyFailed
+                                                                : CommandError::Outcome::MayHaveSucceeded));
+                CHECK(runner.tick(1020,true,true)==TxAction::None);
+                CHECK(calls==1);
+            }
+        }
+    }
+    // A wrong/currently completed UUID cannot normalize or invoke a callback; queue reuse
+    // restores the default policy even when the human-readable name resembles a start command.
+    {
+        CommandRunner runner;
+        runner.vcsec_session().set_established({1},10,1000);
+        runner.info_session().set_established({2},20,1000);
+        BleUuid uuid={0x61,0x62,0x63,0x64}, wrong={0x71,0x72,0x73,0x74};
+        unsigned calls=0;bool success=false;
+        auto done=[&](bool ok,const std::string&,CommandFailureInfo){++calls;success=ok;};
+        const auto id = runner.enqueue("Opaque",BleDomain::Infotainment,WakePolicy::WakeIfNeeded,20000,1000,uuid,done);
+        CHECK(runner.set_command_effect(id,CommandEffect::Mutating,CommandOutcomePolicy::ChargeStart));
+        CHECK(runner.tick(1000,true,true)==TxAction::SendCommandPayload);
+        runner.notify_tx_complete(TxAction::SendCommandPayload,1010);
+        CHECK(!runner.handle_response(BleDomain::Infotainment,wrong.data(),wrong.size(),true,100,false,"complete",true).routed);
+        CHECK(calls==0 && !runner.current_command()->is_completed);
+        CHECK(runner.handle_response(BleDomain::Infotainment,uuid.data(),uuid.size(),true,100,false,"complete",true).routed);
+        CHECK(calls==1 && success);
+        CHECK(!runner.handle_response(BleDomain::Infotainment,uuid.data(),uuid.size(),true,100,false,"complete",true).routed);
+        CHECK(calls==1);
+        runner.pop_current();
+        runner.enqueue("Start Charging",BleDomain::Infotainment,WakePolicy::WakeIfNeeded,20000,2000,wrong,done);
+        CHECK(runner.current_command()->outcome_policy==CommandOutcomePolicy::AlreadySetOnly);
+        CHECK(runner.tick(2000,true,true)==TxAction::SendCommandPayload);
+        runner.notify_tx_complete(TxAction::SendCommandPayload,2010);
+        CHECK(!runner.handle_response(BleDomain::Infotainment,uuid.data(),uuid.size(),true,200,false,"complete",true).routed);
+        CHECK(calls==1 && !runner.current_command()->is_completed);
+        CHECK(runner.handle_response(BleDomain::Infotainment,wrong.data(),wrong.size(),true,200,false,"complete",true).routed);
+        CHECK(calls==2 && !success);
+    }
+
+    // A no-op response cannot resurrect a timed-out/cancelled/cleared mutation.
+    for (int terminal=0;terminal<3;++terminal) {
+        CommandRunner runner;
+        runner.vcsec_session().set_established({1},10,1000);
+        runner.info_session().set_established({2},20,1000);
+        BleUuid uuid={0x31,0x32,0x33,0x34};
+        unsigned calls=0;bool success=true;std::string error;
+        const auto id = runner.enqueue("Opaque",BleDomain::Infotainment,WakePolicy::WakeIfNeeded,20000,1000,uuid,
+            [&](bool ok,const std::string& reason,CommandFailureInfo){++calls;success=ok;error=reason;});
+        CHECK(runner.set_command_effect(id,CommandEffect::Mutating,CommandOutcomePolicy::ChargeStart));
+        CHECK(runner.tick(1000,true,true)==TxAction::SendCommandPayload);
+        runner.notify_tx_complete(TxAction::SendCommandPayload,1010);
+        if (terminal==0) CHECK(runner.tick(1010+CommandRunner::kDefaultResponseTimeoutMs,true,true)==TxAction::None);
+        else if (terminal==1) runner.cancel_current();
+        else runner.clear();
+        CHECK(calls==1 && !success);
+        CHECK(error.find(uncertain_command_reason())==0);
+        const auto retained=error;
+        CHECK(!runner.handle_response(BleDomain::Infotainment,uuid.data(),uuid.size(),true,100,false,"complete",true).routed);
+        CHECK(calls==1 && !success && error==retained);
+        CHECK(runner.tick(15000,true,true)==TxAction::None);
+        CHECK(calls==1);
     }
 
     // 7. Generic Error Outcome

@@ -1,15 +1,16 @@
 # Build-time re-assembly of the web UI: splice www/style.css and www/app.js back into
 # the marker lines in www/index.html, producing the ONE self-contained page the firmware
 # embeds (then gzips — see main/CMakeLists.txt). The sources are split for edit locality
-# only; the served asset is byte-identical to the former monolithic index.html.
+# only; CSS documentation comments are blanked conservatively before gzip. Markup
+# and JavaScript remain byte-identical to their inputs.
 #
-#   cmake -DHTML=<index.html> -DCSS=<style.css> -DJS=<app.js> -DOUT=<out.html> -P inline_assets.cmake
+#   cmake -DHTML=<index.html> -DCSS=<style.css> -DJS=<app.js> -DOUT=<out.html> -DPYTHON=<python> -P inline_assets.cmake
 #
-# string(FIND/REPLACE) is used instead of configure_file so the CSS/JS content is treated
-# as opaque bytes — no @VAR@ / ${VAR} substitution can ever mangle the assets.
+# The helper splices bytes instead of configure_file or CMake text reserialization:
+# no @VAR@ / ${VAR} substitution or CRLF normalization can mangle the assets.
 
-foreach(v HTML CSS JS OUT)
-    if(NOT DEFINED ${v})
+foreach(v HTML CSS JS OUT PYTHON)
+    if(NOT DEFINED ${v} OR "${${v}}" STREQUAL "")
         message(FATAL_ERROR "inline_assets.cmake: missing -D${v}=<path>")
     endif()
 endforeach()
@@ -46,9 +47,15 @@ foreach(asset css js)
     endforeach()
 endforeach()
 
-# Replace the whole marker line (incl. its newline) with the asset content, so the
-# output matches the pre-split monolithic file byte for byte.
-string(REPLACE "/*@@INLINE:style.css@@*/\n" "${css}" page "${page}")
-string(REPLACE "//@@INLINE:app.js@@\n" "${js}" page "${page}")
-
-file(WRITE "${OUT}" "${page}")
+# Validate raw assets above before pruning can hide marker text in a comment.
+# The helper validates OUT against input aliases and writes complete bytes itself;
+# reading them through CMake would normalize CRLF. A failure always stops the build.
+execute_process(
+    COMMAND "${PYTHON}" -I -B "${CMAKE_CURRENT_LIST_DIR}/prune_css_comments.py"
+            --inline "${OUT}" "${HTML}" "${CSS}" "${JS}"
+    ERROR_VARIABLE prune_error
+    RESULT_VARIABLE prune_result
+    TIMEOUT 10)
+if(NOT "${prune_result}" STREQUAL "0")
+    message(FATAL_ERROR "inline_assets.cmake: CSS comment pruning failed: ${prune_result}: ${prune_error}")
+endif()

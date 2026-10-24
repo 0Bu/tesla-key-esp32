@@ -3,6 +3,7 @@
 #include "http_effect_reply.hpp"
 #include "time_sync.hpp"
 #include "logic/command_result.hpp"
+#include "logic/command_runner.hpp"
 #include "logic/config_request.hpp"
 #include "logic/http_route.hpp"
 #include "logic/json_syntax.hpp"
@@ -31,6 +32,8 @@
 #include <iostream>
 
 static int checks;
+static bool runner_reply_enabled, runner_success;
+static std::string runner_error;
 static bool throw_confirmation;
 static bool allocation_fault_armed;
 static int allocation_fault_index, effect_allocations;
@@ -45,7 +48,7 @@ using Handler = esp_err_t(*)(GuardedReq);
 static Handler selected;
 static bool fail_json, throw_error, throw_remove, throw_effect, save_ok, start_ok, ntp_synced;
 static bool fail_json_after_effect, guard_ok, key_refused, require_config_owner;
-static int effects, saves, removes, restarts, confirms, clock_calls;
+static int effects, saves, removes, restarts, confirms, clock_calls, vin_transaction_entries;
 static int transport_calls, fail_transport, response_attempts, response_status, response_ends;
 static BrowserClockStatus clock_status;
 static bool updating;
@@ -244,6 +247,7 @@ struct VehicleController {
         effect_done(); return {rotation};
     }
     template<typename Stage> NewVehicleResetResult reset_for_new_vehicle(Stage stage) {
+        ++vin_transaction_entries;
         // Model the platform transaction only; the compiled handler owns every result branch.
         if (vin_result==tk::VinTransitionApply::IdentityUnverified ||
             vin_result==tk::VinTransitionApply::IdentityRecoveryPending) {
@@ -254,11 +258,11 @@ struct VehicleController {
         if (!stage(previous_key_id)) return {tk::VinTransitionApply::StageFailed};
         effect_done(); return {vin_result};
     }
-    std::string last_command_error() { if (throw_error) throw std::bad_alloc(); return "offline refusal"; }
+    std::string last_command_error() { if (throw_error) throw std::bad_alloc(); return runner_reply_enabled ? runner_error : "offline refusal"; }
 };
 static VehicleController vehicle;
 static VehicleController* g_vehicle=&vehicle;
-static bool execute_vehicle_command(VehicleController&,tk::CmdKind,const int*,const bool*) { effect_done(); return start_ok; }
+static bool execute_vehicle_command(VehicleController&,tk::CmdKind,const int*,const bool*) { effect_done(); return runner_reply_enabled ? runner_success : start_ok; }
 static const char* api_command_name="charge_start";
 static const char* api_path_vin="TESTVIN0000000001";
 static const char* api_body=nullptr;
@@ -293,6 +297,7 @@ static esp_err_t handle_all_dispatch(GuardedReq rq) { return selected(rq); }
 #include "effect_reply_adapters.generated.hpp"
 
 static void reset(Handler handler) {
+    runner_reply_enabled=false; runner_success=false; runner_error.clear();
     CHECK(s_operation_gate.state()==tk::OtaIdentityGateState::Idle);
     crash_erase_result=tk::CrashEraseResult::Erased; crash_open_result=tk::CoredumpOpenResult::Ready;
     crash_owned=false; crash_dismissed=false; crash_erase_calls=0; crash_read_calls=0;
@@ -306,7 +311,7 @@ static void reset(Handler handler) {
     api_command_name="charge_start"; api_body=nullptr; api_path_vin="TESTVIN0000000001";
     selected=handler; fail_json=false; throw_error=false; throw_remove=false; throw_effect=false;
     fail_json_after_effect=false; save_ok=true; start_ok=true; ntp_synced=true; guard_ok=true;
-    key_refused=false; effects=0; saves=0; removes=0; restarts=0; confirms=0;
+    key_refused=false; effects=0; saves=0; removes=0; restarts=0; confirms=0; vin_transaction_entries=0;
     clock_calls=0; transport_calls=0; fail_transport=0;
     response_attempts=0; response_status=0; response_ends=0; wire_size=0; wire[0]='\0';
     rotation=tk::KeyRotationResult::Complete; vin_result=tk::VinTransitionApply::Complete;
@@ -352,8 +357,66 @@ static esp_err_t observe_wifi_reply(GuardedReq rq) {
     observed_effect_bits=rq.reply()->state.possible_effects;
     return result;
 }
+static esp_err_t mcp_named_command(GuardedReq rq) {
+    char input[96];
+    const int count=std::snprintf(input,sizeof(input),"{\"params\":{\"name\":\"%s\"}}",api_command_name);
+    CHECK(count>=0 && static_cast<size_t>(count)<sizeof(input));
+    auto request=tk::json_owner(cJSON_Parse(input));
+    tk::mcp_json::RpcId id; id.kind=tk::mcp_json::RpcIdKind::Number; id.number=1;
+    return handle_tools_call_(rq,id,std::move(request));
+}
+
+static void test_nominal_charge_reply_adapters() {
+    using Policy=tk::CommandOutcomePolicy;
+    struct Case { Policy policy; const char* reason; bool expected; };
+    const Case cases[]={{Policy::ChargeStart,"is_charging",true},
+        {Policy::ChargeStart,"Infotainment action failed: complete",true},
+        {Policy::ChargeStop,"Infotainment action failed: not_charging",true},
+        {Policy::ChargeStart,"not_charging",false},{Policy::ChargeStop,"complete",false},
+        {Policy::AlreadySetOnly,"Infotainment action failed: complete",false},
+        {Policy::ChargeStart,"requested",false},{Policy::ChargeStart,"complete_suffix",false}};
+    for (const auto& sample:cases) for (bool authenticated:{false,true}) for (bool has_counter:{false,true}) {
+        tk::CommandRunner runner;
+        runner.vcsec_session().set_established({1},10,1000);
+        runner.info_session().set_established({2},20,1000);
+        tk::BleUuid uuid={0x41,0x42,0x43,0x44};
+        unsigned calls=0;bool result=false;std::string error;
+        const auto id=runner.enqueue("Opaque label",tk::BleDomain::Infotainment,tk::WakePolicy::WakeIfNeeded,
+            20000,1000,uuid,[&](bool ok,const std::string& err,tk::CommandFailureInfo){++calls;result=ok;error=err;});
+        CHECK(runner.set_command_effect(id,tk::CommandEffect::Mutating,sample.policy));
+        CHECK(runner.tick(1000,true,true)==tk::TxAction::SendCommandPayload);
+        runner.notify_tx_complete(tk::TxAction::SendCommandPayload,1010);
+        CHECK(runner.handle_response(tk::BleDomain::Infotainment,uuid.data(),uuid.size(),has_counter,100,
+                                     false,sample.reason,authenticated).routed);
+        const bool expected=authenticated && has_counter && sample.expected;
+        CHECK(calls==1 && result==expected);
+        for (auto handler:{handle_command,mcp_named_command}) {
+            reset(handler);runner_reply_enabled=true;runner_success=result;runner_error=error;
+            api_command_name=sample.policy==Policy::ChargeStop?"charge_stop":"charge_start";
+            httpd_req_t request;
+            CHECK(handle_all(&request)==ESP_OK && effects==1);
+            const auto json=reply_json();CHECK(json);
+            if (handler==handle_command) {
+                CHECK(response_status==(expected?200:502));
+                const auto* response=cJSON_GetObjectItemCaseSensitive(json.get(),"response");CHECK(response);
+                CHECK(bool(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(response,"result")))==expected);
+                const auto* reason=cJSON_GetObjectItemCaseSensitive(response,"reason");CHECK(cJSON_IsString(reason));
+                CHECK(std::strcmp(reason->valuestring,expected?"command executed successfully":error.c_str())==0);
+            } else {
+                CHECK(response_status==200);
+                const auto* response=cJSON_GetObjectItemCaseSensitive(json.get(),"result");CHECK(response);
+                CHECK(bool(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(response,"isError")))==!expected);
+                const auto* content=cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(response,"content"),0);CHECK(content);
+                const auto* text=cJSON_GetObjectItemCaseSensitive(content,"text");CHECK(cJSON_IsString(text));
+                CHECK(std::strcmp(text->valuestring,expected?"command executed successfully":error.c_str())==0);
+            }
+        }
+    }
+}
+
 int main() {
     cJSON_Hooks hooks{gate_malloc,gate_free}; cJSON_InitHooks(&hooks);
+    test_nominal_charge_reply_adapters();
     httpd_req_t req;
     for (auto handler : {shell_standard_fault_before_effect,shell_unknown_fault_before_effect}) {
         reset(handler); CHECK(handle_all(&req)==ESP_OK);
@@ -564,6 +627,18 @@ int main() {
         reset(handle_ota_check); ntp_synced=false; query=absent;
         CHECK(handle_all(&req)==0 && response_status==200 && clock_calls==0 && check_starts==1);
     }
+    reset(handle_set_vin); guard_ok=false; previous_key_id="AA:BB:CC:DD";
+    req.input="{\"vin\":\"NEWVIN00000000001\"}";
+    CHECK(handle_all(&req)==ESP_OK);
+    CHECK(response_status==503 && response_attempts==1);
+    CHECK(vin_transaction_entries==0);
+    CHECK(effects==0 && saves==0 && removes==0 && restarts==0 && confirms==0);
+    reset(handle_set_vin); previous_key_id="AA:BB:CC:DD";
+    req.input="{\"vin\":\"NEWVIN00000000001\"}";
+    CHECK(handle_all(&req)==ESP_OK);
+    CHECK(response_status==200 && response_attempts==1);
+    CHECK(vin_transaction_entries==1 && saves>0 && effects>0 && restarts==1);
+
     reset(handle_set_vin); previous_key_id="broken-format";
     req.input="{\"vin\":\"NEWVIN00000000001\"}";
     CHECK(handle_all(&req)==0); CHECK(response_status==500);
