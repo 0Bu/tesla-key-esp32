@@ -43,6 +43,7 @@ const PAIRED_OPEN_ATTEMPTS = 3;
 const PAIRED_OPEN_RETRY_MS = 500;
 // A board that re-enumerates on its reset pulse reports a new USB connect. Checking it again would
 // reset it again; a connect this soon after the installer's own port activity waits for a click.
+// The installer cannot tell that from a quick manual replug, which waits for the click too.
 const RECONNECT_GRACE_MS = 5000;
 const ANSI_CONTROL_SEQUENCE = /\x1B\[[0-?]*[ -/]*[@-~]/g;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
@@ -470,7 +471,8 @@ export function combinedProgress(fileArray, fileIndex, written, total) {
 }
 
 // The schema-v2 part order is also the write order: the OTA selector is written last, so a stopped
-// update keeps the previous boot selection; the bootloader's image check guards everything else.
+// update keeps the previous boot selection. A stopped bootloader or partition-table write still
+// needs another USB install.
 function expectedPartLayout(chipFamily) {
   return [
     { role: "bootloader", offset: chipFamily === "ESP32" ? 0x1000 : 0, maxSize: chipFamily === "ESP32" ? 0x7000 : 0x8000 },
@@ -1161,7 +1163,7 @@ export function attachWebInstaller({
   followLog = true, // open the live log after connecting and after installing
   trace = false, // also log esptool-js's packet trace (diagnostics; the page enables it with ?trace)
   delay = sleep, // reset pulses and retry pauses
-  now = () => Date.now(), // the reconnect grace clock
+  now = () => globalThis.performance?.now?.() ?? Date.now(), // the reconnect grace clock (monotonic)
   // Clean flash deletes the configuration and pairing; it needs its own confirmation.
   confirmEraseImpl = (message) => globalThis.confirm?.(message) === true
 }) {
@@ -1577,7 +1579,8 @@ export function attachWebInstaller({
       if (!installed) {
         // The offer always carries its partition tables; without one the device was not inspected.
       } else if (installed.error) {
-        appendStatusLine(`Installed firmware unknown: ${installed.error} Use Flash only if the board already runs tesla-key-esp32`, "warning");
+        const reason = /[.!?]$/.test(installed.error) ? installed.error : `${installed.error}.`;
+        appendStatusLine(`Installed firmware unknown: ${reason} Use Flash only if the board already runs tesla-key-esp32`, "warning");
       } else {
         appendStatusLine(describeInstalled(installed));
         if (!session.device.keepable) appendStatusLine("Clean flash required", "warning");
@@ -1754,7 +1757,9 @@ export function attachWebInstaller({
   if (typeof serial?.addEventListener === "function") {
     serial.addEventListener("connect", () => {
       if (now() - lastPortActivity < RECONNECT_GRACE_MS) {
-        if (serialSupported && !current?.compatible) appendStatusLine("USB device reappeared right after a reset; click Connect to check it");
+        if (serialSupported && !current?.compatible && !foreground) {
+          appendStatusLine(`USB device reconnected within ${RECONNECT_GRACE_MS / 1000} s of its last use; click Connect to check it`);
+        }
         return;
       }
       return reconnectPaired();

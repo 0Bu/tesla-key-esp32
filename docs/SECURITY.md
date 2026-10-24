@@ -69,11 +69,12 @@ its boot slot runs `tesla-key-esp32`; this read-only check is a safeguard, not a
 and a device that cannot be read keeps both choices. Flash over another firmware's NVS can stop this
 firmware at boot, because it never erases an NVS partition it cannot initialize. Installer writes
 require the flasher stub: the ROM loader erases 16 KiB blocks, so the partition-table write would
-reach into `nvs`. Installer **Clean flash**, merged-image writes and full flash erases destroy NVS.
-Each **Clean flash** requires a separate confirmation with a secret-NVS backup reminder before any
-flash work starts. NVS remains at
-`0x9000` for `0x6000` bytes. Firmware rollback does not restore keys/configuration. Destructive or
-identity work needs explicit authorization and a backup/rollback plan.
+reach into `nvs`.
+
+Installer **Clean flash**, merged-image writes and full flash erases destroy NVS. Each **Clean
+flash** requires a separate confirmation with a secret-NVS backup reminder before any flash work
+starts. Firmware rollback does not restore keys/configuration. Destructive or identity work needs
+explicit authorization and a backup/rollback plan.
 
 ## HTTP API exposure
 

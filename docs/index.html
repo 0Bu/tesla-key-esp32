@@ -148,7 +148,7 @@ button:disabled { cursor:default; opacity:.5; }
       <li>Open <code>http://tesla-key-esp32.local</code>. Key setup and pairing run automatically; when pairing is needed, place a Tesla keycard on the console reader and approve the request on the touchscreen.</li>
       <li>Later updates install over the air from the device page.</li>
     </ol>
-    <p><strong>Connecting restarts the board:</strong> the check enters its bootloader and the log starts the firmware again. A single port this page is paired with reconnects when the page loads or the board is plugged in.</p>
+    <p><strong>Connecting restarts the board:</strong> the check enters its bootloader and the log starts the firmware again. A single port this page is paired with reconnects when the page loads, or when the board is plugged in more than 5 s after it was unplugged; otherwise click <strong>Connect</strong>.</p>
     <p><strong>Two USB ports?</strong> Choose the board's native port (<code>USB JTAG/serial debug unit</code>), not the UART bridge.</p>
   </section>
   <footer class="installer-footer"><a href="./LICENSE" target="_blank" rel="noopener noreferrer">AGPL-3.0</a> ·

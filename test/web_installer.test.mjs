@@ -1997,7 +1997,7 @@ test("?trace adds esptool-js's packet trace to the log as whole lines, and only 
 test("a single paired port reconnects without the chooser after a reload or a replug", async (t) => {
   const [a, b] = ["A", "B"].map((name) => lifecyclePort(name));
   const { controller, serial, dom, clock } = await attachedLifecycle(t, [a, b], { forget: true });
-  // A real replug happens well after the installer's last port activity.
+  // These replugs come later than the reconnect grace; a quick replug has its own test.
   const plugIn = async () => { clock.advance(); await serial.listeners.get("connect")[0](); };
   await controller.reconnectPaired();
   assert.deepEqual([controller.getSelectedPort(), serial.chooserCalls], [null, 0], "two paired ports are left to the chooser");
@@ -2047,11 +2047,32 @@ test("a board that re-enumerates on the installer's reset is not checked and res
   await serial.listeners.get("connect")[0]();
   assert.equal(controller.isConnected(), false);
   assert.deepEqual({ opens: a.opens, signals: a.signals.length }, settled, "no second check, so no second reset");
-  assert.match(logLines(dom, "status").at(-1), /\] USB device reappeared right after a reset; click Connect to check it$/);
+  assert.match(logLines(dom, "status").at(-1), /\] USB device reconnected within 5 s of its last use; click Connect to check it$/);
   clock.advance(6000);
   await serial.listeners.get("connect")[0]();
   assert.equal(controller.isConnected(), true, "a later plug-in reconnects as usual");
   assert.equal(a.opens, settled.opens + 1);
+});
+
+test("a quick manual replug waits for Connect; one after the grace reconnects by itself", async (t) => {
+  const a = lifecyclePort("A");
+  const { controller, serial, dom, clock } = await attachedLifecycle(t, [a], { followLog: true, forget: true });
+  await controller.reconnectPaired();
+  assert.equal(controller.isConnected(), true);
+  // Long after the check, the cable is pulled and pushed back in within two seconds.
+  clock.advance(60000);
+  await serial.listeners.get("disconnect")[0]({ port: a });
+  const opens = a.opens;
+  clock.advance(2000);
+  await serial.listeners.get("connect")[0]();
+  assert.equal(controller.isConnected(), false, "the unplug cleanup itself opens the grace window");
+  assert.equal(a.opens, opens);
+  assert.match(logLines(dom, "status").at(-1), /\] USB device reconnected within 5 s of its last use; click Connect to check it$/);
+  await serial.listeners.get("disconnect")[0]({ port: a });
+  clock.advance(3000);
+  await serial.listeners.get("connect")[0]();
+  assert.equal(controller.isConnected(), true, "5 s after the unplug, plugging in reconnects");
+  assert.equal(a.opens, opens + 1);
 });
 
 test("a busy paired port is retried quietly by the check itself and gets one line", async (t) => {

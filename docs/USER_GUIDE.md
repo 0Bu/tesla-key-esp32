@@ -94,12 +94,13 @@ stop the new firmware at boot.
 
 - After an install the log shows `Booted <version>`, or a warning after 20 s.
 - **Disconnect** also removes the browser's permission for the port where the browser supports it.
-  A single port that is still paired reconnects when the page loads or the board is plugged in;
-  that check restarts the board.
+- A single port that is still paired reconnects by itself when the page loads, or when the board
+  is plugged in more than 5 s after it was unplugged or last used by the page; that check restarts
+  the board. Sooner, for example after the board's own reset, the log asks for **Connect**, so the
+  board is not reset again. Several paired ports always wait for **Connect**.
 - After a timeout, **Reset**, **Flash** and **Clean flash** stay disabled until the stopped serial
   operation has released the port; then retry.
-- After a USB disconnect, plug the board back in. A single paired port reconnects by itself;
-  otherwise click **Connect**.
+- After a USB disconnect, plug the board back in; click **Connect** if it does not reconnect.
 - If the log says the port remains reserved, reconnect the board and reload the page.
 - Add `?trace` to the installer address to log esptool-js's packet trace.
 
