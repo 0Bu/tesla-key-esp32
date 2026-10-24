@@ -65,6 +65,9 @@
 
 namespace tk {
 
+// Typed boot evidence shared by the storage adapter and pure restart/boot-window policy.
+enum class RebootReasonState : uint8_t { Missing, Present, Error };
+
 // Below this, the largest contiguous block can no longer satisfy the allocations normal
 // operation makes. Healthy steady state is 31744 B and the boot-time low-water mark is ~40 KB;
 // the wedge sat at 480–1536 B. 4 KB is far under anything healthy and far over the wedge, so it

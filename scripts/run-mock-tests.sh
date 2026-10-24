@@ -71,6 +71,9 @@ if [ "$REQUIRE_ALL" = 1 ]; then
         test/test_log_origin_contract.py \
         test/test_diagnostic_export_guidance.py \
         test/test_runtime_boundary_contract.py \
+        test/generate_heap_supervisor_adapter.py \
+        test/test_heap_supervisor.cpp \
+        test/stubs/esp_attr.h \
         test/test_charge_presentation.py \
         test/test_command_outcomes.py \
         test/test_inline_assets.py \
@@ -165,6 +168,12 @@ else
         -o "$BUILD_DIR/runtime_boundary_tests" \
         test/test_runtime_boundaries.cpp test/test_background_poll.cpp test/test_ota_admission.cpp test/test_coredump_hash.cpp main/diag_log.cpp main/stack_watch.cpp main/safe_mode.cpp
     run_gate "execute runtime boundary tests" 120 "$BUILD_DIR/runtime_boundary_tests"
+    run_gate "generate heap supervisor adapters" 120 python3 test/generate_heap_supervisor_adapter.py \
+        "$BUILD_DIR/heap_supervisor_adapter.generated.hpp"
+    run_gate "compile heap supervisor tests" 120 "$CXX" -std=c++17 -Wall -Wextra -Werror \
+        -Itest/stubs -Imain -I"$BUILD_DIR" -o "$BUILD_DIR/heap_supervisor_tests" \
+        test/test_heap_supervisor.cpp main/safe_mode.cpp main/heap_trend.cpp
+    run_gate "execute heap supervisor tests" 120 "$BUILD_DIR/heap_supervisor_tests"
     run_gate "generate clock shell adapters" 120 python3 test/generate_clock_adapters.py \
         "$BUILD_DIR/clock_adapters.generated.hpp"
     run_gate "compile clock shell tests" 120 "$CXX" -std=c++17 -Wall -Wextra -Werror \

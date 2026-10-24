@@ -24,6 +24,7 @@ idf_component_register(
         "runtime_admission.cpp"
         "stack_watch.cpp"
         "heap_trend.cpp"
+        "heap_supervisor.cpp"
         "config_blob.cpp"
         "ota_update.cpp"
         "mqtt_ha.cpp"
@@ -91,8 +92,8 @@ target_compile_options(${COMPONENT_LIB} PRIVATE
 # Assemble + pre-compress the web UI at build time. The sources are split for edit
 # locality — www/index.html (markup with inline markers), www/style.css, www/app.js —
 # and inline_assets.cmake splices them back into the ONE self-contained page the device
-# serves. The bounded Python helper blanks whole-line CSS documentation comments;
-# source comments remain readable, while markup, JavaScript and CSS tokens are kept.
+# serves. The bounded Python helper blanks whole-line CSS/JavaScript documentation;
+# source comments remain readable, while markup and code tokens are kept.
 # Shipping the page pre-gzipped saves flash space and transfer bytes.
 # Regenerated when an input or generator changes, so the served page never goes stale
 # (the UI changes with each flash/OTA). The EMBED_FILES path above points at the final

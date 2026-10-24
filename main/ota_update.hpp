@@ -113,6 +113,24 @@ private:
 bool ota_fault_restart_begin();
 void ota_fault_restart_cancel();
 
+// Fault/rollback admission. Before a confirmed effect, scope exit releases this owner only.
+// seal() retains it for shutdown even if subsequent logging throws or a restart returns.
+class OtaFaultRestartGuard {
+public:
+    OtaFaultRestartGuard() noexcept;
+    ~OtaFaultRestartGuard() noexcept;
+    OtaFaultRestartGuard(const OtaFaultRestartGuard&) = delete;
+    OtaFaultRestartGuard& operator=(const OtaFaultRestartGuard&) = delete;
+    OtaFaultRestartGuard(OtaFaultRestartGuard&&) = delete;
+    OtaFaultRestartGuard& operator=(OtaFaultRestartGuard&&) = delete;
+    bool held() const noexcept { return acquisition_.acquired; }
+    tk::OtaIdentityGateState observed_owner() const noexcept { return acquisition_.observed; }
+    void seal() noexcept { if (held()) sealed_ = true; }
+private:
+    tk::OperationAcquisition acquisition_;
+    bool sealed_{false};
+};
+
 // Serialize the irreversible PENDING_VERIFY -> VALID transition against OTA workers, identity
 // journals and a deliberate fault restart. The health task must re-check the heap only after this
 // guard is held, then keep it alive through esp_ota_mark_app_valid_cancel_rollback().
@@ -127,9 +145,11 @@ public:
     OtaHealthCommitGuard& operator=(OtaHealthCommitGuard&&) = delete;
 
     explicit operator bool() const { return held_; }
+    tk::OtaIdentityGateState observed_owner() const noexcept { return observed_; }
 
 private:
     bool held_ = false;
+    tk::OtaIdentityGateState observed_ = tk::OtaIdentityGateState::Idle;
 };
 
 // A request owns this lease from before cfg_save through reply/catch/restart. Construction
@@ -145,8 +165,12 @@ public:
     OtaConfigRestartGuard& operator=(OtaConfigRestartGuard&&) = delete;
     [[nodiscard]] bool try_begin() noexcept;
     bool owns_gate() const noexcept;
+    // Bootstrap recovery uses this lease without confirming a pending image. After a committed
+    // repair it retains ownership through restart, including a throw or an unexpected return.
+    void seal() noexcept { if (owns_gate()) sealed_ = true; }
 private:
     bool held_{};
+    bool sealed_{};
 };
 
 // Query raw image state under this request's lease. VALID and UNDEFINED are distinct;

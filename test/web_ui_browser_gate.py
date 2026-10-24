@@ -52,6 +52,7 @@ def assembled_page() -> str:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     css = module.prune(raw_css).decode("utf-8")
+    app = module.prune_js(app.encode("utf-8")).decode("utf-8")
     no_animation = "\n*,*::before,*::after{animation:none!important;transition:none!important}\n"
 
     prelude = r'''

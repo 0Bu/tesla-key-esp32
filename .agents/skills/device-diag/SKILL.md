@@ -103,5 +103,5 @@ means disabled NimBLE Security Manager, not heap exhaustion; confirm context bef
 
 Heap logs distinguish excused OTA allocation from recovery, the five-restart cap from success,
 postponed OTA/identity restart from write-failed breadcrumb degradation. Re-derive their exact lines
-in `heap_watchdog.hpp`/`vehicle_telemetry.cpp`; neither postponement nor later healthy heap proves a
+in `main/logic/heap_watchdog.hpp`/`main/heap_supervisor.cpp`; neither postponement nor later healthy heap proves a
 previously blocked gate passed.

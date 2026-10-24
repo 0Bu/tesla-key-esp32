@@ -113,8 +113,11 @@ def apply_series(component, patch_dir, manifest, *, quiet=False):
     require(is_before or is_after, "unknown or mixed source state; rematerialise the component")
     if is_before and not is_after:
         for row in manifest["patches"]:
-            subprocess.run(["patch", "-f", "-N", "-F0", "-V", "none", "-p1", "-d", str(component),
+            subprocess.run(["patch", "--posix", "-f", "-N", "-F0", "-V", "none", "-p1", "-d", str(component),
                             "-i", str(patch_dir / row["name"])], check=True,
+                           # GNU patch 2.7.6 initializes its mismatch-backup default before
+                           # parsing --posix. Set POSIX policy at process startup as well.
+                           env={**os.environ, "POSIXLY_CORRECT": "1"},
                            stdout=subprocess.DEVNULL if quiet else None)
         require(all(digest(regular_leaf(component, r["path"])) == r["afterSha256"]
                     for r in manifest["files"]), "patched source differs from reviewed postimages")
@@ -180,7 +183,9 @@ def self_test():
         patches.mkdir()
         contents = {"src/vehicle.cpp": (b"first\nalpha\nlast\n", b"first\nbeta\nlast\n"),
                     "include/client.h": (b"one\n", b"two\n")}
-        patch_texts = ["--- a/src/vehicle.cpp\n+++ b/src/vehicle.cpp\n@@ -1,3 +1,3 @@\n first\n-alpha\n+beta\n last\n",
+        # The first hunk deliberately needs an offset. GNU patch otherwise leaves backup
+        # files even with '-V none'; POSIX mode must keep the entire work copy exact.
+        patch_texts = ["--- a/src/vehicle.cpp\n+++ b/src/vehicle.cpp\n@@ -2,3 +2,3 @@\n first\n-alpha\n+beta\n last\n",
                        "--- a/include/client.h\n+++ b/include/client.h\n@@ -1 +1 @@\n-one\n+two\n"]
         patch_rows = []
         for index, text in enumerate(patch_texts):
@@ -202,6 +207,8 @@ def self_test():
                 path.write_bytes(data[int(after)])
         fresh()
         apply_series(component, patches, manifest)
+        require({str(path.relative_to(component)) for path in component.rglob("*") if path.is_file()}
+                == {*contents, MARKER}, "patch transformation left extra files")
         apply_series(component, patches, manifest)
         (component / MARKER).unlink()
         apply_series(component, patches, manifest)

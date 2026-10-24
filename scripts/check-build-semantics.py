@@ -1134,8 +1134,9 @@ def validate_generated_firmware_sources(
     spec.loader.exec_module(module)
     try:
         css = module.prune(css.encode("utf-8")).decode("utf-8")
+        js = module.prune_js(js.encode("utf-8")).decode("utf-8")
     except ValueError as exc:
-        raise SemanticsError("web CSS pruning refused repository input") from exc
+        raise SemanticsError("web asset pruning refused repository input") from exc
     expected_page = page.replace(style_marker, css).replace(script_marker, js).encode("utf-8")
     generated_page = canonical_regular_file(
         build_root / "esp-idf/main/index_inlined.html", "generated inlined web page"

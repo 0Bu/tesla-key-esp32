@@ -16,6 +16,7 @@ header = source("main/vehicle_ctrl.hpp")
 outcome_logic = source("main/logic/connect_outcome.hpp")
 pairing = source("main/vehicle_pairing.cpp")
 telemetry = source("main/vehicle_telemetry.cpp")
+supervisor = source("main/heap_supervisor.cpp")
 commands = source("main/vehicle_commands.cpp")
 ble_client = source("main/ble_client.cpp")
 ble_header = source("main/ble_client.hpp")
@@ -142,9 +143,10 @@ verbose_end = ble_client.index("if (on_rx_data_ &&", verbose_start)
 assert 'ESP_LOGI(TAG, "RX notify len=%u: %s"' in ble_client[verbose_start:verbose_end]
 
 # Healthy periodic heap samples are INFO; watchdog threshold/recovery messages remain separate.
-heap_format = 'HEAP free=%u largest_block=%u min_free=%u internal_largest=%u'
-assert f'ESP_LOGI(TAG, "{heap_format}"' in telemetry
-assert f'ESP_LOGW(TAG, "{heap_format}"' not in telemetry
+heap_format = 'HEAP free=%u largest_block=%u min_free=%u internal_largest=%u supervisor_min_stack=%u'
+assert f'ESP_LOGI(TAG, "{heap_format}"' in supervisor
+assert f'ESP_LOGW(TAG, "{heap_format}"' not in supervisor
+assert 'HEAP free=' not in telemetry  # one sampler, independent of Vehicle progress
 
 # A link established by the telemetry loop must close the previous failure streak too.
 already_connected = commands.index("if (ble_->is_connected()) {")

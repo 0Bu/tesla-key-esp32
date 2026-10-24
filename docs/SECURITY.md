@@ -53,7 +53,7 @@ over 15 bytes.
 | `tesla_cfg/last_time` | clock | replaceable cache |
 | `tesla_cfg/vin_txn` | VIN transition | recovery journal |
 | `tesla_cfg/ble_mac` | BLE discovery | replaceable cache |
-| `tesla_cfg/reboot_why` | heap watchdog | recovery journal |
+| `tesla_cfg/reboot_why` | independent heap supervisor | recovery journal |
 | `tesla_cfg/boot_fails` | boot guard | recovery journal |
 | `tesla_cfg/disp_rot` | display | durable across OTA |
 | `tesla_cfg/disp_flip` | display | read-only legacy migration |

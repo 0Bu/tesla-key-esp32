@@ -30,6 +30,10 @@ PATH_LIMIT = 10000
 # Existing source repositories are never allowed to supply Git execution/configuration policy.
 SOURCE_CONFIG = (b"[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n"
                  b"\tbare = false\n\tlogallrefupdates = false\n\tautocrlf = false\n")
+# Import records identity only. Kernel signal policy changes at the first effectful entry.
+PROCESS_ID = os.getpid()
+PROCESS_PARENT = os.getppid()
+_parent_death_armed = False
 
 
 class SourceError(RuntimeError):
@@ -49,6 +53,38 @@ class ColdSourceUnavailable(SourceError):
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise SourceError(message)
+
+
+def parent_lifetime_boundary(*, cli: bool = False) -> None:
+    """Never adopt a new owner after import, arming or a fork of this interpreter."""
+    global _parent_death_armed
+    require(os.getpid() == PROCESS_ID and os.getppid() == PROCESS_PARENT,
+            "dependency admission process owner changed")
+    # A dedicated CLI adopted by init before import has already lost its consumer. An
+    # imported validator may legitimately be launched directly by a container's init.
+    require(not cli or PROCESS_PARENT > 1, "dependency admission CLI has no live consumer")
+    if sys.platform == "linux":
+        try:
+            import ctypes
+            libc = ctypes.CDLL(None, use_errno=True)
+            prctl = libc.prctl
+            prctl.restype = ctypes.c_int
+            prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong,
+                             ctypes.c_ulong, ctypes.c_ulong]
+            if not _parent_death_armed:
+                require(prctl(1, signal.SIGKILL, 0, 0, 0) == 0,
+                        "cannot arm dependency admission parent-death guard")
+            configured = ctypes.c_int()
+            require(prctl(2, ctypes.addressof(configured), 0, 0, 0) == 0
+                    and configured.value == signal.SIGKILL,
+                    "dependency admission parent-death guard differs")
+        except (ImportError, OSError, AttributeError, TypeError, ValueError) as error:
+            raise SourceError("dependency admission parent-death guard unavailable") from error
+    # Linux can reparent between the initial identity check and prctl. Refuse before effects;
+    # an inherited Python flag after fork never substitutes for the kernel guard.
+    require(os.getpid() == PROCESS_ID and os.getppid() == PROCESS_PARENT,
+            "dependency admission process owner changed while arming")
+    _parent_death_armed = True
 
 
 def real_directory(path: Path) -> Path:
@@ -188,6 +224,7 @@ finally:
 
 def git_query(directory: Path, arguments: list[str], environment: dict[str, str],
               maximum: int = 2 * 1024 * 1024) -> bytes:
+    parent_lifetime_boundary()
     # Only fixed plumbing commands and validated object IDs reach this reader.
     command = ["git", "--no-pager", "--no-optional-locks",
                               "--literal-pathspecs", "--git-dir=" + str(directory),
@@ -220,6 +257,7 @@ def git_query(directory: Path, arguments: list[str], environment: dict[str, str]
             for stream in buffers:
                 selector.register(stream, selectors.EVENT_READ)
             while selector.get_map():
+                parent_lifetime_boundary()
                 remaining = deadline - time.monotonic()
                 require(remaining > 0, "exact-source Git query exceeded its deadline")
                 for key, _events in selector.select(min(remaining, 0.25)):
@@ -260,6 +298,7 @@ def git_query(directory: Path, arguments: list[str], environment: dict[str, str]
 @contextlib.contextmanager
 def object_context(source: Path, commit: str) -> Iterator[tuple[Path, dict[str, str]]]:
     """Read source objects through our own context, never the cache's Git configuration."""
+    parent_lifetime_boundary()
     require(SHA1.fullmatch(commit) is not None, "invalid source commit")
     source = real_directory(source)
     metadata = real_directory(source / ".git")
@@ -529,6 +568,7 @@ def populate_cold(source: Path, commit: str, repository: str) -> None:
 def admit_source(source: Path, role: str, record: dict[str, Any], *,
                  existing_only: bool = False) -> dict[str, dict[str, Any]]:
     """Admit an exact owned source without adopting, deleting or repairing existing state."""
+    parent_lifetime_boundary()
     source = Path(os.path.abspath(source))
     real_directory(source.parent)
     require(source.name not in ("", ".", "..") and not source.name.startswith("."),
@@ -621,6 +661,7 @@ def patched_inventory(source: Path, pristine: dict[str, dict[str, Any]],
 def admit_tesla_workspace(root: Path, pristine_source: Path,
                           workspace: Path, *, existing_only: bool = False
                           ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    parent_lifetime_boundary()
     record = read_tesla_record(root)
     pristine = admit_source(pristine_source, "tesla-ble", record, existing_only=existing_only)
     spec = importlib.util.spec_from_file_location("tesla_source_patch_contract",
@@ -716,6 +757,7 @@ def preflight_harness(root: Path, cache: Path) -> None:
 
 
 def object_directory(root: Path, role: str, proof: dict[str, str], salt: str) -> Path:
+    parent_lifetime_boundary()
     root = real_directory(root)
     key = hashlib.sha256(json.dumps({**proof, "salt": salt}, sort_keys=True,
                                     separators=(",", ":")).encode()).hexdigest()
@@ -759,6 +801,7 @@ def main() -> int:
     parser.add_argument("--cache-salt", default="")
     options = parser.parse_args()
     try:
+        parent_lifetime_boundary(cli=True)
         root = real_directory(options.root)
         require(options.source.is_absolute(), "source destination must be absolute")
         if options.role == "harness-preflight":

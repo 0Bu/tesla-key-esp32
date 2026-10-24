@@ -133,6 +133,10 @@
       "test": "test/test_logic.cpp",
       "evidence": "test_heap_json_stream("
     },
+    "heap_supervision.hpp": {
+      "test": "test/test_logic.cpp",
+      "evidence": "test_heap_supervision("
+    },
     "heap_watchdog.hpp": {
       "test": "test/test_logic.cpp",
       "evidence": "test_heap_watchdog("

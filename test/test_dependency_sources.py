@@ -11,11 +11,117 @@ import shutil
 import sys
 import tempfile
 import unittest
+import ctypes
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("dependency_sources_under_test", ROOT / "scripts/dependency_source.py")
 SOURCE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(SOURCE)
+
+
+class ParentBoundaryTests(unittest.TestCase):
+    """Actual boundary function with controlled kernel/identity errors, never real signals."""
+    def setUp(self):
+        spec = importlib.util.spec_from_file_location("fresh_parent_boundary",
+                                                     ROOT / "scripts/dependency_source.py")
+        self.module = importlib.util.module_from_spec(spec)
+        # Import must neither load ctypes nor change kernel signal policy.
+        with patch.dict(sys.modules, {"ctypes": None}):
+            spec.loader.exec_module(self.module)
+        self.module.PROCESS_ID, self.module.PROCESS_PARENT = 100, 200
+        self.calls = []
+        self.configured = 0
+        self.failed_option = None
+
+        def prctl(option, value, *_unused):
+            self.calls.append(option)
+            if self.failed_option == option:
+                return -1
+            if option == 1:
+                self.configured = value
+            elif option == 2:
+                ctypes.c_int.from_address(value).value = self.configured
+            return 0
+        self.prctl = prctl
+        self.libc = type("InertLibc", (), {})()
+        self.libc.prctl = self.prctl
+        for target, value in (("getpid", lambda: 100), ("getppid", lambda: 200)):
+            control = patch.object(self.module.os, target, value)
+            control.start()
+            self.addCleanup(control.stop)
+        control = patch.object(self.module.sys, "platform", "linux")
+        control.start()
+        self.addCleanup(control.stop)
+        control = patch.object(ctypes, "CDLL", return_value=self.libc)
+        control.start()
+        self.addCleanup(control.stop)
+
+    def test_arm_once_read_back_and_never_rearm_changed_policy(self):
+        m = self.module
+        m.parent_lifetime_boundary()
+        m.parent_lifetime_boundary()
+        self.assertEqual(self.calls, [1, 2, 2])
+        self.configured = 0
+        with self.assertRaisesRegex(m.SourceError, "guard differs"):
+            m.parent_lifetime_boundary()
+        self.assertEqual(self.calls, [1, 2, 2, 2])
+
+    def test_identity_changes_and_inherited_fork_state_refuse_without_rearming(self):
+        m = self.module
+        for armed in (False, True):
+            m._parent_death_armed = armed
+            for target in ("getpid", "getppid"):
+                with self.subTest(armed=armed, target=target), patch.object(m.os, target, return_value=999):
+                    with self.assertRaisesRegex(m.SourceError, "owner changed"):
+                        m.parent_lifetime_boundary()
+        self.assertEqual(self.calls, [])
+        with patch.object(m.os, "getppid", side_effect=[200, 201]):
+            m._parent_death_armed = False
+            with self.assertRaisesRegex(m.SourceError, "while arming"):
+                m.parent_lifetime_boundary()
+        self.assertFalse(m._parent_death_armed)
+
+    def test_setup_and_readback_failure_are_closed(self):
+        m = self.module
+        for failure in (1, 2):
+            self.failed_option = failure
+            with self.subTest(failure=failure), self.assertRaises(m.SourceError):
+                m.parent_lifetime_boundary()
+            self.assertFalse(m._parent_death_armed)
+        for error in (OSError, AttributeError, TypeError, ValueError):
+            with patch.object(ctypes, "CDLL", side_effect=error), self.assertRaisesRegex(m.SourceError, "unavailable"):
+                m.parent_lifetime_boundary()
+        with patch.dict(sys.modules, {"ctypes": None}), self.assertRaisesRegex(m.SourceError, "unavailable"):
+            m.parent_lifetime_boundary()
+
+    def test_cli_init_adoption_refuses_but_direct_init_library_owner_is_valid(self):
+        m = self.module
+        m.PROCESS_PARENT = 1
+        with patch.object(m.os, "getppid", return_value=1):
+            with self.assertRaisesRegex(m.SourceError, "no live consumer"):
+                m.parent_lifetime_boundary(cli=True)
+            self.assertEqual(self.calls, [])
+            m.parent_lifetime_boundary()
+            self.assertEqual(self.calls, [1, 2])
+
+    def test_every_effectful_entry_refuses_before_any_filesystem_change(self):
+        m = self.module
+        with tempfile.TemporaryDirectory(prefix="dependency-owner-refusal-") as temporary:
+            root = Path(temporary)
+            def refuse():
+                raise m.SourceError("inert owner refusal")
+            with patch.object(m, "parent_lifetime_boundary", side_effect=refuse):
+                entries = [lambda: m.git_query(root, [], {}),
+                           lambda: m.admit_source(root / "source", "nanopb", {}),
+                           lambda: m.admit_tesla_workspace(root, root / "source", root / "work"),
+                           lambda: m.object_directory(root, "nanopb", {}, "salt")]
+                for entry in entries:
+                    with self.assertRaisesRegex(m.SourceError, "inert owner refusal"):
+                        entry()
+                with self.assertRaisesRegex(m.SourceError, "inert owner refusal"):
+                    with m.object_context(root, "0" * 40):
+                        self.fail("refused context yielded")
+            self.assertEqual(list(root.iterdir()), [])
 
 
 class SourceAdmissionTests(unittest.TestCase):

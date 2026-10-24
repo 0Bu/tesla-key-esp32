@@ -66,6 +66,18 @@ sanitizers. The fixture is bound to the toolchain-file hash; a migration require
 These checks model SDK mark effects; they do not execute flash writes, the bootloader, RTOS or
 physical restart, and cannot prove runtime heap/stack or key preservation.
 
+`heap_supervisor_tests` compiles complete shipped supervisor/admission bodies, extracted real
+operation owners and bootstrap repair/rollback sites, plus real BootGuard/trend shells. Passive
+clock, task, host, SDK and storage doubles cover qualified maintenance, stale/missing progress,
+pre-Ready host-read exclusion, competing owners, false/throwing commits, visible-but-unconfirmed
+writes, SafeMode carry, budget trust and postcommit parking. The doubles do not execute the RTOS,
+flash, bootloader or vehicle; host stack observations do not certify target runtime margin. Native
+process memory does not prove retained noinit bytes survive a physical reset.
+The structural runtime gate binds its unique checked startup before network and portal entries.
+The host wiring gate checks the generator/CTest graph and executes fallback, fast and sanitizer
+shell flow with passive tools, including omitted/disabled calls and a failing Heap executable.
+These flow probes establish invocation and failure propagation, not an actual compiler or sanitizer run.
+
 `syslog_runtime_tests` compiles the shipped formatter and boot-replay bodies with passive socket,
 cache and application-description adapters. It checks BOOT INFO/CRASH ERROR, ordinary-message
 classification, default-argument behavior, live dismissal, no replay retry after an allocation
@@ -251,7 +263,7 @@ WiFi-driver callback framing, a physical exported log or complete sanitation.
 | `scripts/test-build-contracts.sh` | Targets, pins, partitions, generated artifacts, size/stack/effective-build and publication contracts; validator self-tests isolate offsets, digest syntax, unsigned-prefix/size reuse, production pins, signed padding/image binding and complete Release/Pages bytes with deterministic disposable fixtures. Pages controls cover build-state/CLI consumption, bounded backoff beyond 50 seconds, delayed size/hash/404 failures for each of 16 parts, independent complete retries, bounded persistent failures, separate manifest/Release-byte delegation and immutable-input rejection before polling; no real signing key |
 | `scripts/test-pr-gates.sh` | Exact-head review records, relevance, canonical Git command boundaries and shared-library loss using fixtures; `ci-heal.sh` refusals with stubbed `git`/`gh` |
 | `test_pages_changelog.py` and Pages checker/relevance self-tests | Actual assembler delegation and metadata admission; exact root/Dev served bytes, complete fresh retries, immutable same-commit baseline files, and shipped Markdown add/edit/rename/delete through all three relevance decisions. Synthetic firmware and owned offline Git fixtures prove no delivery or live CDN behavior. |
-| `test_inline_assets.py` | Bounded CSS byte fixtures, legal/annotation/HTML-context preservation, exact CMake output and unchanged JavaScript, raw-marker rejection, stale-output cleanup and real incremental helper dependency. The Linux browser fixture reuses the helper API but independently compares the ordered raw CSSOM with its actual DOM stylesheet; host CMake tests and target build semantics cover the production generator. |
+| `test_inline_assets.py` | Bounded CSS/JavaScript byte fixtures, legal/annotation/HTML-context preservation, rejected unsupported multiline JS, actual Node ASI/regex controls, exact CMake output and unchanged code lines, raw-marker rejection, stale-output cleanup and real incremental helper dependency. The Linux browser fixture reuses the helper API but independently compares the ordered raw CSSOM with its actual DOM stylesheet; host CMake tests and target build semantics cover the production generator. |
 | `web_ui_browser_gate.py` / `browser_cdp.py` and their policy/transport tests | Linux-only assembled page in Chrome/Chromium: console/request failures, degraded poller, escaping, computed contrast, OTA notes and uncertainty; populated 390/light, 768/light and 1200/dark layouts; real trusted CDP Tab navigation, focus-visible ring and exactly one action each for Enter and Space. Controlled Python peers test pipe framing/limits/FD ownership and cleanup separately from DOM behavior; the host contract executes the actual strict shell with passive tools on Linux/Darwin branches and rejects commented, disabled or early-exit test invocations |
 | `web_installer.test.mjs` | Actual installer with passive serial/flasher adapters: phase ordering, abort/release, explicit erase confirmation, and `eraseAll:false` on every Keep write. No physical flash or NVS-preservation proof. |
 

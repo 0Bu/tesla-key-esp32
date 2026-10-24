@@ -58,6 +58,22 @@ add_test(NAME runtime_boundary_tests COMMAND runtime_boundary_tests)
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
     add_custom_command(
+        OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/heap_supervisor_adapter.generated.hpp
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/generate_heap_supervisor_adapter.py
+                ${CMAKE_CURRENT_BINARY_DIR}/heap_supervisor_adapter.generated.hpp
+        DEPENDS generate_heap_supervisor_adapter.py test_runtime_boundary_contract.py
+                ../main/heap_supervisor.cpp ../main/runtime_admission.cpp
+                ../main/ota_update.cpp ../main/main.cpp ../main/vehicle_telemetry.cpp
+        VERBATIM)
+    add_executable(heap_supervisor_tests test_heap_supervisor.cpp
+        ${CMAKE_CURRENT_BINARY_DIR}/heap_supervisor_adapter.generated.hpp
+        ../main/safe_mode.cpp ../main/heap_trend.cpp)
+    target_include_directories(heap_supervisor_tests PRIVATE
+        ${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/stubs
+        ${CMAKE_CURRENT_SOURCE_DIR}/../main)
+    add_test(NAME heap_supervisor_tests COMMAND heap_supervisor_tests)
+
+    add_custom_command(
         OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/ota_admission_adapter.generated.hpp
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/generate_ota_admission_adapter.py
                 ${CMAKE_CURRENT_BINARY_DIR}/ota_admission_adapter.generated.hpp

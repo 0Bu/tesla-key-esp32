@@ -74,6 +74,7 @@ esac
                     "actual signed deploy consumer must run once in order and propagate failure")
 
 
+@lru_cache(maxsize=8)
 def probe_sanitizer_invocations(source: str) -> None:
     """Execute shell control flow with passive tools, not a second sanitizer run."""
     with tempfile.TemporaryDirectory(prefix="sanitizer-flow-") as directory:
@@ -86,6 +87,10 @@ def probe_sanitizer_invocations(source: str) -> None:
         trace = work / "calls.jsonl"
         # The fake compiler/CMake only produce successful disposable executables. The
         # actual shell must still traverse its prerequisites, loops and two Python calls.
+        heap_program = ("#!" + sys.executable + "\nimport json,os\n"
+                        "with open(os.environ['TESLA_FLOW_TRACE'],'a') as out: "
+                        "out.write(json.dumps(['__native__','heap_supervisor_tests'])+'\\n')\n"
+                        "raise SystemExit(37 if os.environ.get('TESLA_FLOW_FAIL_HEAP') == '1' else 0)\n")
         stub = '''#!PYTHON
 import json, os, sys
 from pathlib import Path
@@ -97,13 +102,18 @@ if name == "python3":
 elif name == "cmake" and "-B" in args:
     build = Path(args[args.index("-B") + 1]); build.mkdir(parents=True, exist_ok=True)
     for target in ("logic_tests", "nvs_storage_tests", "runtime_boundary_tests", "clock_runtime_tests",
-                   "config_commit_tests", "syslog_runtime_tests", "crash_runtime_xtensa_tests", "crash_runtime_riscv_tests"):
-        output = build / target; output.write_text("#!/bin/sh\\nexit 0\\n"); output.chmod(0o700)
+                   "config_commit_tests", "syslog_runtime_tests", "crash_runtime_xtensa_tests", "crash_runtime_riscv_tests", "heap_supervisor_tests"):
+        output = build / target
+        if target == "heap_supervisor_tests":
+            output.write_text(HEAP_EXECUTABLE_PROGRAM)
+        else:
+            output.write_text("#!/bin/sh\\nexit 0\\n")
+        output.chmod(0o700)
 elif name == "compiler" and "-o" in args:
     output = Path(args[args.index("-o") + 1])
     if str(output) != "/dev/null":
         output.write_text("#!/bin/sh\\nexit 0\\n"); output.chmod(0o700)
-'''.replace("#!PYTHON", "#!" + sys.executable)
+'''.replace("#!PYTHON", "#!" + sys.executable).replace("HEAP_EXECUTABLE_PROGRAM", repr(heap_program))
         for name in ("cmake", "compiler", "python3"):
             path = binaries / name
             path.write_text(stub)
@@ -118,16 +128,84 @@ elif name == "compiler" and "-o" in args:
         env.update(PATH=str(binaries) + os.pathsep + env.get("PATH", os.defpath),
                    CC=str(binaries / "compiler"), CXX=str(binaries / "compiler"),
                    TMPDIR=str(scratch), TESLA_FLOW_TRACE=str(trace))
-        try:
-            result = subprocess.run(["/bin/bash", str(script)], env=env, cwd=work,
-                                    capture_output=True, text=True, timeout=10)
-        except subprocess.TimeoutExpired as exc:
-            raise ContractError("sanitizer invocation flow timed out") from exc
-        calls = [json.loads(line) for line in trace.read_text().splitlines()] if trace.exists() else []
-        require(result.returncode == 0 and calls == [
-            ["test/test_led_driver_contract.py", "--sanitize"],
-            ["test/test_display_parity_contract.py", "--render-only", "--sanitize"],
-        ], "sanitizer invocation flow did not execute both actual native-probe commands")
+        for fail in (False, True):
+            trace.unlink(missing_ok=True)
+            try:
+                result = subprocess.run(["/bin/bash", str(script)],
+                                        env={**env, "TESLA_FLOW_FAIL_HEAP": str(int(fail))},
+                                        cwd=work, capture_output=True, text=True, timeout=10)
+            except subprocess.TimeoutExpired as exc:
+                raise ContractError("sanitizer invocation flow timed out") from exc
+            calls = [json.loads(line) for line in trace.read_text().splitlines()] if trace.exists() else []
+            expected = [["__native__", "heap_supervisor_tests"]]
+            if not fail:
+                expected += [["test/test_led_driver_contract.py", "--sanitize"],
+                             ["test/test_display_parity_contract.py", "--render-only", "--sanitize"]]
+            require(result.returncode == (37 if fail else 0) and calls == expected,
+                    "sanitizer invocation flow must execute Heap once and propagate its failure before later probes")
+
+
+def probe_heap_suite_invocations(run_mock: str, fast: str) -> None:
+    """Execute actual fallback/fast shell paths with inert compiler and executable effects."""
+    branch = 'if command -v cmake >/dev/null 2>&1; then'
+    boundary = '# Display sim'
+    require(run_mock.count(branch) == 1 and run_mock.count(boundary) == 1,
+            "Heap fallback flow seam is missing")
+    # Select only the documented no-CMake branch. All guards, generators, compile argv and
+    # executable invocations in that branch remain the actual shipped shell source.
+    fallback = run_mock.split(boundary, 1)[0].replace(branch, 'if false; then', 1)
+    probe_heap_suite_shells(fallback, fast)
+
+
+@lru_cache(maxsize=8)
+def probe_heap_suite_shells(fallback: str, fast: str) -> None:
+    # Cache only the complete executed texts. Later unrelated mock gates cannot change an
+    # earlier fallback effect; every change to that prefix or the full fast script reruns it.
+    for label, source, arguments in (("fallback", fallback, []), ("fast", fast, ["--boundary"])):
+        with tempfile.TemporaryDirectory(prefix="heap-host-flow-") as directory:
+            work = Path(directory); scripts = work / "scripts"; tools = work / "bin"
+            scripts.mkdir(); tools.mkdir(); trace = work / "trace.jsonl"
+            script = scripts / ("run-mock-tests.sh" if label == "fallback" else "run-fast-tests.sh")
+            script.write_text(source + '\npython3 __heap_flow_after__\n')
+            stub = '''#!PYTHON
+import json,os,sys
+from pathlib import Path
+def note(value):
+    with open(os.environ['TESLA_HEAP_FLOW_TRACE'],'a') as out: out.write(json.dumps(value)+'\\n')
+args=sys.argv[1:]
+if Path(sys.argv[0]).name == 'python3':
+    if args and args[0] == 'test/generate_heap_supervisor_adapter.py': note(['generate'])
+    if args == ['__heap_flow_after__']: note(['after'])
+elif '-o' in args:
+    output=Path(args[args.index('-o')+1]); output.parent.mkdir(parents=True,exist_ok=True)
+    if output.name == 'heap_supervisor_tests':
+        required={'test/test_heap_supervisor.cpp','main/safe_mode.cpp','main/heap_trend.cpp'}
+        if not required <= set(args): raise SystemExit(38)
+        note(['compile'])
+        program="#!"+sys.executable+"\\nimport json,os\\nwith open(os.environ['TESLA_HEAP_FLOW_TRACE'],'a') as out: out.write(json.dumps(['run'])+'\\\\n')\\nraise SystemExit(37 if os.environ['TESLA_HEAP_FLOW_FAIL']=='1' else 0)\\n"
+    else: program='#!/bin/sh\\nexit 0\\n'
+    output.write_text(program); output.chmod(0o700)
+'''.replace("#!PYTHON", "#!" + sys.executable)
+            for name in ("python3", "compiler"):
+                tool = tools / name; tool.write_text(stub); tool.chmod(0o700)
+            env = {k: v for k, v in os.environ.items() if k not in
+                   ("ENV", "BASH_ENV", "OTA_SIGNING_KEY", "OTA_SIGNING_KEY_FILE", "GH_TOKEN", "GITHUB_TOKEN")
+                   and not k.startswith(("BASH_FUNC_", "PYTHON", "LD_", "DYLD_"))}
+            env.update(PATH=str(tools) + os.pathsep + os.defpath,
+                       CXX=str(tools / "compiler"), CC=str(tools / "compiler"),
+                       TESLA_HEAP_FLOW_TRACE=str(trace))
+            for fail in (False, True):
+                trace.unlink(missing_ok=True)
+                try:
+                    result = subprocess.run(["/bin/bash", str(script), *arguments], cwd=work,
+                                            env={**env, "TESLA_HEAP_FLOW_FAIL": str(int(fail))},
+                                            capture_output=True, timeout=10)
+                except subprocess.TimeoutExpired as exc:
+                    raise ContractError("Heap " + label + " invocation flow timed out") from exc
+                calls = [json.loads(line) for line in trace.read_text().splitlines()] if trace.exists() else []
+                expected = [["generate"], ["compile"], ["run"]] + ([] if fail else [["after"]])
+                require(result.returncode == (37 if fail else 0) and calls == expected,
+                        "Heap " + label + " invocation flow must generate, compile and execute once and propagate failure")
 
 
 # These isolated passive fixtures depend only on the complete shell text. Reuse a successful
@@ -244,7 +322,6 @@ def validate(root: Path) -> None:
             "actual optional LED driver gate is missing")
     require('python3 test/test_display_parity_contract.py --render-only --sanitize' in sanitizers,
             "actual display renderer sanitizer gate is missing")
-    probe_sanitizer_invocations(sanitizers)
     presenter_gate = (root / "scripts/check-ble-row-parity.sh").read_text()
     require('"$OUT/ble_row_golden_dump" --web-presenters > "$OUT/web_presenter_golden.tsv"' in presenter_gate and
             'node tools/ble_row_parity.js "$OUT/ble_row_golden.tsv" "$OUT/web_presenter_golden.tsv"' in presenter_gate and
@@ -258,9 +335,15 @@ def validate(root: Path) -> None:
                 f"run-mock-tests.sh strict mode does not require {tool}")
     require("tools/agent-hooks/run_with_timeout.py" in run_mock and "run_gate" in run_mock,
             "run-mock-tests.sh strict sub-gates are not bounded")
+    inventory = re.search(r"for required in (.*?)\s*; do", run_mock, re.DOTALL)
+    require(inventory is not None, "strict host inventory loop is missing")
+    strict_inputs = set(shlex.split(inventory.group(1).replace("\\\n", " ")))
     for path in (
         "test/tesla_protocol_vectors.test.mjs",
         "test/test_runtime_boundary_contract.py",
+        "test/generate_heap_supervisor_adapter.py",
+        "test/test_heap_supervisor.cpp",
+        "test/stubs/esp_attr.h",
         "test/test_charge_presentation.py",
         "test/test_command_outcomes.py",
         "test/test_inline_assets.py",
@@ -292,7 +375,7 @@ def validate(root: Path) -> None:
         "test/test_browser_cdp.py",
         "test/browser_cdp.py",
     ):
-        require(path in run_mock, f"run-mock-tests.sh strict inventory omits {path}")
+        require(path in strict_inputs, f"run-mock-tests.sh strict inventory omits {path}")
     require("python3 scripts/check-logic-test-ownership.py --compile --self-test" in run_mock,
             "run-mock-tests.sh does not execute the exact logic ownership/compile gate")
     require('run_gate "locked cJSON intake and OOM" 120 bash test/run-cjson-oom-tests.sh' in run_mock,
@@ -357,6 +440,42 @@ def validate(root: Path) -> None:
                 label + " omits the actual OTA admission/cache seam")
     require("add_test(NAME runtime_boundary_tests" in cmake,
             "runtime_boundary_tests is not part of ctest")
+    # The Heap suite must be the first active Python-generated group, not a retained token in
+    # a disabled nested block. Keep its entire source/generator graph and CTest admission bound.
+    # CMake bracket comments may contain an entire otherwise valid target group. Remove the
+    # complete comment, including matching optional '=' delimiters, before line comments.
+    cmake_code = re.sub(r"#\[(=*)\[.*?\]\1\]",
+                        lambda match: "\n" * match.group(0).count("\n"), cmake, flags=re.DOTALL)
+    cmake_code = re.sub(r"(?m)#.*$", "", cmake_code)
+    heap_at = cmake_code.find("find_package(Python3 COMPONENTS Interpreter QUIET)")
+    require(heap_at >= 0 and not re.search(
+        r"\b(?:if|elseif|else|function|macro|return|foreach|while)\s*\(", cmake_code[:heap_at]),
+        "Heap CMake group must not be hidden behind an earlier conditional or return")
+    first = cmake_code.find("add_custom_command(", heap_at)
+    following = cmake_code.find("add_custom_command(", first + 1)
+    require(first >= heap_at and following > first, "Heap CMake generator group is missing")
+    heap_group = cmake_code[heap_at:following]
+    require(re.findall(r"\b(?:if|elseif|else|function|macro|return|foreach|while)\s*\(", heap_group) == ["if("],
+            "Heap CMake group must have only its Python-availability condition")
+    require("if(Python3_Interpreter_FOUND)" in heap_group and
+            "OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/heap_supervisor_adapter.generated.hpp" in heap_group and
+            "COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/generate_heap_supervisor_adapter.py" in heap_group and
+            "add_executable(heap_supervisor_tests test_heap_supervisor.cpp" in heap_group and
+            "${CMAKE_CURRENT_BINARY_DIR}/heap_supervisor_adapter.generated.hpp" in heap_group and
+            "../main/safe_mode.cpp ../main/heap_trend.cpp" in heap_group and
+            "add_test(NAME heap_supervisor_tests COMMAND heap_supervisor_tests)" in heap_group,
+            "Heap CMake generator, real sources or CTest admission is incomplete")
+    dependencies = re.search(r"DEPENDS\s+(.*?)\s+VERBATIM\)", heap_group, re.DOTALL)
+    require(dependencies is not None and set(dependencies.group(1).split()) == {
+        "generate_heap_supervisor_adapter.py", "test_runtime_boundary_contract.py",
+        "../main/heap_supervisor.cpp", "../main/runtime_admission.cpp", "../main/ota_update.cpp",
+        "../main/main.cpp", "../main/vehicle_telemetry.cpp"},
+        "Heap CMake actual-body generator dependencies are incomplete")
+    for entry, label in ((run_mock, "fallback"), (fast, "fast")):
+        require('python3 test/generate_heap_supervisor_adapter.py' in entry and
+                'test/test_heap_supervisor.cpp main/safe_mode.cpp main/heap_trend.cpp' in entry and
+                '"$BUILD_DIR/heap_supervisor_tests"' in entry,
+                "Heap " + label + " source generation/compile/execution is incomplete")
     require("add_executable(nvs_storage_tests" in cmake and
             "test_nvs_storage.cpp" in cmake and
             "../main/nvs_storage.cpp" in cmake and
@@ -414,8 +533,8 @@ def validate(root: Path) -> None:
                                                '-DCMAKE_C_COMPILER="$CC"',
                                                '-DCMAKE_CXX_COMPILER="$CXX"'))
                 for block in configure_blocks) and
-            '--target logic_tests nvs_storage_tests runtime_boundary_tests clock_runtime_tests config_commit_tests syslog_runtime_tests crash_runtime_xtensa_tests crash_runtime_riscv_tests' in sanitizers and
-            'for target in logic_tests nvs_storage_tests runtime_boundary_tests clock_runtime_tests config_commit_tests syslog_runtime_tests crash_runtime_xtensa_tests crash_runtime_riscv_tests; do' in sanitizers,
+            '--target logic_tests nvs_storage_tests runtime_boundary_tests clock_runtime_tests config_commit_tests syslog_runtime_tests crash_runtime_xtensa_tests crash_runtime_riscv_tests heap_supervisor_tests' in sanitizers and
+            'for target in logic_tests nvs_storage_tests runtime_boundary_tests clock_runtime_tests config_commit_tests syslog_runtime_tests crash_runtime_xtensa_tests crash_runtime_riscv_tests heap_supervisor_tests; do' in sanitizers,
             "config/SDK shell C and C++ sanitizer instrumentation/execution is incomplete")
     require("add_executable(syslog_runtime_tests test_syslog_runtime.cpp" in cmake and
             "COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/generate_syslog_adapters.py" in cmake and
@@ -445,13 +564,20 @@ def validate(root: Path) -> None:
             "fast NVS concurrency tests require explicit thread linkage")
     require("../main/stack_watch.cpp" in cmake and "main/stack_watch.cpp" in fast,
             "actual stack minimum shell is missing from CMake/fast runtime tests")
+    runtime_fallback = re.search(
+        r'^\s*run_gate "compile runtime boundary tests" 120 (.*?)'
+        r'(?=^\s*run_gate "execute runtime boundary tests")',
+        run_mock, re.MULTILINE | re.DOTALL)
+    require(runtime_fallback is not None,
+            "cmake-less runtime_boundary_tests fallback compile command is missing")
+    runtime_arguments = shlex.split(runtime_fallback.group(1).replace("\\\n", " "))
     for source in (
         "test/test_runtime_boundaries.cpp",
         "main/diag_log.cpp",
         "main/stack_watch.cpp",
         "main/safe_mode.cpp",
     ):
-        require(source in run_mock,
+        require(source in runtime_arguments,
                 f"cmake-less runtime_boundary_tests fallback omits {source}")
     require('-Itest/stubs -Imain' in run_mock and
             '"$CXX" -std=c++17 -Wall -Wextra -Werror' in run_mock,
@@ -488,7 +614,6 @@ def validate(root: Path) -> None:
     require(browser_gate.count('if sys.platform != "linux":') == 4 and
             browser_cdp.count('if sys.platform != "linux":') == 1,
             "Linux-only browser launch guards drifted")
-    probe_browser_invocations(run_mock)
     cjson_gate = "CJSON_OOM_SANITIZE=1 bash ./test/run-cjson-oom-tests.sh"
     mqtt_gate = "MQTT_JSON_SANITIZE=1 bash ./test/run-mqtt-json-publish-tests.sh"
     build = './scripts/ci-build-all.sh "$version" "$source_sha"'
@@ -497,6 +622,11 @@ def validate(root: Path) -> None:
     require(idf_verify.index(cjson_gate) < idf_verify.index(build) and
             idf_verify.index(mqtt_gate) < idf_verify.index(build),
             "real-cJSON host gates must run before expensive firmware builds")
+    # Reject structural omissions before the slower passive control-flow fixtures. Each fixture
+    # still binds complete executed source text and runs all success/failure effects when needed.
+    probe_sanitizer_invocations(sanitizers)
+    probe_heap_suite_invocations(run_mock, fast)
+    probe_browser_invocations(run_mock)
 
 
 def replace_once(path: Path, old: str, new: str) -> None:
@@ -560,16 +690,16 @@ def self_test(root: Path) -> None:
          "cmake-less fallback omits the actual crash"),
         ("scripts/run-fast-tests.sh", "test/test_crash_runtime.cpp", "missing_crash.cpp",
          "fast boundary omits the actual crash"),
-        ("scripts/run-sanitizer-tests.sh", "syslog_runtime_tests crash_runtime_xtensa_tests crash_runtime_riscv_tests; do",
-         "syslog_runtime_tests; do", "config/SDK shell C and C++ sanitizer"),
+        ("scripts/run-sanitizer-tests.sh", "syslog_runtime_tests crash_runtime_xtensa_tests crash_runtime_riscv_tests heap_supervisor_tests; do",
+         "syslog_runtime_tests heap_supervisor_tests; do", "config/SDK shell C and C++ sanitizer"),
         ("test/CMakeLists.txt", "add_test(NAME syslog_runtime_tests COMMAND syslog_runtime_tests)",
          "# removed syslog CTest", "syslog runtime target/source"),
         ("test/CMakeLists.txt", "COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/generate_syslog_adapters.py",
          "COMMAND missing_syslog_generator", "syslog runtime target/source"),
         ("scripts/run-mock-tests.sh", 'run_gate "execute syslog shell tests" 120 "$BUILD_DIR/syslog_runtime_tests"',
          "# removed syslog fallback", "cmake-less fallback omits the actual syslog"),
-        ("scripts/run-sanitizer-tests.sh", "config_commit_tests syslog_runtime_tests crash_runtime_xtensa_tests crash_runtime_riscv_tests; do",
-         "config_commit_tests; do", "config/SDK shell C and C++ sanitizer"),
+        ("scripts/run-sanitizer-tests.sh", "config_commit_tests syslog_runtime_tests crash_runtime_xtensa_tests crash_runtime_riscv_tests heap_supervisor_tests; do",
+         "config_commit_tests heap_supervisor_tests; do", "config/SDK shell C and C++ sanitizer"),
         ("scripts/run-fast-tests.sh", "test/test_coredump_hash.cpp", "missing_hash.cpp",
          "fast boundary checksum/syslog"),
         ("scripts/run-fast-tests.sh", "-Itest/coredump_stubs", "-Imissing_stubs",
@@ -581,8 +711,9 @@ def self_test(root: Path) -> None:
          '    // omitted actual timed health tests', "actual timed/config health consumer extraction"),
         ("test/test_config_commit.cpp", '#include "ota_health_task.generated.hpp"',
          '// omitted actual timed health header', "actual timed/config health consumer extraction"),
-        ("test/CMakeLists.txt", '../main/ota_update.cpp ../main/main.cpp',
-         '../main/ota_update.cpp', "actual health adapter regeneration dependencies"),
+        ("test/CMakeLists.txt", '../esp-idf-toolchain.txt ../main/ota_update.hpp ../main/ota_update.cpp ../main/main.cpp',
+         '../esp-idf-toolchain.txt ../main/ota_update.hpp ../main/ota_update.cpp',
+         "actual health adapter regeneration dependencies"),
         ("test/CMakeLists.txt", "add_test(NAME config_commit_tests COMMAND config_commit_tests)",
          "# removed config CTest", "config_commit_tests SDK/portal generation"),
         ("scripts/run-mock-tests.sh", 'run_gate "execute config shell tests" 120 "$BUILD_DIR/config_commit_tests"',
@@ -679,11 +810,11 @@ def self_test(root: Path) -> None:
         ("scripts/run-mock-tests.sh", "python3 scripts/prepare-reused-release.py --self-test",
          "python3 scripts/missing-reused-release.py --self-test", "immutable Release reuse gate"),
         ("scripts/run-mock-tests.sh", "        scripts/check-dependency-contract.py \\\n",
-         "", "strict gate_file inventory"),
+         "", "strict inventory omits scripts/check-dependency-contract.py"),
         ("scripts/run-mock-tests.sh", "        scripts/check-otadata-contract.py \\\n",
-         "", "strict gate_file inventory"),
+         "", "strict inventory omits scripts/check-otadata-contract.py"),
         ("scripts/run-mock-tests.sh", "        scripts/prepare-reused-release.py \\\n",
-         "", "strict gate_file inventory"),
+         "", "strict inventory omits scripts/prepare-reused-release.py"),
         ("scripts/run-mock-tests.sh",
          "python3 scripts/check-logic-test-ownership.py --compile --self-test",
          "python3 scripts/check-logic-test-ownership.py --self-test",
@@ -692,6 +823,32 @@ def self_test(root: Path) -> None:
          "python3 scripts/missing-host-gate-contract.py", "host wiring contract"),
         ("test/CMakeLists.txt", "add_test(NAME nvs_storage_tests COMMAND nvs_storage_tests)",
          "# removed nvs CTest", "nvs_storage_tests is not part"),
+        ("test/CMakeLists.txt", "add_test(NAME heap_supervisor_tests COMMAND heap_supervisor_tests)",
+         "# removed heap CTest", "Heap CMake generator, real sources or CTest"),
+        ("test/CMakeLists.txt", "add_test(NAME heap_supervisor_tests COMMAND heap_supervisor_tests)",
+         "if(FALSE)\nadd_test(NAME heap_supervisor_tests COMMAND heap_supervisor_tests)\nendif()", "Heap CMake group"),
+        ("test/CMakeLists.txt", "../main/main.cpp ../main/vehicle_telemetry.cpp",
+         "../main/main.cpp", "Heap CMake actual-body generator dependencies"),
+        ("test/CMakeLists.txt", "${CMAKE_CURRENT_SOURCE_DIR}/generate_heap_supervisor_adapter.py",
+         "${CMAKE_CURRENT_SOURCE_DIR}/missing_heap_generator.py", "Heap CMake generator, real sources or CTest"),
+        ("scripts/run-mock-tests.sh", "        test/test_heap_supervisor.cpp \\\n",
+         "", "strict inventory omits test/test_heap_supervisor.cpp"),
+        ("scripts/run-mock-tests.sh", 'run_gate "execute heap supervisor tests" 120 "$BUILD_DIR/heap_supervisor_tests"',
+         "# omitted Heap runtime", "Heap fallback invocation flow"),
+        ("scripts/run-mock-tests.sh", 'run_gate "execute heap supervisor tests" 120 "$BUILD_DIR/heap_supervisor_tests"',
+         'if false; then\nrun_gate "execute heap supervisor tests" 120 "$BUILD_DIR/heap_supervisor_tests"\nfi', "Heap fallback invocation flow"),
+        ("scripts/run-mock-tests.sh", 'run_gate "execute heap supervisor tests" 120 "$BUILD_DIR/heap_supervisor_tests"',
+         'run_gate "execute heap supervisor tests" 120 "$BUILD_DIR/heap_supervisor_tests" || true', "Heap fallback invocation flow"),
+        ("scripts/run-fast-tests.sh", '\n  "$BUILD_DIR/heap_supervisor_tests"\n',
+         '\n  # omitted Heap runtime\n', "Heap fast invocation flow"),
+        ("scripts/run-fast-tests.sh", '\n  "$BUILD_DIR/heap_supervisor_tests"\n',
+         '\n  if false; then "$BUILD_DIR/heap_supervisor_tests"; fi\n', "Heap fast invocation flow"),
+        ("scripts/run-fast-tests.sh", '\n  "$BUILD_DIR/heap_supervisor_tests"\n',
+         '\n  "$BUILD_DIR/heap_supervisor_tests" || true\n', "Heap fast invocation flow"),
+        ("scripts/run-sanitizer-tests.sh", '    binary="$work/build/$target"',
+         '    if [ "$target" = heap_supervisor_tests ]; then continue; fi\n    binary="$work/build/$target"', "sanitizer invocation flow"),
+        ("scripts/run-sanitizer-tests.sh", 'LSAN_OPTIONS="$lsan_options" "$binary"\ndone',
+         'LSAN_OPTIONS="$lsan_options" "$binary" || true\ndone', "sanitizer invocation flow"),
         ("test/CMakeLists.txt", "test_nvs_storage.cpp", "missing_nvs_storage.cpp",
          "target/source wiring"),
         ("scripts/run-mock-tests.sh",
@@ -732,6 +889,14 @@ def self_test(root: Path) -> None:
         ("scripts/run-mock-tests.sh", css_call, 'exit 0\n' + css_call,
          "strict browser invocation flow"),
     ])
+    cmake_source = (root / "test/CMakeLists.txt").read_text()
+    heap_begin = cmake_source.index("    add_custom_command(\n        OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/heap_supervisor_adapter.generated.hpp")
+    heap_end = cmake_source.index("\n\n    add_custom_command(", heap_begin + 1)
+    heap_fixture = cmake_source[heap_begin:heap_end]
+    for equals in ("", "="):
+        mutations.append(("test/CMakeLists.txt", heap_fixture,
+                          "#[" + equals + "[\n" + heap_fixture + "\n]" + equals + "]",
+                          "Heap CMake group must have only its Python-availability condition"))
     for relative, old, new, expected in mutations:
         with tempfile.TemporaryDirectory(prefix="host-gate-contract-") as directory:
             fixture = Path(directory)
@@ -760,7 +925,7 @@ def self_test(root: Path) -> None:
                 validate(fixture)
             except ContractError as exc:
                 require(expected in str(exc),
-                        f"self-test mutation failed for wrong reason: {exc}")
+                        f"self-test mutation failed for wrong reason in {relative} replacing {old!r}: {exc}")
             else:
                 raise ContractError(f"self-test accepted mutation in {relative}: {old}")
 

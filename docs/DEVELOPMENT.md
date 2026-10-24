@@ -54,6 +54,8 @@ complete pristine path/body/mode inventory; VERSION text, a parent repository an
 are insufficient. Only exact committed links to direct regular tracked files are allowed; all seven
 nanopb runtime inputs remain regular files. The separate Tesla work copy admits the complete
 pristine tree plus exactly the reviewed patch transformation, including untouched files.
+Patch application sets POSIX mode at process startup with zero fuzz so allowed offset hunks do not leave backup
+files; the complete inventory still refuses every extra file instead of deleting or ignoring it.
 
 An existing foreign, modified, aliased, partial or failed cache is never adopted, repaired or silently
 retried. Failure leaves its owned state for inspection; select a new empty build/cache directory or
@@ -69,6 +71,15 @@ timeout or SIGKILL kills admission, EOF makes the guardian terminate its own gro
 and pipe-holding descendants after the Git leader exits. Normal cleanup kills that entire group
 atomically before closing the liveness writer, keeping ownership through parent cancellation.
 The guardian holds no data-output writer.
+Before side effects, admission records and checks its original process/parent identity. On Linux,
+it arms and verifies parent-death SIGKILL before the first query or cache write, then rechecks the
+owner. This covers CMake versions whose timeout leaves a helper alive after CMake exits; the
+consumer must still fail and exit on admission timeout. Later calls never adopt a new parent or
+reuse an inherited post-fork flag. Imports alone do not change kernel policy. The dedicated CLI
+rejects startup already adopted by init; an imported validator may legitimately have container
+init as its original parent. This cannot identify arbitrary subreaper adoption before import, and
+does not fire while the original parent remains alive. Non-Linux systems retain bounded parent
+identity checks and the consumer's own cancellation behavior, without a Linux kernel guarantee.
 Normal success and internal failure also confirm group cleanup; malformed or missing leader status
 refuses immediately. This does not authorize killing unrelated process groups.
 
@@ -84,11 +95,17 @@ standalone tag-fetch CMake path remains unchanged.
 
 `main/www/inline_assets.cmake` inserts the CSS and JavaScript into the HTML marker lines,
 then the build uses `gzip -9 -n`. Raw marker checks precede any transformation. The bounded,
-standard-library `prune_css_comments.py` helper blanks documentation text only in whole-line
-CSS comments outside strings and parentheses; it preserves whitespace, inline comments,
-legal/tooling notices, escapes and HTML style-end sequences. It accepts bounded UTF-8 without
-NUL, refuses unfinished syntax, and leaves markup and JavaScript bytes unchanged. Source comments
-remain available for editing. This is a narrow repository CSS subset, not general minification.
+standard-library `prune_css_comments.py` helper blanks documentation text in whole-line CSS
+comments outside strings and parentheses, and ordinary whole-line JavaScript `//` comments.
+It preserves byte offsets, whitespace, inline comments, recognized legal/tooling directive families and HTML-sensitive
+sequences. JavaScript block comments remain opaque. The supported JavaScript subset refuses code
+lines containing template backticks, inline block openers or a final backslash, code after a block
+closer, unfinished blocks and Unicode line separators. These restrictions exclude untracked
+multiline strings/templates without guessing regex syntax. Inputs are bounded UTF-8 without NUL.
+Markup and code tokens remain unchanged; source comments remain readable. This is conservative
+repository-specific pruning, not general minification or universal observable equivalence:
+source introspection such as `Function.prototype.toString()` can expose changed comment text.
+The application does not use source introspection.
 The helper is an explicit generator dependency. It rejects output/input aliases before cleanup,
 removes the validated old output before generation and publishes complete bytes atomically.
 CMake refuses helper startup, generation and timeout failures; retained files are never a success.

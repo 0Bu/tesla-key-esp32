@@ -107,6 +107,13 @@ def present(pid):
  try:os.kill(pid,0);return True
  except ProcessLookupError:return False
 
+def require_absent(pid,seconds=1):
+ # Signal delivery and init's reaping are asynchronous. Zombies remain present; only
+ # actual ESRCH is accepted, within a bound shorter than the delayed-effect witness.
+ until=real_mono()+seconds
+ while present(pid) and real_mono()<until:time.sleep(.005)
+ assert not present(pid),'owned fixture process still exists: '+str(pid)
+
 def group_absent(group,seconds=2):
  until=real_mono()+seconds
  while real_mono()<until:
@@ -124,7 +131,9 @@ def clean_group(group):
 # Real outer cancellation must not rely on the killed Python parent's finally block.
 with tempfile.TemporaryDirectory(prefix='dependency-query-outer-') as temporary:
  root=Path(temporary).resolve();cmake=shutil.which('cmake');assert cmake
- for case in ('cmake-live','canonical-live','canonical-exited','sigkill-exited','sigkill-cleanup','guardian-eof-omitted','cleanup-atomic-omitted','restored'):
+ cases=['cmake-live','cmake-parent-killed','canonical-live','canonical-exited','sigkill-exited','sigkill-cleanup','guardian-eof-omitted','cleanup-atomic-omitted','restored']
+ if sys.platform=='linux':cases+=['parent-death-omitted','parent-death-restored']
+ for case in cases:
   work=root/case;work.mkdir();tools=work/'tools';tools.mkdir()
   record=work/'query.json';helper_record=work/'helper.json';effect=work/'delayed-effect';ready=work/'descendant-ready'
   local_source=work/'dependency_source.py';source=F.read_text()
@@ -134,6 +143,12 @@ with tempfile.TemporaryDirectory(prefix='dependency-query-outer-') as temporary:
   if case=='cleanup-atomic-omitted':
    needle='stop_owned_group(child, atomic=True)'
    assert source.count(needle)==1;source=source.replace(needle,'stop_owned_group(child)')
+  if case=='parent-death-omitted':
+   # Omit the complete owner boundary, including its portable identity fallback. Merely
+   # omitting prctl would still be contained by the query's bounded parent observation.
+   needle='def main() -> int:'
+   assert source.count(needle)==1
+   source=source.replace(needle,'parent_lifetime_boundary = lambda **options: None\n\n'+needle)
   compile(source,str(local_source),'exec');local_source.write_text(source)
   fake=tools/'git';exited=case in ('canonical-exited','sigkill-exited','sigkill-cleanup','cleanup-atomic-omitted')
   fake.write_text('#!'+sys.executable+'\n'+
@@ -157,20 +172,21 @@ with tempfile.TemporaryDirectory(prefix='dependency-query-outer-') as temporary:
    'Path('+repr(str(helper_record))+').write_text(json.dumps({"pid":os.getpid(),"group":os.getpgrp()}))\n'+
    's=importlib.util.spec_from_file_location("actual_query",'+repr(str(local_source))+')\n'+
    'm=importlib.util.module_from_spec(s);s.loader.exec_module(m)\n'+
+   'm.parent_lifetime_boundary(cli=True)\n'+
    cleanup_hook+
    'env=m.git_environment();env["PATH"]='+repr(str(tools))+'\n'+
    'm.git_query(Path('+repr(str(work))+'),["fixture-only"],env,maximum=8)\n')
   env=m.git_environment();env['PYTHONDONTWRITEBYTECODE']='1'
-  if case=='cmake-live':
+  if case in ('cmake-live','cmake-parent-killed','parent-death-omitted','parent-death-restored'):
    command_file=work/'outer.cmake'
-   command_file.write_text('execute_process(COMMAND "'+sys.executable+'" "'+str(helper)+'" TIMEOUT 2 RESULT_VARIABLE result)\nfile(WRITE "'+str(work/'cmake-result')+'" "${result}")\n')
+   command_file.write_text('execute_process(COMMAND "'+sys.executable+'" "'+str(helper)+'" TIMEOUT '+('20' if case in ('cmake-parent-killed','parent-death-omitted','parent-death-restored') else '2')+' RESULT_VARIABLE result)\nfile(WRITE "'+str(work/'cmake-result')+'" "${result}")\nif(NOT "${result}" STREQUAL "0")\n message(FATAL_ERROR "fixture admission failed")\nendif()\n')
    command=[cmake,'-P',str(command_file)]
   elif case in ('sigkill-exited','sigkill-cleanup','cleanup-atomic-omitted'):command=[sys.executable,str(helper)]
   else:command=[sys.executable,str(ROOT/'tools/agent-hooks/run_with_timeout.py'),'2',sys.executable,str(helper)]
   start=real_mono();owned=None;outer=None
   try:
    outer=real_popen(command,env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True)
-   if case=='sigkill-exited':
+   if case in ('sigkill-exited','cmake-parent-killed','parent-death-omitted','parent-death-restored'):
     until=real_mono()+3
     while not record.exists() and real_mono()<until:time.sleep(.005)
     assert record.exists(),'owned query never started'
@@ -179,23 +195,33 @@ with tempfile.TemporaryDirectory(prefix='dependency-query-outer-') as temporary:
    assert record.is_file() and helper_record.is_file(),'fixture did not start before outer deadline'
    owned=json.loads(record.read_text());hp=json.loads(helper_record.read_text())
    assert owned['group']!=hp['group'] and owned['group']!=owned['git']
-   assert not present(hp['pid'])
+   if case!='parent-death-omitted':require_absent(hp['pid'])
    assert not effect.exists(),'outer did not return before the delayed effect'
-   if case=='cmake-live':assert 'timeout' in (work/'cmake-result').read_text().lower()
-   elif case in ('sigkill-exited','sigkill-cleanup','cleanup-atomic-omitted'):assert outer.returncode==-signal.SIGKILL
+   if case=='cmake-live':
+    assert 'timeout' in (work/'cmake-result').read_text().lower() and outer.returncode!=0
+   elif case in ('sigkill-exited','sigkill-cleanup','cleanup-atomic-omitted','cmake-parent-killed','parent-death-omitted','parent-death-restored'):assert outer.returncode==-signal.SIGKILL
    else:assert outer.returncode==124
    if case in ('sigkill-cleanup','cleanup-atomic-omitted'):assert (work/'cleanup-interruption').is_file()
-   if case in ('guardian-eof-omitted','cleanup-atomic-omitted'):
+   if case in ('guardian-eof-omitted','cleanup-atomic-omitted','parent-death-omitted'):
     until=start+4.2
     while not effect.exists() and real_mono()<until:time.sleep(.01)
     assert effect.exists() and present(owned['child']),'valid EOF omission did not defeat the cancellation oracle'
+    if case=='parent-death-omitted':assert present(hp['pid']),'owner omission did not leave a live helper'
    else:
     assert group_absent(owned['group']) and not present(owned['child'])
     assert not effect.exists()
-   rows.append({'case':case,'result':'PASS','outerExit':outer.returncode,'expectedUnsafeOmission':case in ('guardian-eof-omitted','cleanup-atomic-omitted'),'stderrSha256':hashlib.sha256(err).hexdigest()})
+   rows.append({'case':case,'result':'PASS','outerExit':outer.returncode,'expectedUnsafeOmission':case in ('guardian-eof-omitted','cleanup-atomic-omitted','parent-death-omitted'),'stderrSha256':hashlib.sha256(err).hexdigest()})
   finally:
    if owned is None and record.exists():owned=json.loads(record.read_text())
    if owned is not None:clean_group(owned['group'])
+   if helper_record.exists():
+    hp=json.loads(helper_record.read_text())
+    if present(hp['pid']):
+     # The record belongs to this exclusive fixture session; never signal an unrelated
+     # inherited caller group. This also cleans the intentionally surviving owner omission.
+     assert outer is not None and hp['group']==outer.pid
+     clean_group(hp['group'])
+     require_absent(hp['pid'])
    if outer is not None:
     if outer.poll() is None:clean_group(outer.pid)
     outer.wait(timeout=2)

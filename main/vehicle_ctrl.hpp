@@ -365,13 +365,6 @@ private:
     CarServer_TirePressureState telemetry_pending_tires_{};
     CarServer_ClosuresState telemetry_pending_closures_{};
 
-    // Record WHY we are about to restart ourselves, so the reason survives into the next boot
-    // (see take_reboot_reason()). Written from loop_task's heap watchdog on a heap that is by
-    // definition failing. Restart authorization is fail-closed: without a durable next counter,
-    // rebooting would erase the five-cycle cap and could reopen the BLE/radio window forever.
-    bool persist_reboot_reason_(const char* why) noexcept {
-        return tk::persist_reboot_reason(config_store_, why);
-    }
 
 public:
     // Why the PREVIOUS boot ended, if it ended by our own hand ("heap:<n>"); empty after an

@@ -29,9 +29,10 @@ inline constexpr UBaseType_t kPrioOta          = 5;  // ota_update.cpp      OTA 
 inline constexpr UBaseType_t kPrioOtaCheck     = 5;  // ota_update.cpp      OTA manifest check (transient)
 inline constexpr UBaseType_t kPrioAutoPair     = 4;  // vehicle_pairing.cpp auto-pair supervisor
 inline constexpr UBaseType_t kPrioWifiWatchdog = 4;  // net.cpp             ghost-association watchdog
+inline constexpr UBaseType_t kPrioHeapSupervisor = 4; // heap_supervisor.cpp independent recovery sampler
 inline constexpr UBaseType_t kPrioMqttPub      = 4;  // mqtt_ha.cpp         MQTT/HA publisher
 inline constexpr UBaseType_t kPrioDisplay      = 3;  // display.cpp         ST7735 renderer (T-Dongle-S3)
-inline constexpr UBaseType_t kPrioOtaGate      = 3;  // main.cpp/safe_mode  one-shot health timers
+inline constexpr UBaseType_t kPrioOtaGate      = 3;  // main.cpp            one-shot OTA health gate
 inline constexpr UBaseType_t kPrioSyslog       = 3;  // syslog.cpp          UDP Syslog forwarder (opt-in)
 inline constexpr UBaseType_t kPrioLed          = 2;  // led_status.cpp      APA102 status LED (opt-in)
 

@@ -325,23 +325,46 @@ a scheduled consumer waits until commit, and cancelled unpublished resources unw
 
 ## Heap-exhaustion watchdog (last-resort escalation)
 
-`logic/heap_watchdog.hpp` samples INTERNAL 8-bit largest block at the 30 s heap site. Below 4 KiB
-continuously for five minutes arms restart; one healthy sample resets the run. OTA busy clears it.
-Read `ota_is_busy()` atomically, never an allocating status copy.
+`heap_supervisor.cpp` is the sole heap sampler and recovery owner. Its essential task starts after
+consuming the typed reboot reason and obtaining BootGuard's verdict, before optional Syslog,
+Ethernet or a non-returning setup portal. It needs no Vehicle handle or lock, so Booting, portal,
+SafeMode, Fatal and a stalled/dead vehicle loop cannot disable the critical decision. Every 30 s
+it samples INTERNAL 8-bit largest block: below 4 KiB for five minutes requests restart, one healthy
+sample resets the run, and OTA busy clears it. `ota_is_busy()` is an atomic read, not a status copy.
+The existing hold uses wrap-safe low-32-bit milliseconds from the 64-bit monotonic timer; late
+samples retain elapsed critical time. Healthy-maintenance freshness does not shorten that hold.
 
-Heap history and bootstrap retries use seconds derived from the 64-bit ESP timer through
-`logic/uptime.hpp`. They remain monotonic across the former millisecond and RTOS-tick rollover
-boundaries; the watchdog and short runner deadlines retain their wrap-safe tick arithmetic.
-The diagnostic seconds representation saturates after about 136 years. An unrepresentable
-retained-history carry starts an empty trend rather than wrapping the timeline; it changes no NVS
-or retained-data layout. Bootstrap retry deadlines use unsigned differences and preserve backoff
-and awake-episode quiescence.
+The same samples feed the optional retained trend after critical evaluation. Its mutex is prepared
+before task/readers start; cyclic recording uses checked zero-wait acquisition, dropping a sample
+when contended. CRC/layout, retained carry and saturated `logic/uptime.hpp` seconds are unchanged.
+No network, storage or logging occurs under the trend's leaf lock. Optional failures cannot bypass
+critical evaluation. Periodic INFO logs preserve the historical 8-bit `free`, `largest_block` and
+`min_free` fields beside the decisive `internal_largest`; `supervisor_min_stack` labels the
+supervisor's own stack observation separately from Vehicle minima.
 
-Restart requires durable `reboot_why=heap:<n>` first, followed by fixed-buffer logging and a 300 ms
-yield for Syslog. It never confirms PendingVerify. After five consecutive restarts, stop the ladder.
-Watchdog boots suppress the ordinary initial active window; only exact NOT_FOUND means ordinary
-boot. Malformed/read/erase errors close the ladder conservatively. `/status.last_reboot` retains
-cause evidence. Failed persistence/throws cannot authorize an unrecorded restart.
+Restart needs an actual FaultRestart lease, a fresh post-CAS INTERNAL/OTA check and a confirmed
+`reboot_why=heap:<n>` commit. Failed strong CAS reports its observed owner; no later reload can
+misidentify the winner. Precommit exits release only their own lease. After confirmation the lease
+is sealed across logging, the 300 ms Syslog yield, throws and an unexpectedly returning restart;
+the task parks rather than retrying the effect. Fault recovery never confirms PendingVerify.
+
+The five-step effective heap allowance is task-local RAM state. A trusted prior count can decay to
+zero only after the qualified 30-minute normal run described below; an error seed remains untrusted
+at the cap. Decay changes neither immutable `/status.last_reboot` nor the already-closed boot
+activity window. Fault, heap, error and unknown reset evidence suppress that automatic seed;
+known Clean boots and later explicitly admitted foreground commands retain their separate policy.
+Only the configuration pointer and by-value budget seed occupy the static startup record. The
+supervisor constructs its mutable policy on its allocated task stack; startup is not overwritten
+after successful creation. Its stack frame and runtime minimum require separate measurement.
+A failed reason commit grants no restart and consumes a five-minute write-retry interval. Degraded
+logs share one first/then-five-minute cadence, independent of owner changes and storage retries.
+
+SafeMode adds a fresh raw Stable check under FaultRestart and a confirmed crash-counter commit
+of at least four before the final reason. This commit is required even when an earlier failed write
+is visible on the same handle; readback is not durability. Missing can become four; malformed or
+unreadable counters refuse. Pending/unknown SafeMode does not restart or mark valid. The two
+commits are not a power-loss transaction and cannot promise behavior after old-firmware rollback,
+an intervening known Clean reset or arbitrary shared-NVS changes.
 
 ### Why a restart, and not in-place recovery
 
@@ -723,7 +746,7 @@ The narrative inventory requires review alongside source changes; it is not gene
 | `mqtt_pub` | `kPrioMqttPub` = 4 | 6144 | `mqtt_ha.cpp` | MQTT/HA publisher (reads the caches) |
 | `display` | `kPrioDisplay` = 3 | 6144 | `display.cpp` | ST7735 renderer (`CONFIG_TESLA_DISPLAY_ENABLED` builds) |
 | `ota_gate` | `kPrioOtaGate` = 3 | 3072 | `main.cpp` | one-shot OTA rollback health gate (polls every 5 s; commits on proven link + INTERNAL largest block ≥ 4 KiB past 90 s under the shared owner, gives up at 600 s) |
-| `safe_gate` | `kPrioOtaGate` = 3 | 2560 | `safe_mode.cpp` | one-shot healthy-window timer: after 30 s under the full normal workload it durably clears the crash-boot counter; latched safe mode never creates it |
+| `heapsup` | `kPrioHeapSupervisor` = 4 | 3072 | `heap_supervisor.cpp` | essential early independent INTERNAL heap sampling/recovery and qualified healthy-counter maintenance; own stack observation, no Vehicle handle |
 | `syslog_task` | `kPrioSyslog` = 3 | 6144 | `syslog.cpp` | best-effort UDP Syslog forwarder (opt-in; degraded-not-fatal on a failed start) |
 | `led` | `kPrioLed` = 2 | 3072 | `led_status.cpp` | APA102 status LED (`CONFIG_TESLA_LED_ENABLED` builds) |
 
@@ -791,8 +814,13 @@ bounded host-sync acknowledgement; timeout stays terminal against late callbacks
 host reset or loss of sync blocks confirmation.
 
 Essential: NVS, controller primitives/tasks, network primitives/watchdog, NimBLE, primary HTTP
-registration and OTA gate task. Fatal PendingVerify marks invalid and reboots to the prior slot;
-fatal stable boot halts with diagnostics rather than looping. Optional MQTT/Syslog/display/LED
+registration, early heap supervisor and OTA gate task. Fatal PendingVerify yields while a temporary
+operation owner is held, then freshly queries metadata under its own FaultRestart lease and marks
+invalid without confirmation. An uncertain SDK rollback effect retains the lease; Stable/unknown
+metadata releases it and parks with existing diagnostics rather than entering a reboot loop.
+VIN-journal repair and automatic WiFi rollback hold ConfigRestart across their entire mutation and
+committed restart; neither can confirm an image. Initial-key recovery retains its existing identity
+owner without recursively acquiring another lease. Optional MQTT/Syslog/display/LED
 contain start failures, unwind partial resources and report disabled status.
 
 Fatal diagnostics use only the sinks already started: an NVS failure can halt before networking,
@@ -801,14 +829,32 @@ does not distinguish that halt from a network fault. See [recovery steps](USER_G
 
 ### Boot-loop safe mode
 
-Four consecutive fault boots latch recovery mode: networking, web UI and OTA remain, while BLE,
-vehicle, auto-pair and MQTT stay down. NVS read/write/malformed-value/exception failures enter safe
-mode conservatively. The 30 s healthy counter-clear timer runs only under the full normal workload,
-never while latched; recovery uptime is not proof the faulty subsystem works. A non-fault intentional
-configuration/OTA/power/reset reboot clears the sequence only after a valid counter read and a
-successful zero write. Persistent storage failure or a malformed counter keeps safe mode active;
-repeated resets and firmware rollback do not repair shared NVS. `boot_guard.hpp` and `safe_mode.cpp`
-own this policy. Preserve the failure evidence and follow the [recovery steps](USER_GUIDE.md#safe-mode-and-fatal-startup).
+Four fault boots occurring before a qualified 30-minute normal run latch recovery: networking,
+web UI and OTA remain, while BLE, vehicle, auto-pair and MQTT stay down. A real fault reset
+increments even beside a heap breadcrumb; a verified heap SW restart preserves the crash count.
+Unknown reset/reason evidence cannot lower a verified count. Counter read/write/type/parse or
+exception failures enter SafeMode; a reason Error also vetoes later time-based clear. Known Clean
+configuration/OTA/power/reset exits still require a valid counter read and confirmed zero commit.
+
+`logic/heap_supervision.hpp` qualifies recovery maintenance from 64-bit monotonic observations:
+Ready acquired before any BLE singleton read, current host sync, zero sticky host resets, a successful
+Vehicle iteration within 60 s, a network lease, INTERNAL largest block at least 4 KiB and no OTA.
+Sleeping/unpaired operation is eligible without a probe or wake. Known runner/parse failures do not
+publish successful progress; a terminal vehicle boundary first marks Fatal. Missing, backward,
+ineligible or more-than-60-second-gapped samples restart this healthy interval.
+
+Only this full interval can decay a trusted RAM heap budget or authorize the one pending crash
+counter clear. The actual HealthCommit owner and a second fresh health/elapsed check precede that
+clear. Failed/throwing commits remain pending and retry no faster than five minutes; confirmed
+success retires the work. SafeMode, portal, Fatal, stale progress and raw uptime earn no clear.
+This bounds repeated faults at 60/120 s and other intervals shorter than the healthy phase; it is
+not a bound on unrelated faults after a completed healthy interval.
+
+The permanent 3072-byte supervisor replaces a temporary 2560-byte timer. No steady-state RAM saving
+or worst-path stack margin follows from that replacement: static state, task/TCB allocation, startup
+overlap, INTERNAL largest block and own runtime minimum require separate measurement. Repeated
+resets or firmware rollback do not repair shared NVS. Preserve failure evidence and follow the
+[recovery steps](USER_GUIDE.md#safe-mode-and-fatal-startup).
 
 ### Deferred: owned BLE-ops queue
 

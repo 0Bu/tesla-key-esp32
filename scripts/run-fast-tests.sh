@@ -67,6 +67,11 @@ run_boundary() {
     -o "$BUILD_DIR/runtime_boundary_tests" \
     test/test_runtime_boundaries.cpp test/test_background_poll.cpp test/test_ota_admission.cpp test/test_coredump_hash.cpp main/diag_log.cpp main/stack_watch.cpp main/safe_mode.cpp
   "$BUILD_DIR/runtime_boundary_tests"
+  python3 test/generate_heap_supervisor_adapter.py "$BUILD_DIR/heap_supervisor_adapter.generated.hpp"
+  "$CXX" -std=c++17 -Wall -Wextra -Werror -Itest/stubs -Imain -I"$BUILD_DIR" \
+    -o "$BUILD_DIR/heap_supervisor_tests" \
+    test/test_heap_supervisor.cpp main/safe_mode.cpp main/heap_trend.cpp
+  "$BUILD_DIR/heap_supervisor_tests"
   python3 test/generate_syslog_adapters.py "$BUILD_DIR/syslog_adapters.generated.hpp"
   "$CXX" -std=c++17 -Wall -Wextra -Werror -Imain -I"$BUILD_DIR" \
     -o "$BUILD_DIR/syslog_runtime_tests" test/test_syslog_runtime.cpp
