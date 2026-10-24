@@ -11,6 +11,8 @@ import tempfile
 import json
 import os
 import subprocess
+import re
+import shlex
 
 
 class ContractError(RuntimeError):
@@ -78,6 +80,73 @@ elif name == "compiler" and "-o" in args:
         ], "sanitizer invocation flow did not execute both actual native-probe commands")
 
 
+def probe_browser_invocations(source: str) -> None:
+    """Execute the actual strict shell flow with passive tools, without compiling or a browser."""
+    inventory = re.search(r"for required in (.*?)\s*; do", source, re.DOTALL)
+    require(inventory is not None, "strict host inventory loop is missing")
+    required = shlex.split(inventory.group(1).replace("\\\n", " "))
+    for platform in ("Linux", "Darwin"):
+        with tempfile.TemporaryDirectory(prefix="browser-host-flow-") as directory:
+            work = Path(directory)
+            for name in [*required, "tools/agent-hooks/run_with_timeout.py"]:
+                relative = Path(name)
+                require(not relative.is_absolute() and ".." not in relative.parts,
+                        "unsafe strict host fixture path")
+                file = work / relative
+                file.parent.mkdir(parents=True, exist_ok=True)
+                file.touch()
+            script = work / "scripts/run-mock-tests.sh"
+            script.write_text(source)
+            binaries = work / "bin"
+            binaries.mkdir()
+            trace = work / "trace.jsonl"
+            python = binaries / "python3"
+            python.write_text("#!" + sys.executable + '''
+import json,os,sys
+if sys.argv[1:2] != ['-c']:
+    with open(os.environ['TESLA_BROWSER_FLOW_TRACE'],'a') as out:
+        out.write(json.dumps(sys.argv[1:])+'\\n')
+    if sys.argv[1:] == json.loads(os.environ.get('TESLA_BROWSER_FLOW_FAIL','null')):
+        raise SystemExit(37)
+''')
+            python.chmod(0o700)
+            for name in ("cmake", "node"):
+                file = binaries / name
+                file.write_text("#!/bin/sh\nexit 0\n")
+                file.chmod(0o700)
+            uname = binaries / "uname"
+            uname.write_text("#!/bin/sh\nprintf '%s\\n' " + shlex.quote(platform) + "\n")
+            uname.chmod(0o700)
+            env = os.environ.copy()
+            for name in tuple(env):
+                if name in ("OTA_SIGNING_KEY", "OTA_SIGNING_KEY_FILE", "GH_TOKEN", "GITHUB_TOKEN",
+                            "ENV", "BASH_ENV") or name.startswith(("PYTHON", "BASH_FUNC_")):
+                    env.pop(name, None)
+            env.update(PATH=str(binaries) + os.pathsep + os.defpath,
+                       TESLA_BROWSER_FLOW_TRACE=str(trace))
+            prefix = ["tools/agent-hooks/run_with_timeout.py", "120"]
+            expected = [prefix + ["python3", "test/test_inline_assets.py"],
+                        prefix + ["python3", "test/test_web_ui_browser_gate.py"],
+                        prefix + ["python3", "test/test_browser_cdp.py"],
+                        prefix + (["scripts/run-browser-tests-linux.sh"] if platform == "Darwin" else
+                                  ["python3", "test/web_ui_browser_gate.py", "--require-browser"])]
+            for failure in [None, *expected]:
+                trace.unlink(missing_ok=True)
+                env["TESLA_BROWSER_FLOW_FAIL"] = json.dumps(failure)
+                try:
+                    result = subprocess.run(["/bin/bash", str(script), "--require-all"], cwd=work,
+                                            env=env, capture_output=True, timeout=10)
+                except subprocess.TimeoutExpired as error:
+                    raise ContractError("strict browser invocation flow timed out") from error
+                calls = [json.loads(line) for line in trace.read_text().splitlines()] if trace.exists() else []
+                if failure is None:
+                    require(result.returncode == 0 and all(calls.count(call) == 1 for call in expected),
+                            "strict browser invocation flow must execute policy, pipe and real-browser gates once")
+                else:
+                    require(result.returncode == 1 and calls.count(failure) == 1,
+                            "strict browser invocation flow must propagate each gate failure")
+
+
 def validate(root: Path) -> None:
     run_mock = (root / "scripts/run-mock-tests.sh").read_text(encoding="utf-8")
     idf_verify = (root / "scripts/ci-build-verify.sh").read_text(encoding="utf-8")
@@ -85,6 +154,7 @@ def validate(root: Path) -> None:
     cmake = (root / "test/CMakeLists.txt").read_text(encoding="utf-8")
     sanitizers = (root / "scripts/run-sanitizer-tests.sh").read_text(encoding="utf-8")
     browser_gate = (root / "test/web_ui_browser_gate.py").read_text(encoding="utf-8")
+    browser_cdp = (root / "test/browser_cdp.py").read_text(encoding="utf-8")
     fast = (root / "scripts/run-fast-tests.sh").read_text(encoding="utf-8")
     mqtt_gate_source = (root / "test/run-mqtt-json-publish-tests.sh").read_text(encoding="utf-8")
     mqtt_test = (root / "test/test_mqtt_json_publish.cpp").read_text(encoding="utf-8")
@@ -128,6 +198,9 @@ def validate(root: Path) -> None:
         "test/tesla_protocol_vectors.test.mjs",
         "test/test_runtime_boundary_contract.py",
         "test/test_charge_presentation.py",
+        "test/test_command_outcomes.py",
+        "test/test_inline_assets.py",
+        "main/www/prune_css_comments.py",
         "test/run-cjson-oom-tests.sh",
         "test/test_codex_setup.py",
         "scripts/check-bench-acceptance.py",
@@ -145,6 +218,8 @@ def validate(root: Path) -> None:
         "scripts/run-fuzz-smoke.sh",
         "test/web_ui_browser_gate.py",
         "test/test_web_ui_browser_gate.py",
+        "test/test_browser_cdp.py",
+        "test/browser_cdp.py",
     ):
         require(path in run_mock, f"run-mock-tests.sh strict inventory omits {path}")
     require("python3 scripts/check-logic-test-ownership.py --compile --self-test" in run_mock,
@@ -155,6 +230,10 @@ def validate(root: Path) -> None:
             "run-mock-tests.sh does not execute the host wiring contract")
     require('run_gate "coherent charge presentation snapshot" 120 python3 test/test_charge_presentation.py' in run_mock,
             "strict host gate must execute the coherent charge presentation snapshot")
+    require('run_gate "contextual charging command outcomes" 120 python3 test/test_command_outcomes.py' in run_mock,
+            "strict host gate must execute contextual charging command outcomes")
+    require('run_gate "CSS bytes and actual inline generation" 120 python3 test/test_inline_assets.py' in run_mock,
+            "strict host gate must execute actual CSS inline generation")
     require('run_gate "retained bootloader compatibility and USB consumers" 120 python3 test/test_bootloader_preflight.py' in run_mock,
             "strict host gate must execute retained-bootloader and USB-consumer admission controls")
     require("python3 scripts/check-nvs-contract.py --self-test" in run_mock,
@@ -307,20 +386,30 @@ def validate(root: Path) -> None:
         "                python3 test/web_ui_browser_gate.py --require-browser" in run_mock,
         "strict real-browser gate must retain its 120-second outer timeout",
     )
-    require(
-        "PROFILE_TIMEOUT_SECONDS = 45" in browser_gate
-        and browser_gate.count("process.wait(timeout=PROFILE_TIMEOUT_SECONDS)") == 1
-        and "TERMINATION_GRACE_SECONDS = 2" in browser_gate
-        and browser_gate.count("process.wait(timeout=TERMINATION_GRACE_SECONDS)") == 2,
-        "real-browser gate cold-start and termination budgets drifted",
-    )
+    require("BROWSER_WORK_SECONDS = 110" in browser_gate and "STARTUP_SECONDS = 45" in browser_gate
+            and "time.monotonic() + BROWSER_WORK_SECONDS" in browser_gate
+            and browser_cdp.count("process.wait(timeout=0.75)") == 2,
+            "real-browser absolute work/startup and termination budgets drifted")
+    require('("mobile", 390, 844, "light")' in browser_gate and
+            '("tablet", 768, 900, "light")' in browser_gate and
+            '("desktop", 1200, 900, "dark")' in browser_gate and
+            'require(completed == [390, 768, 1200]' in browser_gate,
+            "three populated browser profiles must complete")
+    require('"Input.dispatchKeyEvent"' in browser_gate and '"trusted-" + code' in browser_gate and
+            'ring["active"] and ring["visible"]' in browser_gate and
+            'value["actions"] == index and len(value["clicks"]) == index' in browser_gate,
+            "trusted native keyboard/focus acceptance is missing")
     require('run_gate "browser launch policy" 120 python3 test/test_web_ui_browser_gate.py' in run_mock,
             "host suite must execute browser launch-policy tests")
+    require('run_gate "browser pipe transport" 120 python3 test/test_browser_cdp.py' in run_mock,
+            "host suite must execute browser pipe-transport tests")
     require('if [ "$(uname -s)" = Darwin ]; then' in run_mock and
             'run_gate "Linux-container DOM and accessibility contract" 120 scripts/run-browser-tests-linux.sh' in run_mock,
             "strict macOS browser gate must execute its Linux container")
-    require(browser_gate.count('if sys.platform != "linux":') == 3,
+    require(browser_gate.count('if sys.platform != "linux":') == 4 and
+            browser_cdp.count('if sys.platform != "linux":') == 1,
             "Linux-only browser launch guards drifted")
+    probe_browser_invocations(run_mock)
     cjson_gate = "CJSON_OOM_SANITIZE=1 bash ./test/run-cjson-oom-tests.sh"
     mqtt_gate = "MQTT_JSON_SANITIZE=1 bash ./test/run-mqtt-json-publish-tests.sh"
     build = './scripts/ci-build-all.sh "$version" "$source_sha"'
@@ -340,6 +429,8 @@ def replace_once(path: Path, old: str, new: str) -> None:
 def self_test(root: Path) -> None:
     validate(root)
     mutations = [
+        ("scripts/run-mock-tests.sh", 'run_gate "contextual charging command outcomes" 120 python3 test/test_command_outcomes.py',
+         'true # removed contextual outcomes gate', "contextual charging command outcomes"),
         ("scripts/run-mock-tests.sh", 'run_gate "coherent charge presentation snapshot" 120 python3 test/test_charge_presentation.py',
          'true # removed charge snapshot gate', "coherent charge presentation snapshot"),
         ("scripts/run-mock-tests.sh", 'run_gate "optional LED driver decisions and GPIO" 120 python3 test/test_led_driver_contract.py',
@@ -425,6 +516,18 @@ def self_test(root: Path) -> None:
          '# removed Linux browser execution', "must execute its Linux container"),
         ("scripts/run-mock-tests.sh", 'run_gate "browser launch policy" 120 python3 test/test_web_ui_browser_gate.py',
          '# removed browser policy test', "execute browser launch-policy tests"),
+        ("scripts/run-mock-tests.sh", '    run_gate "browser pipe transport" 120 python3 test/test_browser_cdp.py',
+         '    # run_gate "browser pipe transport" 120 python3 test/test_browser_cdp.py',
+         "strict browser invocation flow"),
+        ("scripts/run-mock-tests.sh", '    run_gate "browser pipe transport" 120 python3 test/test_browser_cdp.py',
+         '    if false; then\n    run_gate "browser pipe transport" 120 python3 test/test_browser_cdp.py\n    fi',
+         "strict browser invocation flow"),
+        ("scripts/run-mock-tests.sh", '    run_gate "browser pipe transport" 120 python3 test/test_browser_cdp.py',
+         '    exit 0\n    run_gate "browser pipe transport" 120 python3 test/test_browser_cdp.py',
+         "strict browser invocation flow"),
+        ("scripts/run-mock-tests.sh", '    run_gate "browser pipe transport" 120 python3 test/test_browser_cdp.py',
+         '    run_gate "browser pipe transport" 120 python3 test/test_browser_cdp.py &',
+         "strict browser invocation flow"),
         ("test/web_ui_browser_gate.py", 'if sys.platform != "linux":',
          'if False:', "Linux-only browser launch guards"),
         ("scripts/run-mock-tests.sh", 'run_gate "locked cJSON intake and OOM" 120 bash test/run-cjson-oom-tests.sh',
@@ -471,8 +574,12 @@ def self_test(root: Path) -> None:
         ("scripts/run-mock-tests.sh",
          'run_gate "execute NVS adapter tests" 120 "$BUILD_DIR/nvs_storage_tests"',
          "# removed NVS fallback execution", "compile and execute nvs_storage_tests"),
-        ("test/web_ui_browser_gate.py", "PROFILE_TIMEOUT_SECONDS = 45",
-         "PROFILE_TIMEOUT_SECONDS = 20", "cold-start and termination budgets"),
+        ("test/web_ui_browser_gate.py", "STARTUP_SECONDS = 45",
+         "STARTUP_SECONDS = 20", "absolute work/startup and termination budgets"),
+        ("test/web_ui_browser_gate.py", '("tablet", 768, 900, "light")',
+         '("tablet", 769, 900, "light")', "three populated browser profiles"),
+        ("test/web_ui_browser_gate.py", 'value["actions"] == index and len(value["clicks"]) == index',
+         "True", "trusted native keyboard/focus acceptance"),
         ("scripts/run-mock-tests.sh",
          'run_gate "real-browser DOM and accessibility contract" 120 \\\n',
          'run_gate "real-browser DOM and accessibility contract" 90 \\\n',
@@ -493,6 +600,15 @@ def self_test(root: Path) -> None:
         ("scripts/run-sanitizer-tests.sh", display_call, 'exit 0\n' + display_call,
          "sanitizer invocation flow"),
     ])
+    css_call = 'run_gate "CSS bytes and actual inline generation" 120 python3 test/test_inline_assets.py'
+    mutations.extend([
+        ("scripts/run-mock-tests.sh", css_call, "true # omitted CSS generator controls",
+         "execute actual CSS inline generation"),
+        ("scripts/run-mock-tests.sh", css_call, 'if false; then\n' + css_call + '\nfi',
+         "strict browser invocation flow"),
+        ("scripts/run-mock-tests.sh", css_call, 'exit 0\n' + css_call,
+         "strict browser invocation flow"),
+    ])
     for relative, old, new, expected in mutations:
         with tempfile.TemporaryDirectory(prefix="host-gate-contract-") as directory:
             fixture = Path(directory)
@@ -509,6 +625,7 @@ def self_test(root: Path) -> None:
                 "test/generate_effect_reply_adapters.py",
                 "test/test_config_commit.cpp",
                 "test/web_ui_browser_gate.py",
+                "test/browser_cdp.py",
                 "test/run-mqtt-json-publish-tests.sh",
                 "test/test_mqtt_json_publish.cpp",
             ):

@@ -53,18 +53,25 @@ dispatch; the same rule applies to vehicle-data routes.
   fresh, serialized `ChargeState` request and the car reported *exactly* the requested current.
   Missing/malformed input is `400`; an unreachable car, rejected command or missing/mismatched
   readback is `502`, so controllers such as evcc retry instead of accepting a false success.
-- **Outcome status:** in a complete reply, success and the nominal `already_set` are HTTP `200`
-  with `result:true`. Every other failed command (car refusal, authentication or role fault,
+- **Outcome status:** in a complete reply, success, exact `already_set` and the contextual charging
+  no-ops below are HTTP `200` with `result:true`. Every other failed command (car refusal, authentication or role fault,
   asleep or unreachable car, timeout, or a device-side refusal such as a full command queue) keeps
   the Tesla-compatible JSON (`result:false` plus the reason) but uses HTTP `502`, not a misleading
   `200`. Intake and out-of-memory failures before dispatch keep their own codes. If the reply
   cannot be built after the attempt, the degraded HTTP `200` reply carries `outcome:"succeeded"`
-  only for a successful command, including `already_set`, otherwise `result:false` and
-  `outcome:"unknown"` (see
+  only for a successful command, including `already_set` and these no-ops, otherwise
+  `result:false` and `outcome:"unknown"` (see
   [Response classes](#response-classes)).
   vehicle-command's proxy maps these differently (200 for car refusals, otherwise 408/412/500/503
   with an error-only body, or a Fleet server error's own status); see
   [ADR-0005](adr/0005-tesla-ble-seam.md#2-platform-forced-departures-and-reference-deviations).
+
+- **Already satisfied charging requests:** after an authenticated current Infotainment rejection,
+  `charge_start` accepts exact reasons `is_charging` or `complete`; `charge_stop` accepts
+  `not_charging`. The response is successful without another send. Here `complete` means an
+  accepted already-finished no-op, not proof that charging started. Inverse pairs, `requested`,
+  unrelated commands and uncertain replies remain failures. This local compatibility policy
+  changes neither cached charge telemetry nor the existing exact `already_set` behavior.
 
 - **Uncertain execution:** after possible payload submission, an unconfirmed failure reports
   `command outcome unknown; command may have executed`. The firmware does not automatically send
@@ -267,7 +274,7 @@ See [pairing](USER_GUIDE.md#pairing-and-identity) for the NFC card and vehicle c
 `sys.board_mac` remains visible. `/diag?redact=1` substitutes identifiers per line, retains the board
 MAC and discards a wrapped partial first line. Lines over 288 bytes become `"<redacted>"`;
 truncated sensitive values are redacted through the line's end. Known network-identifier formats from
-netif, WiFi, TLS DNS and MQTT URI parsing become a complete replacement line. For recognized complete V1 log records, the ring copy flattens embedded CR/LF while retaining
+netif, WiFi (including block-ack `<ba-add>` AP addresses), TLS DNS and MQTT URI parsing become a complete replacement line. For recognized complete V1 log records, the ring copy flattens embedded CR/LF while retaining
 trailing line endings; this also affects raw `/diag`. Serial and Syslog retain the original bytes except known MQTT URI parse errors, which become
 a fixed credential-free line before any sink, even if optional ring allocation fails.
 Fragmented driver output and other library or serial output may contain identifiers; inspect
