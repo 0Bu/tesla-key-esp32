@@ -196,7 +196,7 @@ SIGNING_ENVIRONMENT_JOBS = {
 # Scalar/step semantics below remain explanatory; exact bodies also close narrow-scanner gaps.
 EXPECTED_PRIVILEGED_JOB_SHA256 = {
     ('build.yml', 'publish'): "3d8071b2e6361b0d013b5a07e6f598ff5152245e64eda83f4f031ba2f4850180",
-    ('build.yml', 'deploy'): "4bf4e43925d0fec42a726061437ce9eb78579b15371c57096ae4fd7aa482b341",
+    ('build.yml', 'deploy'): "415caf4c6a5be8ac9f31711193bd0a47b13b4e47562ecf67b95bf779022b7bad",
     ('signed-pr-preview.yml', 'sign-preview'): "e44a21370d774b00b10dafcd11ff44a1d590485aeb8e03f62d600c3829f90925",
     ('signed-pr-preview.yml', 'validate'): "44f1065eb3e479f4363e2fba6c10b29ae814cb01fe4ea4f0482f6b548f63511b",
     ('pr-preview-cleanup.yml', 'cleanup-event'): "444dac196ca71ad9b7875975bceae73b8a4fc6acf36325da7766d0ef8a66467f",
@@ -363,6 +363,43 @@ def workflow_model(path: Path, text: str) -> dict:
         require(isinstance(model, dict), f"{path.name}: workflow must be a mapping")
         YAML_MODELS[digest] = model
     return YAML_MODELS[digest]
+
+
+def validate_deploy_signed_candidate(steps: list[dict]) -> None:
+    """Require the actual key-free deploy consumer, including all four signature checks."""
+    name = "Validate downloaded signed root and local Pages bytes"
+    expected = {
+        "name": name,
+        "env": {"DISPLAY_VERSION": "${{ needs.build.outputs.display-version }}",
+                "SOURCE_SHA": "${{ github.sha }}"},
+        "run": '''set -euo pipefail
+python3 scripts/check-signed-root-inventory.py ./_deploy-input \\
+  --version "$DISPLAY_VERSION"
+python3 scripts/check-pages-manifest.py ./_deploy-input/_site \\
+  --source-sha "$SOURCE_SHA" --version "$DISPLAY_VERSION"
+python3 scripts/check-release-pages-bytes.py \\
+  ./_deploy-input/_site ./_deploy-input --version "$DISPLAY_VERSION"
+for row in 'esp32|' 'esp32s3|-s3' 'esp32c3|-c3' 'esp32c6|-c6'; do
+  target="${row%%|*}"
+  suffix="${row#*|}"
+  python3 scripts/check-firmware-artifacts.py \\
+    --target "$target" --version "$DISPLAY_VERSION" --signed-app \\
+    --bootloader "_deploy-input/_fw/$target/bootloader.bin" \\
+    --app "_deploy-input/tesla-key-esp32$suffix.bin" \\
+    --expected-public-key-digest scripts/ota-signing-public-key.sha256
+done
+''',
+    }
+    matches = [(i, step) for i, step in enumerate(steps) if step.get("name") == name]
+    require(len(matches) == 1 and matches[0][1] == expected,
+            "build.yml:deploy must run the mandatory four-target production-pin consumer")
+    names = [step.get("name") for step in steps]
+    require(names.count("Download exact signed Release and Pages candidate") == 1
+            and names.count("Deploy root site to gh-pages") == 1
+            and names.count("Deploy dev site to gh-pages") == 1
+            and names.index("Download exact signed Release and Pages candidate") < matches[0][0]
+            < min(names.index("Deploy root site to gh-pages"), names.index("Deploy dev site to gh-pages")),
+            "build.yml:deploy production-pin consumer must precede both branch writes")
 
 
 def validate(root: Path) -> None:
@@ -921,6 +958,7 @@ def validate(root: Path) -> None:
     )
     dev_pages_name = "Revalidate branch-backed Pages authority immediately before dev deployment"
     deploy_steps = workflow_model(root / ".github/workflows/build.yml", contents["build.yml"])["jobs"]["deploy"]["steps"]
+    validate_deploy_signed_candidate(deploy_steps)
     dev_pages_steps = [(index, step) for index, step in enumerate(deploy_steps) if step.get("name") == dev_pages_name]
     expected_dev_pages = {
         "name": dev_pages_name,
@@ -1488,8 +1526,8 @@ def self_test(root: Path) -> None:
          "      contents: read\n    environment: firmware-signing\n    steps:\n",
          "protected Environment inventory drift"),
         ("unprivileged-write", "build.yml",
-         "  logic-test:\n    runs-on: ubuntu-26.04\n    timeout-minutes: 10\n    permissions:\n      contents: read",
-         "  logic-test:\n    runs-on: ubuntu-26.04\n    timeout-minutes: 10\n    permissions:\n      contents: write",
+         "  logic-test:\n    runs-on: ubuntu-26.04\n    timeout-minutes: 20\n    permissions:\n      contents: read",
+         "  logic-test:\n    runs-on: ubuntu-26.04\n    timeout-minutes: 20\n    permissions:\n      contents: write",
          "permissions must match the exact reviewed inventory"),
         ("unprivileged-arbitrary-write", "build.yml",
          "      contents: read\n    steps:\n",

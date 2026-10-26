@@ -1,8 +1,8 @@
 # Build-time re-assembly of the web UI: splice www/style.css and www/app.js back into
 # the marker lines in www/index.html, producing the ONE self-contained page the firmware
 # embeds (then gzips — see main/CMakeLists.txt). The sources are split for edit locality
-# only; CSS documentation comments are blanked conservatively before gzip. Markup
-# and JavaScript remain byte-identical to their inputs.
+# only; whole-line CSS/JavaScript documentation is blanked conservatively before
+# gzip. Markup and code tokens remain unchanged within the supported source subset.
 #
 #   cmake -DHTML=<index.html> -DCSS=<style.css> -DJS=<app.js> -DOUT=<out.html> -DPYTHON=<python> -P inline_assets.cmake
 #
@@ -57,5 +57,5 @@ execute_process(
     RESULT_VARIABLE prune_result
     TIMEOUT 10)
 if(NOT "${prune_result}" STREQUAL "0")
-    message(FATAL_ERROR "inline_assets.cmake: CSS comment pruning failed: ${prune_result}: ${prune_error}")
+    message(FATAL_ERROR "inline_assets.cmake: web asset comment pruning failed: ${prune_result}: ${prune_error}")
 endif()

@@ -49,7 +49,10 @@ inline constexpr std::array<std::string_view, kStateDomainCount> kStateTopicSuff
     "charge", "climate", "drive", "tires", "closures", "vehicle", "device",
 }};
 
-inline constexpr std::array<DiscoveryEntry, kDiscoveryEntryCount> kDiscoveryEntries{{
+namespace discovery_detail {
+
+// Human-readable source rows are evaluated only while constructing the compact catalog.
+inline constexpr std::array<DiscoveryEntry, kDiscoveryEntryCount> kSourceEntries{{
     // Charge
     {StateDomain::Charge, DiscoveryComponent::Sensor, "soc", "Battery", "soc",
      JsonValueKind::Number, "battery", "%", "measurement", "", false},
@@ -183,6 +186,136 @@ inline constexpr std::array<DiscoveryEntry, kDiscoveryEntryCount> kDiscoveryEntr
      "diagnostic", false},
 }};
 
+// All runtime storage is readonly. IDs, offsets and flags replace repeated pointer/length
+// pairs; consumers still receive the original DiscoveryEntry value without heap allocation.
+inline constexpr unsigned kStringFields = 7;
+struct SourceCatalog {
+    std::array<std::string_view, kDiscoveryEntryCount * kStringFields> strings{};
+    std::array<std::array<uint8_t, kStringFields>, kDiscoveryEntryCount> ids{};
+    size_t count{0};
+    size_t bytes{0};
+};
+constexpr std::array<std::string_view, kStringFields> string_fields(
+        const DiscoveryEntry& entry) noexcept {
+    return {{entry.object_id, entry.name, entry.field, entry.device_class, entry.unit,
+             entry.state_class, entry.entity_category}};
+}
+constexpr SourceCatalog source_catalog() noexcept {
+    SourceCatalog catalog{};
+    for (size_t row = 0; row < kSourceEntries.size(); ++row) {
+        const auto fields = string_fields(kSourceEntries[row]);
+        for (unsigned field = 0; field < fields.size(); ++field) {
+            size_t id = 0;
+            while (id < catalog.count && catalog.strings[id] != fields[field]) ++id;
+            if (id == catalog.count) {
+                catalog.strings[catalog.count++] = fields[field];
+                catalog.bytes += fields[field].size() + 1;
+            }
+            catalog.ids[row][field] = static_cast<uint8_t>(id);
+        }
+    }
+    return catalog;
+}
+inline constexpr auto kSourceCatalog = source_catalog();
+static_assert(kSourceCatalog.count > 0 && kSourceCatalog.count <= 256);
+static_assert(kSourceCatalog.bytes < 65536);
+struct PackedEntry {
+    std::array<uint8_t, kStringFields> strings{};
+    uint8_t flags{0};
+};
+static_assert(sizeof(PackedEntry) == 8);
+
+template <size_t Strings, size_t Bytes>
+struct PackedCatalog {
+    std::array<PackedEntry, kDiscoveryEntryCount> rows{};
+    std::array<uint16_t, Strings + 1> offsets{};
+    std::array<char, Bytes> text{};
+
+    constexpr bool valid() const noexcept {
+        if (offsets.front() != 0 || offsets.back() != Bytes) return false;
+        for (size_t id = 0; id < Strings; ++id) {
+            if (offsets[id] >= offsets[id + 1] || offsets[id + 1] > Bytes ||
+                text[offsets[id + 1] - 1] != '\0') return false;
+        }
+        for (const auto& row : rows) {
+            if ((row.flags & 0x80u) || (row.flags & 7u) >= kStateDomainCount ||
+                ((row.flags >> 4) & 3u) > static_cast<unsigned>(JsonValueKind::Boolean))
+                return false;
+            for (const auto id : row.strings) if (id >= Strings) return false;
+        }
+        return true;
+    }
+    constexpr std::string_view string(unsigned id) const noexcept {
+        if (id >= Strings) return {};
+        const size_t begin = offsets[id], end = offsets[id + 1];
+        if (begin >= end || end > Bytes || text[end - 1] != '\0') return {};
+        return {text.data() + begin, end - begin - 1};
+    }
+    constexpr DiscoveryEntry entry(size_t index) const noexcept {
+        if (index >= rows.size()) return {};
+        const auto& row = rows[index];
+        const auto flags = row.flags;
+        if ((flags & 0x80u) || (flags & 7u) >= kStateDomainCount ||
+            ((flags >> 4) & 3u) > static_cast<unsigned>(JsonValueKind::Boolean)) return {};
+        return {static_cast<StateDomain>(flags & 7u),
+                static_cast<DiscoveryComponent>((flags >> 3) & 1u),
+                string(row.strings[0]), string(row.strings[1]), string(row.strings[2]),
+                static_cast<JsonValueKind>((flags >> 4) & 3u),
+                string(row.strings[3]), string(row.strings[4]), string(row.strings[5]),
+                string(row.strings[6]), (flags & 0x40u) != 0};
+    }
+};
+template <size_t Strings, size_t Bytes>
+constexpr PackedCatalog<Strings, Bytes> pack_catalog() noexcept {
+    PackedCatalog<Strings, Bytes> packed{};
+    size_t offset = 0;
+    for (size_t id = 0; id < Strings; ++id) {
+        packed.offsets[id] = static_cast<uint16_t>(offset);
+        for (const char byte : kSourceCatalog.strings[id]) packed.text[offset++] = byte;
+        packed.text[offset++] = '\0';
+    }
+    packed.offsets[Strings] = static_cast<uint16_t>(offset);
+    for (size_t i = 0; i < kSourceEntries.size(); ++i) {
+        const auto& entry = kSourceEntries[i];
+        packed.rows[i].strings = kSourceCatalog.ids[i];
+        packed.rows[i].flags = static_cast<uint8_t>(
+            static_cast<unsigned>(entry.domain) |
+            (static_cast<unsigned>(entry.component) << 3) |
+            (static_cast<unsigned>(entry.value_kind) << 4) |
+            (entry.invert ? 0x40u : 0u));
+    }
+    return packed;
+}
+inline constexpr auto kPackedCatalog =
+    pack_catalog<kSourceCatalog.count, kSourceCatalog.bytes>();
+static_assert(kPackedCatalog.valid());
+static_assert(sizeof(kPackedCatalog) < kDiscoveryEntryCount * sizeof(DiscoveryEntry));
+}  // namespace discovery_detail
+
+// Immutable view: each dereference returns one decoded value, never a reference to a temporary
+// or a second expanded global registry. Callers keeping an entry must keep that value.
+struct DiscoveryRegistry {
+    constexpr size_t size() const noexcept { return kDiscoveryEntryCount; }
+    constexpr const auto& packed_rows() const noexcept {
+        return discovery_detail::kPackedCatalog.rows;
+    }
+    constexpr DiscoveryEntry operator[](size_t index) const noexcept {
+        return discovery_detail::kPackedCatalog.entry(index);
+    }
+    constexpr DiscoveryEntry front() const noexcept { return (*this)[0]; }
+    struct Iterator {
+        size_t index;
+        constexpr DiscoveryEntry operator*() const noexcept {
+            return discovery_detail::kPackedCatalog.entry(index);
+        }
+        constexpr Iterator& operator++() noexcept { ++index; return *this; }
+        constexpr bool operator!=(Iterator other) const noexcept { return index != other.index; }
+    };
+    constexpr Iterator begin() const noexcept { return {0}; }
+    constexpr Iterator end() const noexcept { return {size()}; }
+};
+inline constexpr DiscoveryRegistry kDiscoveryEntries{};
+
 static_assert(kDiscoveryEntries.size() == kDiscoveryEntryCount,
               "Home Assistant discovery registry must contain exactly 55 entities");
 
@@ -200,31 +333,80 @@ inline constexpr std::string_view discovery_component_name(
     return component == DiscoveryComponent::BinarySensor ? "binary_sensor" : "sensor";
 }
 
-inline constexpr bool discovery_is_binary(const DiscoveryEntry& entry) noexcept {
-    return entry.component == DiscoveryComponent::BinarySensor;
+// Typed field access lets the publisher use a const packed-row reference, avoiding a
+// full decoded DiscoveryEntry temporary in its already bounded serializer frame.
+enum class DiscoveryTextField : uint8_t {
+    ObjectId, Name, Field, DeviceClass, Unit, StateClass, EntityCategory,
+};
+inline constexpr std::string_view discovery_text(const DiscoveryEntry& entry,
+        DiscoveryTextField field) noexcept {
+    switch (field) {
+        case DiscoveryTextField::ObjectId: return entry.object_id;
+        case DiscoveryTextField::Name: return entry.name;
+        case DiscoveryTextField::Field: return entry.field;
+        case DiscoveryTextField::DeviceClass: return entry.device_class;
+        case DiscoveryTextField::Unit: return entry.unit;
+        case DiscoveryTextField::StateClass: return entry.state_class;
+        case DiscoveryTextField::EntityCategory: return entry.entity_category;
+    }
+    return {};
+}
+inline constexpr std::string_view discovery_text(const discovery_detail::PackedEntry& entry,
+        DiscoveryTextField field) noexcept {
+    const auto column = static_cast<unsigned>(field);
+    return column < discovery_detail::kStringFields
+        ? discovery_detail::kPackedCatalog.string(entry.strings[column]) : std::string_view{};
+}
+inline constexpr DiscoveryComponent discovery_component(const DiscoveryEntry& entry) noexcept {
+    return entry.component;
+}
+inline constexpr DiscoveryComponent discovery_component(
+        const discovery_detail::PackedEntry& entry) noexcept {
+    return static_cast<DiscoveryComponent>((entry.flags >> 3) & 1u);
+}
+inline constexpr StateDomain discovery_domain(const DiscoveryEntry& entry) noexcept {
+    return entry.domain;
+}
+inline constexpr StateDomain discovery_domain(const discovery_detail::PackedEntry& entry) noexcept {
+    return static_cast<StateDomain>(entry.flags & 7u);
+}
+inline constexpr bool discovery_inverted(const DiscoveryEntry& entry) noexcept {
+    return entry.invert;
+}
+inline constexpr bool discovery_inverted(const discovery_detail::PackedEntry& entry) noexcept {
+    return (entry.flags & 0x40u) != 0;
+}
+template <class Entry>
+inline constexpr bool discovery_is_binary(const Entry& entry) noexcept {
+    return discovery_component(entry) == DiscoveryComponent::BinarySensor;
+}
+template <class Entry>
+inline const char* discovery_optional_text(const Entry& entry, DiscoveryTextField field) noexcept {
+    const auto text = discovery_text(entry, field);
+    return text.empty() ? nullptr : text.data();
 }
 
-template <size_t N>
+template <class Registry>
 inline constexpr bool discovery_registry_size_valid(
-    const std::array<DiscoveryEntry, N>&) noexcept {
-    return N == kDiscoveryEntryCount;
+    const Registry& entries) noexcept {
+    return entries.size() == kDiscoveryEntryCount;
 }
 
-template <size_t N>
+template <class Registry>
 inline constexpr bool discovery_registry_object_ids_unique(
-    const std::array<DiscoveryEntry, N>& entries) noexcept {
-    for (size_t i = 0; i < N; ++i) {
+    const Registry& entries) noexcept {
+    for (size_t i = 0; i < entries.size(); ++i) {
         if (entries[i].object_id.empty()) return false;
-        for (size_t j = i + 1; j < N; ++j) {
+        for (size_t j = i + 1; j < entries.size(); ++j) {
             if (entries[i].object_id == entries[j].object_id) return false;
         }
     }
     return true;
 }
 
-template <size_t N>
+template <class Registry>
 inline constexpr bool discovery_registry_shape_valid(
-    const std::array<DiscoveryEntry, N>& entries) noexcept {
+    const Registry& entries) noexcept {
     if (!discovery_registry_size_valid(entries) ||
         !discovery_registry_object_ids_unique(entries)) {
         return false;
@@ -241,28 +423,32 @@ inline constexpr bool discovery_registry_shape_valid(
     return true;
 }
 
+template <class Entry>
 inline std::string discovery_unique_id(std::string_view node,
-                                       const DiscoveryEntry& entry) {
+                                       const Entry& entry) {
+    const auto object_id = discovery_text(entry, DiscoveryTextField::ObjectId);
     std::string result;
-    result.reserve(node.size() + 1 + entry.object_id.size());
+    result.reserve(node.size() + 1 + object_id.size());
     result.append(node.data(), node.size());
     result.push_back('_');
-    result.append(entry.object_id.data(), entry.object_id.size());
+    result.append(object_id.data(), object_id.size());
     return result;
 }
 
+template <class Entry>
 inline std::string discovery_config_topic(std::string_view prefix, std::string_view node,
-                                          const DiscoveryEntry& entry) {
-    const std::string_view component = discovery_component_name(entry.component);
+                                          const Entry& entry) {
+    const std::string_view component = discovery_component_name(discovery_component(entry));
+    const auto object_id = discovery_text(entry, DiscoveryTextField::ObjectId);
     std::string result;
-    result.reserve(prefix.size() + component.size() + node.size() + entry.object_id.size() + 10);
+    result.reserve(prefix.size() + component.size() + node.size() + object_id.size() + 10);
     result.append(prefix.data(), prefix.size());
     result.push_back('/');
     result.append(component.data(), component.size());
     result.push_back('/');
     result.append(node.data(), node.size());
     result.push_back('/');
-    result.append(entry.object_id.data(), entry.object_id.size());
+    result.append(object_id.data(), object_id.size());
     result.append("/config");
     return result;
 }
@@ -278,11 +464,13 @@ inline std::string discovery_state_topic(std::string_view base, StateDomain doma
     return result;
 }
 
-inline std::string discovery_value_template(const DiscoveryEntry& entry) {
+template <class Entry>
+inline std::string discovery_value_template(const Entry& entry) {
+    const auto field = discovery_text(entry, DiscoveryTextField::Field);
     if (discovery_is_binary(entry)) {
-        return ha_binary_value_template(entry.field.data(), entry.invert);
+        return ha_binary_value_template(field.data(), discovery_inverted(entry));
     }
-    return ha_value_template(std::string(entry.field).c_str());
+    return ha_value_template(std::string(field).c_str());
 }
 
 }  // namespace tk::mqtt

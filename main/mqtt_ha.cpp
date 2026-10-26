@@ -17,7 +17,9 @@
 #include "mqtt_payloads.hpp"
 #include "mqtt_publish_sequence.hpp"
 #include "safe_mode.hpp"
+#include "runtime_admission.hpp"
 #include "stack_watch.hpp"
+#include "task_watchdog_subscription.hpp"
 #include <esp_heap_caps.h>
 #include <esp_task_wdt.h>
 
@@ -144,36 +146,44 @@ static void current_configuration_url(char* out, size_t capacity) {
 }
 
 [[gnu::noinline]] static bool publish_discovery_rows(const char* cfgurl) {
-    for (const tk::mqtt::DiscoveryEntry& entry : tk::mqtt::kDiscoveryEntries) {
-        const std::string uid = tk::mqtt::discovery_unique_id(s_node, entry);
-        const std::string value_template = tk::mqtt::discovery_value_template(entry);
+    using Field = tk::mqtt::DiscoveryTextField;
+    for (const auto& entry : tk::mqtt::kDiscoveryEntries.packed_rows()) {
+        tk::JsonOwner document;
+        {
+            const std::string uid = tk::mqtt::discovery_unique_id(s_node, entry);
+            const std::string value_template = tk::mqtt::discovery_value_template(entry);
+
+            // HA's "lock" device_class is inverted vs every other binary here: it renders ON as
+            // "Unlocked" and OFF as "Locked". The host-tested template already applies that inversion
+            // and its presence guard; the shared emitter below is the exact production serializer.
+            const tk::mqtt::DiscoveryPayload payload{
+                tk::mqtt::discovery_optional_text(entry, Field::Name),
+                uid.c_str(),
+                state_topic(tk::mqtt::discovery_domain(entry)).c_str(),
+                s_avail.c_str(),
+                value_template.c_str(),
+                tk::mqtt::discovery_optional_text(entry, Field::DeviceClass),
+                tk::mqtt::discovery_optional_text(entry, Field::Unit),
+                tk::mqtt::discovery_optional_text(entry, Field::StateClass),
+                tk::mqtt::discovery_optional_text(entry, Field::EntityCategory),
+                tk::mqtt::discovery_is_binary(entry),
+                s_node.c_str(),
+                s_devname.c_str(),
+                TK_PLATFORM,
+                esp_app_get_description()->version,
+                cfgurl[0] ? cfgurl : nullptr,
+            };
+            document = tk::mqtt::build_discovery_payload(payload);
+
+        }
+        if (!document) return false;
+        // The tree owns copied strings before temporary UID/template storage is retired.
         const std::string config_topic =
             tk::mqtt::discovery_config_topic(s_prefix, s_node, entry);
 
-        // HA's "lock" device_class is inverted vs every other binary here: it renders ON as
-        // "Unlocked" and OFF as "Locked". The host-tested template already applies that inversion
-        // and its presence guard; the shared emitter below is the exact production serializer.
-        const tk::mqtt::DiscoveryPayload payload{
-            entry.name.data(),
-            uid.c_str(),
-            state_topic(entry.domain).c_str(),
-            s_avail.c_str(),
-            value_template.c_str(),
-            entry.device_class.empty() ? nullptr : entry.device_class.data(),
-            entry.unit.empty() ? nullptr : entry.unit.data(),
-            entry.state_class.empty() ? nullptr : entry.state_class.data(),
-            entry.entity_category.empty() ? nullptr : entry.entity_category.data(),
-            tk::mqtt::discovery_is_binary(entry),
-            s_node.c_str(),
-            s_devname.c_str(),
-            TK_PLATFORM,
-            esp_app_get_description()->version,
-            cfgurl[0] ? cfgurl : nullptr,
-        };
-
         // Retained so HA recreates entities after a restart. A failed builder, print, or broker
         // enqueue stops the round before availability and is retried as a complete discovery pass.
-        if (!pub_json(config_topic, tk::mqtt::build_discovery_payload(payload))) return false;
+        if (!pub_json(config_topic, std::move(document))) return false;
     }
     ESP_LOGI(TAG, "published %d HA-discovery configs under %s/",
              static_cast<int>(tk::mqtt::kDiscoveryEntries.size()), s_prefix.c_str());
@@ -425,23 +435,14 @@ static bool publish_state() {
         // reporting a crash whose evidence is gone.
         payload.crash_dump = ci.coredump;
         payload.safe_mode = tk::safe_mode_active();
+        payload.runtime = tk::runtime_admission_snapshot(); // cached; no SDK/storage/BLE work
+        payload.pairing_block_reason = s_vehicle->pairing_block_reason();
 
         payload.wifi_reconnects = (double)tk::net_reconnect_count();
         payload.mqtt_reconnects = (double)s_reconnects.load();
-        // Payload-only fleet diagnostics (no extra HA entities). Omit an unsampled task rather than
-        // publishing zero bytes free for a task that has not run or is absent in safe mode.
-        const auto httpd_stack = tk::stack_watch_min_free_bytes(tk::StackWatch::Httpd);
-        const auto vehicle_stack = tk::stack_watch_min_free_bytes(tk::StackWatch::Vehicle);
-        const auto auto_pair_stack = tk::stack_watch_min_free_bytes(tk::StackWatch::AutoPair);
-        const auto mqtt_stack = tk::stack_watch_min_free_bytes(tk::StackWatch::Mqtt);
-        payload.has_httpd_stack = httpd_stack.has_value();
-        if (httpd_stack) payload.httpd_stack = *httpd_stack;
-        payload.has_vehicle_stack = vehicle_stack.has_value();
-        if (vehicle_stack) payload.vehicle_stack = *vehicle_stack;
-        payload.has_auto_pair_stack = auto_pair_stack.has_value();
-        if (auto_pair_stack) payload.auto_pair_stack = *auto_pair_stack;
-        payload.has_mqtt_stack = mqtt_stack.has_value();
-        if (mqtt_stack) payload.mqtt_stack = *mqtt_stack;
+        // One cached snapshot, no stack probe in telemetry. Nullable per-context fields keep
+        // missing/absent observations distinct from a measured conservative lower bound zero.
+        payload.stack_context_samples = tk::stack_watch_snapshot();
         if (!pub_json(state_topic(tk::mqtt::StateDomain::Device),
                       tk::mqtt::build_device_payload(payload)))
             return false;
@@ -451,9 +452,12 @@ static bool publish_state() {
 
 // ─── MQTT event handler ───────────────────────────────────────────────────────
 static void mqtt_event_handler(void*, esp_event_base_t, int32_t event_id, void* event_data) {
-    // Runs on the esp-mqtt event-loop C task. Only atomic stores + logging here (no throwing
-    // ops), but keep a final boundary so a future edit that allocates cannot unwind into the C
-    // event loop → std::terminate → reboot (issue #204, C-callback boundary).
+    tk::StackWatchScope f135_callback_exit(tk::StackWatch::MqttEvent);
+
+    // The pinned NoTaskLoop dispatch runs in the current MQTT/client or publisher caller.
+    // This lane aggregates those callers; it does not identify one dedicated SDK task.
+    // Keep a final boundary so future allocating work cannot unwind into the C dispatcher
+    // and terminate the process (issue #204, C-callback boundary).
     try {
     switch ((esp_mqtt_event_id_t)event_id) {
     case MQTT_EVENT_CONNECTED: {
@@ -501,6 +505,10 @@ static void mqtt_event_handler(void*, esp_event_base_t, int32_t event_id, void* 
 // discovery configs, the "online" availability, then an immediate state snapshot;
 // thereafter it republishes state every s_interval_s.
 static void publisher_task(void*) {
+    tk::stack_watch_sample(tk::StackWatch::Mqtt); // current task at entry
+    tk::StackWatchScope f135_task_exit(tk::StackWatch::Mqtt);
+
+  tk::TaskWatchdogSubscription watchdog;
   try {
     TickType_t last = 0;
     const TickType_t interval = pdMS_TO_TICKS(s_interval_s * 1000);
@@ -508,20 +516,20 @@ static void publisher_task(void*) {
     // Subscribe to the task watchdog: this task performs real, blocking network I/O (a publish over
     // a TLS socket to a broker that may be gone), and a wedge here is silent — HA simply stops
     // receiving, which looks exactly like a device that is off.
-    if (esp_task_wdt_add(nullptr) != ESP_OK) {
+    if (!watchdog.subscribe()) {
         ESP_LOGW(TAG, "mqtt_pub could not subscribe to the task watchdog — a wedged publish will no "
                       "longer reboot the device automatically");
     }
 
     while (true) {
+        tk::StackWatchScope f135_iteration_exit(tk::StackWatch::Mqtt);
         // UNCONDITIONAL, at the top: not gated on s_connected or on a successful publish, so a long
         // broker outage — during which this task correctly does nothing — can never be mistaken for
         // a hang. What must trip the watchdog is a publish that never returns, not a broker that
         // never answers.
-        esp_task_wdt_reset();
-        // Same retrospective placement as vehicle_loop: every branch reaches it, including broker
-        // outage and OOM recovery cycles, and the MQTT snapshot below reads this task's own mark.
-        tk::stack_watch_sample(tk::StackWatch::Mqtt);
+        watchdog.feed();
+        // The outer iteration scope records the historical mark after this round, including
+        // broker outages, early continues and contained faults, after local guards retire.
 
         // Iteration-boundary containment (issue #204): publish_discovery()/publish_state()
         // build cJSON + std::string discovery payloads that can throw std::bad_alloc on a
@@ -570,15 +578,25 @@ static void publisher_task(void*) {
         }
         vTaskDelay(pdMS_TO_TICKS(500));
     }
-  } catch (const std::exception& e) {
-      s_need_discovery = true;
-      ESP_LOGE(TAG, "mqtt publisher boundary threw (%s) — stopping task", e.what());
-      vTaskDelete(nullptr);
   } catch (...) {
       s_need_discovery = true;
-      ESP_LOGE(TAG, "mqtt publisher boundary threw (unknown) — stopping task");
-      vTaskDelete(nullptr);
   }
+  // Do not delete a task whose watchdog entry might still exist. An uncertain
+  // cleanup parks this task without replaying any publish or discovery round.
+  bool reported = false;
+  while (!watchdog.release()) {
+      if (!reported) {
+          reported = true;
+          try { ESP_LOGE(TAG, "mqtt publisher parked: watchdog removal unconfirmed"); }
+          catch (...) {}
+      }
+      watchdog.feed(true);
+      tk::stack_watch_sample(tk::StackWatch::Mqtt); // owned park after diagnostics/feed
+      vTaskDelay(pdMS_TO_TICKS(1000));
+  }
+  try { ESP_LOGE(TAG, "mqtt publisher stopped after boundary failure"); } catch (...) {}
+  tk::stack_watch_sample(tk::StackWatch::Mqtt); // deepest terminal path before self-delete
+  vTaskDelete(nullptr);
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────

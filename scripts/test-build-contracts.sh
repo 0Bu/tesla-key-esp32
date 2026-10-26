@@ -1,9 +1,23 @@
 #!/usr/bin/env bash
-# Fast, dependency-free host tests for destructive-path, target and manifest contracts.
+# Offline destructive-path, target, manifest and publication contracts.
+# No arguments retain all checks; --build-and-manifest is paired with the separate
+# mandatory release-relevance gate by run-mock-tests.sh.
 set -euo pipefail
 
+build_and_manifest_only=0
+case "$#" in
+  0) ;;
+  1)
+    [[ "$1" == --build-and-manifest ]] || { echo "usage: test-build-contracts.sh [--build-and-manifest]" >&2; exit 2; }
+    build_and_manifest_only=1
+    ;;
+  *) echo "usage: test-build-contracts.sh [--build-and-manifest]" >&2; exit 2 ;;
+esac
+
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-"$repo_root/scripts/release-relevance.sh" --self-test
+if [[ "$build_and_manifest_only" -eq 0 ]]; then
+  "$repo_root/scripts/release-relevance.sh" --self-test
+fi
 "$repo_root/scripts/select-release-version.sh" --self-test
 "$repo_root/scripts/check-reproducible-build.sh" --self-test
 # Actual entry points must reject injected build settings before even their tool-free self-test.
@@ -30,6 +44,9 @@ print("build override entry-point controls: PASS (2 positive, 32 negative)")
 PY_ENV
 "$repo_root/scripts/publish-pages-branch.sh" --self-test
 python3 "$repo_root/scripts/check-reproducible-artifacts.py" --self-test
+python3 "$repo_root/scripts/check-config-repair-contract.py"
+python3 "$repo_root/test/test_config_repair_role.py"
+python3 "$repo_root/test/test_config_repair_exchange.py"
 python3 "$repo_root/scripts/check-dependency-contract.py" --self-test
 python3 "$repo_root/scripts/check-otadata-contract.py" --self-test
 python3 "$repo_root/scripts/check-partition-contract.py" --self-test
@@ -42,6 +59,8 @@ python3 "$repo_root/scripts/report-firmware-size.py" --self-test
 "$repo_root/scripts/precheck-firmware.sh" --self-test
 python3 "$repo_root/scripts/check-release-assets.py" --self-test
 python3 "$repo_root/scripts/check-signed-root-inventory.py" --self-test
+python3 "$repo_root/test/test_signer_output_admission.py"
+python3 "$repo_root/test/test_deploy_candidate.py"
 python3 "$repo_root/scripts/prepare-reused-release.py" --self-test
 python3 "$repo_root/scripts/wait-pages-build.py" --self-test
 python3 "$repo_root/scripts/check-published-release.py" --self-test
@@ -50,6 +69,7 @@ python3 "$repo_root/scripts/check-dev-pages.py" --self-test
 python3 "$repo_root/scripts/check-pages-manifest.py" --self-test
 python3 "$repo_root/scripts/check-release-pages-bytes.py" --self-test
 python3 "$repo_root/scripts/generate-ota-changelog.py" --self-test
+python3 "$repo_root/test/test_pages_changelog.py"
 python3 "$repo_root/scripts/check-stack-usage.py" --self-test
 python3 "$repo_root/scripts/check-build-gate-contract.py" --self-test
 "$repo_root/scripts/e2e_evcc.sh" --self-test

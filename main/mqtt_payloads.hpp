@@ -1,6 +1,9 @@
 #pragma once
 
 #include "json_builder.hpp"
+#include "logic/stack_context.hpp"
+#include "logic/identity_recovery.hpp"
+#include <optional>
 
 #include <cstdint>
 
@@ -255,16 +258,11 @@ struct DevicePayload {
     double reset_reason_code{};
     bool crash_dump{};
     bool safe_mode{};
+    std::optional<tk::RuntimeAdmissionSnapshot> runtime;
+    const char* pairing_block_reason{};
     double wifi_reconnects{};
     double mqtt_reconnects{};
-    bool has_httpd_stack{};
-    double httpd_stack{};
-    bool has_vehicle_stack{};
-    double vehicle_stack{};
-    bool has_auto_pair_stack{};
-    double auto_pair_stack{};
-    bool has_mqtt_stack{};
-    double mqtt_stack{};
+    tk::stack_sample::Snapshot stack_context_samples{};
 };
 
 inline JsonOwner build_device_payload(const DevicePayload& in) noexcept {
@@ -285,16 +283,26 @@ inline JsonOwner build_device_payload(const DevicePayload& in) noexcept {
     json.number(root, "reset_reason_code", in.reset_reason_code);
     json.boolean(root, "crash_dump", in.crash_dump);
     json.boolean(root, "safe_mode", in.safe_mode);
+    if (in.runtime) {
+        json.string(root, "runtime_state", tk::runtime_admission_state_name(in.runtime->state));
+        if (in.runtime->state == tk::RuntimeAdmissionState::Fatal)
+            json.string(root, "fatal_component", tk::runtime_fatal_component_name(in.runtime->component));
+        json.string(root, "identity_state", tk::identity_recovery_state_name(
+            tk::identity_recovery_state(in.pairing_block_reason, in.runtime->state)));
+    }
     json.number(root, "wifi_reconnects", in.wifi_reconnects);
     json.number(root, "mqtt_reconnects", in.mqtt_reconnects);
-    if (in.has_httpd_stack)
-        json.number(root, "httpd_stack_min_free_bytes", in.httpd_stack);
-    if (in.has_vehicle_stack)
-        json.number(root, "vehicle_stack_min_free_bytes", in.vehicle_stack);
-    if (in.has_auto_pair_stack)
-        json.number(root, "auto_pair_stack_min_free_bytes", in.auto_pair_stack);
-    if (in.has_mqtt_stack)
-        json.number(root, "mqtt_stack_min_free_bytes", in.mqtt_stack);
+    json.number(root, "stack_min_free_quantum_bytes", tk::stack_sample::kQuantumBytes);
+    char key[tk::kStackMetricKeyBytes];
+    for (unsigned slot = 0; slot < tk::kStackContextCount; ++slot) {
+        if (!tk::stack_context_metric_key(static_cast<tk::StackContext>(slot), key)) {
+            json.invalidate();
+            return {};
+        }
+        const auto sample = tk::stack_sample::read(in.stack_context_samples, slot);
+        if (sample.sampled) json.number(root, key, sample.lower_bound_bytes);
+        else json.null(root, key);
+    }
     return json.finish();
 }
 

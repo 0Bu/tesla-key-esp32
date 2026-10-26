@@ -1,0 +1,46 @@
+{
+  "status": "PUBLIC_SOURCE_SHAPE_CONTEXT; no SDK ABI or crypto execution",
+  "bodies": [
+    {
+      "sdkPath": "sdk-export-receipt",
+      "sha256": "4ef18fd15e4b3c2feac0b695d0a5322e16feb44d587383224980b26991611fb8",
+      "size": 2384
+    },
+    {
+      "sdkPath": "components/nvs_flash/include/nvs.h",
+      "sha256": "bc1548e1ea0c12a29b72186f4110e1d19db9073611742ef40a7f4189c9aacab1",
+      "size": 42334
+    },
+    {
+      "sdkPath": "components/mbedtls/mbedtls/tf-psa-crypto/include/mbedtls/pk.h",
+      "sha256": "91dcedf5c44007f85324cd826fdc5910b1ea3b9606b41c3d16879d09d4cdba7e",
+      "size": 39363
+    },
+    {
+      "sdkPath": "components/mbedtls/mbedtls/tf-psa-crypto/include/psa/crypto.h",
+      "sha256": "8f0b7e1c227875076540809d19c4686b38a765f929caa1559df2babc418cdb85",
+      "size": 296641
+    },
+    {
+      "sdkPath": "components/esp_driver_uart/include/driver/uart.h",
+      "sha256": "1b32eca915e4fbe66e4de493d014f85122a3bc29d0a96ac6d5f63b585a9009d4",
+      "size": 39022
+    },
+    {
+      "sdkPath": "components/esp_driver_usb_serial_jtag/include/driver/usb_serial_jtag.h",
+      "sha256": "d61d95e0e01f6f93580f9faee4c8ea968e3d516037f32c1aedbc588d8170b310",
+      "size": 3920
+    },
+    {
+      "sdkPath": "components/esp_hal_uart/esp32/include/hal/uart_ll.h",
+      "sha256": "185554a9867faad385b4db847c0d8a8029b702530a313a6c96f8d950e8031cf9",
+      "size": 39075
+    }
+  ],
+  "exactCopiedBodies": [
+    "test/config_repair_sdk/nvs.h",
+    "test/config_repair_sdk/driver/usb_serial_jtag.h"
+  ],
+  "facadeLimits": "NVS public declarations are exact. PSA/PK functions match the retained public parameter/return signatures, but fixture structures/attributes/hash are NOT SDK layouts or cryptography. UART/FreeRTOS/LL opaque data/layout/clock are passive; only the used call contracts and zero-wait arguments are exercised.",
+  "authority": "Existing esp-idf-toolchain.txt v6.1 immutable image; retained public source receipts are bound in the private author handoff, not project-local secret/device evidence."
+}

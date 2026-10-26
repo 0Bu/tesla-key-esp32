@@ -152,30 +152,27 @@ private:
     // shortest UTF-8 form. The restricted second-byte ranges reject overlong sequences, UTF-16
     // surrogate code points and values above U+10FFFF without decoding or allocating.
     bool utf8_scalar(unsigned char lead) {
+        unsigned remaining = 0;
+        unsigned char minimum = 0x80;
+        unsigned char maximum = 0xbf;
         if (lead >= 0xc2 && lead <= 0xdf) {
-            return utf8_continuation();
+            remaining = 1;
+        } else if (lead >= 0xe0 && lead <= 0xef) {
+            remaining = 2;
+            if (lead == 0xe0) minimum = 0xa0;
+            if (lead == 0xed) maximum = 0x9f;
+        } else if (lead >= 0xf0 && lead <= 0xf4) {
+            remaining = 3;
+            if (lead == 0xf0) minimum = 0x90;
+            if (lead == 0xf4) maximum = 0x8f;
+        } else {
+            return false;
         }
-        if (lead == 0xe0) {
-            return utf8_continuation(0xa0, 0xbf) && utf8_continuation();
+        if (!utf8_continuation(minimum, maximum)) return false;
+        while (--remaining != 0) {
+            if (!utf8_continuation()) return false;
         }
-        if ((lead >= 0xe1 && lead <= 0xec) || (lead >= 0xee && lead <= 0xef)) {
-            return utf8_continuation() && utf8_continuation();
-        }
-        if (lead == 0xed) {
-            return utf8_continuation(0x80, 0x9f) && utf8_continuation();
-        }
-        if (lead == 0xf0) {
-            return utf8_continuation(0x90, 0xbf) && utf8_continuation() &&
-                   utf8_continuation();
-        }
-        if (lead >= 0xf1 && lead <= 0xf3) {
-            return utf8_continuation() && utf8_continuation() && utf8_continuation();
-        }
-        if (lead == 0xf4) {
-            return utf8_continuation(0x80, 0x8f) && utf8_continuation() &&
-                   utf8_continuation();
-        }
-        return false;
+        return true;
     }
 
     bool string(bool* exact_decoded_id = nullptr) {

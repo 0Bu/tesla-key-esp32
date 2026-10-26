@@ -58,7 +58,16 @@ output.with_name("config_commit_owner.generated.hpp").write_text(owner)
 runtime = (root / "main/ota_update.cpp").read_text()
 runtime = runtime[runtime.index("OtaHealthCommitGuard::OtaHealthCommitGuard()"):
                   runtime.index("// Short per-target image suffix")]
-runtime = function("ota_update.cpp", "finish_operation") + "\n" + runtime
+reference_source = (root / "main/ota_update.cpp").read_text()
+reference_name = "ordinary_recovery_reference_ready_owned"
+reference_body = body_in(reference_source, reference_name)
+reference_match = re.search(r"^static bool ordinary_recovery_reference_ready_owned\([^;{}]*\) noexcept \{",
+                            reference_source, re.M)
+if not reference_match:
+    raise AssertionError("actual owned recovery-reference definition missing")
+reference_open = reference_source.index("{", reference_match.start())
+reference = reference_source[reference_match.start():reference_open + len(reference_body)]
+runtime = function("ota_update.cpp", "finish_operation") + "\n" + reference + "\n" + runtime
 output.with_name("ota_health_task.generated.hpp").write_text(function("main.cpp", "ota_health_gate_task") + "\n")
 output.with_name("config_commit_runtime.generated.hpp").write_text(runtime)
 

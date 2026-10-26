@@ -10,12 +10,6 @@
 
 namespace tk {
 
-enum class RebootReasonState : uint8_t {
-    Missing,
-    Present,
-    Error,
-};
-
 struct RebootReasonRecord {
     RebootReasonState state{RebootReasonState::Missing};
     uint8_t           heap_restarts{0};

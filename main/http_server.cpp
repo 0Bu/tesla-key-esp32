@@ -211,6 +211,8 @@ static esp_err_t handle_all_dispatch(GuardedReq rq) {
 // cause is the low largest-free-block; this is the safety net so no request can crash
 // the box.)
 static esp_err_t handle_all(httpd_req_t* req) {
+    tk::StackWatchScope f135_callback_exit(tk::StackWatch::Httpd);
+
     HttpGuardContext context{req, {}};
     const GuardedReq rq{&context};
     esp_err_t result = ESP_FAIL;
@@ -233,9 +235,7 @@ static esp_err_t handle_all(httpd_req_t* req) {
         // the limit is exactly the one most likely to throw; a destructor also covers every early
         // return without duplicating the measurement at each route. Construct it inside the outer
         // boundary so even a future throwing constructor cannot escape into the C httpd frame.
-        struct SampleHttpdStackOnExit {
-            ~SampleHttpdStackOnExit() noexcept { tk::stack_watch_sample(tk::StackWatch::Httpd); }
-        } sample_httpd_stack;
+        // F135: outer noexcept scope now covers setup, all early returns and catches.
         result = handle_all_dispatch(rq);
     } catch (const std::exception& e) {
         ESP_LOGE(TAG, "handler for %s threw (%s) — containing reply failure", req->uri, e.what());

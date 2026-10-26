@@ -5,6 +5,8 @@
 
 #include "vehicle_ctrl.hpp"
 #include "logic/key_rotation.hpp"
+#include "logic/identity_recovery.hpp"
+#include <esp_system.h>
 #include "runtime_admission.hpp"
 #include "vehicle_ctrl_internal.hpp"
 #include "stack_watch.hpp"
@@ -28,13 +30,61 @@
 
 static const char* TAG = "vehicle_ctrl";
 
+// Actual shell: no key/config/session writes, no Client/BLE call and no image confirmation.
+// The existing command mutex owns the identity transaction, not a leaf cache. Acquire order is
+// ConfigRestart -> command mutex; storage reads are permitted here, never under Vehicle/leaf locks.
+template <typename Recheck>
+static bool automatic_identity_reload_once(tk::IdentityReloadOnce& once,
+        NvsStorageAdapter* storage, SemaphoreHandle_t command_mutex, Recheck recheck) noexcept {
+    if (once.reserved() || !storage || !command_mutex) return false;
+    bool claimed = false;
+    try {
+        OtaConfigRestartGuard owner;
+        if (!owner.try_begin()) return false;
+        {
+            tk::SemGuard command(command_mutex, pdMS_TO_TICKS(100));
+            if (!command) return false;
+            auto admission = recheck(); // fresh cached identity facts under their transaction owner
+            admission.ready = tk::runtime_admission_vehicle_ready();
+            const auto image = ota_config_image_state(owner); // raw SDK query under this real lease
+            admission.stable = image == tk::ConfigImageResult::Valid ||
+                               image == tk::ConfigImageResult::Undefined;
+            bool present = false;
+            admission.journal_readable = storage->probe_blob(tk::kKeyRotationMarker, present);
+            admission.journal_present = present;
+            // Every fallible identity/SDK/journal check is complete. The old Ready snapshot
+            // is advisory only; this exact-state CAS is the final restart linearization.
+            if (!tk::identity_reload_allowed(admission)) return false;
+            if (!tk::runtime_admission_try_claim_identity_reload()) return false;
+            owner.seal(); // noexcept, immediately after the claim and before command unlock
+            claimed = true;
+            // An impossible/reentrant local reservation failure must retain ownership and
+            // park without an effect; never release a globally consumed restart admission.
+            if (!once.reserve(admission)) return true;
+        } // no command/Vehicle/leaf lock across logging, delay or restart
+        try { ESP_LOGE(TAG, "automatic first-key commit is ambiguous; reloading identity once"); }
+        catch (...) {}
+        try {
+            vTaskDelay(pdMS_TO_TICKS(300));
+            esp_restart();
+        } catch (...) {}
+        return true; // caller parks after any sealed attempt, including a throw/return
+    } catch (...) {
+        return claimed || once.reserved(); // a post-claim failure parks; sealed owner is retained
+    }
+}
+
 // Pairing supervisor: probe first, then submit the existing key automatically when a session
 // is verifiably absent or a connection-recovery hint persists. Never replace identity.
 void VehicleController::auto_pair_task_fn_(void* arg) {
+    tk::stack_watch_sample(tk::StackWatch::AutoPair); // current task at entry
+    tk::StackWatchScope f135_task_exit(tk::StackWatch::AutoPair);
+
   try {
     auto* self = static_cast<VehicleController*>(arg);
     if (!self || !self->await_task_start_()) {
         // The start-cancel path is intentionally resource-free and always self-deletes.
+        tk::stack_watch_sample(tk::StackWatch::AutoPair); // no C++ unwind on delete
         vTaskDelete(nullptr);
         return;
     }
@@ -44,10 +94,11 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
     tk::PeriodicLogState unpaired_notice;
     tk::PeriodicLogState recovery_notice;
     tk::AutoEnrollmentState enrollment;
+    tk::IdentityReloadOnce identity_reload;
     while (true) {
-      // Pairing/crypto is an allocation-rich 8 KiB task. Record its historical minimum at the one
-      // point every supervision round reaches, before an exception or early continue can skip it.
-      tk::stack_watch_sample(tk::StackWatch::AutoPair);
+        tk::StackWatchScope f135_iteration_exit(tk::StackWatch::AutoPair);
+      // Pairing/crypto is allocation-rich. The outer iteration scope records its historical
+      // low mark after local guards retire, including contained faults and early continues.
       // Iteration-boundary containment (issue #204): enroll_existing_key_()/generate_key()/health_probe_() run
       // tesla-ble crypto + std::string work that can throw std::bad_alloc. An escape would unwind
       // into the FreeRTOS C task trampoline → std::terminate → reboot (and a reboot loop re-opens
@@ -90,7 +141,16 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
         if (self->key_reload_required_.load()) {
             self->key_runtime_safe_.store(false);
             self->believed_paired_.store(false);
-            ESP_LOGE(TAG, "auto-pair: key commit outcome is ambiguous — reboot required; pairing disabled");
+            if (automatic_identity_reload_once(identity_reload, self->storage_, self->command_mutex_, [&] {
+                    return tk::IdentityReloadAdmission{
+                        false,
+                        self->automatic_key_action_.load() == tk::AutomaticKeyAction::AutomaticCommitReload,
+                        self->key_reload_required_.load(), self->vin_transition_pending_.load(),
+                        self->pairing_cleanup_pending_.load(), self->key_rotation_recovered_at_boot_};
+                })) {
+                for (;;) vTaskDelay(pdMS_TO_TICKS(10000)); // no retry after a sealed effect
+            }
+            ESP_LOGE(TAG, "auto-pair: saved identity needs reload; automatic restart is not admitted");
             vTaskDelay(pdMS_TO_TICKS(30000));
             continue;
         }
@@ -275,6 +335,7 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
     }
   } catch (...) {
       ESP_LOGE(TAG, "auto-pair task boundary threw outside an iteration — stopping task");
+      tk::stack_watch_sample(tk::StackWatch::AutoPair); // no C++ unwind on delete
       vTaskDelete(nullptr);
   }
 }
@@ -346,6 +407,16 @@ bool VehicleController::generate_key() {
         return false;
     }
 
+    // This scope begins only after the locked first-key-absence recheck and owns the existing
+    // AutomaticKey lease. Publish origin on unwind too: cache/log allocation can throw after the
+    // ambiguous commit already set reload_required. No new persistent identity state is created.
+    struct AutomaticCommitOrigin {
+        std::atomic<bool>& reload;
+        std::atomic<tk::AutomaticKeyAction>& action;
+        ~AutomaticCommitOrigin() noexcept {
+            if (reload.load()) action.store(tk::AutomaticKeyAction::AutomaticCommitReload);
+        }
+    } origin{key_reload_required_, automatic_key_action_};
     return tk::key_rotation_runtime_safe(generate_key_locked_());
 }
 

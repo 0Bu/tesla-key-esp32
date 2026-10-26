@@ -1,3 +1,4 @@
+#include "stack_watch.hpp"
 // Setup / pairing / persisted-config endpoints:
 //   POST /gen_keys[?force=1]  (generate key — refuses overwrite w/o force)
 //   POST /set_time            (browser wall clock — NTP fallback)
@@ -430,6 +431,8 @@ struct MqttProbeResources {
 };
 
 static void on_mqtt_probe(void* handler_args, esp_event_base_t, int32_t id, void* event_data) {
+    tk::StackWatchScope f135_callback_exit(tk::StackWatch::MqttProbeEvent);
+
     auto* ctx = static_cast<MqttProbeCtx*>(handler_args);
     switch (static_cast<esp_mqtt_event_id_t>(id)) {
     case MQTT_EVENT_CONNECTED:

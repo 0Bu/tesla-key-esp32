@@ -153,6 +153,7 @@ export EXTRA_CXXFLAGS="-fstack-usage"
 # is checked against the same exact contract for every target below. --idf-path also proves that the
 # image's Mbed TLS is the commit the host tesla-ble harness verifies the PSA port against.
 python3 scripts/check-dependency-contract.py --root . --idf-path "${IDF_PATH:?ci-build-all.sh must run in the pinned ESP-IDF image}"
+python3 scripts/check-config-repair-contract.py
 python3 scripts/check-partition-contract.py --csv partitions.csv
 
 echo "ccache disabled for effective-compiler/dependency gate visibility"
@@ -192,6 +193,7 @@ for target in $TARGETS; do
   # Pass it on every configuring invocation so a stale CMake cache cannot retain another stamp.
   idf.py -D "PROJECT_VER=$version" set-target "$target"
   python3 scripts/check-sdkconfig-defaults.py --target "$target"
+  python3 scripts/check-config-repair-contract.py --target "$target" --sdkconfig sdkconfig --application-config
   idf.py -D "PROJECT_VER=$version" build
 
   python3 scripts/check-otadata-contract.py build/ota_data_initial.bin

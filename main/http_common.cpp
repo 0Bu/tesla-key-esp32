@@ -1,3 +1,4 @@
+#include "stack_watch.hpp"
 // Shared helpers for the HTTP handler files (see http_handlers.hpp). JSON response
 // plumbing, body/query parsing, and the browser-clock plausibility window.
 
@@ -101,6 +102,7 @@ void run_effect_continuation(GuardedReq rq) noexcept {
         }
         // Identity recovery/failure reboots never confirm a pending OTA image.
         vTaskDelay(pdMS_TO_TICKS(800));
+        tk::stack_watch_sample(tk::StackWatch::Httpd); // before terminal effect
         esp_restart();
     } catch (...) {
         // Never retry a consumed continuation or let diagnostics unwind into httpd.

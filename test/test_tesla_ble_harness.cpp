@@ -30,6 +30,7 @@
 #include <vin_utils.h>
 #include <pb_encode.h>
 #include <pb_decode.h>
+#include <pb_common.h>
 #include <car_server.pb.h>
 #include <vcsec.pb.h>
 #include <universal_message.pb.h>
@@ -49,7 +50,10 @@
 #include "logic/key_rotation.hpp"
 #include "logic/rx_framing.hpp"
 #include "logic/link_state.hpp"
+#include "logic/ble_deferred_queue.hpp"
 
+#include <algorithm>
+#include <initializer_list>
 #include <cstdio>
 #include <cstdlib>
 #include <new>
@@ -76,6 +80,8 @@ void operator delete[](void* value, std::size_t) noexcept { std::free(value); }
 
 using namespace TeslaBLE;
 
+#include "ble_deferred_test_hooks.hpp"
+
 static uint32_t native_ticks = 0;
 static unsigned native_errors = 0, native_warnings = 0;
 struct NativeClientRef {
@@ -89,8 +95,33 @@ struct NativeBleSink {
     bool connected{true};
     bool write_ok{true}, submit_then_fail{false};
     unsigned writes{0};
+    uint32_t generation{8};
+    uint16_t handle{0x22};
+    bool ready_ok{true};
+    unsigned disconnects{0}, ready_calls{0};
+    NativeLifecycleTrace lifecycle_trace;
+    std::function<void()> during_generation, during_ready;
+    uint32_t lifecycle_generation() {
+        native_require_unlocked();
+        if (during_generation) during_generation();
+        return generation;
+    }
+    bool complete_ready(uint16_t candidate, uint32_t epoch) {
+        native_require_unlocked();
+        ++ready_calls;
+        lifecycle_trace.push_back('U');
+        if (during_ready) during_ready();
+        return ready_ok && candidate == handle && epoch == generation && (epoch & 1u) == 0;
+    }
+    void disconnect() {
+        native_require_unlocked();
+        ++disconnects;
+        connected = false;
+        lifecycle_trace.push_back('X');
+    }
     std::vector<std::vector<uint8_t>> frames;
     bool write(const std::vector<uint8_t>& frame) {
+        native_require_unlocked();
         ++writes;
         if (write_ok || submit_then_fail) frames.push_back(frame);
         return write_ok;
@@ -101,6 +132,7 @@ struct HostSemaphore { bool available{false}, fail{false}; unsigned gives{0}; };
 extern "C" SemaphoreHandle_t xSemaphoreCreateMutex() { return new HostSemaphore{true}; }
 extern "C" SemaphoreHandle_t xSemaphoreCreateBinary() { return new HostSemaphore{}; }
 extern "C" BaseType_t xSemaphoreTake(SemaphoreHandle_t sem, TickType_t) {
+    native_require_unlocked();
     if (!sem || sem->fail || !sem->available) return pdFALSE;
     sem->available = false; return pdTRUE;
 }
@@ -115,6 +147,7 @@ struct NativeSessionStorage {
     std::map<std::string, std::vector<uint8_t>> records;
     std::function<void()> during_save;
     bool save(const std::string& key, const std::vector<uint8_t>& data) {
+        native_require_unlocked();
         ++saves;
         if (during_save) during_save();
         if (throw_save) throw std::bad_alloc();
@@ -123,6 +156,7 @@ struct NativeSessionStorage {
         return true;
     }
     bool load(const std::string& key, std::vector<uint8_t>& data) {
+        native_require_unlocked();
         const auto found = records.find(key);
         if (found == records.end()) return false;
         data = found->second; return true;
@@ -135,6 +169,14 @@ static time_t native_session_time(time_t*) { return native_session_wall_seconds;
 // Hardware/clock/logging and storage/cache/hint sinks are substituted; protocol decisions are not.
 class VehicleController {
 public:
+#include "ble-deferred-types.inc"
+    unsigned deferred_mac_persists{0};
+    std::function<void()> during_sleep;
+    void persist_discovered_mac_after_ready_() {
+        native_require_unlocked();
+        ++deferred_mac_persists;
+        ble.lifecycle_trace.push_back('P');
+    }
     NativeClientRef client_;
     tk::CommandRunner command_runner_;
     std::array<std::function<int(Client*, uint8_t*, size_t*)>, tk::CommandRunner::kMaxQueueSize> command_builders_{};
@@ -159,10 +201,18 @@ public:
     explicit VehicleController(Client& client) : client_{&client} {}
     bool ble_connected() const { return ble_ && ble_->connected; }
     bool command_identity_ready_() const { return identity_ready; }
-    void note_vcsec_sleep_(tk::SleepState) { ++sleep_deliveries; }
+    void note_vcsec_sleep_(tk::SleepState) {
+        native_require_unlocked();
+        ++sleep_deliveries;
+        if (during_sleep) during_sleep();
+    }
     void on_vehicle_message_(const UniversalMessage_RoutableMessage&) { ++recovery_deliveries; }
     ~VehicleController() { vSemaphoreDelete(vehicle_mutex_); }
-    void mark_vcsec_unknown_() { vcsec_sleep_state_.store(static_cast<int>(tk::SleepState::Unknown)); }
+    void mark_vcsec_unknown_() {
+        native_require_unlocked();
+        vcsec_sleep_state_.store(static_cast<int>(tk::SleepState::Unknown));
+        ble.lifecycle_trace.push_back('D');
+    }
     bool apply_ble_link_state_(bool);
     bool persist_session_(UniversalMessage_Domain, const UniversalMessage_RoutableMessage_session_info_t&);
     bool save_session_runtime_locked_(UniversalMessage_Domain,
@@ -175,11 +225,11 @@ public:
     void invalidate_session_runtime_locked_(UniversalMessage_Domain) noexcept;
     tk::SessionAvailability session_availability() const noexcept;
     bool session_available() const noexcept;
-    template <typename T> void on_charge_state_(const T&) { ++telemetry_deliveries; }
-    template <typename T> void on_climate_state_(const T&) { ++telemetry_deliveries; }
-    template <typename T> void on_drive_state_(const T&) { ++telemetry_deliveries; }
-    template <typename T> void on_tire_pressure_state_(const T&) { ++telemetry_deliveries; }
-    template <typename T> void on_closures_state_(const T&) { ++telemetry_deliveries; }
+    template <typename T> void on_charge_state_(const T&) { native_require_unlocked(); ++telemetry_deliveries; }
+    template <typename T> void on_climate_state_(const T&) { native_require_unlocked(); ++telemetry_deliveries; }
+    template <typename T> void on_drive_state_(const T&) { native_require_unlocked(); ++telemetry_deliveries; }
+    template <typename T> void on_tire_pressure_state_(const T&) { native_require_unlocked(); ++telemetry_deliveries; }
+    template <typename T> void on_closures_state_(const T&) { native_require_unlocked(); ++telemetry_deliveries; }
     void handle_carserver_frame_(const UniversalMessage_RoutableMessage& msg);
     void retire_vcsec_contexts_() noexcept;
     bool initialize_routing_address_();
@@ -196,10 +246,10 @@ public:
     void process_rx_frame_(const uint8_t* data, size_t size);
     void drive_command_runner_();
 };
-#define ESP_LOGE(...) (++native_errors)
-#define ESP_LOGW(...) (++native_warnings)
-#define ESP_LOGD(...) ((void)0)
-#define ESP_LOGI(...) ((void)0)
+#define ESP_LOGE(...) (native_require_unlocked(), ++native_errors)
+#define ESP_LOGW(...) (native_require_unlocked(), ++native_warnings)
+#define ESP_LOGD(...) (native_require_unlocked())
+#define ESP_LOGI(...) (native_require_unlocked())
 #define xTaskGetTickCount() (native_ticks)
 #define pdTICKS_TO_MS(value) (value)
 #include "carserver-handler.inc"
@@ -217,6 +267,11 @@ struct NativeRoutingRandom {
 #define CryptoUtils NativeRoutingRandom
 #define time native_session_time
 #include "vcsec-native.inc"
+#define portENTER_CRITICAL(mux) native_mailbox_enter(mux)
+#define portEXIT_CRITICAL(mux) native_mailbox_exit(mux)
+#include "ble-deferred-native.inc"
+#undef portEXIT_CRITICAL
+#undef portENTER_CRITICAL
 #undef time
 #undef CryptoUtils
 #undef pdTICKS_TO_MS
@@ -2014,6 +2069,8 @@ static void check_session_info_continuity() {
     }
 }
 
+#include "ble_deferred_delivery_fixture.hpp"
+
 int main() {
     std::printf("=================================================================\n");
     std::printf("=== Tesla BLE Integration Harness (B1, B2, H1, V1)            ===\n");
@@ -2030,6 +2087,8 @@ int main() {
     expect(!pem.empty() && pem.size() + 1 <= tk::kPrivateKeyPemCapacity,
            "tk::kPrivateKeyPemCapacity holds the real tesla-ble PEM export",
            "tk::kPrivateKeyPemCapacity is smaller than the real tesla-ble PEM export");
+
+    check_native_ble_deferred_delivery();
 
     // =========================================================================
     // PART A: TX wire framing (B1) through the production helpers

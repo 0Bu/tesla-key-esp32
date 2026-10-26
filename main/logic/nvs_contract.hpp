@@ -67,6 +67,9 @@ struct Entry {
     bool secret;
 };
 
+// ConfigHttp remains the ordinary logical cfg owner. The default-off physical maintenance
+// actor is separately registered by check-nvs-contract.py with exactly one cfg set/commit;
+// it adds no key/schema and has no write access to identity, journals, sessions or mirrors.
 inline constexpr std::array<Entry, 19> kEntries{{
     {Namespace::Config, kConfigBlob, kConfigBlob, StorageApi::RawBlob,
      Owner::ConfigHttp, Retention::DurableAcrossOta, true},

@@ -1,0 +1,9 @@
+# Explicit maintenance overlay; never read by the normal application build.
+CONFIG_TESLA_CONFIG_REPAIR_USB=y
+CONFIG_ESP_CONSOLE_NONE=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+CONFIG_LOG_DEFAULT_LEVEL_NONE=y
+CONFIG_LOG_DEFAULT_LEVEL=0
+CONFIG_LOG_MAXIMUM_EQUALS_DEFAULT=y
+CONFIG_LOG_MAXIMUM_LEVEL=0
+# Bootloader, partition table, RSA pin, dependency and compiler flags are unchanged.

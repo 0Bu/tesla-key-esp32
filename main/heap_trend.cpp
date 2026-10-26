@@ -97,21 +97,24 @@ void log_adoption(const AdoptionLog& adopted) {
     }
 }
 
-// Function-local static initialization serializes first use between the recorder and readers.
-// Either may arrive first; both validate retained storage under the same mutex.
-SemaphoreHandle_t mutex() {
-    static SemaphoreHandle_t m = xSemaphoreCreateMutex();
-    return m;
-}
+// Initialized once by app_main before creating the supervisor or any diagnostic reader. Neither
+// cyclic recorder nor reader may lazily allocate a resource while heap is already exhausted.
+SemaphoreHandle_t s_mutex = nullptr;
 
 }  // namespace
 
-void heap_trend_record(uint32_t monotonic_s, uint32_t free_bytes, uint32_t largest_bytes) {
-    SemaphoreHandle_t m = mutex();
-    if (!m) return;   // no mutex, no trend — a diagnostic must never be the reason a boot fails
+bool heap_trend_prepare() noexcept {
+    if (!s_mutex) s_mutex = xSemaphoreCreateMutex();
+    return s_mutex != nullptr;
+}
+
+bool heap_trend_record(uint32_t monotonic_s, uint32_t free_bytes, uint32_t largest_bytes) {
+    SemaphoreHandle_t m = s_mutex;
+    if (!m) return false;
     AdoptionLog adopted{};
     {
-        SemGuard g(m);
+        SemGuard g(m, 0);
+        if (!g) return false;
         adopted = adopt_or_reset();
         if (!heap_timeline_fits(monotonic_s, s_carry_s)) {
             // Retained time uses uint32 seconds. Start a new diagnostic timeline rather than
@@ -125,12 +128,13 @@ void heap_trend_record(uint32_t monotonic_s, uint32_t free_bytes, uint32_t large
         seal();
     }
     log_adoption(adopted);
+    return true;
 }
 
 size_t heap_trend_snapshot(HeapTrendSample* free_out, HeapTrendSample* largest_out, size_t max,
                            uint32_t* out_bucket0, uint32_t* out_boot_bucket) {
     if (!free_out || !largest_out || max == 0) return 0;
-    SemaphoreHandle_t m = mutex();
+    SemaphoreHandle_t m = s_mutex;
     if (!m) return 0;
     AdoptionLog adopted{};
     size_t n = 0;

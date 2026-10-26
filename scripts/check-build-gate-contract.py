@@ -6,6 +6,9 @@ from __future__ import annotations
 import argparse
 import ast
 from collections import Counter
+from functools import lru_cache
+import importlib.util
+import os
 from pathlib import Path
 import re
 import shutil
@@ -77,6 +80,7 @@ EXPECTED_OFFSETS = {
     "ESP32-C6": (0, 0x8000, 0x20000, 0xF000),
 }
 EXACT_TARGET_LOOP = "for target in esp32 esp32s3 esp32c3 esp32c6; do"
+WORKFLOW_POLICY = None
 HEAD_REF = "ref: ${{ github.event.pull_request.head.sha || github.sha }}"
 SOURCE_EXPR = '"${{ github.event.pull_request.head.sha || github.sha }}"'
 LOCAL_PAGES_CHECK = "python3 scripts/check-release-pages-bytes.py"
@@ -178,6 +182,22 @@ def require(condition: bool, message: str) -> None:
         raise GateError(message)
 
 
+def validate_deploy_consumer(root: Path, text: str) -> None:
+    global WORKFLOW_POLICY
+    if WORKFLOW_POLICY is None:
+        spec = importlib.util.spec_from_file_location(
+            "build_gate_workflow_policy", Path(__file__).with_name("check-workflow-policy.py"))
+        require(spec is not None and spec.loader is not None,
+                "build.yml:deploy structured production-pin policy is unavailable")
+        WORKFLOW_POLICY = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(WORKFLOW_POLICY)
+    try:
+        steps = WORKFLOW_POLICY.workflow_model(root / ".github/workflows/build.yml", text)["jobs"]["deploy"]["steps"]
+        WORKFLOW_POLICY.validate_deploy_signed_candidate(steps)
+    except WORKFLOW_POLICY.PolicyError as exc:
+        raise GateError(str(exc)) from exc
+
+
 def read(root: Path, relative: str) -> str:
     path = root / relative
     require(path.is_file() and not path.is_symlink(), f"missing/unsafe gate source: {relative}")
@@ -254,10 +274,17 @@ def marked_target_loop(
     return region
 
 
+@lru_cache(maxsize=32)
+def _module_body(relative: str, text: str) -> tuple[ast.stmt, ...]:
+    # Cache parsing only, keyed by the complete freshly read source rather than file metadata.
+    # These nodes are read-only to both consumers; validation and file safety still run each time.
+    return tuple(ast.parse(text, filename=relative).body)
+
+
 def literal_assignment(root: Path, relative: str, name: str) -> Any:
     text = read(root, relative)
     values: list[Any] = []
-    for node in ast.parse(text, filename=relative).body:
+    for node in _module_body(relative, text):
         if not isinstance(node, ast.Assign) or len(node.targets) != 1:
             continue
         target = node.targets[0]
@@ -272,7 +299,7 @@ def literal_assignment(root: Path, relative: str, name: str) -> Any:
 
 def compiled_regex_assignment(root: Path, relative: str, name: str) -> str:
     values: list[str] = []
-    for node in ast.parse(read(root, relative), filename=relative).body:
+    for node in _module_body(relative, read(root, relative)):
         if not isinstance(node, ast.Assign) or len(node.targets) != 1:
             continue
         target = node.targets[0]
@@ -839,6 +866,26 @@ def validate(root: Path) -> None:
     key_boundary = signer.find("signing_key=")
     require(key_boundary > 0, "ci-sign-artifacts.sh: signing-key boundary is missing")
     key_free = signer[:key_boundary]
+    empty_output_gate = "python3 scripts/check-signed-root-inventory.py --require-empty ."
+    require(
+        signer.count(empty_output_gate) == 1
+        and re.search(r"(?m)^" + re.escape(empty_output_gate) + r"$", key_free) is not None
+        and key_free.index("# EXACT_FOUR_TARGETS_END preflight") < key_free.index(empty_output_gate)
+        and 'for output_dir in _fw _signed; do\n'
+            '  [[ ! -e "$output_dir" && ! -L "$output_dir" ]] || {\n'
+            '    echo "ERROR: signer output already exists: $output_dir" >&2\n'
+            '    exit 1\n'
+            '  }\n'
+            'done\n' in key_free,
+        "ci-sign-artifacts.sh: stale output refusal must precede the signing-key boundary",
+    )
+    require(
+        signer.count("mkdir _fw _signed") == 1
+        and signer.index("mkdir _fw _signed") > key_boundary
+        and "rm -rf _fw _signed" not in signer
+        and "rm -f tesla-key-esp32" not in signer,
+        "ci-sign-artifacts.sh: outputs must be exclusively created without caller-file cleanup",
+    )
     require("check-build-artifact-inventory.py" in key_free and
             'check-dependency-contract.py --root "$source_root"' in key_free and
             '--copy-to "$private_stage"' in key_free and
@@ -986,9 +1033,10 @@ def validate(root: Path) -> None:
         and "pre-publication merged trailing bytes were accepted" in release_assets,
         "check-release-assets.py: complete pre-publication merged-layout gate drifted",
     )
+    validate_deploy_consumer(root, build_workflow)
     require(
         build_workflow.count("--expected-public-key-digest scripts/ota-signing-public-key.sha256")
-        == 4
+        == 5
         and "Verify production signing authority for all staged apps" in build_workflow
         and "      - name: Upload signed firmware artifacts\n        uses:" in build_workflow
         and build_workflow.index("Verify production signing authority for all staged apps")
@@ -1337,6 +1385,52 @@ def copy_fixture(root: Path, destination: Path) -> None:
 
 def self_test(root: Path) -> None:
     validate(root)
+    # A hot parser cache must see changed bytes even when size and mtime are preserved.
+    with tempfile.TemporaryDirectory(prefix="build-gate-parser-cache-") as directory:
+        fixture = Path(directory)
+        path = fixture / "source.py"
+        original = 'VALUE = 1\nPATTERN = re.compile(r"one")\n'
+        changed = 'VALUE = 2\nPATTERN = re.compile(r"two")\n'
+        path.write_text(original, encoding="utf-8")
+        require(literal_assignment(fixture, "source.py", "VALUE") == 1
+                and compiled_regex_assignment(fixture, "source.py", "PATTERN") == "one",
+                "parser cache positive source failed")
+        stamp = path.stat()
+        require(len(original) == len(changed), "parser cache fixture size drifted")
+        path.write_text(changed, encoding="utf-8")
+        os.utime(path, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+        require(literal_assignment(fixture, "source.py", "VALUE") == 2
+                and compiled_regex_assignment(fixture, "source.py", "PATTERN") == "two",
+                "parser cache hid a same-size/mtime source change")
+        path.write_text('VALUE = dynamic()\n', encoding="utf-8")
+        try:
+            literal_assignment(fixture, "source.py", "VALUE")
+        except GateError as exc:
+            require("must be a static literal" in str(exc), "wrong parser cache refusal")
+        else:
+            raise GateError("parser cache admitted a nonliteral source")
+        path.write_text(original, encoding="utf-8")
+        require(literal_assignment(fixture, "source.py", "VALUE") == 1,
+                "parser cache restored source failed")
+        target = fixture / "held.py"
+        path.rename(target)
+        path.symlink_to(target)
+        try:
+            literal_assignment(fixture, "source.py", "VALUE")
+        except GateError as exc:
+            require("missing/unsafe gate source" in str(exc), "wrong hot symlink refusal")
+        else:
+            raise GateError("parser cache bypassed fresh file safety")
+        path.unlink()
+        target.rename(path)
+        require(literal_assignment(fixture, "source.py", "VALUE") == 1
+                and compiled_regex_assignment(fixture, "source.py", "PATTERN") == "one",
+                "parser cache final restore failed")
+        for number in range(40):
+            _module_body("bounded.py", f"VALUE = {number}\n")
+        require(_module_body.cache_info().maxsize == 32
+                and _module_body.cache_info().currsize == 32,
+                "parser cache no longer obeys its entry bound")
     mutations = (
         ("served-preview-call", ".github/workflows/signed-pr-preview.yml",
          "python3 scripts/check-pr-preview-served.py", "true # removed served preview acceptance",
@@ -1817,18 +1911,32 @@ def self_test(root: Path) -> None:
          'if component_hash(component) != expected:',
          'if False:', "locked-cJSON source"),
     )
-    for name, relative, old, new, expected in mutations:
-        with tempfile.TemporaryDirectory(prefix=f"build-gate-{name}-") as directory:
-            fixture = Path(directory)
-            copy_fixture(root, fixture)
-            replace_once(fixture / relative, old, new)
+    # Keep one disposable baseline rather than copying every contract file for every case.
+    # The sole changed file is restored even when an oracle raises; all cases still validate.
+    def check_mutation(fixture: Path, label: str, relative: str, old: str,
+                       new: str, expected: str) -> None:
+        path = fixture / relative
+        original = path.read_bytes()
+        try:
+            replace_once(path, old, new)
             try:
                 validate(fixture)
             except GateError as exc:
                 require(expected in str(exc),
-                        f"self-test {name} failed for the wrong reason: {exc}")
+                        f"self-test {label} failed for the wrong reason: {exc}")
             else:
-                raise GateError(f"self-test accepted mutation: {name}")
+                raise GateError(f"self-test accepted mutation: {label}")
+        finally:
+            path.write_bytes(original)
+            require(path.read_bytes() == original,
+                    f"self-test failed to restore fixture: {label}")
+
+    with tempfile.TemporaryDirectory(prefix="build-gate-mutations-") as directory:
+        fixture = Path(directory)
+        copy_fixture(root, fixture)
+        for name, relative, old, new, expected in mutations:
+            check_mutation(fixture, name, relative, old, new, expected)
+        validate(fixture)
 
     loop_sites = (
         ("scripts/ci-build-all.sh", "build", "for target in $TARGETS; do"),
@@ -1851,26 +1959,15 @@ def self_test(root: Path) -> None:
         ("early-exit", "  exit 0", "may not exit successfully"),
         ("early-return", "  return 0", "may not exit successfully"),
     )
-    for relative, loop_label, header in loop_sites:
-        anchor = f"# EXACT_FOUR_TARGETS_BEGIN {loop_label}\n{header}"
-        for mutation_name, injection, expected in skip_mutations:
-            with tempfile.TemporaryDirectory(
-                prefix=f"build-gate-loop-{loop_label}-{mutation_name}-"
-            ) as directory:
-                fixture = Path(directory)
-                copy_fixture(root, fixture)
-                replace_once(fixture / relative, anchor, f"{anchor}\n{injection}")
-                try:
-                    validate(fixture)
-                except GateError as exc:
-                    require(expected in str(exc),
-                            f"self-test {relative}/{loop_label}/{mutation_name} "
-                            f"failed for the wrong reason: {exc}")
-                else:
-                    raise GateError(
-                        f"self-test accepted target-loop skip mutation: "
-                        f"{relative}/{loop_label}/{mutation_name}"
-                    )
+    with tempfile.TemporaryDirectory(prefix="build-gate-loop-mutations-") as directory:
+        fixture = Path(directory)
+        copy_fixture(root, fixture)
+        for relative, loop_label, header in loop_sites:
+            anchor = f"# EXACT_FOUR_TARGETS_BEGIN {loop_label}\n{header}"
+            for mutation_name, injection, expected in skip_mutations:
+                check_mutation(fixture, f"{relative}/{loop_label}/{mutation_name}",
+                               relative, anchor, f"{anchor}\n{injection}", expected)
+        validate(fixture)
 
 
 def main() -> int:

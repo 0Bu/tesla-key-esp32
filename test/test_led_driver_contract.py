@@ -73,20 +73,28 @@ def main() -> None:
 #include <vector>
 #include "logic/led_driver.hpp"
 #include "runtime_fault_log.hpp"
+#include "stack_watch.hpp"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 using gpio_num_t = int;
 #define CONFIG_TESLA_LED_DI_GPIO 40
 #define CONFIG_TESLA_LED_CI_GPIO 39
 #define CONFIG_TESLA_LED_BRIGHTNESS 8
 #define GPIO_MODE_OUTPUT 1
-#define pdMS_TO_TICKS(x) (x)
 template<typename... T> static void log_stub(T...) {}
 #define ESP_LOGI(...) log_stub(__VA_ARGS__)
 #define ESP_LOGE(...) log_stub(__VA_ARGS__)
 struct gpio_config_t { uint64_t pin_bit_mask = 0; int mode = 0; };
 static int gpio_config(gpio_config_t*) { return 0; }
 struct TaskEnd {};
-static void vTaskDelay(int) { throw TaskEnd{}; }
-static void vTaskDelete(void*) { throw TaskEnd{}; }
+extern "C" void vTaskDelay(TickType_t) { throw TaskEnd{}; }
+extern "C" void vTaskDelete(TaskHandle_t) { throw TaskEnd{}; }
+static unsigned hwm_reads = 0;
+extern "C" UBaseType_t uxTaskGetStackHighWaterMark(TaskHandle_t task) {
+    assert(task == nullptr);
+    ++hwm_reads;
+    return 4096;
+}
 static int64_t task_elapsed_us = 0;
 static unsigned timer_reads = 0;
 static int64_t esp_timer_get_time() { return timer_reads++ == 0 ? 0 : task_elapsed_us; }
@@ -139,6 +147,7 @@ struct SemGuard {
 ''' + ota_function + "\n".join(declarations + parts) + r'''
 static void task_frame(VehicleController vehicle, bool wifi, OtaState ota,
                        const std::array<uint8_t, 3>& expected, int64_t elapsed_us = 0) {
+    const unsigned hwm_before = hwm_reads;
     events.clear(); signal_ok = wifi;
     timer_reads = 0; task_elapsed_us = elapsed_us;
     recovery_reads = state_reads = ensure_calls = 0;
@@ -147,6 +156,10 @@ static void task_frame(VehicleController vehicle, bool wifi, OtaState ota,
     // Stop only through passive RTOS doubles: normal delay throws into the real inner catch,
     // recovery delay throws into the real outer catch, task deletion ends this test invocation.
     try { led_task(&vehicle); } catch (const TaskEnd&) {}
+    // Real entry/terminal/iteration hooks delegate through the linked sampler.
+    assert(hwm_reads - hwm_before >= 2);
+    const auto led_minimum = tk::stack_watch_min_free_bytes(tk::StackWatch::Led);
+    assert(led_minimum.has_value() && *led_minimum == 4096);
     assert(recovery_reads == 1 && state_reads == unsigned(!recovery) && ensure_calls == unsigned(!recovery));
     assert(events.size() == 2 + 12 * 8 * 3);
     assert(events[0] == std::make_pair(39, 0) && events[1] == std::make_pair(40, 0));
@@ -162,6 +175,7 @@ static void task_frame(VehicleController vehicle, bool wifi, OtaState ota,
     assert(bytes[7] == expected[0] && bytes[6] == expected[1] && bytes[5] == expected[2]);
 }
 int main() {
+    assert(!tk::stack_watch_min_free_bytes(tk::StackWatch::Led).has_value());
     for (bool lock : {false, true}) for (bool guard : {false, true}) {
         for (const auto state : {OtaState::Idle, OtaState::Checking, OtaState::Downloading,
                                  OtaState::Done, OtaState::Error}) {
@@ -220,7 +234,9 @@ int main() {
         work = Path(directory)
         cpp, binary = work / "actual_led.cpp", work / "actual_led"
         cpp.write_text(code)
-        subprocess.run([compiler, *flags, "-I" + str(ROOT / "main"), str(cpp), "-o", str(binary)],
+        subprocess.run([compiler, *flags, "-I" + str(ROOT / "test/stubs"),
+                        "-I" + str(ROOT / "main"), str(cpp), str(ROOT / "main/stack_watch.cpp"),
+                        "-o", str(binary)],
                        check=True, timeout=45)
         subprocess.run([str(binary)], check=True, timeout=10)
     pipeline_probe()

@@ -11,14 +11,10 @@
 #include "logic/active_window.hpp"
 #include "logic/wake_poll.hpp"
 #include "logic/telemetry_poll.hpp"
-#include "logic/heap_watchdog.hpp"
+#include "logic/heap_supervision.hpp"
 #include "logic/uptime.hpp"
-#include "ota_update.hpp"
-#include "heap_trend.hpp"
 #include "stack_watch.hpp"
 #include <esp_log.h>
-#include <esp_heap_caps.h>
-#include <esp_system.h>
 #include <esp_timer.h>
 #include <esp_task_wdt.h>
 #include <cstdio>
@@ -549,11 +545,10 @@ void VehicleController::persist_discovered_mac_after_ready_() {
 }
 
 void VehicleController::process_ble_host_events_() {
-    if (!ble_event_queue_ || !ble_ || !client_) return;
+    if (!ble_host_events_ready_() || !ble_ || !client_) return;
 
-    if (ble_event_overflow_.exchange(false, std::memory_order_acq_rel)) {
-        BleHostEvent discarded{};
-        while (xQueueReceive(ble_event_queue_, &discarded, 0) == pdTRUE) {}
+    if (ble_events_.overflow.exchange(false, std::memory_order_acq_rel)) {
+        clear_ble_host_events_();
         // A lost byte or transition makes framing/state unknowable. Reset link and framer
         // first, then terminate the physical link. No stale LinkUp may become ready afterward.
         (void)apply_ble_link_state_(false);
@@ -567,7 +562,7 @@ void VehicleController::process_ble_host_events_() {
     }
 
     BleHostEvent event{};
-    while (xQueueReceive(ble_event_queue_, &event, 0) == pdTRUE) {
+    while (pop_ble_host_event_(event)) {
         const uint32_t current_generation = ble_->lifecycle_generation();
         if (!tk::ble_deferred_event_may_apply(event.kind, event.generation,
                                                current_generation)) {
@@ -1572,16 +1567,20 @@ void VehicleController::drive_command_runner_() {
 }
 
 void VehicleController::loop_task_fn_(void* arg) {
+    tk::stack_watch_sample(tk::StackWatch::Vehicle); // current task at entry
+    tk::StackWatchScope f135_task_exit(tk::StackWatch::Vehicle);
+
   try {
     auto* self = static_cast<VehicleController*>(arg);
     if (!self || !self->await_task_start_()) {
         // Cancellation is acknowledged inside await_task_start_(). No watchdog, mutex, BLE object
         // or vehicle state has been touched, so a second-create OOM unwinds without cross-core kill.
+        tk::stack_watch_sample(tk::StackWatch::Vehicle); // no C++ unwind on delete
         vTaskDelete(nullptr);
         return;
     }
 
-    // Subscribe to the Task Watchdog. The heap watchdog above already covers the wedge caused by
+    // Subscribe to the Task Watchdog. The independent heap supervisor covers the wedge caused by
     // memory exhaustion; this covers the one it structurally cannot see — a task blocked forever on
     // a semaphore, the BLE stack or a socket, with the heap looking perfectly healthy the whole
     // time. This task is the right subscriber because it is the one that must keep ticking for the
@@ -1605,13 +1604,13 @@ void VehicleController::loop_task_fn_(void* arg) {
     tk::WakePollState wake_poll{};         // one-shot charge poll on the VCSEC wake edge (#264)
     tk::IterationFaultLog fault_log{};
     while (true) {
+        tk::StackWatchScope f135_iteration_exit(tk::StackWatch::Vehicle);
       // Feed the task watchdog FIRST and UNCONDITIONALLY, before anything that can block or throw.
       // Gating it on the work below would make a long-but-legitimate command look like a hang; put
       // after the work, a throw would skip it and turn an already-contained OOM into a reboot.
       if (watchdog.active()) esp_task_wdt_reset();
-      // Retrospective: FreeRTOS retains the lowest free stack ever observed for this task, so a
-      // top-of-loop sample records the deepest path of the previous cycle and no branch can skip it.
-      tk::stack_watch_sample(tk::StackWatch::Vehicle);
+      // FreeRTOS retains the historical low mark. The outer iteration scope records it after
+      // this round, including contained faults and early continues, after local guards retire.
 
       // Iteration-boundary containment (issue #204): the poll injections + bookkeeping below
       // call command builders and touch std::string caches that can throw std::bad_alloc.
@@ -1662,153 +1661,10 @@ void VehicleController::loop_task_fn_(void* arg) {
         // outside the vehicle mutex. Disconnect drives apply_ble_link_state_(false), which clears the
         // RX framer buffer and resets sessions so the next connect re-syncs cleanly —
         // turning a would-be abort()/reboot into a brief reconnect.
-        if (self->ble_fault_.exchange(false)) {
+        const bool parse_fault = self->ble_fault_.exchange(false);
+        if (parse_fault) {
             ESP_LOGW(TAG, "BLE parse fault — dropping link to clear corrupt RX state");
             if (self->ble_connected()) self->ble_->disconnect();
-        }
-
-        // Heap watch: log free heap + LARGEST contiguous free block every ~30 s. The largest
-        // block (not total free) is what bounds big allocations; it can fall to a few tens of KB
-        // under BLE rx-buffer churn, so a large contiguous alloc would throw std::bad_alloc →
-        // uncaught → abort(). This keeps the trend visible. (/diag itself streams and no longer
-        // allocates the whole log; the HTTP handler guard catches anything else.)
-        static uint32_t last_heap_log = 0;
-        uint32_t hb_now = xTaskGetTickCount();
-        if (hb_now - last_heap_log > pdMS_TO_TICKS(30000)) {
-            last_heap_log = hb_now;
-            // INTERNAL, not plain 8BIT: heap_caps_* reports the max across every heap with the
-            // cap, and a board with PSRAM registers it into 8BIT. Deciding on that number
-            // would make the watchdog below a silent no-op on exactly the board that has PSRAM.
-            // Logged alongside the historical 8BIT figures (identical on the four PSRAM-less
-            // targets) so the trend stays comparable with older captures.
-            size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
-            ESP_LOGI(TAG, "HEAP free=%u largest_block=%u min_free=%u internal_largest=%u",
-                     (unsigned) heap_caps_get_free_size(MALLOC_CAP_8BIT),
-                     (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
-                     (unsigned) heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT),
-                     (unsigned) largest);
-
-            // Feed the 24-hour memory trend (GET /heap) from the SAME two samples the watchdog
-            // below judges — so the chart a human reads and the threshold the firmware acts on can
-            // never tell different stories. INTERNAL on both, for the PSRAM reason above: a trend
-            // drawn from plain 8BIT would show any PSRAM and hide the only heap that matters.
-            // Fixed .bss ring, no allocation — a diagnostic must not compete for the contiguous
-            // block it exists to measure.
-            tk::heap_trend_record(tk::uptime_seconds(static_cast<uint64_t>(esp_timer_get_time())),
-                                  (uint32_t) heap_caps_get_free_size(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL),
-                                  (uint32_t) largest);
-
-            // Last-resort escalation. Every OOM guard in this firmware turns OOM into "recover
-            // and continue", which is right for a transient and left the device WEDGED for ten
-            // hours on 2026-07-18 when the shortage was permanent. Decision logic (threshold,
-            // hold time, the OTA excusal, tick-wrap safety) is the host-tested
-            // logic/heap_watchdog.hpp; this site only samples and acts.
-            //
-            // Nothing here may allocate: we are deciding precisely because allocation is failing.
-            // ota_is_busy() reads one atomic (ota_get_status() would copy std::strings and could
-            // throw), and the persist below hands NVS a short literal.
-            //
-            // Every transition is logged, not just the restart. Syslog is the ONLY post-mortem
-            // source that outlives the reboot (the /diag ring is RAM), so someone reading it must
-            // be able to answer "why did this device restart?" without any other evidence: the
-            // arming line states the trigger, the countdown lines prove the shortage was sustained
-            // rather than a spike, and a recovery line closes a run that did not fire.
-            static tk::HeapWatchdog heap_wd;
-            tk::HeapVerdict v = tk::heap_watch(
-                heap_wd, {largest, (uint32_t) pdTICKS_TO_MS(hb_now), ota_is_busy()});
-            const unsigned held_s    = (unsigned) (v.critical_ms / 1000);
-            const unsigned left_s    = (unsigned) (tk::heap_restart_in_ms(v.critical_ms) / 1000);
-            const unsigned threshold = (unsigned) tk::kHeapCriticalBytes;
-
-            if (v.action == tk::HeapAction::Armed) {
-                ESP_LOGE(TAG, "HEAP CRITICAL: internal largest_block %u B < %u B — watchdog ARMED, "
-                              "restarting in %u s unless it recovers",
-                         (unsigned) largest, threshold, left_s);
-            } else if (v.action == tk::HeapAction::Watching) {
-                ESP_LOGE(TAG, "HEAP CRITICAL for %u s (largest %u B < %u B) — restart in %u s unless recovered",
-                         held_s, (unsigned) largest, threshold, left_s);
-            } else if (v.action == tk::HeapAction::Recovered) {
-                if (v.ota_excused) {
-                    ESP_LOGW(TAG, "HEAP critical run (%u s) cleared: OTA in flight holds large allocations",
-                             held_s);
-                } else {
-                    ESP_LOGW(TAG, "HEAP recovered after %u s critical (largest_block now %u B) — watchdog disarmed",
-                             held_s, (unsigned) largest);
-                }
-            }
-
-            if (v.action == tk::HeapAction::Restart) {
-                // How many watchdog restarts this run of exhaustion has already caused (0 unless
-                // the last boot was one of ours). Five is proof that restarting does not fix it,
-                // and continuing would cycle the radios every ~10 min forever — see
-                // kHeapMaxConsecutiveRestarts. Latch the run so we say this once, not every 30 s.
-                uint8_t prior = VehicleController::boot_heap_restarts();
-                if (!tk::heap_may_restart(prior)) {
-                    static bool said = false;
-                    if (!said) {
-                        said = true;
-                        ESP_LOGE(TAG, "HEAP EXHAUSTED for %u s: %u watchdog restarts failed — staying degraded",
-                                 held_s, (unsigned) prior);
-                    }
-                } else {
-                    tk::HeapReason why = tk::heap_reason_format((uint8_t)(prior + 1));
-                    // Join the same CAS gate used by OTA and identity journals BEFORE making the
-                    // restart durable. If either operation is in flight, postpone this watchdog
-                    // sample without writing reboot_why; the next sample retries after the owner
-                    // exits. Once the breadcrumb is durable we intentionally hold FaultRestart
-                    // until esp_restart(), closing the inverse "persisted, then OTA started" race.
-                    if (!ota_fault_restart_begin()) {
-                        static bool said_gate = false;
-                        if (!said_gate) {
-                            said_gate = true;
-                            ESP_LOGW(TAG, "HEAP EXHAUSTED for %u s: OTA/identity in flight — postponing restart",
-                                     held_s);
-                        }
-                        continue;
-                    }
-                    if (!self->persist_reboot_reason_(why.text)) {
-                        // Persistence authorizes the reboot: without the next counter a reboot
-                        // would forget this attempt and could cycle BLE/radios forever. Stay up
-                        // degraded and keep retrying the durable write on later watchdog samples.
-                        // Release FaultRestart so the failed attempt does not wedge OTA/identity.
-                        ota_fault_restart_cancel();
-                        static bool said_persist = false;
-                        if (!said_persist) {
-                            said_persist = true;
-                            ESP_LOGE(TAG, "HEAP EXHAUSTED for %u s: reboot_why write failed — staying degraded",
-                                     held_s);
-                        }
-                        continue;
-                    }
-                    // The one line that has to survive the reboot and explain it on its own —
-                    // state, threshold, how long, which restart, and where the reasoning lives.
-                    // Keep every line here well under ~230 chars: diag_log.cpp's capture hook
-                    // formats into a 256-byte stack buffer, so a longer line reaches syslog cut
-                    // off mid-sentence — and this is the one that must not be.
-                    ESP_LOGE(TAG, "HEAP EXHAUSTED for %u s (largest %u B < %u B, free %u B) — "
-                                  "RESTARTING (restart %u/%u, reboot_why=heap:%u)",
-                             held_s, (unsigned) largest, threshold,
-                             (unsigned) heap_caps_get_free_size(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL),
-                             (unsigned) (prior + 1), (unsigned) tk::kHeapMaxConsecutiveRestarts,
-                             (unsigned) (prior + 1));
-                    // Heap exhaustion is an automatic fault reboot, not a user health signal.
-                    // Leaving PENDING_VERIFY armed is exactly what lets the bootloader escape a
-                    // new image whose heap regression triggers this watchdog.
-                    static_assert(!tk::ota_reboot_confirms_pending_image(
-                        tk::OtaRebootClass::AutomaticFaultRecovery));
-                    // Let the log actually LEAVE the device before we kill it. syslog_send only
-                    // queues, and its task runs at priority 3 against this task's 5, so without a
-                    // yield the final message dies in the queue on a single-core target — and the
-                    // /diag ring does not survive the reboot either. Then the one thing explaining
-                    // the restart would be gone, which is the whole point of logging it. 300 ms is
-                    // nothing against a 5 min hold, and nothing against the 60 s task-watchdog
-                    // budget this task is now subscribed to either — but feed it first anyway, so a
-                    // deliberate restart is never misreported as a task_wdt panic on the way out.
-                    if (watchdog.active()) esp_task_wdt_reset();
-                    vTaskDelay(pdMS_TO_TICKS(300));
-                    esp_restart();
-                }
-            }
         }
 
         // While NOT paired we stay completely out of the way: the auto-pair task owns the
@@ -1961,6 +1817,9 @@ void VehicleController::loop_task_fn_(void* arg) {
             telemetry_poll.begin_attempt(now_ticks);
             self->enqueue_telemetry_round_(telemetry_poll);
         }
+        // Publish only after the complete successful iteration, never from entry or its catch.
+        if (tk::vehicle_iteration_successful(runner_failed, parse_fault))
+            tk::runtime_vehicle_progress_publish(static_cast<uint64_t>(esp_timer_get_time()) / 1000);
       } catch (...) {
           tk::report_iteration_fault(fault_log, static_cast<uint64_t>(esp_timer_get_time()) / 1000,
               [](uint32_t suppressed) { ESP_LOGE(TAG, "iteration fault; %u suppressed", (unsigned)suppressed); });
@@ -1969,8 +1828,11 @@ void VehicleController::loop_task_fn_(void* arg) {
       vTaskDelay(pdMS_TO_TICKS(50));
     }
   } catch (...) {
-      ESP_LOGE(TAG, "vehicle loop boundary threw outside an iteration — stopping task");
+      tk::runtime_admission_mark_fatal();
+      try { ESP_LOGE(TAG, "vehicle loop boundary threw outside an iteration — stopping task"); }
+      catch (...) {}
       // TaskWatchdogSubscription has already unwound and removed this task from TWDT.
+      tk::stack_watch_sample(tk::StackWatch::Vehicle); // no C++ unwind on delete
       vTaskDelete(nullptr);
   }
 }

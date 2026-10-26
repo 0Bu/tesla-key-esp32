@@ -1,0 +1,142 @@
+{
+  "status": "UNQUALIFIED_UNEXECUTED_SOURCE_RECIPES",
+  "sourceBase": "Private common-entry candidate from non-injected S85; all new recipes unexecuted",
+  "rules": [
+    "Exact source mutation only in disposable owned copy.",
+    "Successful generation and compilation required before negative credit.",
+    "Require exact causal first CHECK, source preservation, known group quiescence and exact restore/full positive.",
+    "Existing literal source guards may refuse first; isolated runtime drivers must distinguish source-contract refusal from compiled runtime evidence.",
+    "New INFO-checkpoint recipes are unqualified until actual compilation, causal first CHECK and restore/full positive are observed.",
+    "Entry/confirmation R and TLS record screen are distinct named references; ordinary and worker samples must not alias."
+  ],
+  "cases": [
+    {
+      "id": "F146-TLS-PRE",
+      "path": "main/ota_transport.cpp",
+      "old": "if (!tk::ota_recovery_memory_affordable(pre_init_largest,\n            tk::ota_recovery_required_bytes(tk::OtaRecoveryUse::TlsAdmission))) return NetResult::NoMemory;",
+      "new": "if (false) return NetResult::NoMemory;",
+      "count": 1,
+      "oracle": "recovery_policy_checks: observed12344 must refuse before TLS init; exact CHECK to be qualified after compilation"
+    },
+    {
+      "id": "F146-TLS-POST",
+      "path": "main/ota_transport.cpp",
+      "old": "if (!tk::ota_recovery_memory_affordable(post_context_largest,\n            tk::ota_recovery_required_bytes(tk::OtaRecoveryUse::TlsAdmission))) return NetResult::NoMemory;",
+      "new": "// omitted second recovery guard",
+      "count": 1,
+      "oracle": "recovery_policy_checks: {12345,12344} must have init1/connect0/destroy1; require exact CHECK, not earlier setup error"
+    },
+    {
+      "id": "F146-CONFIRM-PROVIDER",
+      "path": "main/ota_update.cpp",
+      "old": "tk::ota_recovery_required_bytes(tk::OtaRecoveryUse::ImageConfirmation));",
+      "new": "tk::kHeapCriticalBytes);",
+      "count": 1,
+      "oracle": "recovery_policy_tests:12344 must refuse user confirmation and probation; shared actual facade remains"
+    },
+    {
+      "id": "F146-HEALTH-COMPARISON",
+      "path": "main/logic/health_gate.hpp",
+      "old": "ota_recovery_memory_affordable(largest, required_recovery_bytes)",
+      "new": "(largest >= required_recovery_bytes)",
+      "count": 1,
+      "oracle": "invalid0/SIZE_MAX health sample must not become healthy; pure/native exact CHECK pending"
+    },
+    {
+      "id": "F146-PROBATION-POSTOWNER",
+      "path": "main/main.cpp",
+      "old": "const auto commit_health = ota_runtime_health();",
+      "new": "const auto commit_health = tk::RuntimeHealthSample{tk::RuntimeHealthFailure::None, 12345};",
+      "count": 1,
+      "oracle": "recovery_policy_tests: pre12345/post12344 after HealthCommit must have marks0; preserve independent prerequisite markers"
+    },
+    {
+      "id": "F146-OBS-GUARD-VALUE",
+      "path": "main/ota_update.cpp",
+      "old": "guard_sample ? guard_largest : info.largest_free_block",
+      "new": "info.largest_free_block",
+      "count": 1,
+      "oracle": "checkpoint_semantics_checks direct guarded sample must preserve12345 rather than independent diagnostic22222; exact first CHECK pending"
+    },
+    {
+      "id": "F146-OBS-HEADER-COMPLETE",
+      "path": "main/ota_coordinator.cpp",
+      "old": "headers_before < 200 && framing_->status() >= 200",
+      "new": "headers_before < 200",
+      "count": 1,
+      "oracle": "new actual one-byte header path must report exactly one complete headers_observed per manifest/notes leg, after delivered>=header_end; exact first CHECK pending"
+    },
+    {
+      "id": "F146-OBS-PRE-GUARD",
+      "path": "main/ota_transport.cpp",
+      "old": "memory_checkpoint(\"tls_pre_init\", j.generation, j.started_ms, pre_init_largest);",
+      "new": "(void)pre_init_largest;",
+      "count": 1,
+      "oracle": "post-context refusal case must still retain both observed guard records and policy samples2; exact first CHECK pending"
+    },
+    {
+      "id": "F146-OBS-DESTROY",
+      "path": "main/ota_transport.cpp",
+      "old": "memory_checkpoint(cleanup_ok ? \"tls_destroyed\" : \"tls_destroy_failed\",\n                              j.generation, j.started_ms);",
+      "new": "(void)cleanup_ok;",
+      "count": 1,
+      "oracle": "post-context refusal must observe successful actual destroy, before final phase publication; exact first CHECK pending"
+    },
+    {
+      "id": "F146-ENTRY-ROLE",
+      "path": "main/ota_update.cpp",
+      "old": "tk::ota_recovery_required_bytes(tk::OtaRecoveryUse::OperationEntry)",
+      "new": "tk::kHeapCriticalBytes",
+      "count": 1,
+      "oracle": "entry_recovery_checks: blocking entry12344/profileR12345 must return fixed memory refusal before Operation/tasks/TLS; compile and freeze exact first CHECK later"
+    },
+    {
+      "id": "F146-ENTRY-TYPED-RESULT",
+      "path": "main/ota_update.cpp",
+      "old": "return Result::NoMemory;",
+      "new": "return Result::InternalError;",
+      "count": 1,
+      "oracle": "entry_recovery_checks: actual blocking result must preserve fixed memory reason even though cached Error is already set; exact first CHECK pending"
+    },
+    {
+      "id": "F146-REFERENCE-ACTUAL-OWNER",
+      "path": "main/ota_update.cpp",
+      "old": "s_operation_gate.state() != owner",
+      "new": "false",
+      "count": 1,
+      "oracle": "reference_policy_tests: actual helper under FaultRestart may not reach ReferencePointer.load; actual spy is first forbidden-read CHECK; no source-refusal credit"
+    },
+    {
+      "id": "F146-REFERENCE-DONE-ACQUIRE",
+      "path": "main/ota_update.cpp",
+      "old": "if (!old->coordinator_done.load(std::memory_order_acquire)) return false;",
+      "new": "",
+      "count": 1,
+      "oracle": "reference_policy_tests: actual body may not call can_reclaim while reference_done=false; first read-order CHECK pending"
+    },
+    {
+      "id": "F146-REFERENCE-TYPED-GUARD",
+      "path": "main/ota_update.cpp",
+      "old": "if (!owner || s_operation_gate.state() != tk::OtaIdentityGateState::HealthCommit) return false;",
+      "new": "if (s_operation_gate.state() != tk::OtaIdentityGateState::HealthCommit) return false;",
+      "count": 1,
+      "oracle": "reference_policy_tests: a denied HealthCommit guard must refuse even while another actual guard holds the same owner enum; no pointer read; exact first CHECK pending"
+    },
+    {
+      "id": "F146-PROBATION-REFERENCE",
+      "path": "main/main.cpp",
+      "old": "if (!ota_recovery_reference_ready(commit_guard)) continue;",
+      "new": "",
+      "count": 1,
+      "oracle": "reference_policy_tests: raw pending high-heap final-owner reference_done=false keeps marks0; exact compiled first CHECK pending"
+    },
+    {
+      "id": "F146-CONFIG-REFERENCE",
+      "path": "main/ota_update.cpp",
+      "old": "if (!ordinary_recovery_reference_ready_owned(tk::OtaIdentityGateState::ConfigRestart))",
+      "new": "if (false)",
+      "count": 1,
+      "oracle": "reference_policy_tests: raw Pending/unavailable old resources returns Pending without health/mark; exact first CHECK pending"
+    }
+  ]
+}

@@ -108,9 +108,10 @@ jobs:
           echo "version=$release" >> "$GITHUB_OUTPUT"
           echo "latest=$latest" >> "$GITHUB_OUTPUT"
 
+  # Keep a bounded envelope for the full strict host suite and cold browser fixtures.
   logic-test:
     runs-on: ubuntu-26.04
-    timeout-minutes: 10
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
@@ -1009,6 +1010,15 @@ jobs:
             --source-sha "$SOURCE_SHA" --version "$DISPLAY_VERSION"
           python3 scripts/check-release-pages-bytes.py \
             ./_deploy-input/_site ./_deploy-input --version "$DISPLAY_VERSION"
+          for row in 'esp32|' 'esp32s3|-s3' 'esp32c3|-c3' 'esp32c6|-c6'; do
+            target="${row%%|*}"
+            suffix="${row#*|}"
+            python3 scripts/check-firmware-artifacts.py \
+              --target "$target" --version "$DISPLAY_VERSION" --signed-app \
+              --bootloader "_deploy-input/_fw/$target/bootloader.bin" \
+              --app "_deploy-input/tesla-key-esp32$suffix.bin" \
+              --expected-public-key-digest scripts/ota-signing-public-key.sha256
+          done
 
       - name: Revalidate branch-backed Pages authority immediately before deployment
         if: needs.build.outputs.mode == 'release'
@@ -1035,6 +1045,7 @@ jobs:
         if: needs.build.outputs.mode == 'release'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_SHA: ${{ github.sha }}
         run: ./scripts/publish-pages-branch.sh root ./_deploy-input/_site
 
       - name: Accept branch-served Pages against immutable Release bytes
@@ -1058,6 +1069,7 @@ jobs:
             --pages-base-url "$pages_base_url" \
             --release-base-url "https://github.com/$GITHUB_REPOSITORY/releases/download/v$RELEASE_VERSION" \
             --release-json "$release_json" \
+            --expected-changelog-file ./_deploy-input/_site/changelog.json \
             --version "$DISPLAY_VERSION" \
             --source-sha "$SOURCE_SHA" \
             --attempts 6 --interval 10 --timeout 15

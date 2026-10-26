@@ -1,3 +1,4 @@
+#include "stack_watch.hpp"
 // On-device ST7735 status display for the LilyGo T-Dongle-S3 (a 0.96" IPS
 // 80x160 panel, same ST7735 init/gamma/INVON). Drivable LANDSCAPE (160x80) OR PORTRAIT (80x160)
 // — the BOOT button rotates 90° per press through 4 orientations (draw_landscape / draw_portrait;
@@ -633,6 +634,9 @@ static void rotate_90(void) {
 }
 
 static void display_task(void* arg) {
+    tk::stack_watch_sample(tk::StackWatch::Display); // current task at entry
+    tk::StackWatchScope f135_task_exit(tk::StackWatch::Display);
+
   try {
     VehicleController& v = *static_cast<VehicleController*>(arg);
 
@@ -648,6 +652,7 @@ static void display_task(void* arg) {
     bool paired = (v.has_session() || v.session_available());        // durable record or usable RAM — sample at ~1 Hz
     tk::IterationFaultLog fault_log{};
     for (;;) {
+        tk::StackWatchScope f135_iteration_exit(tk::StackWatch::Display);
       // Iteration-boundary containment (issue #204): render_frame() reads the cached UiSnapshot
       // and builds std::string SSID text that can throw bad_alloc under heap pressure. This is a
       // cosmetic task with no lock held across the frame, so an escape must not unwind into the
@@ -685,6 +690,7 @@ static void display_task(void* arg) {
     }
   } catch (...) {
       ESP_LOGE(TAG, "display task boundary threw outside a frame — stopping task");
+      tk::stack_watch_sample(tk::StackWatch::Display); // no C++ unwind on delete
       vTaskDelete(nullptr);
   }
 }

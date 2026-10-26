@@ -1,6 +1,6 @@
-"""Blank whole-line CSS documentation comments without rewriting tokens or whitespace.
+"""Blank bounded CSS/JavaScript documentation without rewriting code or whitespace.
 
-Only the repository's UTF-8, NUL-free CSS subset is supported. Strings, escapes,
+The CSS pass supports the repository's bounded UTF-8, NUL-free subset. Strings, escapes,
 parenthesized regions, inline comments, legal/tooling notices and HTML style-end
 sequences remain opaque. Unsupported unfinished syntax fails instead of guessing.
 """
@@ -75,6 +75,48 @@ def prune(source: bytes) -> bytes:
     return bytes(output)
 
 
+def prune_js(source: bytes) -> bytes:
+    """Blank whole-line // comments in the repository's single-line-code subset.
+
+    Strings and regex literals cannot cross a physical line without templates or
+    string continuations. Refuse those constructs, inline block openers and code
+    after block closers rather than attempting a general JavaScript lexer. Keep
+    whole-line block comments opaque, including their interior // lines.
+    """
+    if not isinstance(source, bytes) or len(source) > MAX_BYTES:
+        raise ValueError('JavaScript input exceeds the bounded byte budget')
+    source.decode('utf-8', errors='strict')
+    if any(marker in source for marker in (b'\x00', b'\x0b', b'\x0c', b'\xe2\x80\xa8', b'\xe2\x80\xa9')):
+        raise ValueError('JavaScript input contains unsupported text separators')
+    output = bytearray()
+    block = False
+    for line in source.splitlines(keepends=True):
+        body = line.rstrip(b'\r\n')
+        stripped = body.lstrip(b' \t')
+        if block or stripped.startswith(b'/*'):
+            start = 0 if block else line.index(b'/*') + 2
+            end = body.find(b'*/', start)
+            block = end < 0
+            if not block and body[end + 2:].strip(b' \t'):
+                raise ValueError('JavaScript block comment must occupy whole lines')
+            output.extend(line)
+            continue
+        if stripped.startswith(b'//'):
+            lowered = stripped.lower()
+            keep = stripped.startswith((b'//!', b'//#', b'//@')) or any(
+                marker in lowered for marker in
+                (b'@license', b'copyright', b'@preserve', b'spdx', b'sourcemappingurl',
+                 b'sourceurl', b'<script', b'</script', b'<!--', b'-->'))
+            output.extend(line if keep else bytes(value if value in SPACE else 32 for value in line))
+            continue
+        if b'`' in body or b'/*' in body or body.endswith(b'\\'):
+            raise ValueError('JavaScript code exceeds the single-line lexical subset')
+        output.extend(line)
+    if block:
+        raise ValueError('unfinished JavaScript block comment')
+    return bytes(output)
+
+
 def main() -> int:
     try:
         if len(sys.argv) == 2:
@@ -91,7 +133,7 @@ def main() -> int:
                     marker.rstrip(b'\n') in asset for asset in (css, js)
                     for marker in (style_marker, script_marker)):
                 raise ValueError('raw inline marker contract failed')
-            output = page.replace(style_marker, prune(css)).replace(script_marker, js)
+            output = page.replace(style_marker, prune(css)).replace(script_marker, prune_js(js))
             # Publish complete bytes without truncating an input or leaving a
             # partial page when generation fails. CMake never reserializes them.
             temporary = None
@@ -109,7 +151,7 @@ def main() -> int:
         sys.stdout.buffer.write(output)
         return 0
     except (OSError, ValueError) as error:
-        print(f'CSS comment pruning failed: {error}', file=sys.stderr)
+        print(f'web asset comment pruning failed: {error}', file=sys.stderr)
         return 1
 
 

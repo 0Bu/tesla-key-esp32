@@ -33,23 +33,7 @@ for arg in "$@"; do
     fi
 done
 
-mkdir -p "$BUILD_DIR/obj/nanopb" "$BUILD_DIR/obj/tb" "$CACHE_DIR"
-
-clone_or_fail() {
-    local name="$1" branch="$2" url="$3" dest="$4"
-    if [ ! -d "$dest" ]; then
-        echo "[harness] Cloning $name ($branch)..."
-        if ! git clone --depth 1 --branch "$branch" "$url" "$dest"; then
-            if [ "$REQUIRE_ALL" = 1 ] || [ "${CI:-}" = "true" ]; then
-                echo "[harness] ERROR: failed to clone $name in fail-closed mode" >&2
-                exit 1
-            else
-                echo "[harness] offline / network clone failed for $name — skipping integration harness"
-                exit 0
-            fi
-        fi
-    fi
-}
+mkdir -p "$BUILD_DIR/obj" "$CACHE_DIR"
 
 # Fetch one exact commit (a moving branch would let the host crypto drift from the firmware's).
 fetch_commit_or_fail() {
@@ -73,64 +57,64 @@ fetch_commit_or_fail() {
     fi
 }
 
-# 1. Locate or clone dependencies
-EXPECTED_TB_VER="$(ruby -ryaml -e 'puts YAML.load_file("'"$ROOT_DIR/main/idf_component.yml"'")["dependencies"]["yoziru/tesla-ble"]["version"]' 2>/dev/null || awk '/dependencies:/{in_deps=1} in_deps && /yoziru\/tesla-ble:/{in_tb=1} in_tb && /^[[:space:]]*version:/{sub(/.*version:[[:space:]]*"?/, ""); sub(/".*/, ""); print; exit}' "$ROOT_DIR/main/idf_component.yml")"
-[ -n "$EXPECTED_TB_VER" ] || { echo "[harness] ERROR: cannot read yoziru/tesla-ble version from main/idf_component.yml" >&2; exit 1; }
-
-if [ -d "$ROOT_DIR/managed_components/yoziru__tesla-ble" ]; then
-    TB_DIR="$ROOT_DIR/managed_components/yoziru__tesla-ble"
-    if [ ! -f "$TB_DIR/idf_component.yml" ]; then
-        echo "[harness] ERROR: $TB_DIR exists but idf_component.yml is missing" >&2
-        exit 1
-    fi
-    LOCAL_VER="$(sed -n 's/^version:[[:space:]]*"\([^"]*\)".*/\1/p' "$TB_DIR/idf_component.yml" 2>/dev/null || true)"
-    if [ -z "$LOCAL_VER" ]; then
-        echo "[harness] ERROR: cannot read version from $TB_DIR/idf_component.yml" >&2
-        exit 1
-    fi
-    if [ "$LOCAL_VER" != "${EXPECTED_TB_VER#v}" ] && [ "$LOCAL_VER" != "$EXPECTED_TB_VER" ]; then
-        echo "[harness] ERROR: managed_components/yoziru__tesla-ble ($LOCAL_VER) does not match expected version ($EXPECTED_TB_VER)" >&2
-        exit 1
-    fi
-else
-    TB_DIR="$CACHE_DIR/tb"
-    if [ -d "$TB_DIR" ]; then
-        TB_CACHED_VER=""
-        if [ -f "$TB_DIR/idf_component.yml" ]; then
-            TB_CACHED_VER="$(sed -n 's/^version:[[:space:]]*"\([^"]*\)".*/\1/p' "$TB_DIR/idf_component.yml" 2>/dev/null || true)"
-        fi
-        if [ -z "$TB_CACHED_VER" ] || { [ "$TB_CACHED_VER" != "${EXPECTED_TB_VER#v}" ] && [ "$TB_CACHED_VER" != "$EXPECTED_TB_VER" ]; }; then
-            echo "[harness] ERROR: cached tesla-ble in $TB_DIR has version '$TB_CACHED_VER', expected pinned '$EXPECTED_TB_VER'" >&2
-            exit 1
-        fi
-    else
-        clone_or_fail "yoziru/tesla-ble" "$EXPECTED_TB_VER" "https://github.com/yoziru/tesla-ble.git" "$TB_DIR"
-    fi
-fi
-
-echo "[harness] Applying repository patches to tesla-ble ($TB_DIR)..."
-"$ROOT_DIR/scripts/apply-tesla-ble-patches.sh" --component "$TB_DIR"
-
-NANOPB_DIR="$ROOT_DIR/build/_deps/nanopb-src"
-if [ ! -d "$NANOPB_DIR" ]; then
-    NANOPB_DIR="$CACHE_DIR/nanopb"
-    clone_or_fail "nanopb" "0.4.9.1" "https://github.com/nanopb/nanopb.git" "$NANOPB_DIR"
-fi
-
-# The components/mbedtls/mbedtls submodule commit of ESP-IDF v6.1 (Mbed TLS 4.1.0 + TF-PSA-Crypto
-# 1.1.0, Espressif fork). Keep it equal to the pinned toolchain's submodule on every IDF bump.
+# Exact repository-owned sources are admitted before any compiler or dependency configure effect.
+# Keep the existing Mbed TLS source/helper policy separate from Tesla/nanopb admission.
 MBEDTLS_REF="a2b32072ea898afc1ed5b6caf6931e36028c91d6"
-MBEDTLS_DIR="$CACHE_DIR/mbedtls-$MBEDTLS_REF"
-fetch_commit_or_fail "espressif/mbedtls" "$MBEDTLS_REF" "https://github.com/espressif/mbedtls.git" "$MBEDTLS_DIR"
-
 CC="${CC:-clang}"
 CXX="${CXX:-clang++}"
-if ! command -v "$CC" >/dev/null 2>&1; then
-    CC=gcc
+if ! command -v "$CC" >/dev/null 2>&1; then CC=gcc; fi
+if ! command -v "$CXX" >/dev/null 2>&1; then CXX=g++; fi
+
+admit_or_fail() {
+    local proof status
+    if proof="$(python3 "$ROOT_DIR/scripts/dependency_source.py" "$@")"; then
+        printf '%s\n' "$proof"
+        return 0
+    else
+        status=$?
+    fi
+    if [ "$status" = 75 ] && [ "$REQUIRE_ALL" = 0 ] && [ "${CI:-}" != true ]; then
+        return 75
+    fi
+    echo "[harness] ERROR: exact dependency source admission failed" >&2
+    return 1
+}
+# Existing mismatches are always hard failures, even when a different cold fetch is offline.
+python3 "$ROOT_DIR/scripts/dependency_source.py" harness-preflight \
+    --root "$ROOT_DIR" --source "$CACHE_DIR" >/dev/null
+
+if NANOPB_PROOF="$(admit_or_fail nanopb --root "$ROOT_DIR" \
+        --source "$CACHE_DIR/nanopb-pristine" --object-root "$BUILD_DIR/obj" \
+        --cache-salt "$CC mbedtls-$MBEDTLS_REF")"; then
+    :
+else
+    status=$?
+    if [ "$status" = 75 ]; then
+        echo "[harness] cold source transport unavailable — skipping optional harness"
+        exit 0
+    fi
+    exit 1
 fi
-if ! command -v "$CXX" >/dev/null 2>&1; then
-    CXX=g++
+if TB_PROOF="$(admit_or_fail tesla-ble --root "$ROOT_DIR" \
+        --source "$CACHE_DIR/tesla-pristine" --workspace "$CACHE_DIR/tesla-patched" \
+        --object-root "$BUILD_DIR/obj" \
+        --cache-salt "$CC $CXX mbedtls-$MBEDTLS_REF loglevel-2")"; then
+    :
+else
+    status=$?
+    if [ "$status" = 75 ]; then
+        echo "[harness] cold source transport unavailable — skipping optional harness"
+        exit 0
+    fi
+    exit 1
 fi
+NANOPB_DIR="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["source"])' "$NANOPB_PROOF")"
+NANOPB_OBJ_DIR="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["objectDirectory"])' "$NANOPB_PROOF")"
+TB_DIR="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["source"])' "$TB_PROOF")"
+TB_OBJ_DIR="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["objectDirectory"])' "$TB_PROOF")"
+
+MBEDTLS_DIR="$CACHE_DIR/mbedtls-$MBEDTLS_REF"
+fetch_commit_or_fail "espressif/mbedtls" "$MBEDTLS_REF" "https://github.com/espressif/mbedtls.git" "$MBEDTLS_DIR"
 
 # Espressif's fork commits its generated sources (GEN_FILES=OFF) and includes ESP-IDF's public
 # mbedtls/bignum.h and ecp.h wrappers from its builtin drivers; test/stubs/mbedtls-idf stands in
@@ -152,31 +136,22 @@ MBEDTLS_INC="-I $MBEDTLS_DIR/include -I $MBEDTLS_DIR/tf-psa-crypto/include -I $M
 echo "[harness] Compiling Nanopb..."
 INC="-I $TB_DIR/include -I $TB_DIR/generated/include -I $NANOPB_DIR $MBEDTLS_INC -I $ROOT_DIR/main"
 for f in "$NANOPB_DIR"/pb_common.c "$NANOPB_DIR"/pb_decode.c "$NANOPB_DIR"/pb_encode.c; do
-    obj="$BUILD_DIR/obj/nanopb/$(basename "$f" .c).o"
+    obj="$NANOPB_OBJ_DIR/$(basename "$f" .c).o"
     if [ ! -f "$obj" ] || [ "$f" -nt "$obj" ]; then
         "$CC" -O2 -w -c "$f" -I "$NANOPB_DIR" -o "$obj"
     fi
 done
-# tesla-ble objects depend on both the library version and the Mbed TLS headers they compiled against.
+# Both object namespaces already include the complete admitted bytes/modes, record/patch
+# identity, compiler selectors and unchanged crypto/log policy; unchanged mtimes cannot select
+# an old-source namespace. Existing foreign or aliased cache paths are never invalidated.
 TB_LOG_FLAGS="-DTESLA_BLE_LOG_LEVEL=2"
-PATCH_STATE_SHA="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$ROOT_DIR/scripts/tesla-ble-patch-state.json")"
-OBJ_KEY="$EXPECTED_TB_VER mbedtls-$MBEDTLS_REF patches-$PATCH_STATE_SHA loglevel-2"
-if [ -f "$BUILD_DIR/obj/tb/.version" ]; then
-    CACHED_OBJ_VER="$(cat "$BUILD_DIR/obj/tb/.version" 2>/dev/null || true)"
-    if [ "$CACHED_OBJ_VER" != "$OBJ_KEY" ]; then
-        echo "[harness] tesla-ble/Mbed TLS inputs changed ($CACHED_OBJ_VER -> $OBJ_KEY); invalidating object cache..."
-        rm -rf "$BUILD_DIR/obj/tb"
-        mkdir -p "$BUILD_DIR/obj/tb"
-    fi
-fi
-echo "$OBJ_KEY" > "$BUILD_DIR/obj/tb/.version"
 
 echo "[harness] Compiling tesla-ble protobuf descriptors..."
 while IFS= read -r -d '' f; do
     rel="${f#"$TB_DIR/generated/src/"}"
     flat_name="${rel//\//_}"
     flat_name="${flat_name%.c}.o"
-    obj="$BUILD_DIR/obj/tb/$flat_name"
+    obj="$TB_OBJ_DIR/$flat_name"
     if [ ! -f "$obj" ] || [ "$f" -nt "$obj" ]; then
         "$CC" -O2 -w -c "$f" $INC -o "$obj"
     fi
@@ -185,14 +160,14 @@ done < <(find "$TB_DIR/generated/src" -name '*.pb.c' -print0)
 echo "[harness] Compiling tesla-ble core sources..."
 for f in "$TB_DIR"/src/*.cpp; do
     if [ -f "$f" ] && [ "$(basename "$f")" != "vehicle.cpp" ]; then
-        obj="$BUILD_DIR/obj/tb/$(basename "$f" .cpp).o"
+        obj="$TB_OBJ_DIR/$(basename "$f" .cpp).o"
         if [ ! -f "$obj" ] || [ "$f" -nt "$obj" ]; then
             "$CXX" -std=c++20 -O2 -w "$TB_LOG_FLAGS" -c "$f" $INC -o "$obj"
         fi
     fi
 done
 
-ar rcs "$BUILD_DIR/libtb.a" "$BUILD_DIR"/obj/tb/*.o "$BUILD_DIR"/obj/nanopb/*.o
+ar rcs "$BUILD_DIR/libtb.a" "$TB_OBJ_DIR"/*.o "$NANOPB_OBJ_DIR"/*.o
 
 echo "[harness] Compiling test_tesla_ble_harness..."
 # Compile the actual firmware response adapter against the real protocol/crypto types, replacing
@@ -312,6 +287,9 @@ for result, name in (("uint32_t", "deadline_in_"), ("TickType_t", "ticks_until_"
     clocks.append(header[start:end])
 (out / "wake-clock.inc").write_text("\n".join(clocks) + "\n")
 PY_COMPLETION
+# Compile complete actual producer/mailbox/consumer methods, including the real RxFramer path.
+# A failed generation must stop before the test compiler can consume any old generated include.
+python3 "$ROOT_DIR/test/generate_ble_deferred_adapter.py" "$ROOT_DIR" "$BUILD_DIR"
 # tests/test_constants.h carries the official vehicle-command protocol test keys (never production).
 "$CXX" -std=c++20 -O2 -Wall -Wextra "$TB_LOG_FLAGS" \
     "$ROOT_DIR/test/test_tesla_ble_harness.cpp" \

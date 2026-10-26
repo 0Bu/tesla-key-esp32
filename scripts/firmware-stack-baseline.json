@@ -28,6 +28,7 @@
           "/COMPONENT_MAIN_DIR/diag_log.cpp :: int diag_vprintf_(const char*, va_list)": 320
         },
         "CMakeFiles/__idf_main.dir/display.cpp.su": {},
+        "CMakeFiles/__idf_main.dir/heap_supervisor.cpp.su": {},
         "CMakeFiles/__idf_main.dir/heap_trend.cpp.su": {},
         "CMakeFiles/__idf_main.dir/http_api.cpp.su": {
           "/COMPONENT_MAIN_DIR/http_api.cpp :: esp_err_t handle_command(GuardedReq)": 336,
@@ -64,7 +65,6 @@
         },
         "CMakeFiles/__idf_main.dir/mqtt_ha.cpp.su": {
           "/COMPONENT_MAIN_DIR/mqtt_ha.cpp :: bool mqtt_ha_start_impl(VehicleController&, NvsStorageAdapter&)": 832,
-          "/COMPONENT_MAIN_DIR/mqtt_ha.cpp :: bool publish_discovery_rows(const char*)": 256,
           "/COMPONENT_MAIN_DIR/mqtt_ha.cpp :: bool publish_state()": 528
         },
         "CMakeFiles/__idf_main.dir/net.cpp.su": {
@@ -72,9 +72,9 @@
         },
         "CMakeFiles/__idf_main.dir/nvs_storage.cpp.su": {},
         "CMakeFiles/__idf_main.dir/ota_update.cpp.su": {
-          "/COMPONENT_MAIN_DIR/ota_update.cpp :: OtaCheckResult ota_check(unsigned int)": 1584,
-          "/COMPONENT_MAIN_DIR/ota_update.cpp :: bool http_get_to_buffer(const char*, std::string&)": 736,
-          "/COMPONENT_MAIN_DIR/ota_update.cpp :: void ota_task_impl()": 592
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: OtaCheckResult perform_check(OtaOperation&, unsigned int)": 1584,
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: OtaOperation::OtaOperation(uint64_t, unsigned int, tk::OtaChannel, bool)": 256,
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: void ota_task_impl(OtaOperation&)": 336
         },
         "CMakeFiles/__idf_main.dir/provisioning.cpp.su": {
           "/COMPONENT_MAIN_DIR/provisioning.cpp :: SetupPortal portal_open(NvsStorageAdapter&, bool)": 544,
@@ -93,10 +93,7 @@
         "CMakeFiles/__idf_main.dir/vehicle_commands.cpp.su": {
           "/COMPONENT_MAIN_DIR/vehicle_commands.cpp :: bool VehicleController::set_charging_amps(int, int)": 480
         },
-        "CMakeFiles/__idf_main.dir/vehicle_ctrl.cpp.su": {
-          "/COMPONENT_MAIN_DIR/vehicle_ctrl.cpp :: bool VehicleController::enqueue_ble_link_event_(bool, uint16_t, uint32_t)": 288,
-          "/COMPONENT_MAIN_DIR/vehicle_ctrl.cpp :: bool VehicleController::enqueue_ble_rx_event_(const uint8_t*, size_t, uint32_t)": 288
-        },
+        "CMakeFiles/__idf_main.dir/vehicle_ctrl.cpp.su": {},
         "CMakeFiles/__idf_main.dir/vehicle_pairing.cpp.su": {
           "/COMPONENT_MAIN_DIR/vehicle_pairing.cpp :: bool VehicleController::clear_session_and_cache_()": 336,
           "/COMPONENT_MAIN_DIR/vehicle_pairing.cpp :: std::string VehicleController::compute_key_fingerprint_()": 816
@@ -108,9 +105,16 @@
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::handle_carserver_frame_(const UniversalMessage_RoutableMessage&)": 2048,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::handle_session_info_frame_(const UniversalMessage_RoutableMessage&)": 304,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::handle_vcsec_frame_(const UniversalMessage_RoutableMessage&)": 816,
-          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::process_ble_host_events_()": 560,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::process_pending_telemetry_()": 1440,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::process_rx_frame_(const uint8_t*, size_t)": 800
+        },
+        "CMakeFiles/__idf_main.dir/ota_coordinator.cpp.su": {},
+        "CMakeFiles/__idf_main.dir/ota_http.cpp.su": {},
+        "CMakeFiles/__idf_main.dir/ota_transport.cpp.su": {
+          "/COMPONENT_MAIN_DIR/ota_transport.cpp :: void tk::ota::run_network_worker(Job&, const NetRuntime&)": 400
+        },
+        "CMakeFiles/__idf_main.dir/ota_writer.cpp.su": {
+          "/COMPONENT_MAIN_DIR/ota_writer.cpp :: static tk::ota::Effect tk::ota::RawWriter::prefix(void*, const uint8_t*, std::size_t)": 336
         }
       }
     },
@@ -137,6 +141,7 @@
           "/COMPONENT_MAIN_DIR/diag_log.cpp :: int diag_vprintf_(const char*, va_list)": 320
         },
         "CMakeFiles/__idf_main.dir/display.cpp.su": {},
+        "CMakeFiles/__idf_main.dir/heap_supervisor.cpp.su": {},
         "CMakeFiles/__idf_main.dir/heap_trend.cpp.su": {},
         "CMakeFiles/__idf_main.dir/http_api.cpp.su": {
           "/COMPONENT_MAIN_DIR/http_api.cpp :: esp_err_t handle_command(GuardedReq)": 336,
@@ -173,7 +178,6 @@
         },
         "CMakeFiles/__idf_main.dir/mqtt_ha.cpp.su": {
           "/COMPONENT_MAIN_DIR/mqtt_ha.cpp :: bool mqtt_ha_start_impl(VehicleController&, NvsStorageAdapter&)": 832,
-          "/COMPONENT_MAIN_DIR/mqtt_ha.cpp :: bool publish_discovery_rows(const char*)": 256,
           "/COMPONENT_MAIN_DIR/mqtt_ha.cpp :: bool publish_state()": 528
         },
         "CMakeFiles/__idf_main.dir/net.cpp.su": {
@@ -182,9 +186,9 @@
         },
         "CMakeFiles/__idf_main.dir/nvs_storage.cpp.su": {},
         "CMakeFiles/__idf_main.dir/ota_update.cpp.su": {
-          "/COMPONENT_MAIN_DIR/ota_update.cpp :: OtaCheckResult ota_check(unsigned int)": 1584,
-          "/COMPONENT_MAIN_DIR/ota_update.cpp :: bool http_get_to_buffer(const char*, std::string&)": 736,
-          "/COMPONENT_MAIN_DIR/ota_update.cpp :: void ota_task_impl()": 592
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: OtaCheckResult perform_check(OtaOperation&, unsigned int)": 1584,
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: OtaOperation::OtaOperation(uint64_t, unsigned int, tk::OtaChannel, bool)": 256,
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: void ota_task_impl(OtaOperation&)": 336
         },
         "CMakeFiles/__idf_main.dir/provisioning.cpp.su": {
           "/COMPONENT_MAIN_DIR/provisioning.cpp :: SetupPortal portal_open(NvsStorageAdapter&, bool)": 544,
@@ -203,10 +207,7 @@
         "CMakeFiles/__idf_main.dir/vehicle_commands.cpp.su": {
           "/COMPONENT_MAIN_DIR/vehicle_commands.cpp :: bool VehicleController::set_charging_amps(int, int)": 480
         },
-        "CMakeFiles/__idf_main.dir/vehicle_ctrl.cpp.su": {
-          "/COMPONENT_MAIN_DIR/vehicle_ctrl.cpp :: bool VehicleController::enqueue_ble_link_event_(bool, uint16_t, uint32_t)": 288,
-          "/COMPONENT_MAIN_DIR/vehicle_ctrl.cpp :: bool VehicleController::enqueue_ble_rx_event_(const uint8_t*, size_t, uint32_t)": 288
-        },
+        "CMakeFiles/__idf_main.dir/vehicle_ctrl.cpp.su": {},
         "CMakeFiles/__idf_main.dir/vehicle_pairing.cpp.su": {
           "/COMPONENT_MAIN_DIR/vehicle_pairing.cpp :: bool VehicleController::clear_session_and_cache_()": 336,
           "/COMPONENT_MAIN_DIR/vehicle_pairing.cpp :: std::string VehicleController::compute_key_fingerprint_()": 816
@@ -218,9 +219,16 @@
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::handle_carserver_frame_(const UniversalMessage_RoutableMessage&)": 2048,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::handle_session_info_frame_(const UniversalMessage_RoutableMessage&)": 304,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::handle_vcsec_frame_(const UniversalMessage_RoutableMessage&)": 816,
-          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::process_ble_host_events_()": 560,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::process_pending_telemetry_()": 1440,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::process_rx_frame_(const uint8_t*, size_t)": 800
+        },
+        "CMakeFiles/__idf_main.dir/ota_coordinator.cpp.su": {},
+        "CMakeFiles/__idf_main.dir/ota_http.cpp.su": {},
+        "CMakeFiles/__idf_main.dir/ota_transport.cpp.su": {
+          "/COMPONENT_MAIN_DIR/ota_transport.cpp :: void tk::ota::run_network_worker(Job&, const NetRuntime&)": 400
+        },
+        "CMakeFiles/__idf_main.dir/ota_writer.cpp.su": {
+          "/COMPONENT_MAIN_DIR/ota_writer.cpp :: static tk::ota::Effect tk::ota::RawWriter::prefix(void*, const uint8_t*, std::size_t)": 336
         }
       }
     },
@@ -245,6 +253,7 @@
           "/COMPONENT_MAIN_DIR/diag_log.cpp :: int diag_vprintf_(const char*, va_list)": 272
         },
         "CMakeFiles/__idf_main.dir/display.cpp.su": {},
+        "CMakeFiles/__idf_main.dir/heap_supervisor.cpp.su": {},
         "CMakeFiles/__idf_main.dir/heap_trend.cpp.su": {},
         "CMakeFiles/__idf_main.dir/http_api.cpp.su": {
           "/COMPONENT_MAIN_DIR/http_api.cpp :: esp_err_t handle_command(GuardedReq)": 320,
@@ -287,9 +296,9 @@
         },
         "CMakeFiles/__idf_main.dir/nvs_storage.cpp.su": {},
         "CMakeFiles/__idf_main.dir/ota_update.cpp.su": {
-          "/COMPONENT_MAIN_DIR/ota_update.cpp :: OtaCheckResult ota_check(unsigned int)": 1456,
-          "/COMPONENT_MAIN_DIR/ota_update.cpp :: bool http_get_to_buffer(const char*, std::string&)": 736,
-          "/COMPONENT_MAIN_DIR/ota_update.cpp :: void ota_task_impl()": 592
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: OtaCheckResult perform_check(OtaOperation&, unsigned int)": 1456,
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: OtaOperation::OtaOperation(uint64_t, unsigned int, tk::OtaChannel, bool)": 256,
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: void ota_task_impl(OtaOperation&)": 320
         },
         "CMakeFiles/__idf_main.dir/provisioning.cpp.su": {
           "/COMPONENT_MAIN_DIR/provisioning.cpp :: SetupPortal portal_open(NvsStorageAdapter&, bool)": 528,
@@ -308,10 +317,7 @@
         "CMakeFiles/__idf_main.dir/vehicle_commands.cpp.su": {
           "/COMPONENT_MAIN_DIR/vehicle_commands.cpp :: bool VehicleController::set_charging_amps(int, int)": 480
         },
-        "CMakeFiles/__idf_main.dir/vehicle_ctrl.cpp.su": {
-          "/COMPONENT_MAIN_DIR/vehicle_ctrl.cpp :: bool VehicleController::enqueue_ble_link_event_(bool, uint16_t, uint32_t)": 288,
-          "/COMPONENT_MAIN_DIR/vehicle_ctrl.cpp :: bool VehicleController::enqueue_ble_rx_event_(const uint8_t*, size_t, uint32_t)": 288
-        },
+        "CMakeFiles/__idf_main.dir/vehicle_ctrl.cpp.su": {},
         "CMakeFiles/__idf_main.dir/vehicle_pairing.cpp.su": {
           "/COMPONENT_MAIN_DIR/vehicle_pairing.cpp :: bool VehicleController::clear_session_and_cache_()": 304,
           "/COMPONENT_MAIN_DIR/vehicle_pairing.cpp :: std::string VehicleController::compute_key_fingerprint_()": 784
@@ -322,9 +328,16 @@
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::handle_carserver_frame_(const UniversalMessage_RoutableMessage&)": 2048,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::handle_session_info_frame_(const UniversalMessage_RoutableMessage&)": 272,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::handle_vcsec_frame_(const UniversalMessage_RoutableMessage&)": 816,
-          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::process_ble_host_events_()": 544,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::process_pending_telemetry_()": 1408,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::process_rx_frame_(const uint8_t*, size_t)": 800
+        },
+        "CMakeFiles/__idf_main.dir/ota_coordinator.cpp.su": {},
+        "CMakeFiles/__idf_main.dir/ota_http.cpp.su": {},
+        "CMakeFiles/__idf_main.dir/ota_transport.cpp.su": {
+          "/COMPONENT_MAIN_DIR/ota_transport.cpp :: void tk::ota::run_network_worker(Job&, const NetRuntime&)": 400
+        },
+        "CMakeFiles/__idf_main.dir/ota_writer.cpp.su": {
+          "/COMPONENT_MAIN_DIR/ota_writer.cpp :: static tk::ota::Effect tk::ota::RawWriter::prefix(void*, const uint8_t*, std::size_t)": 320
         }
       }
     },
@@ -349,6 +362,7 @@
           "/COMPONENT_MAIN_DIR/diag_log.cpp :: int diag_vprintf_(const char*, va_list)": 272
         },
         "CMakeFiles/__idf_main.dir/display.cpp.su": {},
+        "CMakeFiles/__idf_main.dir/heap_supervisor.cpp.su": {},
         "CMakeFiles/__idf_main.dir/heap_trend.cpp.su": {},
         "CMakeFiles/__idf_main.dir/http_api.cpp.su": {
           "/COMPONENT_MAIN_DIR/http_api.cpp :: esp_err_t handle_command(GuardedReq)": 320,
@@ -392,9 +406,9 @@
         },
         "CMakeFiles/__idf_main.dir/nvs_storage.cpp.su": {},
         "CMakeFiles/__idf_main.dir/ota_update.cpp.su": {
-          "/COMPONENT_MAIN_DIR/ota_update.cpp :: OtaCheckResult ota_check(unsigned int)": 1552,
-          "/COMPONENT_MAIN_DIR/ota_update.cpp :: bool http_get_to_buffer(const char*, std::string&)": 736,
-          "/COMPONENT_MAIN_DIR/ota_update.cpp :: void ota_task_impl()": 592
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: OtaCheckResult perform_check(OtaOperation&, unsigned int)": 1568,
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: OtaOperation::OtaOperation(uint64_t, unsigned int, tk::OtaChannel, bool)": 256,
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: void ota_task_impl(OtaOperation&)": 320
         },
         "CMakeFiles/__idf_main.dir/provisioning.cpp.su": {
           "/COMPONENT_MAIN_DIR/provisioning.cpp :: SetupPortal portal_open(NvsStorageAdapter&, bool)": 528,
@@ -413,10 +427,7 @@
         "CMakeFiles/__idf_main.dir/vehicle_commands.cpp.su": {
           "/COMPONENT_MAIN_DIR/vehicle_commands.cpp :: bool VehicleController::set_charging_amps(int, int)": 480
         },
-        "CMakeFiles/__idf_main.dir/vehicle_ctrl.cpp.su": {
-          "/COMPONENT_MAIN_DIR/vehicle_ctrl.cpp :: bool VehicleController::enqueue_ble_link_event_(bool, uint16_t, uint32_t)": 288,
-          "/COMPONENT_MAIN_DIR/vehicle_ctrl.cpp :: bool VehicleController::enqueue_ble_rx_event_(const uint8_t*, size_t, uint32_t)": 288
-        },
+        "CMakeFiles/__idf_main.dir/vehicle_ctrl.cpp.su": {},
         "CMakeFiles/__idf_main.dir/vehicle_pairing.cpp.su": {
           "/COMPONENT_MAIN_DIR/vehicle_pairing.cpp :: bool VehicleController::clear_session_and_cache_()": 304,
           "/COMPONENT_MAIN_DIR/vehicle_pairing.cpp :: std::string VehicleController::compute_key_fingerprint_()": 784
@@ -428,9 +439,16 @@
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::handle_carserver_frame_(const UniversalMessage_RoutableMessage&)": 2048,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::handle_session_info_frame_(const UniversalMessage_RoutableMessage&)": 272,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::handle_vcsec_frame_(const UniversalMessage_RoutableMessage&)": 816,
-          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::process_ble_host_events_()": 544,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::process_pending_telemetry_()": 1408,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::process_rx_frame_(const uint8_t*, size_t)": 800
+        },
+        "CMakeFiles/__idf_main.dir/ota_coordinator.cpp.su": {},
+        "CMakeFiles/__idf_main.dir/ota_http.cpp.su": {},
+        "CMakeFiles/__idf_main.dir/ota_transport.cpp.su": {
+          "/COMPONENT_MAIN_DIR/ota_transport.cpp :: void tk::ota::run_network_worker(Job&, const NetRuntime&)": 400
+        },
+        "CMakeFiles/__idf_main.dir/ota_writer.cpp.su": {
+          "/COMPONENT_MAIN_DIR/ota_writer.cpp :: static tk::ota::Effect tk::ota::RawWriter::prefix(void*, const uint8_t*, std::size_t)": 320
         }
       }
     }

@@ -38,8 +38,8 @@
     </header>
 
     <main class="grid">
-      <!-- Safe Mode recovery notice -->
-      <div class="banner" id="safeModeBanner">
+      <!-- Device recovery notice; normal automatic pairing stays in the hero. -->
+      <div class="banner" id="safeModeBanner" role="status" aria-live="polite">
         <span class="bi" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#ic-warn"/></svg></span>
         <span class="bt"></span>
         <button type="button" class="pill sm" onclick="otaCheck()">Check for update</button>

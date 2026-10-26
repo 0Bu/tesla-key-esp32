@@ -11,6 +11,7 @@
 #include "logic/ble_readiness.hpp"
 #include "logic/nimble_start_gate.hpp"
 #include "logic/ble_chunk.hpp"
+#include "logic/iteration_fault.hpp"
 
 #include "host/ble_hs.h"
 #include "host/ble_gatt.h"
@@ -136,6 +137,7 @@ public:
     // Start a manual, time-limited discovery scan (does not connect).
     void start_discovery(int ms);
     void on_scan_timeout();   // internal (timer callback)
+    void report_callback_fault(bool timer_context, const char* site) noexcept;
     bool is_scanning() const { return scanning_; }
     bool host_synced() const noexcept { return host_synced_.load(std::memory_order_acquire); }
     std::uint32_t host_reset_count() const noexcept {
@@ -248,6 +250,10 @@ private:
     // would hide a reset followed by a quick re-sync between health samples and could spend OTA
     // rollback on an unstable image.
     std::atomic<std::uint32_t> host_reset_count_{0};
+    // Sync/reset are serialized on the NimBLE host; scan timeout has its own
+    // esp_timer context. Each limiter belongs to exactly one of those contexts.
+    tk::IterationFaultLog host_callback_faults_{};
+    tk::IterationFaultLog timer_callback_faults_{};
     // nimble_port_freertos_init() is a void, unchecked wrapper in the pinned IDF. Only the first
     // on_sync callback proves that its hidden task allocation succeeded. This separate one-shot
     // gate makes a timeout terminal even if a callback arrives after boot has failed closed.

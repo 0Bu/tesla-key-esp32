@@ -1,7 +1,9 @@
+#include "stack_watch.hpp"
 #include "ble_client.hpp"
 #include "diag_log.hpp"
 #include "rtos_guard.hpp"
 #include "logic/connect_outcome.hpp"
+#include "runtime_fault_log.hpp"
 #include <esp_log.h>
 #include <esp_timer.h>
 #include <array>
@@ -42,34 +44,51 @@ std::uint32_t ble_host_reset_count() noexcept {
 // ─── Static NimBLE callbacks ─────────────────────────────────────────────────
 
 static void nimble_host_task(void*) {
+    tk::stack_watch_sample(tk::StackWatch::NimbleHost); // current task at entry
+    tk::StackWatchScope f135_task_exit(tk::StackWatch::NimbleHost);
+
     nimble_port_run();
+    tk::stack_watch_sample(tk::StackWatch::NimbleHost); // SDK deinit can self-delete without unwind
     nimble_port_freertos_deinit();
 }
 
 static void on_sync_cb() {
+    tk::StackWatchScope f135_callback_exit(tk::StackWatch::NimbleHost);
+
     try {
         if (g_instance) g_instance->on_sync();
     } catch (...) {
-        ESP_LOGD(TAG, "NimBLE sync callback threw; state publication aborted");
+        if (g_instance) g_instance->report_callback_fault(false, "sync");
     }
 }
 
 static void on_reset_cb(int reason) {
+    tk::StackWatchScope f135_callback_exit(tk::StackWatch::NimbleHost);
+
+    // Required host-down/sticky reset publication precedes fallible diagnostics.
     try {
-        ESP_LOGW(TAG, "NimBLE host reset, reason=%d", reason);
         if (g_instance) g_instance->on_reset();
     } catch (...) {
-        ESP_LOGD(TAG, "NimBLE reset callback threw; reset remains contained");
+        if (g_instance) g_instance->report_callback_fault(false, "reset");
+    }
+    try {
+        ESP_LOGW(TAG, "NimBLE host reset, reason=%d", reason);
+    } catch (...) {
+        if (g_instance) g_instance->report_callback_fault(false, "reset diagnostic");
     }
 }
 
 static int gap_event_cb(ble_gap_event* event, void* arg) {
+    tk::StackWatchScope f135_callback_exit(tk::StackWatch::NimbleHost);
+
     auto* client = static_cast<BleClient*>(arg);
     return client->on_gap_event(event);
 }
 
 static int svc_disc_cb(uint16_t conn_handle, const ble_gatt_error* error,
                        const ble_gatt_svc* svc, void* arg) {
+    tk::StackWatchScope f135_callback_exit(tk::StackWatch::NimbleHost);
+
     // The callback argument is an opaque connection-generation token, not an object pointer.
     // BleClient is already a singleton in this adapter; carrying the token through each async
     // GATT procedure lets a delayed callback be rejected even when NimBLE rapidly reuses the
@@ -82,6 +101,8 @@ static int svc_disc_cb(uint16_t conn_handle, const ble_gatt_error* error,
 
 static int chr_disc_cb(uint16_t conn_handle, const ble_gatt_error* error,
                        const ble_gatt_chr* chr, void* arg) {
+    tk::StackWatchScope f135_callback_exit(tk::StackWatch::NimbleHost);
+
     auto* client = ble_client_instance();
     if (!client) return 0;
     const uint32_t generation = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(arg));
@@ -90,6 +111,8 @@ static int chr_disc_cb(uint16_t conn_handle, const ble_gatt_error* error,
 
 static int dsc_disc_cb(uint16_t conn_handle, const ble_gatt_error* error,
                        uint16_t chr_val_handle, const ble_gatt_dsc* dsc, void* arg) {
+    tk::StackWatchScope f135_callback_exit(tk::StackWatch::NimbleHost);
+
     auto* client = ble_client_instance();
     if (!client) return 0;
     const uint32_t generation = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(arg));
@@ -98,6 +121,8 @@ static int dsc_disc_cb(uint16_t conn_handle, const ble_gatt_error* error,
 
 static int subscribe_write_cb(uint16_t conn_handle, const ble_gatt_error* error,
                               ble_gatt_attr*, void* arg) {
+    tk::StackWatchScope f135_callback_exit(tk::StackWatch::NimbleHost);
+
     auto* client = ble_client_instance();
     if (!client) return 0;
     const uint32_t generation = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(arg));
@@ -107,11 +132,25 @@ static int subscribe_write_cb(uint16_t conn_handle, const ble_gatt_error* error,
 // ─── BleClient ───────────────────────────────────────────────────────────────
 
 static void scan_timeout_cb(void* arg) {
+    tk::StackWatchScope f135_callback_exit(tk::StackWatch::BleScanTimer);
+
     try {
         static_cast<BleClient*>(arg)->on_scan_timeout();
     } catch (...) {
-        ESP_LOGD(TAG, "BLE scan timer callback threw; timeout publication aborted");
+        static_cast<BleClient*>(arg)->report_callback_fault(true, "scan timeout");
     }
+}
+
+void BleClient::report_callback_fault(bool timer_context, const char* site) noexcept {
+    try {
+        auto& faults = timer_context ? timer_callback_faults_ : host_callback_faults_;
+        tk::report_iteration_fault(faults,
+            static_cast<std::uint64_t>(esp_timer_get_time()) / 1000u,
+            [site](std::uint32_t suppressed) {
+                ESP_LOGW(TAG, "BLE %s callback failed (suppressed=%u)", site,
+                         static_cast<unsigned>(suppressed));
+            });
+    } catch (...) {}
 }
 
 BleClient::BleClient() {

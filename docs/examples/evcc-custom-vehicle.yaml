@@ -1,0 +1,84 @@
+# Replace DEVICE_HOST and REPLACE_WITH_VIN in every URI before use.
+# Settings: paste this mapping into the Custom device YAML editor.
+# evcc.yaml: add name: tesla and type: custom under one vehicles list item,
+# then indent this entire mapping beneath that item.
+title: Tesla Key ESP32
+icon: car
+capacity: 60 # Optional battery capacity in kWh; set for your vehicle.
+
+chargeEnable:
+  source: http
+  uri: 'http://DEVICE_HOST/api/1/vehicles/REPLACE_WITH_VIN/command/{{ if .chargeenable }}charge_start{{ else }}charge_stop{{ end }}'
+  method: POST
+  headers:
+    Content-Type: application/json
+  timeout: 30s
+maxcurrent:
+  source: http
+  uri: http://DEVICE_HOST/api/1/vehicles/REPLACE_WITH_VIN/command/set_charging_amps
+  method: POST
+  headers:
+    Content-Type: application/json
+  body: '{"charging_amps": ${maxcurrent}}'
+  timeout: 30s
+wakeup:
+  source: http
+  uri: http://DEVICE_HOST/api/1/vehicles/REPLACE_WITH_VIN/command/wake_up
+  method: POST
+  headers:
+    Content-Type: application/json
+  timeout: 30s
+soc:
+  source: http
+  uri: http://DEVICE_HOST/api/1/vehicles/REPLACE_WITH_VIN/vehicle_data?endpoints=charge_state
+  jq: .response.response.charge_state.battery_level
+  timeout: 30s
+  cache: 1s
+getmaxcurrent:
+  source: http
+  uri: http://DEVICE_HOST/api/1/vehicles/REPLACE_WITH_VIN/vehicle_data?endpoints=charge_state
+  jq: .response.response.charge_state.charge_amps
+  timeout: 30s
+  cache: 1s
+limitsoc:
+  source: http
+  uri: http://DEVICE_HOST/api/1/vehicles/REPLACE_WITH_VIN/vehicle_data?endpoints=charge_state
+  jq: .response.response.charge_state.charge_limit_soc
+  timeout: 30s
+  cache: 1s
+range:
+  source: http
+  uri: http://DEVICE_HOST/api/1/vehicles/REPLACE_WITH_VIN/vehicle_data?endpoints=charge_state
+  jq: .response.response.charge_state.battery_range
+  scale: 1.60934
+  timeout: 30s
+  cache: 1s
+chargedenergy:
+  source: http
+  uri: http://DEVICE_HOST/api/1/vehicles/REPLACE_WITH_VIN/vehicle_data?endpoints=charge_state
+  jq: .response.response.charge_state.charge_energy_added
+  timeout: 30s
+  cache: 1s
+climater:
+  source: http
+  uri: http://DEVICE_HOST/api/1/vehicles/REPLACE_WITH_VIN/vehicle_data?endpoints=climate_state
+  jq: .response.response.climate_state.is_preconditioning
+  timeout: 30s
+  cache: 1s
+odometer:
+  source: http
+  uri: http://DEVICE_HOST/api/1/vehicles/REPLACE_WITH_VIN/vehicle_data?endpoints=drive_state
+  jq: .response.response.drive_state.odometer | if . > 0 then . else error("odometer not available") end
+  scale: 1.60934
+  timeout: 30s
+  cache: 1s
+status:
+  source: http
+  uri: http://DEVICE_HOST/api/1/vehicles/REPLACE_WITH_VIN/vehicle_data?endpoints=charge_state
+  jq: (if (.response.response.charge_state.charging_state == "Charging") then "C"
+    elif (.response.response.charge_state.charging_state == "Stopped") then "B"
+    elif (.response.response.charge_state.charging_state == "NoPower") then "B"
+    elif (.response.response.charge_state.charging_state == "Complete") then "B"
+    else "A" end)
+  timeout: 30s
+  cache: 1s

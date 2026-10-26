@@ -1,3 +1,4 @@
+#include "stack_watch.hpp"
 #include "diag_log.hpp"
 #include "syslog.hpp"
 #include "logic/redact.hpp"
@@ -20,6 +21,7 @@ static_assert(CONFIG_LOG_TIMESTAMP_SOURCE_RTOS, "diagnostic credential guard req
 #include <algorithm>
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 #include "rtos_guard.hpp"
 
 // Ring buffer of console output. It WRAPS: once full, the oldest bytes are
@@ -82,7 +84,23 @@ static bool diag_mqtt_uri_error_(const char* line, size_t len) {
 // esp_log hook: capture the formatted line, then forward ordinary records to the original
 // Serial sink. Known credential-bearing MQTT parser errors are replaced before every sink.
 // Must not call ESP_LOG itself.
+// F135: task-only diagnostic aggregate. Unsafe/early/ISR/critical callers remain unknown.
+// Pinned Xtensa/RISC-V xPortCanYield rejects masked critical contexts; the inspected HWM chain
+// only reads the current task stack and updates the atomic bank, with no logger/allocation/mutex.
+// This prevents sampler-driven recursion without adding a global/TLS recursion flag. It does not
+// certify caller lock latency or identify every otherwise unregistered task that invokes logging.
+static void diag_stack_sample_safe_() noexcept {
+    if (xPortInIsrContext() || !xPortCanYield()) return;
+    if (xTaskGetSchedulerState() != taskSCHEDULER_RUNNING ||
+        xTaskGetCurrentTaskHandle() == nullptr) return;
+    tk::stack_watch_sample(tk::StackWatch::DiagLogCallback);
+}
+
 static int diag_vprintf_(const char* fmt, va_list ap) {
+    struct F135SafeTaskSampleOnExit {
+        ~F135SafeTaskSampleOnExit() noexcept { diag_stack_sample_safe_(); }
+    } f135_callback_exit;
+
     char line[256];
     va_list ap2;
     va_copy(ap2, ap);

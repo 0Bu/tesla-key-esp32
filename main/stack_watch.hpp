@@ -1,33 +1,30 @@
 #pragma once
 
-// Allocation-free reporting for the second memory budget: FreeRTOS task stacks.
-//
-// The heap watchdog and /heap trend already expose heap exhaustion before and after a restart, but
-// a growing task frame otherwise stays invisible until the stack watchpoint panics. Each watched
-// task samples its OWN high-water mark; readers only consume the cached minimum and never inspect a
-// foreign task handle. Sample presence is tracked separately so a measured zero remains visible;
-// safe mode deliberately leaves the vehicle, auto-pair and MQTT tasks unsampled.
-
+#include "logic/stack_context.hpp"
 #include <cstdint>
 #include <optional>
 
 namespace tk {
-
-enum class StackWatch : uint8_t {
-    Httpd,
-    Vehicle,
-    AutoPair,
-    Mqtt,
-    Count,
-};
-
-// Must be called from the task named by `which`. ESP-IDF reports the calling task's historical
-// minimum free stack in bytes (unlike upstream FreeRTOS, whose corresponding API uses words).
-// Lock-free, allocation-free and safe on OOM/error paths.
+using StackWatch = StackContext;
+// Call only from a task context, including SDK callbacks known to have a current task.
+// Never inspect a foreign task handle. Missing/unsafe/unexercised contexts remain unknown.
 void stack_watch_sample(StackWatch which) noexcept;
 
-// Worst sampled headroom since boot, in bytes. nullopt means never sampled; an engaged zero is a
-// valid and critical measurement.
+// A conservative256-byte lower bound on successfully sampled historical free stack.
+// An engaged zero is measured; nullopt is unknown. Saturation is at least15872B.
 std::optional<uint32_t> stack_watch_min_free_bytes(StackWatch which) noexcept;
+// Each word is an atomic observation; the six-word snapshot is not a global instant.
+stack_sample::Snapshot stack_watch_snapshot() noexcept;
 
+// Use at task-backed callback exits, declared before local lock guards so they release first.
+// Infinite task bodies require explicit iteration/terminal samples; no-unwind deletion skips it.
+class StackWatchScope {
+public:
+    explicit StackWatchScope(StackWatch which) noexcept : which_(which) {}
+    ~StackWatchScope() noexcept { stack_watch_sample(which_); }
+    StackWatchScope(const StackWatchScope&) = delete;
+    StackWatchScope& operator=(const StackWatchScope&) = delete;
+private:
+    StackWatch which_;
+};
 }  // namespace tk

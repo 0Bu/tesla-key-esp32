@@ -1,0 +1,88 @@
+{
+  "status": "UNQUALIFIED source recipes, NOT executed controls",
+  "rules": "One actual source omission with declared occurrence only, full successful extraction/compile, specific actual CHECK only, exact restore and restored positive. Recipes are unexecuted/UNQUALIFIED; actual first failures must be read independently. No timeout/setup/sourcegate/compiler or arbitrary nonzero credit. Unknown owned-group cleanup prohibits restore/next mutation.",
+  "cases": [
+    {
+      "id": "seal-before-set",
+      "path": "main/logic/config_repair.hpp",
+      "before": "        owner.seal();",
+      "after": "        (void)owner;",
+      "mode": "run-positive",
+      "expected": "Actual READWRITE-open spy CHECK(fixture::owner_held&&fixture::owner_sealed&&std::strcmp(ns,\"tesla_cfg\")==0) fails before set_blob; this is actual escaped seal ordering, not setup/compiler failure."
+    },
+    {
+      "id": "false-visible-commit",
+      "path": "main/config_repair_store.hpp",
+      "before": "return nvs_commit(write.value)==ESP_OK;",
+      "after": "(void)nvs_commit(write.value);return true;",
+      "mode": "commit-visible-failure",
+      "expected": "terminal CHECK(outcome==Outcome::Ambiguous&&terminal_receipt[9]==0)"
+    },
+    {
+      "id": "readback-equality",
+      "path": "main/logic/config_repair.hpp",
+      "before": "std::memcmp(actual.bytes.data(),canonical.bytes.data(),actual_size)!=0",
+      "after": "false",
+      "mode": "readback-substitute",
+      "expected": "SDK facade returns a different valid canonical cfg of identical size, so the subsequent decode cannot mask omission. Terminal CHECK(outcome==Outcome::Ambiguous&&terminal_receipt[9]==0) must fail after wrongful Confirmed."
+    },
+    {
+      "id": "noncfg-retention",
+      "path": "main/logic/config_repair.hpp",
+      "before": "!store.retention_digest_excluding_cfg(after) || before!=after",
+      "after": "!store.retention_digest_excluding_cfg(after)",
+      "mode": "retention-change",
+      "expected": "terminal CHECK(outcome==Outcome::Ambiguous&&terminal_receipt[9]==0)"
+    },
+    {
+      "id": "fresh-raw-state",
+      "path": "main/config_repair.cpp",
+      "before": "evidence.raw_image_stable=fresh==ConfigImageResult::Valid || fresh==ConfigImageResult::Undefined;",
+      "after": "evidence.raw_image_stable=true;(void)fresh;",
+      "mode": "raw-late",
+      "expected": "Terminal refusal/zero-set CHECK must fail after actual second raw Pending was observed but ignored; owner remains real held facade, no timeout or generic failure credit."
+    },
+    {
+      "id": "fresh-key-identity",
+      "path": "main/config_repair.cpp",
+      "before": "evidence.identity_valid=store.public_identity(evidence.board,evidence.public_key);",
+      "after": "evidence.identity_valid=true;",
+      "mode": "key-refresh",
+      "expected": "Mutate only second occurrence; INFO used original independently known point, real refresh now returns changed full point. Omission bypasses refresh and reaches write, so exact terminal Refused/zero-set CHECK must fail.",
+      "occurrence": 1
+    },
+    {
+      "id": "journal-presence",
+      "path": "main/config_repair.cpp",
+      "before": "evidence.key_journal=store.journal(nvs_contract::kKeyRotation,false);",
+      "after": "evidence.key_journal=Read::Missing;",
+      "mode": "key-journal-late",
+      "expected": "Initial absent journal is real; Console facade inserts a present journal before real refresh. Omit only refresh assignment. Terminal Refused/zero-set CHECK must fail after write. Golden transcript is intentionally not a prior oracle for this changed synthetic record set.",
+      "occurrence": 1
+    },
+    {
+      "id": "tuple-specific-exclusion",
+      "path": "main/config_repair_store.hpp",
+      "before": "std::strcmp(info.namespace_name,nvs_contract::kConfigNamespace)!=0 ||",
+      "after": "false ||",
+      "mode": "backend-direct",
+      "expected": "actual PSA transcript CHECK(transcript==fixture::golden_retention) must fail because other/cfg was incorrectly excluded"
+    },
+    {
+      "id": "exact-read-length",
+      "path": "main/config_repair_store.hpp",
+      "before": "return result==ESP_OK && size==wanted;",
+      "after": "return result==ESP_OK;",
+      "mode": "retention-length-drift",
+      "expected": "The real retention blob reader gets query length4 then successful read length3. Omission reaches actual hash input with truncated session; exact independent golden-transcript CHECK must fail. No cfg CRC/classifier masks this case."
+    },
+    {
+      "id": "one-request-deadline",
+      "path": "main/config_repair.cpp",
+      "before": "io.read_exact(frame.bytes.data()+kFramePrefix,size-kFramePrefix,until)",
+      "after": "io.read_exact(frame.bytes.data()+kFramePrefix,size-kFramePrefix,deadline(30000000))",
+      "mode": "read-time-progress",
+      "expected": "First actual prefix read advances fake clock by5000us. A renewed second-body deadline must fail TestConsole CHECK(until==30001000&&p&&n&&position+n<=frame.size()), not an outer timeout. Restored actual run confirms and parks sealed."
+    }
+  ]
+}

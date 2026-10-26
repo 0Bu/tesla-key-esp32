@@ -1,6 +1,8 @@
 #pragma once
 
 #include "json_builder.hpp"
+#include "logic/status_model.hpp"
+#include "stack_watch.hpp"
 
 #include <cstddef>
 
@@ -48,6 +50,12 @@ public:
         else                      json_.number(top_(), key, value);
     }
 
+    void null(const char* key) noexcept {
+        if (!valid_) return;
+        if (cJSON_IsArray(top_())) json_.null_element(top_());
+        else                      json_.null(top_(), key);
+    }
+
     void boolean(const char* key, bool value) noexcept {
         if (!valid_) return;
         if (cJSON_IsArray(top_())) json_.boolean_element(top_(), value);
@@ -93,5 +101,17 @@ private:
     size_t       depth_{0};
     bool         valid_{true};
 };
+
+// Keep the cached snapshot temporary and JSON emitter out of the large gather frame.
+// This separates per-function frames; it does not establish a smaller task-stack peak.
+// All fallible by-value inputs are already gathered. The snapshot is cache-only/noexcept;
+// JsonBuilder retains the same sticky whole-tree OOM behavior for every emitted field.
+[[gnu::noinline]] inline cJSON* emit_status_object(status::Inputs& in) {
+    in.stack_context_samples = stack_watch_snapshot();
+    JsonBuilder json;
+    StatusJsonEmitter emitter(json);
+    status::emit_status(in, emitter);
+    return emitter.release();
+}
 
 }  // namespace tk

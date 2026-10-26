@@ -16,3 +16,7 @@ inline constexpr TickType_t portMAX_DELAY = 0xffffffffu;
 
 // Host clock uses one millisecond per tick; hardware conversion remains an IDF boundary.
 #define pdTICKS_TO_MS(ticks) static_cast<uint32_t>(ticks)
+
+// Public ESP-IDF v6.1 port signatures, with deterministic runtime-test implementations.
+extern "C" BaseType_t xPortInIsrContext();
+extern "C" bool xPortCanYield();

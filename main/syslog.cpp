@@ -1,3 +1,4 @@
+#include "stack_watch.hpp"
 // UDP Syslog forwarder. See syslog.hpp.
 #include "syslog.hpp"
 #include "config_blob.hpp"
@@ -125,6 +126,11 @@ SyslogStatus syslog_status() {
 // it works even when the host drops ICMP), else an ICMP echo. Returns "could we
 // confirm the host answers?" for the /status hint only; when it can't measure it
 // returns false ("unverified"), and forwarding proceeds anyway.
+static void ping_syslog_on_end(esp_ping_handle_t handle, void* args) noexcept {
+    tk::StackWatchScope f135_callback_exit(tk::StackWatch::PingSyslog);
+    tk::ping_probe_on_end(handle, args);
+}
+
 static bool syslog_ping_host(const struct in_addr& ip) {
     struct netif* net = netif_default;
     if (net) {
@@ -161,7 +167,7 @@ static bool syslog_ping_host(const struct in_addr& ip) {
     cfg.timeout_ms  = 800;
     cfg.interval_ms = 200;
 
-    return tk::ping_probe_run(s_ping, cfg, pdMS_TO_TICKS(2200), pdMS_TO_TICKS(1600)) ==
+    return tk::ping_probe_run(s_ping, cfg, pdMS_TO_TICKS(2200), pdMS_TO_TICKS(1600), ping_syslog_on_end) ==
            tk::PingProbeResult::Reply;
 }
 
@@ -298,9 +304,13 @@ static void syslog_replay_boot(const struct sockaddr_in& dest, bool& replayed) {
 }
 
 static void syslog_task(void* raw_start) {
+    tk::stack_watch_sample(tk::StackWatch::Syslog); // current task at entry
+    tk::StackWatchScope f135_task_exit(tk::StackWatch::Syslog);
+
   try {
     auto* start = static_cast<SyslogTaskStart*>(raw_start);
     if (!start) {
+        tk::stack_watch_sample(tk::StackWatch::Syslog); // no C++ unwind on delete
         vTaskDelete(nullptr);
         return;
     }
@@ -311,6 +321,7 @@ static void syslog_task(void* raw_start) {
         const tk::SyslogStartAction action = start->gate.action();
         if (action == tk::SyslogStartAction::Run) break;
         if (action == tk::SyslogStartAction::Cancel) {
+            tk::stack_watch_sample(tk::StackWatch::Syslog); // no C++ unwind on delete
             vTaskDelete(nullptr);
             return;
         }
@@ -318,6 +329,7 @@ static void syslog_task(void* raw_start) {
     }
     QueueHandle_t const queue = start->queue;
     if (!queue) {
+        tk::stack_watch_sample(tk::StackWatch::Syslog); // no C++ unwind on delete
         vTaskDelete(nullptr);
         return;
     }
@@ -333,6 +345,7 @@ static void syslog_task(void* raw_start) {
     const TickType_t check_interval = pdMS_TO_TICKS(10000); // re-resolve + re-probe cadence
 
     while (true) {
+        tk::StackWatchScope f135_iteration_exit(tk::StackWatch::Syslog);
       // Iteration-boundary containment (issue #204): getaddrinfo()/set_status() and the
       // std::string bookkeeping here can throw std::bad_alloc under heap pressure. An escape
       // would unwind into the FreeRTOS C task-entry trampoline → std::terminate → reboot; a
@@ -432,6 +445,7 @@ static void syslog_task(void* raw_start) {
     }
   } catch (...) {
       ESP_LOGE(TAG, "syslog task boundary threw outside an iteration — stopping task");
+      tk::stack_watch_sample(tk::StackWatch::Syslog); // no C++ unwind on delete
       vTaskDelete(nullptr);
   }
 }
