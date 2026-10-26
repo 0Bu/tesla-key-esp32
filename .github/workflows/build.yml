@@ -108,9 +108,10 @@ jobs:
           echo "version=$release" >> "$GITHUB_OUTPUT"
           echo "latest=$latest" >> "$GITHUB_OUTPUT"
 
+  # Keep a bounded envelope for the full strict host suite and cold browser fixtures.
   logic-test:
     runs-on: ubuntu-26.04
-    timeout-minutes: 10
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
