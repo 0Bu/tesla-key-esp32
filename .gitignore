@@ -67,3 +67,6 @@ ota_signing_key.pem
 /_ci-independent/
 # Isolated reproduction copies emitted by check-reproducible-build.sh --emit and compared in CI.
 /_repro/
+
+# Separate non-OTA physical maintenance evidence; never a normal16-part root.
+/maintenance-dist/

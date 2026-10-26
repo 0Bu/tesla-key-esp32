@@ -38,15 +38,74 @@ For linked worktrees, only the external Git common directory is mounted read-onl
 checkout's source files are not exposed. Daemon reuse checks the actual mount inventory as well
 as its image, resource limits and mount-policy label. An older, broader daemon is recreated.
 
+## Exact dependency source admission
+
+[`scripts/nanopb-source.json`](../scripts/nanopb-source.json) owns the existing nanopb 0.4.9.1
+commit and seven runtime digests. Root CMake admits its complete owned Git tree before IDF
+component processing, declares that exact commit, and marks it globally populated without
+configuring nanopb. The unchanged component's later tag declaration cannot select another source.
+Unsupported FetchContent/provider overrides fail. Reconfiguration watches the admitted inputs;
+an always-run existing-only prerequisite also guards component and ELF targets when file size or
+mtime is preserved. A warm configure with missing admitted state fails instead of fetching again.
+
+The host harness selects only its owned `nanopb-pristine`, `tesla-pristine` and `tesla-patched`
+caches. Tesla's source commit comes from all four validated locks. Raw Git objects establish the
+complete pristine path/body/mode inventory; VERSION text, a parent repository and a managed archive
+are insufficient. Only exact committed links to direct regular tracked files are allowed; all seven
+nanopb runtime inputs remain regular files. The separate Tesla work copy admits the complete
+pristine tree plus exactly the reviewed patch transformation, including untouched files.
+Patch application sets POSIX mode at process startup with zero fuzz so allowed offset hunks do not leave backup
+files; the complete inventory still refuses every extra file instead of deleting or ignoring it.
+
+An existing foreign, modified, aliased, partial or failed cache is never adopted, repaired or silently
+retried. Failure leaves its owned state for inspection; select a new empty build/cache directory or
+remove that dedicated generated state deliberately after inspecting it. Only legitimate optional
+cold-network absence may skip the harness; strict mode, unknown commits and every provenance
+mismatch fail. Existing caches are checked before a different cold fetch can skip. Git selectors,
+configuration, hooks, filters and automatic maintenance cannot supply alternate source material.
+The existing harness Mbed TLS selection is unchanged.
+
+Each Git query has bounded data pipes and a separate bounded leader-status channel. An owned
+guardian watches a liveness pipe whose writer belongs only to the admission process. If an outer
+timeout or SIGKILL kills admission, EOF makes the guardian terminate its own group, including Git
+and pipe-holding descendants after the Git leader exits. Normal cleanup kills that entire group
+atomically before closing the liveness writer, keeping ownership through parent cancellation.
+The guardian holds no data-output writer.
+Before side effects, admission records and checks its original process/parent identity. On Linux,
+it arms and verifies parent-death SIGKILL before the first query or cache write, then rechecks the
+owner. This covers CMake versions whose timeout leaves a helper alive after CMake exits; the
+consumer must still fail and exit on admission timeout. Later calls never adopt a new parent or
+reuse an inherited post-fork flag. Imports alone do not change kernel policy. The dedicated CLI
+rejects startup already adopted by init; an imported validator may legitimately have container
+init as its original parent. This cannot identify arbitrary subreaper adoption before import, and
+does not fire while the original parent remains alive. Non-Linux systems retain bounded parent
+identity checks and the consumer's own cancellation behavior, without a Linux kernel guarantee.
+Normal success and internal failure also confirm group cleanup; malformed or missing leader status
+refuses immediately. This does not authorize killing unrelated process groups.
+
+Source/patch identity and compiler-selector salts separate owned object namespaces even when
+source mtimes match. This does not authenticate compiler binaries or cached object contents.
+[`test_dependency_sources.py`](../test/test_dependency_sources.py) exercises local Git/cache
+admission; [`test_dependency_cmake.py`](../test/test_dependency_cmake.py) exercises real root CMake
+and passive consumer targets with Make and Ninja. These fixtures are distinct from the required
+pinned IDF builds and protocol vectors. This correction covers repository consumers; upstream's
+standalone tag-fetch CMake path remains unchanged.
+
 ## Embedded web assets
 
 `main/www/inline_assets.cmake` inserts the CSS and JavaScript into the HTML marker lines,
 then the build uses `gzip -9 -n`. Raw marker checks precede any transformation. The bounded,
-standard-library `prune_css_comments.py` helper blanks documentation text only in whole-line
-CSS comments outside strings and parentheses; it preserves whitespace, inline comments,
-legal/tooling notices, escapes and HTML style-end sequences. It accepts bounded UTF-8 without
-NUL, refuses unfinished syntax, and leaves markup and JavaScript bytes unchanged. Source comments
-remain available for editing. This is a narrow repository CSS subset, not general minification.
+standard-library `prune_css_comments.py` helper blanks documentation text in whole-line CSS
+comments outside strings and parentheses, and ordinary whole-line JavaScript `//` comments.
+It preserves byte offsets, whitespace, inline comments, recognized legal/tooling directive families and HTML-sensitive
+sequences. JavaScript block comments remain opaque. The supported JavaScript subset refuses code
+lines containing template backticks, inline block openers or a final backslash, code after a block
+closer, unfinished blocks and Unicode line separators. These restrictions exclude untracked
+multiline strings/templates without guessing regex syntax. Inputs are bounded UTF-8 without NUL.
+Markup and code tokens remain unchanged; source comments remain readable. This is conservative
+repository-specific pruning, not general minification or universal observable equivalence:
+source introspection such as `Function.prototype.toString()` can expose changed comment text.
+The application does not use source introspection.
 The helper is an explicit generator dependency. It rejects output/input aliases before cleanup,
 removes the validated old output before generation and publishes complete bytes atomically.
 CMake refuses helper startup, generation and timeout failures; retained files are never a success.
@@ -150,6 +209,14 @@ four-target contract. CI action inputs must still use the toolchain output, and 
 matrices must still contain exactly the four supported targets. This list is a migration checklist,
 not authorization to change any pin.
 
+## Configuration-only maintenance role
+
+The default-off [configuration recovery](CONFIG_RECOVERY.md#default-off-build-and-artifact-boundary)
+owner describes its separate project identity, unsigned four-target source/reproduction driver,
+resource gates and unqualified physical procedure. Its non-OTA apps never enter the normal16parts;
+ordinary source/compiler/partition/signature authority is not relaxed. Do not enable its config in
+an application build or treat its presence as a flashable or physically tested recovery product.
+
 ## Delivery
 
 Unsigned local images **cannot boot**. Use provenance-bound signed artifacts and the canonical
@@ -171,6 +238,16 @@ Tesla/Daikin firmware, flashes a signed PR preview or development-key image thro
 or an already-published image through `$usb-recovery`'s provenance and app-only steps, and tests
 the implementation on that same board. Device delivery after merge remains a separately requested
 `$ship` operation.
+
+Pages acceptance requires a bounded, validated expected `changelog.json` and exact served bytes
+within the same complete attempt as the manifest and 16 firmware parts. The root checker takes
+`--expected-changelog-file`; staged Dev checks derive it from the candidate directory, while live
+Dev checks require that argument. Relevance baselines read both files from one exact branch commit.
+Changes to shipped top-level `docs/*.md` select the normal four-target build and Dev publication;
+they do not reuse older firmware under the newer source SHA. Stable publication remains manual.
+Before either Pages branch write, the downloaded candidate passes four key-free RSA-PSS checks
+against the production public pin. The offline deploy-consumer test executes this YAML step with
+disposable signed fixtures and confirms that each target failure stops before publication.
 
 ### Served PR preview acceptance
 

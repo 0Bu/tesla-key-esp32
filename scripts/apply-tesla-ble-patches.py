@@ -80,7 +80,7 @@ def validate_manifest(manifest):
         require(names == sorted(set(names)), "duplicate or unordered patch-state inventory")
 
 
-def apply_series(component, patch_dir, manifest):
+def apply_series(component, patch_dir, manifest, *, quiet=False):
     validate_manifest(manifest)
     component, patch_dir = real_directory(component), real_directory(patch_dir)
     require(sorted(p.name for p in patch_dir.iterdir()) == [r["name"] for r in manifest["patches"]],
@@ -107,13 +107,18 @@ def apply_series(component, patch_dir, manifest):
         require(regular_leaf(component, MARKER).read_bytes() == expected_marker,
                 "patch-state marker differs from the complete current series")
         require(is_after, "recorded patch postimage drifted; rematerialise the component")
-        print("tesla-ble patch series: exact recorded postimages verified")
+        if not quiet:
+            print("tesla-ble patch series: exact recorded postimages verified")
         return
     require(is_before or is_after, "unknown or mixed source state; rematerialise the component")
     if is_before and not is_after:
         for row in manifest["patches"]:
-            subprocess.run(["patch", "-f", "-N", "-F0", "-p1", "-d", str(component),
-                            "-i", str(patch_dir / row["name"])], check=True)
+            subprocess.run(["patch", "--posix", "-f", "-N", "-F0", "-V", "none", "-p1", "-d", str(component),
+                            "-i", str(patch_dir / row["name"])], check=True,
+                           # GNU patch 2.7.6 initializes its mismatch-backup default before
+                           # parsing --posix. Set POSIX policy at process startup as well.
+                           env={**os.environ, "POSIXLY_CORRECT": "1"},
+                           stdout=subprocess.DEVNULL if quiet else None)
         require(all(digest(regular_leaf(component, r["path"])) == r["afterSha256"]
                     for r in manifest["files"]), "patched source differs from reviewed postimages")
     # mkstemp owns its unpredictable, exclusive regular file. replace never follows a marker link.
@@ -125,7 +130,8 @@ def apply_series(component, patch_dir, manifest):
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
-    print("tesla-ble patch series: exact postimages verified and recorded")
+    if not quiet:
+        print("tesla-ble patch series: exact postimages verified and recorded")
 
 
 def load_canonical(root):
@@ -177,7 +183,9 @@ def self_test():
         patches.mkdir()
         contents = {"src/vehicle.cpp": (b"first\nalpha\nlast\n", b"first\nbeta\nlast\n"),
                     "include/client.h": (b"one\n", b"two\n")}
-        patch_texts = ["--- a/src/vehicle.cpp\n+++ b/src/vehicle.cpp\n@@ -1,3 +1,3 @@\n first\n-alpha\n+beta\n last\n",
+        # The first hunk deliberately needs an offset. GNU patch otherwise leaves backup
+        # files even with '-V none'; POSIX mode must keep the entire work copy exact.
+        patch_texts = ["--- a/src/vehicle.cpp\n+++ b/src/vehicle.cpp\n@@ -2,3 +2,3 @@\n first\n-alpha\n+beta\n last\n",
                        "--- a/include/client.h\n+++ b/include/client.h\n@@ -1 +1 @@\n-one\n+two\n"]
         patch_rows = []
         for index, text in enumerate(patch_texts):
@@ -199,6 +207,8 @@ def self_test():
                 path.write_bytes(data[int(after)])
         fresh()
         apply_series(component, patches, manifest)
+        require({str(path.relative_to(component)) for path in component.rglob("*") if path.is_file()}
+                == {*contents, MARKER}, "patch transformation left extra files")
         apply_series(component, patches, manifest)
         (component / MARKER).unlink()
         apply_series(component, patches, manifest)

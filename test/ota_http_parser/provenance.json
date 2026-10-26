@@ -1,0 +1,20 @@
+{
+  "scope": "Exact existing pinned SDK parser body used by native tests; no new runtime dependency/version. SDK consumer must compare these bodies to its pinned component before compiling tests.",
+  "files": [
+    {
+      "path": "http_parser.c",
+      "sha256": "c164edcb06099b026e7ed853ed4d25536e83b4463d5e79921b28621e16588455",
+      "bytes": 72033,
+      "component": "ESP-IDF v6.1 components/http_parser",
+      "sdkPath": "components/http_parser/http_parser.c"
+    },
+    {
+      "path": "http_parser.h",
+      "sha256": "21fcfe834198349472a878e0334dd74b8571fafc70c6dd701169f525dd463041",
+      "bytes": 13889,
+      "component": "ESP-IDF v6.1 components/http_parser",
+      "sdkPath": "components/http_parser/http_parser.h"
+    }
+  ],
+  "image": "espressif/idf:v6.1@sha256:81893c71bb5e570088901f21def8684c25cd2a9020281bd01b843a7655edb18c"
+}

@@ -17,6 +17,10 @@
       "test": "test/test_logic.cpp",
       "evidence": "test_ble_deferred_event("
     },
+    "ble_deferred_queue.hpp": {
+      "test": "test/test_logic.cpp",
+      "evidence": "test_ble_deferred_queue("
+    },
     "ble_dispatcher.hpp": {
       "test": "test/test_logic.cpp",
       "evidence": "test_ble_dispatcher("
@@ -77,6 +81,10 @@
       "test": "test/test_logic.cpp",
       "evidence": "test_config_commit("
     },
+    "config_repair.hpp": {
+      "test": "test/test_logic.cpp",
+      "evidence": "test_config_repair("
+    },
     "config_request.hpp": {
       "test": "test/test_logic.cpp",
       "evidence": "test_config_request_gate("
@@ -133,6 +141,10 @@
       "test": "test/test_logic.cpp",
       "evidence": "test_heap_json_stream("
     },
+    "heap_supervision.hpp": {
+      "test": "test/test_logic.cpp",
+      "evidence": "test_heap_supervision("
+    },
     "heap_watchdog.hpp": {
       "test": "test/test_logic.cpp",
       "evidence": "test_heap_watchdog("
@@ -148,6 +160,10 @@
     "http_route.hpp": {
       "test": "test/test_logic.cpp",
       "evidence": "test_http_route("
+    },
+    "identity_recovery.hpp": {
+      "test": "test/test_logic.cpp",
+      "evidence": "test_identity_recovery("
     },
     "iteration_fault.hpp": {
       "test": "test/test_logic.cpp",
@@ -217,6 +233,14 @@
       "test": "test/test_logic.cpp",
       "evidence": "test_ota_contract("
     },
+    "ota_lifetime.hpp": {
+      "test": "test/test_logic.cpp",
+      "evidence": "test_ota_lifetime("
+    },
+    "ota_recovery_memory.hpp": {
+      "test": "test/test_logic.cpp",
+      "evidence": "test_ota_recovery_memory("
+    },
     "ping_probe.hpp": {
       "test": "test/test_logic.cpp",
       "evidence": "test_ping_probe_generation("
@@ -257,6 +281,14 @@
       "test": "test/test_logic.cpp",
       "evidence": "test_display_helpers("
     },
+    "stack_context.hpp": {
+      "test": "test/test_logic.cpp",
+      "evidence": "test_stack_context_logic("
+    },
+    "stack_sample_codec.hpp": {
+      "test": "test/test_logic.cpp",
+      "evidence": "test_stack_context_logic("
+    },
     "status_model.hpp": {
       "test": "test/test_logic.cpp",
       "evidence": "test_status_model("
@@ -280,6 +312,10 @@
     "telemetry_poll.hpp": {
       "test": "test/test_logic.cpp",
       "evidence": "test_telemetry_poll("
+    },
+    "tls_memory.hpp": {
+      "test": "test/test_logic.cpp",
+      "evidence": "test_tls_memory("
     },
     "ui_state.hpp": {
       "test": "test/test_logic.cpp",

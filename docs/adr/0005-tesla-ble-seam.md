@@ -28,6 +28,16 @@ Tesla's official [`teslamotors/vehicle-command`](https://github.com/teslamotors/
 
 **Own the BLE orchestration layer in this firmware, replacing `vehicle.cpp`, while retaining `yoziru/tesla-ble`'s protocol crypto core upstream.**
 
+### Dependency source provenance
+
+Repository consumers admit the already selected nanopb commit before IDF component configuration
+and before incremental component compilation. The native harness uses complete exact-commit
+pristine caches and a separately verified Tesla patch work copy. The
+[Development source/cache contract](../DEVELOPMENT.md#exact-dependency-source-admission) owns the
+failure and offline rules. This is a build-provenance boundary: the Tesla pin, five patch bytes,
+seven nanopb runtime digests, generated protocol bytes and wire/key/session behavior are unchanged.
+It does not correct the upstream standalone tag-fetch path or establish hardware acceptance.
+
 ### Pairing recovery and enrollment (2026-10-20)
 
 Remote VCSEC faults and command error text are advisory recovery signals, not authority to replace
@@ -71,7 +81,7 @@ The reference is written in Go, relying on goroutines, runtime-managed channels,
 
 The entries above were checked against [vehicle-command `83baa078`](https://github.com/teslamotors/vehicle-command/tree/83baa078e81d08982dd997b8c8e4644e33a046a8), pinned tesla-ble v6.2.0 and the native adapter. They document current departures, not hardware acceptance or fixes to them.
 
-- **No goroutines / channels**: Replaced by deterministic FreeRTOS queues (`ble_event_queue_`) and the single `vehicle_loop` execution thread.
+- **No goroutines / channels**: Replaced by a fixed byte-packing `logic/ble_deferred_queue.hpp` mailbox under its own short critical section and the single `vehicle_loop` execution thread. Adjacent RX bytes coalesce only within the same generation; link records remain ordered barriers. Pop slices stay at20 bytes. This changes local storage, not ATT framing, MTU, subscriptions, crypto, command authority or key/session format.
 - **Bounded vector buffers**: `tk::RxFramer` limits frame payloads to 2048 bytes and buffered-data admission to 2562 bytes (payload + 2-byte header + 512-byte chunk headroom). This bounds buffered size, not the exact allocated capacity of its `std::vector<uint8_t>`.
 - **Max frame length (2048 vs 1024 B)**: `ble.go:21` defines `maxBLEMessageSize = 1024`. tesla-ble's own reassembly used `Vehicle::MAX_MESSAGE_SIZE = 2048` (in the `Vehicle` class this firmware no longer calls), while a `UniversalMessage_RoutableMessage` is at most 741 B. `kMaxFrameLength = 2048` keeps that historical tesla-ble limit.
 - **Inter-chunk timeout (3000 ms vs 1 s)**: `ble.go` drops a partial frame when the next chunk arrives more than `rxTimeout` = 1 s later. `tk::CommandRunner` configures `tk::RxFramer` with `kDefaultRxInterChunkTimeoutMs = 3000` (#320); `tk::RxFramer` itself still defaults to 1000 ms. A partial frame therefore survives notification gaps of up to 3 s, at the cost of holding a torn frame for up to 3 s before the buffer is cleared.

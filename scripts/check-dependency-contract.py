@@ -39,6 +39,7 @@ IDF_MBEDTLS_SUBMODULE = "components/mbedtls/mbedtls"
 # dependency update changes this validator together with the lockfiles; a normal build may not
 # silently rewrite an otherwise semantically plausible lock.
 FILE_DIGESTS = {
+    "scripts/nanopb-source.json": "9796c1535651f23ad95022b28781903ab38316b436b8a16188085db48a836123",
     "scripts/tesla-ble-patch-state.json": "2b87f2cd85d412df2368d88122741cf2bc2738c76d35e08f7cd211e5929c594e",
     "esp-idf-toolchain.txt": "6ef2f1d9c15bb269430cbb4530d689022d914b12ac8610b539d4ac00d148d84f",
     "main/idf_component.yml": "39bdf106eddeeb5b0299c757af3dcffb5ca85fc19f7633344b79a590efe07bbc",
@@ -324,7 +325,10 @@ def validate(root: Path) -> None:
             "native dependency failure/logging guards must execute in the real-library harness")
     require(harness_text.count('TB_LOG_FLAGS="-DTESLA_BLE_LOG_LEVEL=2"') == 1 and
             harness_text.count('"$TB_LOG_FLAGS"') == 2 and
-            'patches-$PATCH_STATE_SHA loglevel-2' in harness_text,
+            '--cache-salt "$CC $CXX mbedtls-$MBEDTLS_REF loglevel-2"' in harness_text and
+            'TB_PROOF="$(admit_or_fail tesla-ble --root "$ROOT_DIR"' in harness_text and
+            'NANOPB_PROOF="$(admit_or_fail nanopb --root "$ROOT_DIR"' in harness_text and
+            harness_text.count('python3 "$ROOT_DIR/scripts/dependency_source.py" harness-preflight') == 1,
             "BLE library harness log policy/object-cache key drifted")
     require(harness_text.count("MBEDTLS_REF=") == 1 and
             harness_text.count(f'\nMBEDTLS_REF="{MBEDTLS_COMMIT}"\n') == 1,
@@ -340,7 +344,7 @@ def probe_harness_invocations(source: str) -> None:
         applier = work / "scripts/apply-tesla-ble-patches.sh"
         applier.write_text("#!/bin/sh\nexit 0\n")
         applier.chmod(0o700)
-        component = work / "managed_components/yoziru__tesla-ble"
+        component = work / "cache/tesla-patched"
         (component / "src").mkdir(parents=True)
         (component / "generated/src").mkdir(parents=True)
         (component / "idf_component.yml").write_text('version: "6.2.0"\n')
@@ -348,7 +352,7 @@ def probe_harness_invocations(source: str) -> None:
         (work / "main").mkdir()
         (work / "main/idf_component.yml").write_text(
             'dependencies:\n  yoziru/tesla-ble:\n    version: "v6.2.0"\n')
-        nanopb = work / "build/_deps/nanopb-src"
+        nanopb = work / "cache/nanopb-pristine"
         nanopb.mkdir(parents=True)
         for name in ("pb_common.c", "pb_decode.c", "pb_encode.c"):
             (nanopb / name).write_text("int fake;\n")
@@ -356,8 +360,8 @@ def probe_harness_invocations(source: str) -> None:
         (cache / ("mbedtls-" + MBEDTLS_COMMIT)).mkdir(parents=True)
         tools = work / "bin"
         tools.mkdir()
-        # Python heredoc generators and compiler/archive tools are passive here. Only the
-        # actual shell's requested native-guard invocations count; no copied guard decisions.
+        # Generators and compiler/archive tools are passive here. Trace the new whole-method
+        # generator and native guards through the actual shell, including failure propagation.
         stub = '''import json,os,sys
 from pathlib import Path
 name=Path(sys.argv[0]).name; args=sys.argv[1:]
@@ -369,11 +373,27 @@ elif name=="compiler":
         path=Path(args[args.index("-o")+1]); path.parent.mkdir(parents=True,exist_ok=True)
         path.write_text("#!/bin/sh\\nexit 0\\n"); path.chmod(0o700)
 elif name=="python3":
-    if args and args[0].endswith("/test/test_dependency_guards.py"):
+    if args and args[0].endswith("/test/generate_ble_deferred_adapter.py"):
+        with Path(os.environ["FLOW_TRACE"]).open("a") as out: out.write(json.dumps(args)+"\\n")
+        if os.environ["FLOW_FAIL_GUARD"]=="generate": raise SystemExit(37)
+    elif args and args[0].endswith("/test/test_dependency_guards.py"):
         with Path(os.environ["FLOW_TRACE"]).open("a") as out: out.write(json.dumps(args)+"\\n")
         kind="sanitize" if "--sanitize" in args else "normal"
         if os.environ["FLOW_FAIL_GUARD"]==kind: raise SystemExit(37)
-    elif args and args[0]=="-c": print("0"*64)
+    elif args and args[0].endswith("/scripts/dependency_source.py"):
+        role=args[1]
+        if role=="harness-preflight": print("{}")
+        elif role in ("nanopb","tesla-ble"):
+            source=args[args.index("--workspace")+1] if "--workspace" in args else args[args.index("--source")+1]
+            objects=Path(args[args.index("--object-root")+1])/role
+            objects.mkdir(parents=True,exist_ok=True)
+            print(json.dumps({"source":source,"objectDirectory":str(objects)}))
+        else: raise SystemExit(2)
+    elif args and args[0]=="-c":
+        if len(args)==3 and "json.loads" in args[1]:
+            key="objectDirectory" if "objectDirectory" in args[1] else "source"
+            print(json.loads(args[2])[key])
+        else: print("0"*64)
     elif args and args[0]=="-": sys.stdin.read()
     else: raise SystemExit(2)
 elif name=="uname": print(os.environ["FLOW_SYSTEM"])
@@ -393,7 +413,8 @@ elif name!="ar": raise SystemExit(2)
                    CACHE_DIR=str(cache), FLOW_MBEDTLS_COMMIT=MBEDTLS_COMMIT)
         for system, failure in (("Linux", ""), ("Darwin", ""),
                                 ("Linux", "normal"), ("Linux", "sanitize"),
-                                ("Darwin", "normal")):
+                                ("Darwin", "normal"), ("Linux", "generate"),
+                                ("Darwin", "generate")):
             build = work / ("host-" + system)
             library = build / ("mbedtls-" + MBEDTLS_COMMIT) / "tf-psa-crypto/core/libtfpsacrypto.a"
             library.parent.mkdir(parents=True, exist_ok=True)
@@ -409,9 +430,13 @@ elif name!="ar": raise SystemExit(2)
                 raise DependencyError("native dependency harness invocation flow timed out") from exc
             calls = [json.loads(line) for line in trace.read_text().splitlines()] if trace.exists() else []
             normal = [str(work / "test/test_dependency_guards.py"), "--component", str(component)]
+            generate = [str(work / "test/generate_ble_deferred_adapter.py"), str(work), str(build)]
             expected = [normal, normal + ["--sanitize"]] if system == "Linux" else [normal]
             if failure == "normal":
                 expected = [normal]
+            expected = [generate] + expected
+            if failure == "generate":
+                expected = [generate]
             expected_exit = 37 if failure else 0
             success_message = "PASS: tesla-ble integration harness verified successfully"
             require(run.returncode == expected_exit and calls == expected and
@@ -449,6 +474,10 @@ def self_test(root: Path) -> None:
         harness.replace('--component "$TB_DIR" --sanitize', '--sanitize'),
         harness.replace('--component "$TB_DIR"\n', '--component "$TB_DIR" || true\n'),
         harness.replace('--component "$TB_DIR" --sanitize\n', '--component "$TB_DIR" --sanitize || true\n'),
+        harness.replace('python3 "$ROOT_DIR/test/generate_ble_deferred_adapter.py" "$ROOT_DIR" "$BUILD_DIR"',
+                        '# omitted whole-method generation'),
+        harness.replace('python3 "$ROOT_DIR/test/generate_ble_deferred_adapter.py" "$ROOT_DIR" "$BUILD_DIR"',
+                        'python3 "$ROOT_DIR/test/generate_ble_deferred_adapter.py" "$ROOT_DIR" "$BUILD_DIR" || true'),
     ):
         try:
             probe_harness_invocations(changed)

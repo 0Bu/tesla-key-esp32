@@ -1,3 +1,12 @@
+# TESLA_REPAIR_REQUIREMENTS_BEGIN
+set(TESLA_REPAIR_REQUIRES)
+if(CONFIG_TESLA_CONFIG_REPAIR_USB)
+    list(APPEND TESLA_REPAIR_REQUIRES esp_driver_uart)
+    if(CONFIG_IDF_TARGET_ESP32S3 OR CONFIG_IDF_TARGET_ESP32C3 OR CONFIG_IDF_TARGET_ESP32C6)
+        list(APPEND TESLA_REPAIR_REQUIRES esp_driver_usb_serial_jtag)
+    endif()
+endif()
+# TESLA_REPAIR_REQUIREMENTS_END
 idf_component_register(
     SRCS
         "main.cpp"
@@ -24,8 +33,13 @@ idf_component_register(
         "runtime_admission.cpp"
         "stack_watch.cpp"
         "heap_trend.cpp"
+        "heap_supervisor.cpp"
         "config_blob.cpp"
         "ota_update.cpp"
+        "ota_transport.cpp"
+        "ota_http.cpp"
+        "ota_coordinator.cpp"
+        "ota_writer.cpp"
         "mqtt_ha.cpp"
         "syslog.cpp"
         "display.cpp"
@@ -36,6 +50,7 @@ idf_component_register(
         "${CMAKE_CURRENT_BINARY_DIR}/index.html.gz"
         "${CMAKE_CURRENT_BINARY_DIR}/setup.html.gz"
     REQUIRES
+        ${TESLA_REPAIR_REQUIRES}
         nvs_flash
         esp_wifi
         esp_eth
@@ -43,10 +58,9 @@ idf_component_register(
         esp_netif
         esp_http_server
         esp_app_format
-        esp_https_ota
         app_update
-        esp_http_client
         esp-tls
+        http_parser
         mbedtls
         bt
         lwip
@@ -56,6 +70,15 @@ idf_component_register(
         bootloader_support
         espcoredump
 )
+
+# TESLA_REPAIR_SOURCES_BEGIN
+if(CONFIG_TESLA_CONFIG_REPAIR_USB)
+    target_sources(${COMPONENT_LIB} PRIVATE
+        "config_repair.cpp"
+        "config_repair_console.cpp"
+    )
+endif()
+# TESLA_REPAIR_SOURCES_END
 
 # ── Warning policy for THIS component only ──
 # main/logic/ was never the exposed half: it is compiled by the host mock build with
@@ -91,8 +114,8 @@ target_compile_options(${COMPONENT_LIB} PRIVATE
 # Assemble + pre-compress the web UI at build time. The sources are split for edit
 # locality — www/index.html (markup with inline markers), www/style.css, www/app.js —
 # and inline_assets.cmake splices them back into the ONE self-contained page the device
-# serves. The bounded Python helper blanks whole-line CSS documentation comments;
-# source comments remain readable, while markup, JavaScript and CSS tokens are kept.
+# serves. The bounded Python helper blanks whole-line CSS/JavaScript documentation;
+# source comments remain readable, while markup and code tokens are kept.
 # Shipping the page pre-gzipped saves flash space and transfer bytes.
 # Regenerated when an input or generator changes, so the served page never goes stale
 # (the UI changes with each flash/OTA). The EMBED_FILES path above points at the final

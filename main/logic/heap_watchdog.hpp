@@ -65,6 +65,9 @@
 
 namespace tk {
 
+// Typed boot evidence shared by the storage adapter and pure restart/boot-window policy.
+enum class RebootReasonState : uint8_t { Missing, Present, Error };
+
 // Below this, the largest contiguous block can no longer satisfy the allocations normal
 // operation makes. Healthy steady state is 31744 B and the boot-time low-water mark is ~40 KB;
 // the wedge sat at 480–1536 B. 4 KB is far under anything healthy and far over the wedge, so it
@@ -83,7 +86,7 @@ inline constexpr uint32_t kHeapCriticalHoldMs = 300000;   // 5 minutes
 // during the 2026-07-18 incident there was nothing to read afterwards at all.
 enum class HeapAction : uint8_t {
     Ok,         // healthy, and healthy on the previous sample too — nothing to say
-    Recovered,  // a critical run just ENDED (the heap came back, or an OTA excused it)
+    Recovered,  // a critical run just ENDED because a real INTERNAL sample recovered
     Armed,      // this sample OPENED a critical run — the countdown to a restart starts here
     Watching,   // still critical, the hold time has not elapsed
     Restart,    // sustained exhaustion: restart deliberately
@@ -96,8 +99,7 @@ struct HeapVerdict {
     // Logged rather than the configured hold, so the line states what actually happened — the
     // sample cadence means a fired run has always run somewhat LONGER than kHeapCriticalHoldMs.
     uint32_t critical_ms;
-    // Recovered because an OTA is in flight, not because the heap healed. A different sentence in
-    // the log: one says the device is fine again, the other says we declined to judge it.
+    // Kept for the existing diagnostic shape; OTA no longer fabricates a recovery verdict.
     bool ota_excused;
 };
 
@@ -111,16 +113,14 @@ struct HeapSample {
     // see the header note: without it a board's PSRAM masks the exhaustion entirely.
     size_t   largest_block;
     uint32_t now_ms;          // monotonic; wrap is handled
-    bool     ota_busy;        // an OTA check/download is in flight
+    bool     ota_busy;        // diagnostic input; writer grace is separate from this critical clock
 };
 
-// After this many CONSECUTIVE watchdog restarts, stop restarting. Five cycles are proof that a
-// restart does not fix this one: the leak re-develops from a fresh ~78 KB in minutes, so we would
-// otherwise reboot every ~10 minutes forever — and every boot re-seeds the active polling window,
-// so a parked car next to it would never sleep again. Staying up in the degraded state is also
-// useless, but it stops cycling the radios and still reports last_reboot, which is diagnosable.
-// The count resets on any ordinary boot (power cycle, crash, OTA) because those leave no
-// breadcrumb — so this only ever bounds a genuine restart LOOP, never an isolated self-heal.
+// Maximum encoded consecutive-heap diagnostic streak and conservative per-streak refusal.
+// BootGuard's shared unhealthy-restart ledger is the sole allowance: every heap effect also
+// needs its confirmed shared unit, while actual faults consume the same credit. A fault may
+// reset this diagnostic streak without refilling the common budget. Qualified durable zero
+// permits replenishment; a known Clean boot remains the existing explicit recovery exit.
 inline constexpr uint8_t kHeapMaxConsecutiveRestarts = 5;
 
 inline constexpr bool heap_may_restart(uint8_t consecutive) {
@@ -175,21 +175,14 @@ inline constexpr uint32_t heap_restart_in_ms(uint32_t critical_ms) {
 // Feed one sample. Call it on a fixed cadence; the decision uses elapsed time, not sample count,
 // so the cadence can change without moving the threshold.
 inline HeapVerdict heap_watch(HeapWatchdog& w, const HeapSample& s) {
-    // An OTA legitimately holds the largest allocations this firmware ever makes (a TLS session
-    // plus the image window), so a low reading during one proves nothing. Clear the run rather
-    // than merely skipping the sample: skipping would let a critical run that started BEFORE the
-    // download resume its clock afterwards and fire mid-install, which is the one reboot that
-    // could leave a half-written slot.
-    if (s.ota_busy || s.largest_block >= kHeapCriticalBytes) {
+    // Only a real healthy INTERNAL sample ends the continuous critical hold. OTA cannot
+    // manufacture recovery or reset this clock. The independent supervisor applies a separate
+    // nonrenewable writer grace and requests coordinator abort before considering a restart.
+    if (s.largest_block >= kHeapCriticalBytes) {
         if (!w.critical) return {HeapAction::Ok, 0, false};
-        // Ending a run is worth a line: it is the difference between "the device healed itself"
-        // and a silence the reader would have to interpret.
         const uint32_t ran = static_cast<uint32_t>(s.now_ms - w.since_ms);
-        // Excused means the OTA is what saved it — the heap itself is still below the threshold.
-        // An OTA running while the heap is healthy again is an ordinary recovery, not an excusal.
-        const bool excused = s.ota_busy && s.largest_block < kHeapCriticalBytes;
         w.critical = false;
-        return {HeapAction::Recovered, ran, excused};
+        return {HeapAction::Recovered, ran, false};
     }
     if (!w.critical) {
         w.critical = true;

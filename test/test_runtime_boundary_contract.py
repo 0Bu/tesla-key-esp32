@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import runpy
 import re
 from collections import Counter
 import tempfile
@@ -34,6 +35,15 @@ REVIEWED_LOCAL_CODE_SUFFIXES = (
 def cmake_source_paths(main: Path) -> dict[str, Path]:
     """Resolve the literal C++ SRCS shipped by the main IDF component, fail closed otherwise."""
     cmake = (main / "CMakeLists.txt").read_text(encoding="utf-8")
+    import importlib.util
+    contract_path = main.parent / "scripts/config_repair_contract.py"
+    if "TESLA_REPAIR" in cmake:
+        spec = importlib.util.spec_from_file_location("runtime_config_repair_contract", contract_path)
+        if spec is None or spec.loader is None:
+            raise AssertionError("missing maintenance source contract")
+        maintenance = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(maintenance)
+        cmake = maintenance.normal_component_text(main.parent, cmake)
     # The boundary inventory is only authoritative while this file has one closed source surface.
     # CMake commands are case-insensitive; reject any second attachment/include/subdirectory seam
     # instead of trying to emulate CMake and accidentally inventory only the visible SRCS block.
@@ -219,9 +229,10 @@ ALL_CODE = "\n".join(MAIN_CODE.values())
 EXPECTED_TASKS = {
     "publisher_task",
     "ota_health_gate_task",
-    "healthy_timer_task",
+    "heap_supervisor_task",
     "ota_check_task",
     "ota_task",
+    "ota_network_task",
     "syslog_task",
     "dns_task",
     "loop_task_fn_",
@@ -233,6 +244,14 @@ EXPECTED_TASKS = {
 }
 
 EXPECTED_CALLBACKS = {
+    'parser_begin',
+    'parser_field',
+    'parser_value',
+    'parser_headers',
+    'parser_body',
+    'parser_complete',
+    'parser_chunk',
+    'parser_chunk_done',
     "on_sync_cb",
     "on_reset_cb",
     "gap_event_cb",
@@ -247,7 +266,8 @@ EXPECTED_CALLBACKS = {
     "eth_event_handler",
     "mqtt_event_handler",
     "on_mqtt_probe",
-    "ping_probe_on_end",
+    "ping_net_on_end",
+    "ping_syslog_on_end",
     "sntp_sync_time",
     "handle_all",
     "diag_vprintf_",
@@ -260,9 +280,10 @@ EXPECTED_CALLBACKS = {
 # inspects the body rather than trusting this list alone, so deleting the catch makes it red.
 CONTAINED = {
     "publisher_task",
-    "healthy_timer_task",
+    "heap_supervisor_task",
     "ota_check_task",
     "ota_task",
+    "ota_network_task",
     "syslog_task",
     "loop_task_fn_",
     "auto_pair_task_fn_",
@@ -304,17 +325,34 @@ DELEGATE_ALLOWED_CALLS = {
 # Reviewed exceptions are deliberately restricted to fixed-buffer/C/atomic paths. Adding another
 # exception is a code-review event because it weakens the default rule that C frames need a catch.
 REVIEWED_NON_THROWING = {
+    'parser_begin': "fixed bounded public HTTP parser adapter; complete transitive source closed separately",
+    'parser_field': "fixed bounded public HTTP parser adapter; complete transitive source closed separately",
+    'parser_value': "fixed bounded public HTTP parser adapter; complete transitive source closed separately",
+    'parser_headers': "fixed bounded public HTTP parser adapter; complete transitive source closed separately",
+    'parser_body': "fixed bounded public HTTP parser adapter; complete transitive source closed separately",
+    'parser_complete': "fixed bounded public HTTP parser adapter; complete transitive source closed separately",
+    'parser_chunk': "fixed bounded public HTTP parser adapter; complete transitive source closed separately",
+    'parser_chunk_done': "fixed bounded public HTTP parser adapter; complete transitive source closed separately",
     "dns_task": "fixed stack buffers, atomic stop flag, socket C calls and the noexcept "
                 "pure DNS reply builder only",
     "nimble_host_task": "NimBLE run/deinit trampoline only",
     "on_mqtt_probe": "plain-data probe verdict plus semaphore give only",
-    "ping_probe_on_end": "generation-atomic ping result plus semaphore give only",
+    "ping_net_on_end": "mapped noexcept own-task sample plus exact persistent ping completion delegate",
+    "ping_syslog_on_end": "mapped noexcept own-task sample plus exact persistent ping completion delegate",
     "diag_vprintf_": "fixed-buffer/C/queue-only",
     "ble_link_event_cb_": "POD cast plus fixed queue delegate only",
     "ble_rx_event_cb_": "POD cast plus fixed queue delegate only",
 }
 
 REVIEWED_ALLOWED_CALLS = {
+    'parser_begin': {'self', 'reset_fields'},
+    'parser_field': {'finish_field', 'min', 'size', 'fill', 'self', 'reject'},
+    'parser_value': {'equal_ci', 'min', 'size', 'memcpy', 'self', 'data', 'reject'},
+    'parser_headers': {'http_parser_pause', 'self', 'finish_field', 'reject'},
+    'parser_body': {'min', 'sink_', 'self', 'reject'},
+    'parser_complete': {'http_parser_pause', 'self', 'finish_field', 'reject'},
+    'parser_chunk': {'self', 'reject'},
+    'parser_chunk_done': {'self'},
     "dns_task": {
         "socket", "ESP_LOGW", "vTaskDelete", "htonl", "htons", "bind", "close",
         "recvfrom", "memcpy", "sendto", "setsockopt", "load", "store", "build_captive_dns_reply",
@@ -322,7 +360,8 @@ REVIEWED_ALLOWED_CALLS = {
     },
     "nimble_host_task": {"nimble_port_run", "nimble_port_freertos_deinit"},
     "on_mqtt_probe": {"xSemaphoreGive"},
-    "ping_probe_on_end": {"esp_ping_get_profile", "complete", "xSemaphoreGive"},
+    "ping_net_on_end": {"ping_probe_on_end"},
+    "ping_syslog_on_end": {"ping_probe_on_end"},
     "diag_vprintf_": {
         "va_copy", "vsnprintf", "va_end", "diag_append_", "syslog_send", "vprintf",
         "diag_mqtt_uri_error_", "diag_forward_fixed_", "load", "previous",
@@ -332,6 +371,12 @@ REVIEWED_ALLOWED_CALLS = {
 }
 
 REVIEWED_DELEGATED_HELPERS = {
+    "ping_net_on_end": {
+        "ping_probe_on_end": {"esp_ping_get_profile", "complete", "xSemaphoreGive"},
+    },
+    "ping_syslog_on_end": {
+        "ping_probe_on_end": {"esp_ping_get_profile", "complete", "xSemaphoreGive"},
+    },
     "diag_vprintf_": {
         "diag_mqtt_uri_error_": {"diag_mqtt_uri_error"},
         "diag_forward_fixed_": {"va_start", "previous", "load", "vprintf", "va_end"},
@@ -339,10 +384,10 @@ REVIEWED_DELEGATED_HELPERS = {
         "syslog_send": {"sv", "find", "memcpy", "load", "xQueueSend", "fetch_add"},
     },
     "ble_link_event_cb_": {
-        "enqueue_ble_link_event_": {"store", "xQueueSend"},
+        "enqueue_ble_link_event_": {"store", "portENTER_CRITICAL", "push_link", "portEXIT_CRITICAL"},
     },
     "ble_rx_event_cb_": {
-        "enqueue_ble_rx_event_": {"store", "static_cast", "data", "memcpy", "xQueueSend"},
+        "enqueue_ble_rx_event_": {"store", "portENTER_CRITICAL", "push_rx", "portEXIT_CRITICAL"},
     },
 }
 
@@ -566,13 +611,23 @@ def callback_inventory(text: str) -> set[str]:
             "ble_hs_cfg callback",
         )
     )
-    found.update(
-        assignment_callbacks(
-            code,
-            r"\b\w+\.(?:on_ping_success|on_ping_timeout|on_ping_end)\s*=\s*([^,;}\n]+)",
-            "esp_ping callback",
-        )
+    ping_callbacks = assignment_callbacks(
+        code,
+        r"\b\w+\.(?:on_ping_success|on_ping_timeout|on_ping_end)\s*=\s*([^,;}\n]+)",
+        "esp_ping callback",
     )
+    if "on_end" in ping_callbacks:
+        # A named parameter is not an inventory exemption. Resolve it only through the exact
+        # typed/default/null-guard/two-owner/delegate program; unknown aliases still fail closed.
+        ping_callbacks.remove("on_end")
+        ping_callbacks.update(f135_fixed_ping_targets(text))
+    found.update(ping_callbacks)
+
+    for table in re.findall(r"static const http_parser_settings settings = \{(.*?)\};", code, re.S):
+        entries=[item.strip() for item in table.split(",")]
+        if len(entries)!=10:raise AssertionError("public HTTP parser callback table shape changed")
+        for callback in entries:
+            if callback!="nullptr":found.add(normalize_registered_callback(callback,"http_parser settings"))
 
     # ESP-IDF invokes app_main through a C startup frame even though it is not registered by a
     # source-level function call.
@@ -674,6 +729,341 @@ def balanced_end(text: str, opening: int, left: str, right: str, label: str) -> 
     raise AssertionError(f"{label}: unterminated {left}{right} group")
 
 
+# F135 has a closed source program, not a general permission to put work before a C boundary.
+F135_TASK_CONTEXTS = {
+    "publisher_task": "Mqtt", "ota_health_gate_task": "OtaGate",
+    "heap_supervisor_task": "HeapSupervisor", "ota_check_task": "OtaCheck",
+    "ota_task": "OtaWriter", "syslog_task": "Syslog", "dns_task": "CaptiveDns",
+    "loop_task_fn_": "Vehicle", "auto_pair_task_fn_": "AutoPair",
+    "display_task": "Display", "net_watchdog_task": "NetWatchdog",
+    "led_task": "Led", "nimble_host_task": "NimbleHost",
+    "ota_network_task": "OtaNetwork",
+}
+F135_CALLBACK_CONTEXTS = {
+    "on_sync_cb": "NimbleHost", "on_reset_cb": "NimbleHost",
+    "gap_event_cb": "NimbleHost", "svc_disc_cb": "NimbleHost",
+    "chr_disc_cb": "NimbleHost", "dsc_disc_cb": "NimbleHost",
+    "subscribe_write_cb": "NimbleHost", "scan_timeout_cb": "BleScanTimer",
+    "form_get": "CaptiveHttp", "save_post": "CaptiveHttp",
+    "wifi_event_handler": "WifiEvent", "eth_event_handler": "EthEvent",
+    "mqtt_event_handler": "MqttEvent", "on_mqtt_probe": "MqttProbeEvent",
+    "sntp_sync_time": "SntpSync", "handle_all": "Httpd", "app_main": "Main",
+    "ping_net_on_end": "PingNet", "ping_syslog_on_end": "PingSyslog",
+    "parser_begin": "OtaParser",
+    "parser_field": "OtaParser",
+    "parser_value": "OtaParser",
+    "parser_headers": "OtaParser",
+    "parser_body": "OtaParser",
+    "parser_complete": "OtaParser",
+    "parser_chunk": "OtaParser",
+    "parser_chunk_done": "OtaParser",
+
+}
+
+
+def f135_statement_pattern(statement: str) -> str:
+    # Keep C++ token separation, permit formatting only. No wildcard executable prefix.
+    return r"\s+".join(re.escape(word) for word in statement.split())
+
+
+def f135_unwrap_sampling_prefix(name: str, body: str) -> str:
+    """Remove only one exact audited noexcept prefix, leaving all old guard code visible."""
+    code = scrub_cpp_preserving_layout(body)
+    if name in F135_TASK_CONTEXTS:
+        context = F135_TASK_CONTEXTS[name]
+        statements = [f"tk::stack_watch_sample(tk::StackWatch::{context});",
+                      f"tk::StackWatchScope f135_task_exit(tk::StackWatch::{context});"]
+    elif name in F135_CALLBACK_CONTEXTS:
+        context = F135_CALLBACK_CONTEXTS[name]
+        statements = [f"tk::StackWatchScope f135_callback_exit(tk::StackWatch::{context});"]
+        if name == "app_main":
+            statements.append("tk::stack_watch_sample(tk::StackWatch::Main);")
+    elif name == "diag_vprintf_":
+        statements = ["struct F135SafeTaskSampleOnExit { ~F135SafeTaskSampleOnExit() noexcept { diag_stack_sample_safe_(); } } f135_callback_exit;"]
+    else:
+        return body
+    pattern = r"\{\s*" + r"\s*".join(f135_statement_pattern(s) for s in statements)
+    match = re.match(pattern, code)
+    if match is None:
+        raise AssertionError(f"{name}: exact mapped F135 noexcept sampling prefix missing/changed")
+    # Only braces/declarations/calls above are removed; a throwing helper before/after them remains.
+    return "{" + body[match.end():]
+
+
+def f135_reviewed_body(name: str, body: str) -> str:
+    normalized = f135_unwrap_sampling_prefix(name, body)
+    # These are the only fixed nonthrowing task bodies with further instrumentation. Preserve
+    # exact counts so omissions, aliasing, wrong lanes or new unreviewed sampling do not disappear.
+    if name in {"dns_task", "nimble_host_task"}:
+        context, expected = {"dns_task": ("CaptiveDns", 4),
+                             "nimble_host_task": ("NimbleHost", 1)}[name]
+        code = scrub_cpp_preserving_layout(normalized)
+        token = f"tk::stack_watch_sample(tk::StackWatch::{context});"
+        matches = list(re.finditer(f135_statement_pattern(token), code))
+        if len(matches) != expected:
+            raise AssertionError(f"{name}: exact F135 terminal sample count drifted")
+        for match in reversed(matches):
+            normalized = normalized[:match.start()] + " " * (match.end() - match.start()) + normalized[match.end():]
+        if name == "dns_task":
+            token = "tk::StackWatchScope f135_iteration_exit(tk::StackWatch::CaptiveDns);"
+            code = scrub_cpp_preserving_layout(normalized)
+            matches = list(re.finditer(f135_statement_pattern(token), code))
+            if len(matches) != 1:
+                raise AssertionError("dns_task: exact F135 iteration scope count drifted")
+            match = matches[0]
+            normalized = normalized[:match.start()] + " " * (match.end() - match.start()) + normalized[match.end():]
+    return normalized
+
+
+def f135_fixed_ping_targets(text: str) -> set[str]:
+    """Resolve only the reviewed typed parameter, its two actual fixed consumers and wrappers."""
+    code = scrub_cpp_preserving_layout(text)
+    declaration = ("void (*on_end)(esp_ping_handle_t, void*) = ping_probe_on_end")
+    if len(re.findall(f135_statement_pattern(declaration), code)) != 1:
+        raise AssertionError("F135 ping: exact typed/default callback parameter missing/changed")
+    bindings = re.findall(
+        r"\b(\w+)\.(on_ping_success|on_ping_timeout|on_ping_end)\s*=\s*on_end\s*;", code)
+    if bindings != [("callbacks", "on_ping_end")]:
+        raise AssertionError("F135 ping: typed parameter may bind only the one reviewed end field")
+    run = scrub_cpp_preserving_layout(function_body_in(text, "ping_probe_run"))
+    null_guard = "if (!control.done || !on_end) return PingProbeResult::Unavailable;"
+    if not re.match(r"\{\s*" + f135_statement_pattern(null_guard), run):
+        raise AssertionError("F135 ping: actual null refusal must be the first executable statement")
+    binding_program = ("esp_ping_callbacks_t callbacks{}; "
+                       "callbacks.cb_args = &control.callback_args; "
+                       "callbacks.on_ping_end = on_end;")
+    if not re.search(f135_statement_pattern(binding_program), run):
+        raise AssertionError("F135 ping: callback argument/end binding must be unconditional and adjacent")
+    require_before("F135 ping null refusal before cleanup/effect", run,
+                   "if (!control.done || !on_end)", "ping_probe_cleanup_completed(control)")
+    calls = call_arguments(scrub_cpp(text), "ping_probe_run")
+    declarations = [a for a in calls if a and a[0].strip() == "PingProbeControl& control"]
+    effects = [a for a in calls if a not in declarations]
+    if len(declarations) != 1 or len(effects) != 2:
+        raise AssertionError("F135 ping: exactly two actual fixed consumers required")
+    found = set()
+    for owner, role, control in (("gateway_reachable", "ping_net_on_end", "s_wd"),
+                                 ("syslog_ping_host", "ping_syslog_on_end", "s_ping")):
+        body = function_body_in(text, owner)
+        actual = call_arguments(scrub_cpp(body), "ping_probe_run")
+        if len(actual) != 1 or len(actual[0]) != 5 or actual[0][0].strip() != control or actual[0][-1].strip() != role:
+            raise AssertionError("F135 ping: fixed owner/role registration drifted: " + owner)
+        if actual[0] not in effects:
+            raise AssertionError("F135 ping: owner call differs from actual callback closure")
+        if not re.search(r"void\s+" + re.escape(role) +
+                         r"\s*\(esp_ping_handle_t handle,\s*void\* args\)\s*noexcept\s*\{", code):
+            raise AssertionError("F135 ping: actual fixed wrapper must be noexcept: " + role)
+        wrapper = f135_unwrap_sampling_prefix(role, function_body_in(text, role))
+        if re.sub(r"\s+", "", scrub_cpp(wrapper)) != "{tk::ping_probe_on_end(handle,args);}":
+            raise AssertionError("F135 ping: wrapper is not exactly the contained completion delegate")
+        found.add(role)
+    return found
+
+
+def require_f135_sampling_programs(parts: dict[str, str]) -> None:
+    """Pin the specific transitive noexcept prefix chain; no broad callback/hash exemption."""
+    def same(actual: str, expected: str, label: str) -> None:
+        if re.sub(r"\s+", "", scrub_cpp(actual)) != re.sub(r"\s+", "", scrub_cpp(expected)):
+            raise AssertionError("F135 sampling source program drifted: " + label)
+    header = parts["main/stack_watch.hpp"]
+    marker = "class StackWatchScope {"
+    if header.count(marker) != 1:
+        raise AssertionError("F135 scope declaration missing/ambiguous")
+    begin = header.index("{", header.index(marker));end = balanced_end(scrub_cpp_preserving_layout(header), begin, "{", "}", "F135 scope")
+    same(header[begin:end+1], '''{
+public:
+    explicit StackWatchScope(StackWatch which) noexcept : which_(which) {}
+    ~StackWatchScope() noexcept { stack_watch_sample(which_); }
+    StackWatchScope(const StackWatchScope&) = delete;
+    StackWatchScope& operator=(const StackWatchScope&) = delete;
+private:
+    StackWatch which_;
+}''', "scope constructor/destructor/one-field lifetime")
+    if not re.search(r"void\s+stack_watch_sample\s*\(StackWatch which\)\s*noexcept\s*;", header):
+        raise AssertionError("F135 sampler public declaration must be noexcept")
+    shell = parts["main/stack_watch.cpp"]
+    for token in ("std::atomic<uint32_t> s_samples[stack_sample::kWordCount]{};",
+                  "static_assert(sizeof(s_samples) == 24);",
+                  "static_assert(std::atomic<uint32_t>::is_always_lock_free);"):
+        if token not in shell:
+            raise AssertionError("F135 atomic storage contract missing: " + token)
+    if not re.search(r"void\s+stack_watch_sample\s*\(StackWatch which\)\s*noexcept", shell):
+        raise AssertionError("F135 actual sampler must be noexcept")
+    same(function_body_in(shell, "stack_watch_sample"), '''{
+    const auto slot = static_cast<unsigned>(which);
+    if (slot >= kStackContextCount) return;
+    const uint32_t free_bytes = static_cast<uint32_t>(uxTaskGetStackHighWaterMark(nullptr));
+    auto& word = s_samples[slot / stack_sample::kLanesPerWord];
+    stack_sample::publish_minimum(word, slot % stack_sample::kLanesPerWord, free_bytes);
+}''', "own-task HWM and single atomic publication")
+    codec = parts["main/logic/stack_sample_codec.hpp"]
+    same(function_body_in(codec, "publish_minimum"), '''{
+    uint32_t previous = word.load(std::memory_order_relaxed);
+    for (;;) {
+        const uint32_t next = merge(previous, lane, free_bytes);
+        if (next == previous || word.compare_exchange_strong(previous, next,
+                std::memory_order_relaxed, std::memory_order_relaxed)) return;
+    }
+}''', "strong CAS/recompute path")
+    require_reviewed_nonthrowing("merge", function_body_in(codec, "merge"), {"encode"}, delegated=True)
+    require_reviewed_nonthrowing("encode", function_body_in(codec, "encode"), {"static_cast"}, delegated=True)
+    log = parts["main/diag_log.cpp"]
+    if not re.search(r"void\s+diag_stack_sample_safe_\s*\(\)\s*noexcept", log):
+        raise AssertionError("F135 logger sampler must be noexcept")
+    same(function_body_in(log, "diag_stack_sample_safe_"), '''{
+    if (xPortInIsrContext() || !xPortCanYield()) return;
+    if (xTaskGetSchedulerState() != taskSCHEDULER_RUNNING ||
+        xTaskGetCurrentTaskHandle() == nullptr) return;
+    tk::stack_watch_sample(tk::StackWatch::DiagLogCallback);
+}''', "logger ISR/critical/scheduler/current-task refusal")
+    f135_unwrap_sampling_prefix("diag_vprintf_", function_body_in(log, "diag_vprintf_"))
+    for path,text in parts.items():
+        if re.search(r"^\s*#\s*define\s+(?:StackWatchScope|stack_watch_sample|uxTaskGetStackHighWaterMark|publish_minimum|merge|encode)\b",
+                     normalize_preprocessor_text(text), re.MULTILINE):
+            raise AssertionError("F135 sampler macro substitution refused: " + path)
+
+
+def f135_program_parts() -> dict[str, str]:
+    # Include every closed local-code input so a transitive header cannot substitute the
+    # reviewed sampling chain through a macro outside its immediate owner files.
+    return {"main/" + path: text for path, text in MAIN_CODE.items()}
+
+
+def self_test_f135_programs(parts: dict[str, str]) -> None:
+    require_f135_sampling_programs(parts)
+    for path,old,new in (
+        ("main/stack_watch.hpp", "noexcept : which_(which) {}", "noexcept : which_(which) { throwing_helper(); }"),
+        ("main/stack_watch.hpp", "stack_watch_sample(which_);", "throwing_helper();"),
+        ("main/stack_watch.cpp", "uxTaskGetStackHighWaterMark(nullptr)", "uxTaskGetStackHighWaterMark(foreign_task)"),
+        ("main/stack_watch.cpp", "if (slot >= kStackContextCount) return;", ""),
+        ("main/logic/stack_sample_codec.hpp", "compare_exchange_strong", "compare_exchange_weak"),
+        ("main/logic/stack_sample_codec.hpp", "const uint32_t next = merge(previous, lane, free_bytes);", "const uint32_t next = 0;"),
+        ("main/diag_log.cpp", "xPortInIsrContext() || !xPortCanYield()", "false"),
+        ("main/diag_log.cpp", "xTaskGetCurrentTaskHandle() == nullptr", "false"),
+    ):
+        if parts[path].count(old) != 1:
+            raise AssertionError("F135 program canary source missing/ambiguous: " + old)
+        changed = {**parts,path:parts[path].replace(old,new,1)}
+        require_mutation_rejected("F135 transitive program " + old,
+                                  lambda changed=changed:require_f135_sampling_programs(changed))
+    for name in sorted(set(F135_TASK_CONTEXTS) | set(F135_CALLBACK_CONTEXTS)):
+        body = function_body(name)
+        normalized = f135_unwrap_sampling_prefix(name,body)
+        # Restoring a deleted/commented/false prefix must be required, and arbitrary code on
+        # either side of the exact prefix remains visible to the original boundary validator.
+        require_mutation_rejected("F135 missing mapped prefix " + name,
+                                  lambda name=name,normalized=normalized:f135_unwrap_sampling_prefix(name,normalized))
+        require_mutation_rejected("F135 executable before prefix " + name,
+                                  lambda name=name,body=body:f135_unwrap_sampling_prefix(name,"{ throwing_helper();"+body[1:]))
+
+
+def self_test_f135_ping_targets(header: str, net: str, syslog: str) -> None:
+    def checked(h: str, n: str, s: str) -> None:
+        f135_fixed_ping_targets("\n".join((h, n, s)))
+    checked(header, net, syslog)
+    fixtures = [
+        ("typed-null-refusal-omitted", header.replace(" || !on_end", "", 1), net, syslog),
+        ("typed-null-refusal-commented", header.replace("if (!control.done || !on_end) return PingProbeResult::Unavailable;", "/* if (!control.done || !on_end) return PingProbeResult::Unavailable; */", 1), net, syslog),
+        ("typed-null-refusal-disabled", header.replace("if (!control.done || !on_end)", "if (false) if (!control.done || !on_end)", 1), net, syslog),
+        ("typed-end-binding-disabled", header.replace("callbacks.on_ping_end = on_end;", "if (false) { callbacks.on_ping_end = on_end; }", 1), net, syslog),
+        ("typed-common-bypass", header.replace("callbacks.on_ping_end = on_end;", "callbacks.on_ping_end = ping_probe_on_end;", 1), net, syslog),
+        ("typed-extra-binding", header.replace("callbacks.on_ping_end = on_end;", "callbacks.on_ping_end = on_end; callbacks.on_ping_success = on_end;", 1), net, syslog),
+        ("net-role-substitution", header, net.replace("pdMS_TO_TICKS(2000), ping_net_on_end", "pdMS_TO_TICKS(2000), ping_syslog_on_end", 1), syslog),
+        ("net-completion-omitted", header, net.replace("tk::ping_probe_on_end(handle, args);", "", 1), syslog),
+        ("net-wrapper-can-throw", header, net.replace("ping_net_on_end(esp_ping_handle_t handle, void* args) noexcept", "ping_net_on_end(esp_ping_handle_t handle, void* args)", 1), syslog),
+        ("extra-default-owner", header, net + "\nvoid f135_extra(PingProbeControl& c, const esp_ping_config_t& cfg) { ping_probe_run(c, cfg, 1, 1); }\n", syslog),
+    ]
+    for label, h, n, s in fixtures:
+        if (h, n, s) == (header, net, syslog):
+            raise AssertionError("F135 ping canary did not alter its actual program: " + label)
+        require_mutation_rejected("F135 fixed ping " + label,
+                                  lambda h=h,n=n,s=s:checked(h,n,s))
+
+# F137: exact reviewed programs, not general task/callback exemptions.
+F137_MQTT_CLEANUP_PROGRAM = '  bool reported = false;\n  while (!watchdog.release()) {\n      if (!reported) {\n          reported = true;\n          try { ESP_LOGE(TAG, "mqtt publisher parked: watchdog removal unconfirmed"); }\n          catch (...) {}\n      }\n      watchdog.feed(true);\n      tk::stack_watch_sample(tk::StackWatch::Mqtt); // owned park after diagnostics/feed\n      vTaskDelay(pdMS_TO_TICKS(1000));\n  }\n  try { ESP_LOGE(TAG, "mqtt publisher stopped after boundary failure"); } catch (...) {}\n  tk::stack_watch_sample(tk::StackWatch::Mqtt); // deepest terminal path before self-delete\n  vTaskDelete(nullptr);\n}'
+F137_RESET_PROGRAM = '{\n    // Required host-down/sticky reset publication precedes fallible diagnostics.\n    try {\n        if (g_instance) g_instance->on_reset();\n    } catch (...) {\n        if (g_instance) g_instance->report_callback_fault(false, "reset");\n    }\n    try {\n        ESP_LOGW(TAG, "NimBLE host reset, reason=%d", reason);\n    } catch (...) {\n        if (g_instance) g_instance->report_callback_fault(false, "reset diagnostic");\n    }\n}'
+F137_REPORTER_PROGRAM = '{\n    try {\n        auto& faults = timer_context ? timer_callback_faults_ : host_callback_faults_;\n        tk::report_iteration_fault(faults,\n            static_cast<std::uint64_t>(esp_timer_get_time()) / 1000u,\n            [site](std::uint32_t suppressed) {\n                ESP_LOGW(TAG, "BLE %s callback failed (suppressed=%u)", site,\n                         static_cast<unsigned>(suppressed));\n            });\n    } catch (...) {}\n}'
+F137_NET_TASK_PROGRAM = '{\n    try {\n      tk::LinkWatch watch{};\n      tk::GatewayIdentity watched_identity{};\n      tk::GatewayBaseline baselines[2]{};\n      tk::IterationFaultLog faults{};\n      for (;;) {\n        tk::StackWatchScope f135_iteration_exit(tk::StackWatch::NetWatchdog);\n        vTaskDelay(pdMS_TO_TICKS(kWdPeriodS * 1000));\n        try {\n        // When the link already knows it is down, the transport\'s own reconnect path owns\n        // recovery — there is nothing to detect (the ghost case is link=up by definition) and\n        // logging every period would fill the 16 KB /diag ring across a long router outage.\n        const bool up = net_is_up();\n        GatewaySample sample;\n        if (up) sample = gateway_reachable();\n        if (!up || !sample.usable) {\n            // Not measurable, or the transport changed during the probe: neither a reply nor a\n            // failure. Drop the failure streak — it described a transport that may be gone.\n            watch = tk::LinkWatch{};\n            watched_identity = {};\n            continue;\n        }\n        // A failure streak belongs to one transport generation; a switch starts a new streak.\n        if (sample.identity != watched_identity) {\n            watch = tk::LinkWatch{};\n            watched_identity = sample.identity;\n        }\n        const bool gw = up && sample.reachable;\n\n        // Keep proof for each leased transport across route failover; a new lease or gateway\n        // starts cold when that transport becomes active again. That includes the lease this\n        // watchdog ends itself: net_recover() re-associates, so the next lease must answer ICMP\n        // once before another recovery is allowed (docs/ARCHITECTURE.md, "State is per\n        // transport and lease").\n        const auto baseline_index = sample.identity.transport == NetLink::Eth ? 1 : 0;\n        const bool gw_ever = baselines[baseline_index].observe(sample.identity, sample.replied);\n\n        switch (tk::watch_step(watch, up, gw, gw_ever)) {\n            case tk::WatchAction::Idle:\n                break;\n            case tk::WatchAction::Wait:\n                ESP_LOGW(TAG, "watchdog: no LAN connectivity (%d/%d, link=up)",\n                         watch.fails, tk::kWatchFailsToRecover);\n                break;\n            case tk::WatchAction::NoBaseline:\n                ESP_LOGW(TAG, "watchdog: gateway has never answered ICMP — not forcing a "\n                              "re-establish");\n                break;\n            case tk::WatchAction::Recover:\n                net_recover(sample.identity);\n                break;\n        }\n        } catch (...) {\n            // An observation or a partially attempted recovery is uncertain.\n            // Require a new matching positive gateway reply before another reset.\n            watch = tk::LinkWatch{};\n            watched_identity = {};\n            baselines[0] = {};\n            baselines[1] = {};\n            try {\n                tk::report_iteration_fault(faults,\n                    static_cast<std::uint64_t>(esp_timer_get_time()) / 1000u,\n                    [](std::uint32_t suppressed) {\n                        ESP_LOGW(TAG, "network watchdog iteration failed; proof cleared (suppressed=%u)",\n                                 static_cast<unsigned>(suppressed));\n                    });\n            } catch (...) {}\n        }\n      }\n    } catch (...) {\n        try { ESP_LOGE(TAG, "network watchdog boundary failed; stopping task"); } catch (...) {}\n        tk::stack_watch_sample(tk::StackWatch::NetWatchdog);\n        vTaskDelete(nullptr);\n    }\n}'
+F137_WDT_HEADER_PROGRAM = '#pragma once\n\n#include <esp_task_wdt.h>\n\nnamespace tk {\n\n// Current-task ownership only. Explicit release must precede FreeRTOS self-deletion;\n// vTaskDelete(nullptr) does not unwind a live C++ scope.\nclass TaskWatchdogSubscription {\npublic:\n    TaskWatchdogSubscription() = default;\n    TaskWatchdogSubscription(const TaskWatchdogSubscription&) = delete;\n    TaskWatchdogSubscription& operator=(const TaskWatchdogSubscription&) = delete;\n    TaskWatchdogSubscription(TaskWatchdogSubscription&&) = delete;\n    TaskWatchdogSubscription& operator=(TaskWatchdogSubscription&&) = delete;\n\n    bool subscribe() noexcept {\n        // This one consumer may subscribe once; never silently rearm a retired owner.\n        if (started_ || released_) return false;\n        started_ = true;\n        try {\n            active_ = esp_task_wdt_add(nullptr) == ESP_OK ||\n                      esp_task_wdt_status(nullptr) == ESP_OK;\n        } catch (...) {\n            active_ = false;\n        }\n        return active_;\n    }\n\n    void feed(bool uncertain_subscription = false) noexcept {\n        if (released_ || (!active_ && !uncertain_subscription)) return;\n        try { (void)esp_task_wdt_reset(); } catch (...) {}\n    }\n\n    bool release() noexcept {\n        if (released_) return true;\n        try {\n            const esp_err_t result = esp_task_wdt_delete(nullptr);\n            // In the pinned SDK these mean confirmed removal, no current-task\n            // entry, or an uninitialized TWDT with no entries, respectively.\n            if (result != ESP_OK && result != ESP_ERR_NOT_FOUND &&\n                result != ESP_ERR_INVALID_STATE) return false;\n            active_ = false;\n            released_ = true;\n            return true;\n        } catch (...) {\n            return false;\n        }\n    }\n\n    ~TaskWatchdogSubscription() { (void)release(); }\n\nprivate:\n    bool started_{false};\n    bool active_{false};\n    bool released_{false};\n};\n\n}  // namespace tk\n'
+
+
+def f137_program(text: str) -> str:
+    """Whitespace/comments/literal contents are irrelevant; executable token order is exact."""
+    return re.sub(r"\s+", "", scrub_cpp_preserving_layout(text))
+
+
+def f137_containment_code(name: str, code: str) -> str:
+    if name == "publisher_task":
+        prefix = re.match(r"\{\s*tk::TaskWatchdogSubscription\s+watchdog\s*;", code)
+        marker = "bool reported = false;"
+        if not prefix or code.count(marker) != 1:
+            raise AssertionError("F137 MQTT: only the reviewed trivial guard precedes outer try")
+        at = code.index(marker)
+        if f137_program(code[at:]) != f137_program(F137_MQTT_CLEANUP_PROGRAM):
+            raise AssertionError("F137 MQTT: explicit release/park/feed/self-delete program drift")
+        # The existing generic checker must still verify the entire publisher catch chain.
+        return "{" + code[prefix.end():at] + "}"
+    if name == "on_reset_cb":
+        if f137_program(code) != f137_program(F137_RESET_PROGRAM):
+            raise AssertionError("F137 reset: essential publication then contained visible diagnostic required")
+        opening = code.index("{", code.index("try"))
+        end_try = balanced_end(code, opening, "{", "}", "F137 reset first try")
+        catch_open = code.index("{", code.index("catch", end_try + 1))
+        end_catch = balanced_end(code, catch_open, "{", "}", "F137 reset first catch")
+        # Exact full-program equality above covered the second contained diagnostic; no arbitrary
+        # prefix/suffix gets admitted. The original checker still validates the essential chain.
+        return code[:end_catch + 1] + "}"
+    return code
+
+
+def require_f137_source_contract(parts: dict[str, str]) -> None:
+    mqtt, net, ble, header, klass = (parts[k] for k in ("mqtt", "net", "ble", "wdt", "class"))
+    require_catch_all("publisher_task", function_body_in(mqtt, "publisher_task"))
+    require_catch_all("on_reset_cb", function_body_in(ble, "on_reset_cb"))
+    if mqtt.count('#include "task_watchdog_subscription.hpp"') != 1:
+        raise AssertionError("F137 MQTT: actual checked current-task helper include required")
+    # This small one-consumer header has no unreviewed extra calls, members, entry points or
+    # error-code authority. Its exact executable form is independently exercised by host tests.
+    if f137_program(header) != f137_program(F137_WDT_HEADER_PROGRAM):
+        raise AssertionError("F137 WDT: one-shot current-task removal/absence authority drift")
+    if f137_program(f135_unwrap_sampling_prefix("net_watchdog_task", function_body_in(net, "net_watchdog_task"))) != f137_program(F137_NET_TASK_PROGRAM):
+        raise AssertionError("F137 net: complete iteration/proof/diagnostic/persistent-owner program drift")
+    if f137_program(function_body_in(ble, "BleClient::report_callback_fault")) != f137_program(F137_REPORTER_PROGRAM):
+        raise AssertionError("F137 BLE: independent visible bounded host/timer reporter drift")
+    class_code = f137_program(klass)
+    for member in ("tk::IterationFaultLog host_callback_faults_{};",
+                   "tk::IterationFaultLog timer_callback_faults_{};"):
+        if class_code.count(f137_program(member)) != 1:
+            raise AssertionError("F137 BLE: one process-lifetime state per real callback context required")
+
+
+def self_test_f137_source_contract(parts: dict[str, str]) -> None:
+    require_f137_source_contract(parts)
+    cases = (
+        ("MQTT explicit release omitted", "mqtt", "while (!watchdog.release()) {", "while (false && !watchdog.release()) {"),
+        ("MQTT diagnostic hidden", "mqtt", 'ESP_LOGE(TAG, "mqtt publisher parked:', 'ESP_LOGD(TAG, "mqtt publisher parked:'),
+        ("MQTT publish replay in cleanup", "mqtt", "watchdog.feed(true);", "(void)publish_discovery(); watchdog.feed(true);"),
+        ("MQTT unprotected prefix", "mqtt", "  tk::TaskWatchdogSubscription watchdog;", "  std::string unprotected; tk::TaskWatchdogSubscription watchdog;"),
+        ("MQTT unprotected suffix", "mqtt", "  vTaskDelete(nullptr);", "  vTaskDelete(nullptr); throw 1;"),
+        ("WDT unknown cleanup accepted", "wdt", "result != ESP_ERR_INVALID_STATE) return false;", "result != ESP_ERR_INVALID_STATE) return true;"),
+        ("WDT foreign task cleanup", "wdt", "esp_task_wdt_delete(nullptr)", "esp_task_wdt_delete(reinterpret_cast<TaskHandle_t>(1))"),
+        ("WDT copy authority", "wdt", "TaskWatchdogSubscription(const TaskWatchdogSubscription&) = delete;", "TaskWatchdogSubscription(const TaskWatchdogSubscription&) = default;"),
+        ("reset essential delegation omitted", "ble", "if (g_instance) g_instance->on_reset();", "(void)g_instance;"),
+        ("reset normal diagnostic before publication", "ble", "if (g_instance) g_instance->on_reset();", 'ESP_LOGW(TAG, "before essential"); if (g_instance) g_instance->on_reset();'),
+        ("net stale proof retained", "net", "            baselines[0] = {};\n            baselines[1] = {};", "            (void)baselines;"),
+        ("net pending owner discarded", "net", "            watch = tk::LinkWatch{};\n            watched_identity = {};\n            baselines[0] = {};", "            s_wd.session = nullptr; watch = tk::LinkWatch{};\n            watched_identity = {};\n            baselines[0] = {};"),
+        ("net quota refilled each iteration", "net", "        vTaskDelay(pdMS_TO_TICKS(kWdPeriodS * 1000));", "        faults = {}; vTaskDelay(pdMS_TO_TICKS(kWdPeriodS * 1000));"),
+        ("BLE timer shares host quota", "ble", "timer_context ? timer_callback_faults_ : host_callback_faults_", "timer_context ? host_callback_faults_ : host_callback_faults_"),
+        ("BLE missing timer state", "class", "    tk::IterationFaultLog timer_callback_faults_{};", ""),
+    )
+    for label, owner, old, new in cases:
+        if parts[owner].count(old) != 1:
+            raise AssertionError("F137 valid-source canary is not unique: " + label)
+        changed = {**parts, owner: parts[owner].replace(old, new, 1)}
+        require_mutation_rejected(label, lambda value=changed: require_f137_source_contract(value))
+    require_f137_source_contract(parts)
+
+
 def require_catch_all(name: str, body: str) -> None:
     """Require one structural outer try/catch chain to cover the whole boundary body.
 
@@ -682,7 +1072,8 @@ def require_catch_all(name: str, body: str) -> None:
     catch body as the last token makes every executable statement part of the protected region or
     its exception handler, independent of the statement spelling.
     """
-    code = scrub_cpp_preserving_layout(body)
+    body = f135_unwrap_sampling_prefix(name, body)
+    code = f137_containment_code(name, scrub_cpp_preserving_layout(body))
     if name == "handle_all":
         # Only these fixed POD/scalar declarations and the noexcept continuation are outside
         # the effect-aware catch chain. Arbitrary prefix/suffix work still fails closed.
@@ -738,6 +1129,7 @@ def require_catch_all(name: str, body: str) -> None:
 
 def require_thin_delegate(name: str, target: str, body: str) -> None:
     """A C adapter may only normalize POD arguments and invoke its contained target once."""
+    body = f135_unwrap_sampling_prefix(name, body)
     code = scrub_cpp(body)
     for label, pattern in {
         "try/catch": r"\b(?:try|catch)\b",
@@ -783,6 +1175,7 @@ def called_functions(body: str) -> set[str]:
 def require_reviewed_nonthrowing(
     name: str, body: str, allowed_calls: set[str], *, delegated: bool = False
 ) -> None:
+    body = f135_reviewed_body(name, body)
     code = scrub_cpp(body)
     forbidden = {
         "new": r"\bnew\b",
@@ -910,7 +1303,7 @@ CJSON_CALL_COUNTS = {
         "cJSON_Delete": 2, "cJSON_ParseWithLengthOpts": 1,
     },
     "ota_manifest.hpp": {"cJSON_IsObject": 1, "cJSON_IsString": 1},
-    "status_json_emitter.hpp": {"cJSON_IsArray": 5},
+    "status_json_emitter.hpp": {"cJSON_IsArray": 6},
 }
 
 
@@ -1002,13 +1395,13 @@ def require_mqtt_factory_inventory(payloads: str, production: str, tests: str) -
     if re.search(r"\b(?:tk::)?JsonBuilder\s+[A-Za-z_]", production_code):
         raise AssertionError("mqtt_ha.cpp may not construct JsonBuilder outside tested factories")
     owner_declarations = re.findall(r"\b(?:tk::)?JsonOwner\s+[A-Za-z_]\w*", production_code)
-    if owner_declarations != ["tk::JsonOwner root"]:
+    if owner_declarations != ["tk::JsonOwner root", "tk::JsonOwner document"]:
         raise AssertionError(
             f"mqtt_ha.cpp JsonOwner construction/parameter inventory drift: {owner_declarations}"
         )
 
     expected_pub_json = (
-        "pub_json(config_topic,tk::mqtt::build_discovery_payload(payload))",
+        "pub_json(config_topic,std::move(document))",
         "pub_json(state_topic(tk::mqtt::StateDomain::Charge),tk::mqtt::build_charge_payload(payload))",
         "pub_json(state_topic(tk::mqtt::StateDomain::Climate),tk::mqtt::build_climate_payload(payload))",
         "pub_json(state_topic(tk::mqtt::StateDomain::Drive),tk::mqtt::build_drive_payload(payload))",
@@ -1023,6 +1416,23 @@ def require_mqtt_factory_inventory(payloads: str, production: str, tests: str) -
             raise AssertionError(f"MQTT pub_json callsite/argument inventory drift: {call}")
     if len(re.findall(r"\bpub_json\s*\(", production_code)) != len(expected_pub_json) + 1:
         raise AssertionError("MQTT pub_json callsite count drift")
+
+    # The sole added owner is bound to the actual discovery loop. Its tree owns all copies
+    # before the input strings/payload leave scope and configuration-topic construction begins.
+    # This guards the lifetime reduction; numerical stack acceptance still needs target evidence.
+    discovery = re.sub(r"\s+", "", scrub_cpp(function_body_in(production, "publish_discovery_rows")))
+    if not discovery.startswith(
+        "{usingField=tk::mqtt::DiscoveryTextField;"
+        "for(constauto&entry:tk::mqtt::kDiscoveryEntries.packed_rows()){tk::JsonOwnerdocument;{"
+        "conststd::stringuid=tk::mqtt::discovery_unique_id(s_node,entry);"
+        "conststd::stringvalue_template=tk::mqtt::discovery_value_template(entry);"
+    ) or (
+        "document=tk::mqtt::build_discovery_payload(payload);}"
+        "if(!document)returnfalse;conststd::stringconfig_topic="
+        "tk::mqtt::discovery_config_topic(s_prefix,s_node,entry);"
+        "if(!pub_json(config_topic,std::move(document)))returnfalse;"
+    ) not in discovery:
+        raise AssertionError("MQTT discovery owning-document lifetime/handoff drift")
 
     # Raw text publication is limited to the JSON delegate and retained availability heartbeat.
     # All state/discovery documents must stay behind pub_json and its OOM/retry owner.
@@ -1097,10 +1507,31 @@ def require_wifi_rollback_status_cache(main_source: str, producer: str) -> None:
             raise AssertionError("/status must not reload allocating configuration snapshots")
 
 
-def require_status_production_seams(producer: str, handler: str) -> None:
-    for token in ("tk::StatusJsonEmitter", "tk::status::emit_status", "return e.release();"):
-        if token not in producer:
-            raise AssertionError(f"/status producer bypasses tested production seam {token!r}")
+def require_status_production_seams(producer: str, handler: str, emitter_header: str) -> None:
+    # Review the actual two-step production path, not stale tokens in the gather frame.
+    producer_code = re.sub(r"\s+", "", scrub_cpp(producer))
+    delegate = "returntk::emit_status_object(in);"
+    if producer_code.count(delegate) != 1 or not producer_code.endswith(delegate + "}"):
+        raise AssertionError("/status gather must return the tested emitter helper exactly once")
+    if "stack_watch_snapshot(" in producer_code:
+        raise AssertionError("/status gather must not duplicate the cached snapshot")
+    header_code = scrub_cpp_preserving_layout(emitter_header)
+    signature = (r"\[\[gnu::noinline\]\]\s+inline\s+cJSON\s*\*\s+emit_status_object"
+                 r"\s*\(\s*status::Inputs\s*&\s*in\s*\)\s*\{")
+    if len(re.findall(signature, header_code)) != 1:
+        raise AssertionError("/status actual emitter helper must retain its noinline Inputs reference seam")
+    helper = function_body_in(emitter_header, "emit_status_object")
+    expected = """{
+        in.stack_context_samples = stack_watch_snapshot();
+        JsonBuilder json;
+        StatusJsonEmitter emitter(json);
+        status::emit_status(in, emitter);
+        return emitter.release();
+    }"""
+    # Complete executable body fixes one snapshot before allocation, sticky builder ownership,
+    # the actual model/key loop and the sole release. Extra/reordered effects fail closed.
+    if re.sub(r"\s+", "", scrub_cpp(helper)) != re.sub(r"\s+", "", scrub_cpp(expected)):
+        raise AssertionError("/status actual snapshot/emitter helper program differs")
     for token in ("build_status_object", "send_json"):
         if token not in handler:
             raise AssertionError(f"/status handler bypasses tested production seam {token!r}")
@@ -1507,7 +1938,7 @@ def require_unlocked_diagnostic_logging(heap: str, telemetry: str) -> None:
     if "ESP_LOG" in adoption:
         raise AssertionError("heap adoption logs while its caller holds the trend mutex")
     # Locate the lexical scope owning each guard, including nested try/catch blocks.
-    for source, name, marker in ((heap, "heap_trend_record", "SemGuard g(m);"),
+    for source, name, marker in ((heap, "heap_trend_record", "SemGuard g(m, 0);"),
                                  (heap, "heap_trend_snapshot", "SemGuard g(m);"),
                                  (telemetry, "enqueue_telemetry_round_", "tk::SemGuard g(self->vehicle_mutex_);"),
                                  (telemetry, "loop_task_fn_", "tk::SemGuard g(self->vehicle_mutex_);")):
@@ -1780,12 +2211,10 @@ def require_operation_wrapper_contract(ota_source: str) -> None:
     ):
         raise AssertionError("FaultRestart cancel wrapper does not owner-release the shared gate")
     constructor = re.search(
-        r"OtaHealthCommitGuard::OtaHealthCommitGuard\s*\(\s*\)\s*:\s*"
-        r"held_\s*\(\s*s_operation_gate\.try_begin\s*\(\s*"
-        r"tk::OtaIdentityGateState::HealthCommit\s*\)\s*\)\s*\{\s*\}",
-        ota_source,
-        re.DOTALL,
-    )
+        r"OtaHealthCommitGuard::OtaHealthCommitGuard\s*\(\s*\)\s*\{\s*"
+        r"const auto acquired = s_operation_gate\.try_begin_observed\(tk::OtaIdentityGateState::HealthCommit\);\s*"
+        r"held_ = acquired\.acquired;\s*observed_ = acquired\.observed;\s*\}",
+        ota_source, re.DOTALL)
     destructor = re.search(
         r"OtaHealthCommitGuard::~OtaHealthCommitGuard\s*\(\s*\)\s*\{\s*"
         r"if\s*\(\s*held_\s*\)\s*finish_operation\s*\(\s*"
@@ -1806,7 +2235,7 @@ def require_operation_wrapper_contract(ota_source: str) -> None:
         raise AssertionError("ConfigRestart ownership requires this guard and current gate")
     cleanup = code[code.index("OtaConfigRestartGuard::~OtaConfigRestartGuard()"):
                    code.index("bool OtaConfigRestartGuard::try_begin()")]
-    for token in ("noexcept", "if (held_)", "held_ = false;",
+    for token in ("noexcept", "if (held_ && !sealed_)", "held_ = false;",
                   "s_operation_gate.finish(tk::OtaIdentityGateState::ConfigRestart)"):
         if token not in cleanup: raise AssertionError("ConfigRestart cleanup missing " + token)
     if "ESP_LOG" in cleanup or "finish_operation" in cleanup:
@@ -1822,12 +2251,15 @@ def require_operation_wrapper_contract(ota_source: str) -> None:
         if token not in query: raise AssertionError("raw config image query missing " + token)
     require_before("config query owner before SDK", query, "owner.owns_gate()", "esp_ota_get_running_partition()")
     require_runtime_health_sampler_contract(code)
+    require_recovery_reference_contract(code)
     confirm = function_body_in(code, "ota_confirm_pending_image")
     ordered = (
         "if (!owner.owns_gate()) return Result::WrongOwner;",
         "if (!tk::ota_reboot_confirms_pending_image(reboot_class)) return Result::WrongClass;",
         "Result result = ota_config_image_state(owner);",
         "if (result != Result::Pending) return result;",
+        "ordinary_recovery_reference_ready_owned(tk::OtaIdentityGateState::ConfigRestart)",
+        "return Result::Pending;",
         "const auto health = ota_runtime_health();",
         "result = tk::config_health_failure(health.failure);",
         "if (result != Result::None) return result;",
@@ -1866,14 +2298,56 @@ def require_operation_wrapper_contract(ota_source: str) -> None:
             raise AssertionError(f"OTA Ready-only executable boundary matrix missing {token!r}")
 
 
+def require_recovery_reference_contract(ota_source: str) -> None:
+    query = function_body_in(ota_source, "ordinary_recovery_reference_ready_owned")
+    tokens = ("owner != tk::OtaIdentityGateState::Ota", "owner != tk::OtaIdentityGateState::HealthCommit",
+              "owner != tk::OtaIdentityGateState::ConfigRestart", "s_operation_gate.state() != owner",
+              "auto* old = s_operation.load(std::memory_order_acquire);", "if (!old) return true;",
+              "if (!old->coordinator_done.load(std::memory_order_acquire)) return false;",
+              "return old->coordinator.can_reclaim() && s_network_slot.owns(old->job);")
+    for token in tokens:
+        if token not in query: raise AssertionError("owned recovery reference missing " + token)
+    require_before("reference owner before pointer", query, "s_operation_gate.state() != owner", "s_operation.load")
+    require_before("reference done before non-atomic state", query, "coordinator_done.load", "coordinator.can_reclaim()")
+    for forbidden in (".store(", ".exchange(", "compare_exchange", "release_after_ack", "delete ", "new ",
+                      "reclaim_finished_operation(", "memory_checkpoint(", "ESP_LOG", "vTaskDelay("):
+        if forbidden in query: raise AssertionError("read-only recovery reference gained effect: " + forbidden)
+    typed = function_body_in(ota_source, "ota_recovery_reference_ready")
+    for token in ("!owner || s_operation_gate.state() != tk::OtaIdentityGateState::HealthCommit",
+                  "return ordinary_recovery_reference_ready_owned(tk::OtaIdentityGateState::HealthCommit);"):
+        if token not in typed: raise AssertionError("typed HealthCommit reference missing " + token)
+    if "s_operation.load" in typed: raise AssertionError("typed wrapper bypasses private reference query")
+    getter = function_body_in(ota_source, "ota_recovery_required_bytes")
+    if "return tk::ota_recovery_required_bytes_for(use);" not in getter:
+        raise AssertionError("actual recovery policy must delegate to the real pure selector")
+    entry = function_body_in(ota_source, "prepare_operation")
+    ordered = ("try_begin_ota_operation()", "reclaim_finished_operation()", "s_target_pr.store(pr, std::memory_order_release);",
+               "const auto entry_largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);",
+               "tk::ota_recovery_required_bytes(tk::OtaRecoveryUse::OperationEntry)",
+               "operation = new (std::nothrow) OtaOperation")
+    for token in ordered:
+        if token not in entry: raise AssertionError("ordinary-entry recovery missing " + token)
+    for first, second in zip(ordered, ordered[1:]):
+        require_before("ordinary-entry owner/reference/allocation order", entry, first, second)
+    start = entry.index("if (!tk::ota_recovery_memory_affordable(entry_largest,")
+    stop = entry.index("s_running.store(true, std::memory_order_release);")
+    refused = entry[start:stop]
+    for token in ("set_check_error(kOtaNoMemory);", "finish_operation(tk::OtaIdentityGateState::Ota);", "return Result::NoMemory;"):
+        if token not in refused: raise AssertionError("typed entry-memory refusal missing " + token)
+    require_before("memory publication before owner release", refused, "set_check_error", "finish_operation")
+    require_before("memory release before typed result", refused, "finish_operation", "return Result::NoMemory")
+
+
 def require_runtime_health_sampler_contract(ota_source: str) -> None:
     sampler = function_body_in(ota_source, "ota_runtime_health")
+    if any(token in sampler for token in ("s_operation", "ordinary_recovery_reference", "ota_recovery_reference_ready")):
+        raise AssertionError("unowned health snapshot must not borrow an old Operation")
     ordered = ("return tk::sample_runtime_health(",
                "[] { return tk::runtime_admission_vehicle_ready(); }",
                "[] { return ble_host_synced(); }",
                "[] { return ble_host_reset_count(); }",
                "[] { return heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL); }",
-               "tk::kHeapCriticalBytes")
+               "tk::ota_recovery_required_bytes(tk::OtaRecoveryUse::ImageConfirmation)")
     for token in ordered:
         if token not in sampler: raise AssertionError("shared OTA runtime sampler missing " + token)
     for first, second in zip(ordered, ordered[1:]):
@@ -1885,6 +2359,7 @@ def require_health_commit_contract(health_task: str) -> None:
                "const bool runtime_healthy = ota_runtime_health().healthy();",
                "tk::health_gate_decide", "if (v == tk::HealthVerdict::Commit)",
                "OtaHealthCommitGuard commit_guard;", "if (!commit_guard) continue;",
+               "if (!ota_recovery_reference_ready(commit_guard)) continue;",
                "const auto commit_health = ota_runtime_health();",
                "if (!commit_health.healthy()) continue;",
                "const size_t commit_largest = commit_health.largest;",
@@ -1970,7 +2445,11 @@ def require_vehicle_task_start_contract(vehicle_source: str, telemetry_source: s
              r"\bself->health_probe_\s*\("),
         ),
     ):
-        code = scrub_cpp(entry)
+        # Only the exact own-task diagnostic prefix may run before admission. It cannot log,
+        # allocate, inspect another task, subscribe TWDT, wait, lock or touch BLE/health state.
+        # All pre-existing sensitive-resource and cancellation checks remain below.
+        entry_name = "loop_task_fn_" if label == "vehicle loop" else "auto_pair_task_fn_"
+        code = scrub_cpp(f135_unwrap_sampling_prefix(entry_name, entry))
         await_at = code.find("self->await_task_start_()")
         if await_at < 0:
             raise AssertionError(f"{label} entry bypasses the task/global start barrier")
@@ -2028,7 +2507,7 @@ def require_vin_transition_cleanup_contract(main_source: str) -> None:
     require_before(
         "VIN transition completion gate before marker removal",
         branch,
-        'boot_fatal("VIN transition completion")',
+        'return "VIN transition completion"',
         "config_store.remove(tk::nvs_contract::kVinTransition)",
     )
     require_before(
@@ -2177,11 +2656,18 @@ def require_runtime_admission_contract(logic_header: str, facade_header: str,
                                        facade_source: str, main_source: str,
                                        http_route_header: str, dispatch: str) -> None:
     for token in (
-        "std::atomic<RuntimeAdmissionState> state_{RuntimeAdmissionState::Booting};",
-        "RuntimeAdmissionState expected = RuntimeAdmissionState::Booting;",
+        "std::atomic<std::uint8_t> state_{runtime_admission_pack(RuntimeAdmissionState::Booting)};",
+        "std::uint8_t expected = runtime_admission_pack(RuntimeAdmissionState::Booting);",
         "RuntimeAdmissionState::Ready",
         "RuntimeAdmissionState::SafeMode",
-        "state_.store(RuntimeAdmissionState::Fatal, std::memory_order_release);",
+        "if (runtime_admission_unpack(current).state == RuntimeAdmissionState::Fatal) return;",
+        "state_.compare_exchange_weak(current,",
+        "runtime_admission_pack(RuntimeAdmissionState::Fatal, component)",
+        "(current & kRuntimeIdentityReloadClaim)",
+        "kRuntimeIdentityReloadClaim = 0x40;",
+        "(value & ~kRuntimeIdentityReloadClaim) >> 2",
+        "runtime_admission_unpack(state_.load(std::memory_order_acquire))",
+        "sizeof(RuntimeAdmissionGate) == sizeof(std::atomic<std::uint8_t>)",
         "== RuntimeAdmissionState::Ready",
         "case RuntimeAdmissionState::Booting:  return RuntimeAdmissionAction::Wait;",
         "case RuntimeAdmissionState::Ready:    return RuntimeAdmissionAction::Run;",
@@ -2190,8 +2676,18 @@ def require_runtime_admission_contract(logic_header: str, facade_header: str,
     ):
         if token not in logic_header:
             raise AssertionError(f"global runtime admission is not default-false: missing {token!r}")
-    if logic_header.count("compare_exchange_strong") != 2:
-        raise AssertionError("Ready/SafeMode must be the only Booting CAS transitions")
+    if logic_header.count("compare_exchange_strong") != 3:
+        raise AssertionError("Ready/SafeMode and exact Ready-only reload claim must be the only strong CAS transitions")
+    for method in ("mark_ready", "mark_safe_mode"):
+        transition = function_body_in(logic_header, method)
+        if "expected = runtime_admission_pack(RuntimeAdmissionState::Booting)" not in transition:
+            raise AssertionError("Ready/SafeMode must remain Booting-only CAS transitions")
+    claim = function_body_in(logic_header, "try_claim_identity_reload")
+    for token in ("expected = runtime_admission_pack(RuntimeAdmissionState::Ready)",
+                  "state_.compare_exchange_strong(expected,", "kRuntimeIdentityReloadClaim",
+                  "std::memory_order_acq_rel, std::memory_order_acquire"):
+        if token not in claim:
+            raise AssertionError("runtime reload claim must use exact Ready-only atomic linearization")
 
     if facade_header.count("runtime_admission_vehicle_ready() noexcept;") != 1:
         raise AssertionError("runtime admission facade declaration drifted")
@@ -2200,7 +2696,9 @@ def require_runtime_admission_contract(logic_header: str, facade_header: str,
     for token in (
         "s_runtime_admission.mark_ready()",
         "s_runtime_admission.mark_safe_mode()",
-        "s_runtime_admission.mark_fatal()",
+        "s_runtime_admission.mark_fatal(component)",
+        "s_runtime_admission.snapshot()",
+        "s_runtime_admission.try_claim_identity_reload()",
         "s_runtime_admission.vehicle_ready()",
         "s_runtime_admission.action()",
     ):
@@ -2209,9 +2707,16 @@ def require_runtime_admission_contract(logic_header: str, facade_header: str,
 
     if main_source.count("tk::runtime_admission_mark_ready()") != 1:
         raise AssertionError("app_main must publish Ready exactly once")
-    require_before("late essential failure closes admission", main_source,
-                   "tk::runtime_admission_mark_fatal();",
-                   "esp_ota_get_running_partition()")
+    fatal = function_body_in(main_source.replace("[[noreturn]]", ""), "boot_fatal")
+    hook = "tk::runtime_admission_mark_fatal(tk::runtime_fatal_component(component));"
+    if not re.match(r"\{\s*" + re.escape(hook), scrub_cpp(fatal)):
+        raise AssertionError("boot fatal component must be the first executable statement")
+    require_before("late essential failure closes admission", fatal,
+                   "tk::runtime_admission_mark_fatal(tk::runtime_fatal_component(component));",
+                   "fatal_startup_rollback();")
+    rollback = function_body_in(main_source, "fatal_startup_rollback")
+    require_before("fatal rollback owns before metadata query", rollback,
+                   "OtaFaultRestartGuard owner;", "esp_ota_get_running_partition()")
     require_before("vehicle tasks allocated before Ready", main_source,
                    "vehicle.start_tasks()", "tk::runtime_admission_mark_ready()")
     require_before("safe-mode latch before Ready branch", main_source,
@@ -2260,7 +2765,8 @@ def require_nimble_safe_mode_start_contract(main_source: str) -> None:
     code = scrub_cpp_preserving_layout(function_body_in(main_source, "app_main"))
     declarations = list(re.finditer(
         r"\bconst\s+bool\s+safe_mode\s*=\s*tk::safe_mode_begin\s*\(\s*"
-        r"config_store\s*,\s*tk::diag_crash_reset_info\s*\(\s*\)\s*\.\s*fault\s*\)\s*;", code))
+        r"config_store\s*,\s*tk::boot_counter_cause\s*\(\s*tk::diag_crash_reset_info"
+        r"\s*\(\s*\)\s*\.\s*code\s*,\s*boot_reboot_record\.state\s*\)\s*,\s*boot_reboot_record\.state\s*,\s*boot_reboot_record\.heap_restarts\s*\)\s*;", code))
     if len(declarations) != 1 or len(re.findall(r"\bbool\s+safe_mode\b", code)) != 1:
         raise AssertionError("NimBLE SafeMode input is not the single durable boot verdict")
     call = re.search(r"\bble_client\s*\.\s*start\s*\(", code)
@@ -2491,6 +2997,7 @@ def require_dynamic_ble_host_health_contract(client_header: str, client_source: 
 def require_ping_probe_contract(header: str, generation_header: str,
                                 net_source: str, syslog_source: str,
                                 runtime_tests: str) -> None:
+    f135_fixed_ping_targets("\n".join((header, net_source, syslog_source)))
     for label, source in (("network watchdog", net_source), ("syslog", syslog_source)):
         if len(re.findall(r"\bping_probe_run\s*\(", scrub_cpp(source))) != 1:
             raise AssertionError(f"{label} must delegate to ping_probe_run exactly once")
@@ -2569,7 +3076,7 @@ def require_ping_probe_contract(header: str, generation_header: str,
         "if (!ping_probe_cleanup_completed(control)) return PingProbeResult::PendingEnd;",
         "control.generation.begin()",
         "callbacks.cb_args = &control.callback_args;",
-        "callbacks.on_ping_end = ping_probe_on_end;",
+        "callbacks.on_ping_end = on_end;",
         "control.session = session;",
         "control.session_generation = generation;",
         "control.session_started = false;",
@@ -2695,31 +3202,15 @@ def require_ping_probe_contract(header: str, generation_header: str,
 def require_ota_fetch_contract(ota_source: str, ota_logic: str,
                                manifest_header: str) -> None:
     fetch = function_body_in(ota_source, "http_get_to_buffer")
-    check = function_body_in(ota_source, "ota_check")
-    for token in (
-        "tk::BoundedHttpBodyGate body_gate(content_length, chunked);",
-        "body_gate.valid_headers()",
-        "tk::kOtaManifestMaxBytes",
-        "out.reserve(chunked ? tk::kOtaManifestMaxBytes",
-        "body_gate.next_read_size(sizeof(buf))",
-        "esp_http_client_read(c, buf, static_cast<int>(requested))",
-        "body_gate.accept_read(",
-        "esp_http_client_is_complete_data_received(c)",
-        "out.append(buf, static_cast<std::size_t>(read))",
-    ):
-        if token not in fetch:
-            raise AssertionError(f"bounded OTA transport contract missing {token!r}")
-    require_before("OTA header validation before reserve", fetch,
-                   "body_gate.valid_headers()", "out.reserve(")
-    require_before("OTA bounded request before transport read", fetch,
-                   "body_gate.next_read_size(sizeof(buf))", "esp_http_client_read")
-    require_before("OTA read verdict before append", fetch,
-                   "body_gate.accept_read(", "out.append(")
-    if re.search(r"\b(?:malloc|calloc|realloc|new)\b", scrub_cpp(fetch)):
-        raise AssertionError("OTA manifest transport added an unbounded secondary allocation")
+    check = function_body_in(ota_source, "perform_check")
+    for token in ("out.reserve(tk::kOtaManifestMaxBytes)",
+                  "operation.coordinator.start(url, limits, false, MetadataSink::append, &sink, optional)",
+                  "operation.job.phase() == tk::ota::Phase::Closed", "poll_operation(operation)"):
+        if token not in fetch:raise AssertionError("bounded actual OTA fetch missing "+token)
+    require_before("body allocation before worker request",fetch,"out.reserve(","operation.coordinator.start(")
 
     required_check_tokens = (
-        "http_get_to_buffer(manifest_url, body)",
+        "http_get_to_buffer(operation, manifest_url, body)",
         "tk::json_materialize<cJSON>",
         "cJSON_ParseWithLengthOpts(",
         "tk::inspect_ota_manifest(j.get())",
@@ -2735,7 +3226,7 @@ def require_ota_fetch_contract(ota_source: str, ota_logic: str,
         if token not in check:
             raise AssertionError(f"OTA manifest integration contract missing {token!r}")
     ordered = (
-        "http_get_to_buffer(manifest_url, body)",
+        "http_get_to_buffer(operation, manifest_url, body)",
         "tk::json_materialize<cJSON>",
         "tk::inspect_ota_manifest(j.get())",
         "parse_end != body.c_str() + body.size()",
@@ -3178,7 +3669,7 @@ def require_explicit_idf_boot_error_contract(main_source: str, net_source: str,
     # host-tested policy (logic/setup_portal.hpp) and never restarts the device itself.
     terminal = " ".join(function_body_in(provisioning_source, "provisioning_run").split())
     if "portal_open(config_store, /*keep_station=*/false);" not in terminal or \
-            "while (true) vTaskDelay(pdMS_TO_TICKS(1000));" not in terminal:
+            "while (true) { tk::StackWatchScope f135_portal_wait_exit(tk::StackWatch::Main); vTaskDelay(pdMS_TO_TICKS(1000)); }" not in terminal:
         raise AssertionError("first-time setup portal must stay terminal")
     retry = function_body_in(provisioning_source, "provisioning_run_with_retry")
     for token in ("if (!tk::net_wifi_station_started()) {", "provisioning_run(config_store);",
@@ -3344,7 +3835,7 @@ def require_ota_status_lock_contract(ota_source: str, runtime_tests: str) -> Non
     # result; set_check_done() moves all public fields as one fixed snapshot. Re-introducing the
     # former set_available()+set_state() intermediates exposes a new version/message alongside
     # stale current/update_available values to a concurrent /ota/status reader.
-    check = scrub_cpp(function_body_in(ota_source, "ota_check"))
+    check = scrub_cpp(function_body_in(ota_source, "perform_check"))
     if re.search(r"\b(?:set_state|set_check_error|set_check_done)\s*\(", check):
         raise AssertionError("OTA manifest check publishes a partial shared-status generation")
     done = scrub_cpp(function_body_in(ota_source, "set_check_done"))
@@ -3389,6 +3880,7 @@ def require_ota_status_lock_contract(ota_source: str, runtime_tests: str) -> Non
             raise AssertionError(f"OTA check-error fixed snapshot missing {token!r}")
     expected_error = (
         "{ OtaStatusPod candidate{}; candidate.state = OtaState::Error; "
+        "candidate.target_pr = s_target_pr.load(std::memory_order_relaxed); "
         "copy_status_text(candidate.message, message); "
         "const std::string_view current = running_version(); "
         "copy_status_text(candidate.current, current.data()); "
@@ -3399,7 +3891,7 @@ def require_ota_status_lock_contract(ota_source: str, runtime_tests: str) -> Non
     require_exact(
         "OTA check-error fallback call allowlist",
         called_functions(error),
-        {"copy_status_text", "data", "publish_check_status", "running_version"},
+        {"copy_status_text", "data", "publish_check_status", "running_version", "load"},
     )
 
     for token in (
@@ -3921,63 +4413,101 @@ def require_crash_dismiss_atomic_contract(crash_source: str) -> None:
         raise AssertionError("boot capture may erase crash evidence")
 
 
-def require_heap_restart_gate_contract(telemetry: str) -> None:
-    restart_marker = "if (v.action == tk::HeapAction::Restart)"
-    code = scrub_cpp_preserving_layout(telemetry)
-    if code.count(restart_marker) != 1:
-        raise AssertionError("heap restart action must have one actual branch")
-    restart_at = code.index(restart_marker)
-    _, opening, closing = if_statement_at(code, restart_at, "heap restart action")
-    branch = code[opening + 1:closing]
-    if re.search(r"(?m)^\s*#", branch):
-        raise AssertionError("heap restart branch has unsupported conditional preprocessing")
-    declaration = re.match(
-        r"\s*uint8_t\s+prior\s*=\s*VehicleController::boot_heap_restarts\s*\(\s*\)\s*;\s*", branch)
-    if declaration is None or branch.count("boot_heap_restarts") != 1:
-        raise AssertionError("heap cap must consume the current durable restart count once")
-    condition, cap_open, cap_close = if_statement_at(
-        branch, declaration.end(), "heap restart cap")
-    if re.sub(r"\s+", "", condition) != "!tk::heap_may_restart(prior)":
-        raise AssertionError("heap restart cap admission is bypassed or inverted")
-    else_at = skip_space(branch, cap_close + 1, len(branch))
-    if not re.match(r"else\b", branch[else_at:]):
-        raise AssertionError("heap cap needs a distinct permitted else branch")
-    else_open = skip_space(branch, else_at + 4, len(branch))
-    else_close = balanced_end(branch, else_open, "{", "}", "heap cap permitted branch")
-    if branch[else_close + 1:].strip():
-        raise AssertionError("heap restart has work outside the cap branches")
-    allowed = branch[else_open + 1:else_close]
-    denied = branch[cap_open + 1:cap_close]
-    for operation in ("ota_fault_restart_begin", "persist_reboot_reason_", "esp_restart"):
-        if operation in denied or allowed.count(operation) != 1:
-            raise AssertionError(f"heap cap does not exclusively own {operation}")
-    if re.search(r"\bprior\s*(?:=(?!=)|\+\+|--|[+*/%&|^-]=)", branch[declaration.end():]):
-        raise AssertionError("heap cap counter is reassigned after the durable read")
-    restart_branch = telemetry[restart_at:]
-    require_before(
-        "heap restart operation admission",
-        restart_branch,
-        "if (!ota_fault_restart_begin())",
-        "self->persist_reboot_reason_(why.text)",
-    )
-    busy_branch = restart_branch[
-        restart_branch.find("if (!ota_fault_restart_begin())") :
-        restart_branch.find("if (!self->persist_reboot_reason_(why.text))")
-    ]
-    if "continue;" not in busy_branch:
-        raise AssertionError("occupied heap restart gate no longer postpones the reboot")
-    persist_gate = "if (!self->persist_reboot_reason_(why.text))"
-    persist_at = restart_branch.find(persist_gate)
-    if persist_at < 0:
-        raise AssertionError("heap reboot persistence authority is missing")
-    persist_branch = restart_branch[persist_at:]
-    require_before("heap reboot persistence release", persist_branch,
-                   "ota_fault_restart_cancel();", "continue;")
-    require_before("heap reboot persistence", persist_branch, persist_gate, "continue;")
-    require_before("heap reboot action", persist_branch, "continue;", "esp_restart();")
-    success_tail = persist_branch[persist_branch.find("continue;") + len("continue;"):]
-    if "ota_fault_restart_cancel" in success_tail:
-        raise AssertionError("successful heap restart releases FaultRestart before esp_restart")
+def require_heap_supervisor_start_contract(main_source: str) -> None:
+    """Bind the essential checked admission to the real unconditional early app_main scope."""
+    raw = function_body_in(main_source, "app_main")
+    code = scrub_cpp_preserving_layout(raw)
+    record = re.search(
+        r"\bconst\s+tk::RebootReasonRecord\s+boot_reboot_record\s*=\s*"
+        r"VehicleController::take_reboot_reason\s*\(\s*config_store\s*\)\s*;", code)
+    call = r"tk::heap_supervisor_start\s*\(\s*config_store\s*,\s*boot_reboot_record\s*\)"
+    checked = list(re.finditer(r"\bif\s*\(\s*!\s*" + call + r"\s*\)\s*\{", code))
+    if record is None or len(checked) != 1 or len(re.findall(r"\bheap_supervisor_start\s*\(", code)) != 1:
+        raise AssertionError("essential Heap startup needs one typed reason and one checked real call")
+    match = checked[0]
+    condition, opening, closing = if_statement_at(code, match.start(), "essential Heap startup")
+    if re.sub(r"\s+", "", condition) != "!tk::heap_supervisor_start(config_store,boot_reboot_record)":
+        raise AssertionError("essential Heap startup condition is not the checked real call")
+    if not re.fullmatch(r'\s*boot_fatal\s*\(\s*"heap supervisor"\s*\)\s*;\s*', raw[opening + 1:closing]):
+        raise AssertionError("essential Heap startup failure must be boot-fatal")
+    if (enclosing_scope(code, record.start(), "Heap reason") !=
+            enclosing_scope(code, match.start(), "Heap admission")):
+        raise AssertionError("essential Heap startup is hidden in another conditional scope")
+    previous = code[:match.start()].rstrip()
+    if not previous or previous[-1] not in ";}":
+        raise AssertionError("essential Heap startup is controlled by an unbraced outer statement")
+    verdict = code.find("const bool safe_mode")
+    if not record.end() < verdict < match.start():
+        raise AssertionError("essential Heap startup must follow typed reason and BootGuard verdict")
+    for token in (r"\bsyslog_start\s*\(", r"\bnet_eth_probe\s*\(",
+                  r"\bnet_start_eth\s*\(", r"\bnet_start_wifi\s*\(",
+                  r"\bprovisioning_run(?:_with_retry)?\s*\(", r"\bhttp_server_start\s*\("):
+        sites = list(re.finditer(token, code))
+        if not sites or any(site.start() <= closing for site in sites):
+            raise AssertionError("essential Heap startup must precede every optional/network/portal entry")
+
+
+def require_heap_restart_gate_contract(supervisor: str) -> None:
+    """Pin actual independent restart admission; native tests execute all effects/owners."""
+    body = scrub_cpp_preserving_layout(function_body_in(supervisor, "attempt_heap_restart"))
+    guards = ("!s.budget.may_restart()", "!s.restart_write.due(now_ms)", "!owner.held()",
+              "largest>=kHeapCriticalBytes||ota_is_busy()",
+              "!reservation",
+              "!persist_reboot_reason(s.cfg,why.text)")
+    positions = []
+    for expected in guards:
+        matches = []
+        for found in re.finditer(r"\bif\s*\(", body):
+            paren = body.index("(", found.start())
+            condition_end = balanced_end(body, paren, "(", ")", expected)
+            condition = "".join(body[paren + 1:condition_end].split())
+            if condition != expected:
+                continue
+            opening = skip_space(body, condition_end + 1, len(body))
+            closing = (balanced_end(body, opening, "{", "}", expected)
+                       if body[opening] == "{" else body.index(";", opening))
+            matches.append((found.start(), opening, closing))
+        if len(matches) != 1:
+            raise AssertionError("heap restart guard missing/duplicated: " + expected)
+        at, opening, closing = matches[0]
+        if enclosing_scope(body, at, expected) != (0, len(body) - 1):
+            raise AssertionError("heap restart refusal hidden in another branch: " + expected)
+        refusal = body[opening + 1:closing] if body[opening] == "{" else body[opening:closing + 1]
+        if not refusal.strip().endswith("return;") or re.search(r"\b(?:if|for|while|goto)\b", refusal):
+            raise AssertionError("heap restart guard does not return directly: " + expected)
+        positions.append(at)
+    if positions != sorted(positions):
+        raise AssertionError("heap restart guard order drifted")
+    for token in ("OtaFaultRestartGuard owner;", "s.restart_write.attempt(fresh_ms);",
+                  "const auto reservation = safe_mode_prepare_heap_restart(*s.cfg, owner);",
+                  "const uint8_t next = static_cast<uint8_t>(s.budget.effective + 1);",
+                  "const HeapReason why = heap_reason_format(next);", "owner.seal();",
+                  "s.shutdown_committed = true;", "esp_restart();", "park_recovery();"):
+        if body.count(token) != 1:
+            raise AssertionError("heap restart authority missing/duplicated: " + token)
+    if re.search(r"s\.budget\.(?:effective|trusted)\s*(?:=(?!=)|[+*/%-]=|\+\+|--)", body):
+        raise AssertionError("heap restart overwrites its verified effective budget")
+    require_before("heap cap before lease", body, "!s.budget.may_restart()", "OtaFaultRestartGuard owner;")
+    require_before("heap lease before post-CAS sample", body, "!owner.held()", "const size_t largest")
+    require_before("write cadence before fallible latch", body, "s.restart_write.attempt(fresh_ms);",
+                   "safe_mode_prepare_heap_restart")
+    require_before("confirmed shared charge before reason", body, "if (!reservation)", "persist_reboot_reason")
+    maintenance = scrub_cpp_preserving_layout(function_body_in(supervisor, "maintain_healthy_run"))
+    require_before("durable shared zero before diagnostic refill", maintenance,
+                   "safe_mode_clear_after_healthy_run", "s.budget.decay_after_healthy_run")
+    require_before("confirmed reason before seal", body, "persist_reboot_reason", "owner.seal();")
+    require_before("sealed owner before shutdown", body, "owner.seal();", "s.shutdown_committed = true;")
+    require_before("shutdown before restart", body, "s.shutdown_committed = true;", "esp_restart();")
+    require_before("returning restart parks", body, "esp_restart();", "park_recovery();")
+    iteration = " ".join(scrub_cpp(function_body_in(supervisor, "supervisor_iteration")).split())
+    raw_iteration = scrub_cpp_preserving_layout(function_body_in(supervisor, "supervisor_iteration"))
+    begin = raw_iteration.find("const bool writer_busy = ota_is_busy();")
+    end = raw_iteration.find("maintain_healthy_run(s, now_ms);", begin)
+    if begin < 0 or end < 0 or "".join(raw_iteration[begin:end].split()) != 'constboolwriter_busy=ota_is_busy();constboolexcused=s.writer_grace.excused(now_ms,largest,writer_busy,ota::kCriticalWriterGraceMs);if(verdict.action==HeapAction::Restart){if(writer_busy){if(!excused)ota_request_heap_abort();report_degraded(s,now_ms,excused?:);}else{attempt_heap_restart(s,now_ms,verdict);}}':
+        raise AssertionError("independent critical verdict must request writer abort or call admitted restart after quiescence")
+    start = " ".join(scrub_cpp(function_body_in(supervisor, "heap_supervisor_start")).split())
+    if "boot_reason.heap_restarts, boot_reason.state != RebootReasonState::Error" not in start:
+        raise AssertionError("heap allowance must seed from complete immutable boot evidence")
 
 
 HTTP_ROUTE_DISPATCH = {
@@ -4047,7 +4577,7 @@ def require_safe_mode_source_contract(source: str) -> None:
     if "Clears itself after a boot that stays up" in source:
         raise AssertionError("safe-mode operator text still promises an unarmed auto-clear timer")
     operator_text = "".join(re.findall(r'"([^"\\]*(?:\\.[^"\\]*)*)"', strip_cpp_comments(source)))
-    for phrase in ("Exit needs a non-fault boot and a successful counter read/reset.",
+    for phrase in ("Exit needs a known clean boot and a confirmed counter reset.",
                    "a clean boot exits only if counter storage is healthy."):
         if phrase not in operator_text:
             raise AssertionError("safe-mode operator text lost the storage condition for leaving recovery")
@@ -4229,7 +4759,8 @@ def require_runtime_source_contracts() -> None:
         (MAIN / "mcp_json_payloads.hpp").read_text(encoding="utf-8"),
     )
     require_status_production_seams(
-        function_body("build_status_object"), function_body("handle_status")
+        function_body("build_status_object"), function_body("handle_status"),
+        MAIN_CODE["status_json_emitter.hpp"],
     )
     require_wifi_rollback_status_cache(SOURCES["main.cpp"], function_body("build_status_object"))
     require_vehicle_data_production_seams(function_body("handle_vehicle_data"))
@@ -4245,7 +4776,7 @@ def require_runtime_source_contracts() -> None:
     require_telemetry_poll_schedule(SOURCES["vehicle_telemetry.cpp"])
     require_drive_poll_builder(SOURCES["vehicle_telemetry.cpp"])
     require_unlocked_diagnostic_logging(SOURCES["heap_trend.cpp"], SOURCES["vehicle_telemetry.cpp"])
-    require_long_uptime_clocks(SOURCES["vehicle_telemetry.cpp"], SOURCES["heap_trend.cpp"])
+    require_long_uptime_clocks(SOURCES["vehicle_telemetry.cpp"], SOURCES["heap_trend.cpp"], SOURCES["heap_supervisor.cpp"])
     require_diag_dump_completion_contract(
         function_body("handle_diag"),
         (MAIN / "diag_log.hpp").read_text(encoding="utf-8"),
@@ -4344,6 +4875,10 @@ def require_runtime_source_contracts() -> None:
         SOURCES["provisioning.cpp"],
         (ROOT / "test/test_runtime_boundaries.cpp").read_text(encoding="utf-8"),
     )
+    f137_parts = {"mqtt": SOURCES["mqtt_ha.cpp"], "net": SOURCES["net.cpp"],
+                  "ble": SOURCES["ble_client.cpp"], "class": (MAIN / "ble_client.hpp").read_text(),
+                  "wdt": (MAIN / "task_watchdog_subscription.hpp").read_text()}
+    require_f137_source_contract(f137_parts)
     require_mqtt_production_seams(SOURCES["mqtt_ha.cpp"])
     require_mqtt_factory_inventory(
         (MAIN / "mqtt_payloads.hpp").read_text(encoding="utf-8"),
@@ -4394,8 +4929,8 @@ def require_runtime_source_contracts() -> None:
     # The heap watchdog must atomically exclude OTA/identity before reboot_why becomes durable.
     # A busy owner postpones the attempt; a failed persistence releases FaultRestart, while the
     # success path deliberately reaches esp_restart without releasing its owner.
-    telemetry = function_body("loop_task_fn_")
-    require_heap_restart_gate_contract(telemetry)
+    require_heap_restart_gate_contract(SOURCES["heap_supervisor.cpp"])
+    require_heap_supervisor_start_contract(SOURCES["main.cpp"])
 
     require_safe_mode_source_contract(SOURCES["safe_mode.cpp"])
     for filename, task, loop, delay in ITERATION_FAULT_TASKS:
@@ -4408,6 +4943,7 @@ def require_runtime_source_contracts() -> None:
 
 
 def check_contract(tasks: set[str], callbacks: set[str]) -> None:
+    require_f135_sampling_programs(f135_program_parts())
     require_exact("task", tasks, EXPECTED_TASKS)
     require_exact("callback", callbacks, EXPECTED_CALLBACKS)
 
@@ -4986,14 +5522,41 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
             "WiFi rollback status cache wiring",
             lambda boot=boot, producer=producer: require_wifi_rollback_status_cache(boot, producer),
         )
-    for token in ("tk::StatusJsonEmitter", "tk::status::emit_status", "return e.release();"):
-        mutated_status = status_producer.replace(token, "fixture_status_bypass", 1)
-        try:
-            require_status_production_seams(mutated_status, status_handler)
-        except AssertionError:
-            pass
-        else:
-            raise AssertionError(f"/status seam-removal mutation passed unexpectedly: {token}")
+    status_emitter = MAIN_CODE["status_json_emitter.hpp"]
+    require_status_production_seams(status_producer, status_handler, status_emitter)
+    # Migrate the three old effective emitter/model/release canaries to their actual owner.
+    for token in ("StatusJsonEmitter emitter(json);", "status::emit_status(in, emitter);",
+                  "return emitter.release();"):
+        if status_emitter.count(token) != 1:
+            raise AssertionError(f"/status actual helper canary target missing/ambiguous: {token}")
+        mutated_emitter = status_emitter.replace(token, "fixture_status_bypass", 1)
+        require_mutation_rejected(
+            f"/status helper seam removal {token}",
+            lambda changed=mutated_emitter: require_status_production_seams(
+                status_producer, status_handler, changed),
+        )
+    snapshot = "in.stack_context_samples = stack_watch_snapshot();"
+    builder = "JsonBuilder json;"
+    delegate = "return tk::emit_status_object(in);"
+    for source, token in ((status_producer, delegate), (status_emitter, snapshot),
+                          (status_emitter, "[[gnu::noinline]]")):
+        if source.count(token) != 1:
+            raise AssertionError(f"/status source canary target missing/ambiguous: {token}")
+    status_cases = (
+        ("actual helper call", status_producer.replace(delegate, "return nullptr;", 1), status_emitter),
+        ("one cached snapshot", status_producer, status_emitter.replace(snapshot, "(void)in;", 1)),
+        ("no duplicate snapshot", status_producer, status_emitter.replace(snapshot, snapshot + snapshot, 1)),
+        ("snapshot before allocation", status_producer,
+         status_emitter.replace(snapshot, "", 1).replace(builder, builder + snapshot, 1)),
+        ("separate emitter frame", status_producer, status_emitter.replace("[[gnu::noinline]]", "", 1)),
+    )
+    for label, producer, emitter in status_cases:
+        require_mutation_rejected(
+            "/status " + label,
+            lambda producer=producer, emitter=emitter: require_status_production_seams(
+                producer, status_handler, emitter),
+        )
+    require_status_production_seams(status_producer, status_handler, status_emitter)
 
     vehicle_data_handler = function_body("handle_vehicle_data")
     for token in VEHICLE_DATA_SEAMS:
@@ -5367,6 +5930,17 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
     mqtt_payloads = (MAIN / "mqtt_payloads.hpp").read_text(encoding="utf-8")
     mqtt_tests = (ROOT / "test/test_mqtt_json_publish.cpp").read_text(encoding="utf-8")
 
+    for label, changed in (
+        ("missing discovery document admission", mqtt_source.replace(
+            "if (!document) return false;", "if (false) return false;", 1)),
+        ("empty discovery document handoff", mqtt_source.replace(
+            "pub_json(config_topic, std::move(document))", "pub_json(config_topic, {})", 1)),
+    ):
+        if changed == mqtt_source:
+            raise AssertionError(label + " mutation did not apply")
+        require_mutation_rejected(label, lambda changed=changed:
+            require_mqtt_factory_inventory(mqtt_payloads, changed, mqtt_tests))
+
     # A ninth production definition and call without an OOM/success case must fail closed.
     added_payloads = mqtt_payloads + (
         "\nnamespace tk::mqtt { inline JsonOwner build_fixture_payload() noexcept "
@@ -5462,8 +6036,10 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
         pass
     else:
         raise AssertionError("safe-mode counter-parser bypass mutation passed unexpectedly")
-    for phrase in ("and a successful counter read/reset.",
+    for phrase in ("and a confirmed counter reset.",
                    "a clean boot exits only if counter storage is healthy."):
+        if SOURCES["safe_mode.cpp"].count(phrase) != 1:
+            raise AssertionError("safe-mode operator canary requires one actual source anchor")
         mutated_safe_mode = SOURCES["safe_mode.cpp"].replace(phrase, "reboot to recover", 1)
         mutated_safe_mode += "\n// " + phrase + "\n"
         try:
@@ -5571,27 +6147,46 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
         else:
             raise AssertionError(f"provisioning {label} mutation passed unexpectedly")
 
-    telemetry = function_body("loop_task_fn_")
-    for old, replacement, label in (
-        ("if (!tk::heap_may_restart(prior))", "if (false)", "restart cap bypass"),
-        ("if (!tk::heap_may_restart(prior))", "if (tk::heap_may_restart(prior))", "restart cap inversion"),
-        ("VehicleController::boot_heap_restarts()", "0", "constant restart count"),
-        ("if (!tk::heap_may_restart(prior))", "prior = 0; if (!tk::heap_may_restart(prior))", "overwritten restart count"),
-        ("if (!tk::heap_may_restart(prior))", "if (false) /* if (!tk::heap_may_restart(prior)) */", "comment-only cap decoy"),
-        ("if (v.action == tk::HeapAction::Restart)", "if (v.action == tk::HeapAction::Restart) if (false)", "dead nested cap"),
-        ("if (!ota_fault_restart_begin())", "if (false)", "operation admission"),
-        ("ota_fault_restart_cancel();", "", "persistence-failure release"),
-        ("if (!self->persist_reboot_reason_(why.text))", "if (false)", "persistence authority"),
+    startup = SOURCES["main.cpp"]
+    checked_start = ('if (!tk::heap_supervisor_start(config_store, boot_reboot_record)) {\n'
+                     '        boot_fatal("heap supervisor");\n    }')
+    if startup.count(checked_start) != 1:
+        raise AssertionError("essential Heap startup canary seam is missing/ambiguous")
+    for label, mutated in (
+        ("missing essential Heap startup", startup.replace(checked_start, "", 1)),
+        ("disabled essential Heap startup", startup.replace(checked_start, "if (false) {\n" + checked_start + "\n}", 1)),
+        ("unbraced disabled Heap startup", startup.replace(checked_start, "if (false) " + checked_start, 1)),
+        ("false conjunction Heap startup", startup.replace("if (!tk::heap_supervisor_start", "if (false && !tk::heap_supervisor_start", 1)),
+        ("unchecked essential Heap startup", startup.replace(checked_start, "tk::heap_supervisor_start(config_store, boot_reboot_record);", 1)),
+        ("duplicate essential Heap startup", startup.replace(checked_start, checked_start + "\n" + checked_start, 1)),
+        ("wrong essential Heap reason", startup.replace("heap_supervisor_start(config_store, boot_reboot_record)", "heap_supervisor_start(config_store, {})", 1)),
+        ("late essential Heap startup", startup.replace(checked_start, "", 1).replace("const bool have_wire", checked_start + "\nconst bool have_wire", 1)),
+        ("nonfatal essential Heap startup", startup.replace('boot_fatal("heap supervisor");', 'ESP_LOGE(TAG, "heap supervisor");', 1)),
     ):
-        mutated_telemetry = telemetry.replace(old, replacement, 1)
-        if mutated_telemetry == telemetry:
-            raise AssertionError(f"heap restart {label} mutation did not apply")
-        try:
-            require_heap_restart_gate_contract(mutated_telemetry)
-        except AssertionError:
-            pass
-        else:
-            raise AssertionError(f"heap restart {label} bypass passed unexpectedly")
+        if mutated == startup:
+            raise AssertionError(label + ": mutation did not apply")
+        require_mutation_rejected(label,
+            lambda changed=mutated: require_heap_supervisor_start_contract(changed))
+    require_heap_supervisor_start_contract(startup)
+
+    supervisor = SOURCES["heap_supervisor.cpp"]
+    for old, replacement, label in (
+        ("if (!s.budget.may_restart())", "if (false)", "restart cap bypass"),
+        ("if (!s.budget.may_restart())", "if (s.budget.may_restart())", "restart cap inversion"),
+        ("boot_reason.heap_restarts, boot_reason.state", "0, boot_reason.state", "constant restart seed"),
+        ("s.budget.effective + 1", "0 + 1", "overwritten restart count"),
+        ("if (!s.budget.may_restart())", "if (false) /* if (!s.budget.may_restart()) */", "comment cap decoy"),
+        ("attempt_heap_restart(s, now_ms, verdict);", "if (false) attempt_heap_restart(s, now_ms, verdict);", "dead nested restart"),
+        ("if (!excused) ota_request_heap_abort();", "if (false) ota_request_heap_abort();", "expired grace never aborts writer"),
+        ("if (writer_busy) {", "if (false) {", "busy writer restart authority stolen"),
+        ("if (!owner.held())", "if (false)", "operation admission"),
+        ("OtaFaultRestartGuard owner;", "OtaFaultRestartGuard owner; owner.seal();", "precommit retained lease"),
+        ("if (!persist_reboot_reason(s.cfg, why.text))", "if (false)", "persistence authority"),
+    ):
+        if supervisor.count(old) != 1:
+            raise AssertionError("heap restart mutation missing/ambiguous: " + label)
+        changed = supervisor.replace(old, replacement, 1)
+        require_mutation_rejected(label, lambda changed=changed: require_heap_restart_gate_contract(changed))
 
     diag_handler = function_body("handle_diag")
     redactor_header = (MAIN / "logic/redact.hpp").read_text(encoding="utf-8")
@@ -5782,15 +6377,28 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
     admission_mutations = (
         (
             "runtime default-open",
-            admission_logic.replace("state_{RuntimeAdmissionState::Booting}",
-                                    "state_{RuntimeAdmissionState::Ready}", 1),
+            admission_logic.replace("state_{runtime_admission_pack(RuntimeAdmissionState::Booting)}",
+                                    "state_{runtime_admission_pack(RuntimeAdmissionState::Ready)}", 1),
             admission_header, admission_source, main_source, route_header, route_dispatch,
         ),
         (
             "late boot-fatal admission close",
             admission_logic, admission_header, admission_source,
-            main_source.replace("tk::runtime_admission_mark_fatal();", "", 1),
+            main_source.replace("tk::runtime_admission_mark_fatal(tk::runtime_fatal_component(component));", "", 1),
             route_header, route_dispatch,
+        ),
+        (
+            "boot fatal component moved behind diagnostic",
+            admission_logic, admission_header, admission_source,
+            main_source.replace("tk::runtime_admission_mark_fatal(tk::runtime_fatal_component(component));", "", 1)
+                .replace("    fatal_startup_rollback();", "    tk::runtime_admission_mark_fatal(tk::runtime_fatal_component(component));\n    fatal_startup_rollback();", 1),
+            route_header, route_dispatch,
+        ),
+        (
+            "runtime claim accepts Fatal",
+            admission_logic.replace("std::uint8_t expected = runtime_admission_pack(RuntimeAdmissionState::Ready);",
+                "std::uint8_t expected = runtime_admission_pack(RuntimeAdmissionState::Fatal);", 1),
+            admission_header, admission_source, main_source, route_header, route_dispatch,
         ),
         (
             "HTTP Ready check bypass",
@@ -5911,7 +6519,7 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
         ("SafeMode NimBLE comment-only guard", main_source.replace(nimble_marker,
             "if (true) { /* if (!safe_mode) { ble_client.start(); } */\n        if (!ble_client.start())", 1)),
         ("SafeMode NimBLE fabricated input", main_source.replace(
-            "const bool safe_mode = tk::safe_mode_begin(config_store, tk::diag_crash_reset_info().fault);",
+            "const bool safe_mode = tk::safe_mode_begin(config_store,\n        tk::boot_counter_cause(tk::diag_crash_reset_info().code, boot_reboot_record.state),\n        boot_reboot_record.state, boot_reboot_record.heap_restarts);",
             "const bool safe_mode = false;", 1)),
     ):
         if mutated == main_source:
@@ -5960,8 +6568,21 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
                 ),
         )
 
+    for old, replacement, label in (
+        ("s_operation_gate.state() != owner", "false", "recovery reference actual owner"),
+        ("if (!old->coordinator_done.load(std::memory_order_acquire)) return false;", "", "recovery reference done acquire"),
+        ("old->coordinator.can_reclaim() && s_network_slot.owns(old->job)", "true", "recovery reference real cleanup and slot"),
+        ("return Result::NoMemory;", "return Result::InternalError;", "entry memory typed result"),
+        ("tk::ota_recovery_required_bytes(tk::OtaRecoveryUse::OperationEntry)", "tk::kHeapCriticalBytes", "entry recovery role"),
+        ("return tk::ota_recovery_required_bytes_for(use);", "return tk::kHeapCriticalBytes;", "real pure recovery selector"),
+    ):
+        if old not in ota_source: raise AssertionError("missing recovery-reference canary: " + label)
+        require_mutation_rejected(label, lambda changed=ota_source.replace(old,replacement,1):
+                                  require_operation_wrapper_contract(changed))
+
     health_task = function_body("ota_health_gate_task")
     for token, replacement, label in (
+        ("if (!ota_recovery_reference_ready(commit_guard)) continue;", "", "OTA health owned recovery reference"),
         ("switch (tk::runtime_admission_action())", "switch (tk::RuntimeAdmissionAction::Run)",
          "OTA health initial admission"),
         ("if (!commit_health.healthy()) continue;", "",
@@ -6209,7 +6830,7 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
     for label, source, logic, manifest in (
         (
             "OTA bounded-body gate bypass",
-            ota_source.replace("tk::BoundedHttpBodyGate body_gate", "FixtureBodyGate body_gate", 1),
+            ota_source.replace("out.reserve(tk::kOtaManifestMaxBytes)", "out.reserve(16384)", 1),
             ota_logic, manifest_header,
         ),
         (
@@ -7904,18 +8525,22 @@ def self_test_config_encode_lease_contract(parts: dict[str, str]) -> None:
     require_mutation_rejected("legacyrefusalaftercomparison", lambda: require_config_encode_lease_contract(mutated))
 
 
-def require_long_uptime_clocks(telemetry: str, trend: str) -> None:
-    """PKG-13: the tested long-lived clock must be the one the firmware actually uses."""
+def require_long_uptime_clocks(telemetry: str, trend: str, supervisor: str) -> None:
+    """PKG-13: long-lived clocks stay at their actual migrated consumers."""
     loop = scrub_cpp(function_body_in(telemetry, "loop_task_fn_"))
     clock = "tk::uptime_seconds(static_cast<uint64_t>(esp_timer_get_time()))"
-    flat = " ".join(loop.split())
-    if f"const uint32_t now_s = {clock};" not in flat:
-        raise AssertionError("bootstrap seconds must come from the production 64-bit timer conversion")
-    calls = call_arguments(loop, "tk::heap_trend_record")
-    if len(calls) != 1 or calls[0][0].strip() != clock:
-        raise AssertionError("heap history must use the same long-lived timer conversion")
-    if "heap_wd, {largest, (uint32_t) pdTICKS_TO_MS(hb_now), ota_is_busy()}" not in loop:
-        raise AssertionError("long-lived clock changes must preserve the short heap-watchdog tick clock")
+    if f"const uint32_t now_s = {clock};" not in " ".join(loop.split()):
+        raise AssertionError("bootstrap seconds must use the production 64-bit timer conversion")
+    iteration = scrub_cpp(function_body_in(supervisor, "supervisor_iteration"))
+    calls = call_arguments(iteration, "heap_trend_record")
+    if len(calls) != 1 or calls[0][0].strip() != "uptime_seconds(static_cast<uint64_t>(esp_timer_get_time()))":
+        raise AssertionError("independent heap history must use the long-lived timer conversion")
+    monotonic = " ".join(scrub_cpp(function_body_in(supervisor, "monotonic_ms")).split())
+    if monotonic != "{ return static_cast<uint64_t>(esp_timer_get_time()) / 1000; }":
+        raise AssertionError("supervisor maintenance clock must preserve 64-bit monotonic milliseconds")
+    short = "{largest, static_cast<uint32_t>(now_ms), ota_is_busy()}"
+    if short not in " ".join(iteration.split()):
+        raise AssertionError("critical hold must retain wrap-safe low-32-bit millisecond differences")
     adoption = " ".join(scrub_cpp(function_body_in(trend, "adopt_or_reset")).split())
     if "heap_persist_valid(persist()) && heap_carry_fits(persist().ring)" not in adoption:
         raise AssertionError("retained history adoption must reject an overflowing carry")
@@ -7925,93 +8550,30 @@ def require_long_uptime_clocks(telemetry: str, trend: str) -> None:
 
 
 def self_test_long_uptime_clocks() -> None:
-    telemetry, trend = SOURCES["vehicle_telemetry.cpp"], SOURCES["heap_trend.cpp"]
-    for label, old, new, in_telemetry in (
-        ("bootstrap tick rollover", "const uint32_t now_s = tk::uptime_seconds(static_cast<uint64_t>(esp_timer_get_time()));",
-         "const uint32_t now_s = now_ticks / configTICK_RATE_HZ;", True),
-        ("heap millisecond rollover", "tk::heap_trend_record(tk::uptime_seconds(static_cast<uint64_t>(esp_timer_get_time())),",
-         "tk::heap_trend_record((uint32_t) pdTICKS_TO_MS(hb_now) / 1000,", True),
-        ("unchecked retained carry", " && heap_carry_fits(persist().ring)", "", False),
-        ("unchecked retained sum", "if (!heap_timeline_fits(monotonic_s, s_carry_s))", "if (false)", False),
-    ):
-        source = telemetry if in_telemetry else trend
-        assert old in source, f"PKG-13 canary did not apply: {label}"
-        mutated = source.replace(old, new, 1) + "\n// decoy: " + old + "\n"
-        require_mutation_rejected(
-            f"PKG-13 {label}",
-            lambda changed=mutated, use_telemetry=in_telemetry: require_long_uptime_clocks(
-                changed if use_telemetry else telemetry, trend if use_telemetry else changed),
-        )
+    parts = {name: SOURCES[name + ".cpp"] for name in
+             ("vehicle_telemetry", "heap_trend", "heap_supervisor")}
+    variants = (
+        ("bootstrap tick rollover", "vehicle_telemetry", "const uint32_t now_s = tk::uptime_seconds(static_cast<uint64_t>(esp_timer_get_time()));", "const uint32_t now_s = now_ticks / configTICK_RATE_HZ;"),
+        ("heap millisecond rollover", "heap_supervisor", "heap_trend_record(uptime_seconds(static_cast<uint64_t>(esp_timer_get_time())),", "heap_trend_record(static_cast<uint32_t>(now_ms) / 1000,"),
+        ("supervisor millisecond rollover", "heap_supervisor", "return static_cast<uint64_t>(esp_timer_get_time()) / 1000;", "return static_cast<uint32_t>(esp_timer_get_time() / 1000);"),
+        ("unchecked retained carry", "heap_trend", " && heap_carry_fits(persist().ring)", ""),
+        ("unchecked retained sum", "heap_trend", "if (!heap_timeline_fits(monotonic_s, s_carry_s))", "if (false)"),
+    )
+    for label, owner, before, after in variants:
+        changed = dict(parts)
+        if changed[owner].count(before) != 1:
+            raise AssertionError("PKG-13 canary missing/ambiguous: " + label)
+        changed[owner] = changed[owner].replace(before, after, 1) + "\n// decoy: " + before + "\n"
+        require_mutation_rejected("PKG-13 " + label, lambda c=changed: require_long_uptime_clocks(
+            c["vehicle_telemetry"], c["heap_trend"], c["heap_supervisor"]))
+
+
+def ota_program_contract():
+    return runpy.run_path(str(ROOT / "test/ota_operation_contract.py"))
 
 
 def require_ota_download_chain(source: str) -> None:
-    """Pin the actual SDK download shell's refusal/ownership order, not SDK execution."""
-    layout = scrub_cpp_preserving_layout(function_body_in(source, "ota_task_impl"))
-    if re.search(r"^\s*(?:#|%:)", layout, re.M):
-        raise AssertionError("OTA download task must not conditionally preprocess its reviewed trust chain")
-    code = "".join(layout.split())
-    for call in ("esp_https_ota_begin(", "esp_https_ota_get_img_desc(", "esp_https_ota_perform(",
-                 "esp_https_ota_finish(", "esp_restart("):
-        if code.count(call) != 1:
-            raise AssertionError("OTA download shell must retain one reviewed SDK operation: " + call)
-    perform = code.index("esp_https_ota_perform(")
-
-    def refusal(condition: str, before: int, error_state: bool = True) -> None:
-        marker = "if(" + condition + "){"
-        at = code.find(marker)
-        if at < 0:
-            raise AssertionError("OTA download refusal missing: " + condition)
-        if code[:at].count("{") - code[:at].count("}") != 1:
-            raise AssertionError("OTA download refusal must execute directly in the task body: " + condition)
-        opening = at + len(marker) - 1
-        end = balanced_end(code, opening, "{", "}", "OTA refusal")
-        block = code[opening:end + 1]
-        if (end >= before or not re.search(r"(?:^|[;{}])return;$", block[1:-1]) or
-                (error_state and "set_state(OtaState::Error," not in block)):
-            raise AssertionError("OTA download must refuse before proceeding: " + condition)
-
-    refusal("!precheck_manifest_for_update(target_pr,expected_version,sizeof(expected_version))",
-            code.index("esp_https_ota_begin("), False)
-    refusal("err!=ESP_OK||handle==nullptr", code.index("structOtaHandleGuard"))
-    refusal("err!=ESP_OK", perform)
-    refusal("!tk::canonical_ota_version(new_version)||!tk::canonical_ota_version(current_version)", perform)
-    refusal("!tk::is_ota_update_available(new_version,current_version,target_pr,channel)", perform)
-    refusal("std::string_view(expected_version)!=new_version", perform)
-    for expected in ("char expected_version[32] = {};",):
-        if "".join(expected.split()) not in code:
-            raise AssertionError("OTA manifest version must retain bounded storage")
-    for first, second in (("precheck_manifest_for_update(", "resolve_firmware_url("),
-                          ("esp_https_ota_get_img_desc(", "tk::bounded_c_string_view(new_app.version)"),
-                          ("tk::bounded_c_string_view(new_app.version)", "if(!tk::canonical_ota_version(")):
-        require_before("OTA download trust order", code, first, second)
-    for token in ("http_cfg.crt_bundle_attach=esp_crt_bundle_attach;", "http_cfg.timeout_ms=20000;",
-                  "~OtaHandleGuard(){if(handle)esp_https_ota_abort(handle);}",
-                  "esp_https_ota_handle_trelease(){autoh=handle;handle=nullptr;returnh;}",
-                  "}handle_guard{handle};"):
-        if token not in code:
-            raise AssertionError("OTA download lost TLS/bounded ownership: " + token)
-    if code.count("handle_guard.release()") != 1 or len(re.findall(r"\bhandle_guard\b", code)) != 2:
-        raise AssertionError("OTA handle ownership may transfer only once, to finish")
-    marker = "if(err==ESP_OK&&esp_https_ota_is_complete_data_received(handle)){"
-    opening = code.find(marker)
-    if opening < 0:
-        raise AssertionError("OTA finish requires complete successful download")
-    opening += len(marker) - 1
-    end = balanced_end(code, opening, "{", "}", "OTA complete download")
-    complete = code[opening + 1:end]
-    prefix = "err=esp_https_ota_finish(handle_guard.release());if(err==ESP_OK){"
-    if not complete.startswith(prefix):
-        raise AssertionError("OTA restart must require a successful owned finish")
-    success_end = balanced_end(complete, len(prefix) - 1, "{", "}", "OTA finish success")
-    success = complete[len(prefix):success_end]
-    if not re.search(r"(?:^|[;{}])esp_restart\(\);$", success) or perform >= opening:
-        raise AssertionError("OTA restart escaped its successful finish branch")
-    require_before("OTA success state before restart", success, "set_state(OtaState::Done,100,", "esp_restart();")
-    if "set_state(OtaState::Error," not in complete[success_end + 1:] or not code[end + 1:].startswith("else{"):
-        raise AssertionError("OTA incomplete/failed finish must publish its failure")
-    error_end = balanced_end(code, end + len("else{"), "{", "}", "OTA incomplete error")
-    if "set_state(OtaState::Error," not in code[end + 1:error_end]:
-        raise AssertionError("OTA incomplete download must publish its failure")
+    ota_program_contract()["check_source"](source)
 
 
 def require_ota_https_configuration(source: str) -> None:
@@ -8030,47 +8592,43 @@ def require_ota_https_configuration(source: str) -> None:
 
 
 def self_test_ota_download_chain(source: str) -> None:
-    for label, old, new in (
-        ("manifest recheck removed", "if (!precheck_manifest_for_update(", "if (false && !precheck_manifest_for_update("),
-        ("image descriptor read removed", "err = esp_https_ota_get_img_desc(handle, &new_app);", "err = ESP_OK;"),
-        ("invalid header admitted", "if (err != ESP_OK) {\n        ESP_LOGE(TAG, \"esp_https_ota_get_img_desc", "if (false) {\n        ESP_LOGE(TAG, \"esp_https_ota_get_img_desc"),
-        ("version syntax ignored", "if (!tk::canonical_ota_version(new_version)", "if (false && !tk::canonical_ota_version(new_version)"),
-        ("downgrade admitted", "if (!tk::is_ota_update_available(new_version", "if (false && !tk::is_ota_update_available(new_version"),
-        ("manifest image mismatch admitted A13-G4", "if (std::string_view(expected_version) != new_version)", "if (false)"),
-        ("abort owner removed", "if (handle) esp_https_ota_abort(handle);", "if (handle) ignored_abort(handle);"),
-        ("guard owns wrong handle", "handle_guard{handle};", "handle_guard{nullptr};"),
-        ("guard released before header", "int image_size = esp_https_ota_get_image_size(handle);", "(void)handle_guard.release(); int image_size = esp_https_ota_get_image_size(handle);"),
-        ("guard cleared before header", "int image_size = esp_https_ota_get_image_size(handle);", "handle_guard.handle=nullptr; int image_size = esp_https_ota_get_image_size(handle);"),
-        ("guard aliased before header", "int image_size = esp_https_ota_get_image_size(handle);", "auto& escaped_owner=handle_guard; escaped_owner.release(); int image_size = esp_https_ota_get_image_size(handle);"),
-        ("finish without completeness", "err == ESP_OK && esp_https_ota_is_complete_data_received(handle)", "err == ESP_OK"),
-        ("finish releases wrong owner", "esp_https_ota_finish(handle_guard.release())", "esp_https_ota_finish(handle)"),
-        ("restart without successful finish", "if (err == ESP_OK) {\n            ESP_LOGI(TAG, \"OTA complete", "if (true) {\n            ESP_LOGI(TAG, \"OTA complete"),
-        ("completed image not restarted", "esp_restart();   // does not return", "if (false) esp_restart();   // does not return"),
-        ("download failure not reported", 'set_state(OtaState::Error, 0, "download failed");', 'ignored_state(OtaState::Error, 0, "download failed");'),
-    ):
-        mutated = source.replace(old, new, 1)
-        if mutated == source:raise AssertionError("OTA download mutation did not apply: " + label)
-        require_mutation_rejected(label, lambda changed=mutated: require_ota_download_chain(changed))
-    body = function_body_in(source, "ota_task_impl")
-    conditional_return = source.replace(body, body.replace("return;", "if (false) return;", 1), 1)
-    require_mutation_rejected("OTA precheck refusal has only conditional return", lambda: require_ota_download_chain(conditional_return))
-    start = source.index("if (std::string_view(expected_version) != new_version)")
-    opening = source.index("{", start)
-    end = balanced_end(scrub_cpp_preserving_layout(source), opening, "{", "}", "OTA mismatch mutant")
-    block = source[start:end + 1]
-    nested = source[:start] + "if (false) {\n" + block + "\n}" + source[end + 1:]
-    require_mutation_rejected("OTA mismatch refusal hidden in unreachable block", lambda: require_ota_download_chain(nested))
-    for directive in ("#", "%:"):
-        disabled = source[:start] + directive + "if 0\n" + block + "\n" + directive + "endif\n" + source[end + 1:]
-        require_mutation_rejected("OTA mismatch refusal removed by preprocessor", lambda changed=disabled: require_ota_download_chain(changed))
+    contract=ota_program_contract()
+    contract["check_source"](source)
+    contract["self_test"]()
     for macro in ("CONFIG_TESLA_OTA_MANIFEST_URL", "CONFIG_TESLA_OTA_FIRMWARE_BASE_URL"):
-        assertion = f"static_assert(tk::ota_https_url({macro}),"
-        statement = re.search(re.escape(assertion) + r'\s*"[^"\n]*"\);', source)
-        if not statement:raise AssertionError("OTA HTTPS assertion statement missing")
-        for mutated in (source.replace(assertion, "static_assert(true,", 1),
-                        source.replace(statement[0], "#if 0\n" + statement[0] + "\n#endif", 1)):
-            if mutated == source:raise AssertionError("OTA HTTPS assertion mutation did not apply")
-            require_mutation_rejected("OTA HTTPS assertion disabled", lambda changed=mutated: require_ota_https_configuration(changed))
+        assertion=f"static_assert(tk::ota_https_url({macro}),"
+        if assertion not in source:raise AssertionError("missing HTTPS assertion")
+        require_mutation_rejected("OTA configured HTTPS refusal",lambda changed=source.replace(assertion,"static_assert(true,",1):require_ota_https_configuration(changed))
+
+
+# F116 closed source programs: fixed POD/critical-section helpers only. Update after an
+# independent source review; the extractor never writes these expected identities at runtime.
+BLE_DEFERRED_PROGRAMS = {'ble_link_event_cb_': {'owner': 'ctrl', 'sha256': 'edc6860b2cb2e65cc7e642533be606d1a1a48d47395505d6ce94ee189d284733'}, 'ble_rx_event_cb_': {'owner': 'ctrl', 'sha256': '9f8462cd54ef462d6454ba9ca02cdd4a1997bcb3211de9bb32c67d0648cae6ac'}, 'enqueue_ble_link_event_': {'owner': 'ctrl', 'sha256': 'fa4976fc3cfc73f7915314e67ca7b2c85f8bf9e244d71e77b0ea0ed887f1e056'}, 'enqueue_ble_rx_event_': {'owner': 'ctrl', 'sha256': 'c2a87ba13d18edb3e33c1a7c0677a8bd629fcfae7e837fd47609096d1ca6bc28'}, 'ble_host_events_ready_': {'owner': 'ctrl', 'sha256': 'e8289f7fa61e7f2c9003f368d8d7537a8d5f5fdc59be566c18a2e4bbcda29183'}, 'pop_ble_host_event_': {'owner': 'ctrl', 'sha256': '613fcb3b828394228e19abc762a136a9bd90739774eb11ad34b1f5f8dafac169'}, 'clear_ble_host_events_': {'owner': 'ctrl', 'sha256': 'b9d23918bd68e77d85c448c6fea5a69527c6d6a8ea31a1d57fa1cff228bb1d90'}, 'process_ble_host_events_': {'owner': 'telemetry', 'sha256': '22c2e83a704780398e5bb828cdbe3fb9fcab4a6597732c11e4ca82dfeb30d807'}}
+BLE_DEFERRED_QUEUE_SHA256 = "39019bdb2394dd81491d6b95d3ae2ab94cd6127fd329d69664781bb77ae0044b"
+
+
+def require_ble_deferred_program_contract(parts: dict[str, str], queue: str) -> None:
+    if hashlib.sha256(queue.encode()).hexdigest() != BLE_DEFERRED_QUEUE_SHA256:
+        raise AssertionError("deferred FIFO pure program drift requires review")
+    for name, expected in BLE_DEFERRED_PROGRAMS.items():
+        body = function_body_in(parts[expected["owner"]], name)
+        if hashlib.sha256(body.encode()).hexdigest() != expected["sha256"]:
+            raise AssertionError("deferred mailbox complete program drift: " + name)
+    init = scrub_cpp(function_body_in(parts["ctrl"], "init"))
+    require_before("deferred publication", init, "ble_events_.queue.clear()", "ble_events_.ready = true")
+    require_before("deferred callback lifetime", init, "ble_events_.ready = true", "set_connected_cb")
+    require_before("deferred RX lifetime", init, "ble_events_.ready = true", "set_rx_data_cb")
+
+
+def self_test_ble_deferred_program_contract(parts: dict[str, str], queue: str) -> None:
+    # Lexical source-gate controls are distinct from the compiled runtime omission controls.
+    for name, expected in BLE_DEFERRED_PROGRAMS.items():
+        body = function_body_in(parts[expected["owner"]], name)
+        changed = {**parts, expected["owner"]: parts[expected["owner"]].replace(body, body[:-1] + " std::string forbidden; }", 1)}
+        require_mutation_rejected("deferred whole-program " + name,
+            lambda changed=changed: require_ble_deferred_program_contract(changed, queue))
+    require_mutation_rejected("deferred pure program append",
+        lambda: require_ble_deferred_program_contract(parts, queue + "\n// unreviewed source\n"))
 
 
 def require_concurrency_regression_contract(parts: dict[str, str]) -> None:
@@ -8115,7 +8673,7 @@ def require_concurrency_regression_contract(parts: dict[str, str]) -> None:
             raise AssertionError(f"{name} bypasses reviewed Vehicle RAII ownership")
 
     events = scrub_cpp_preserving_layout(function_body_in(parts["telemetry"], "process_ble_host_events_"))
-    prefix = (r"while\s*\(\s*xQueueReceive\(ble_event_queue_,\s*&event,\s*0\)\s*==\s*pdTRUE\s*\)\s*\{\s*"
+    prefix = (r"while\s*\(\s*pop_ble_host_event_\(event\)\s*\)\s*\{\s*"
               r"const\s+uint32_t\s+current_generation\s*=\s*ble_->lifecycle_generation\(\)\s*;\s*"
               r"if\s*\(\s*!tk::ble_deferred_event_may_apply\(event.kind,\s*event.generation,\s*current_generation\)\s*\)\s*\{\s*continue\s*;\s*\}")
     if not re.search(prefix, events):
@@ -8158,10 +8716,18 @@ def main() -> int:
     callbacks = callback_inventory(ALL_CODE)
     check_contract(tasks, callbacks)
     self_test_canaries(tasks, callbacks)
+    self_test_f135_programs(f135_program_parts())
+    self_test_f135_ping_targets(MAIN_CODE["ping_probe.hpp"], SOURCES["net.cpp"], SOURCES["syslog.cpp"])
+    self_test_f137_source_contract({"mqtt": SOURCES["mqtt_ha.cpp"], "net": SOURCES["net.cpp"],
+                                  "ble": SOURCES["ble_client.cpp"], "class": (MAIN / "ble_client.hpp").read_text(),
+                                  "wdt": (MAIN / "task_watchdog_subscription.hpp").read_text()})
     self_test_long_uptime_clocks()
     concurrency_parts = {"common": SOURCES["http_common.cpp"], "ctrl": SOURCES["vehicle_ctrl.cpp"],
                          "commands": SOURCES["vehicle_commands.cpp"], "telemetry": SOURCES["vehicle_telemetry.cpp"],
                          "header": (MAIN / "vehicle_ctrl.hpp").read_text()}
+    deferred_queue_source = (MAIN / "logic/ble_deferred_queue.hpp").read_text(encoding="utf-8")
+    require_ble_deferred_program_contract(concurrency_parts, deferred_queue_source)
+    self_test_ble_deferred_program_contract(concurrency_parts, deferred_queue_source)
     require_concurrency_regression_contract(concurrency_parts)
     self_test_concurrency_regression_contract(concurrency_parts)
     require_ota_download_chain(SOURCES["ota_update.cpp"])

@@ -31,14 +31,19 @@
 
 namespace tk {
 
-// Sample both heap figures into the current bucket. Called from loop_task, which already samples
+// Create the optional trend mutex during serialized startup, before the supervisor or readers.
+// Failure disables the diagnostic; it must not disable the critical heap decision.
+bool heap_trend_prepare() noexcept;
+
+// Sample both heap figures into the current bucket. Called from the heap supervisor, which samples
 // the same two numbers for the heap watchdog — so the trend costs no extra heap_caps call on the
 // hot path and, more importantly, cannot disagree with what the watchdog saw.
 //   monotonic_s   — seconds since boot (the ring's clock; deliberately NOT the wall clock, which
 //                   jumps when SNTP lands mid-boot and would fold two buckets into one).
 //   free_bytes    — total free, MALLOC_CAP_8BIT|MALLOC_CAP_INTERNAL
 //   largest_bytes — largest contiguous free block, same caps (the number the watchdog gates on)
-void heap_trend_record(uint32_t monotonic_s, uint32_t free_bytes, uint32_t largest_bytes);
+// Zero-wait acquisition: a contended diagnostic sample is dropped instead of blocking recovery.
+bool heap_trend_record(uint32_t monotonic_s, uint32_t free_bytes, uint32_t largest_bytes);
 
 // Copy the two series out, oldest sample first, into CALLER-OWNED buffers — no allocation happens
 // under the lock, which is the rule that keeps an OOM here from stranding the mutex and wedging

@@ -10,6 +10,7 @@ Start with [installation, pairing and evcc](../README.md).
 | Build firmware or change the project | [Development](DEVELOPMENT.md) |
 | Run or extend host tests | [Test guide](../test/README.md) |
 | Understand data flow, state, task ownership and recovery | [Architecture](ARCHITECTURE.md) |
+| Assess pre-HTTP USB-only recovery and the default-off cfg-only maintenance role | [Configuration recovery](CONFIG_RECOVERY.md) |
 | Assess exposure, keys, signing or publication | [Security](SECURITY.md) |
 | Find a mechanism and its implementation | [Feature catalog](FEATURES.md) |
 | Understand a design decision or protocol departure | [ADRs](adr/) |

@@ -13,6 +13,7 @@ import argparse
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -481,13 +482,13 @@ def self_test() -> None:
         finally:
             os.chdir(original_cwd)
 
+    self_test_document_reader()
     print(
         "OTA changelog generator: normalization, build, provenance, and byte-budget checks passed"
     )
 
 
-def validate_document(path: Path, version: str) -> None:
-    raw = path.read_bytes()
+def validate_document_bytes(raw: bytes, version: str) -> None:
     if len(raw) > MAX_DOCUMENT_BYTES:
         raise ChangelogError("document exceeds firmware fetch budget")
     try:
@@ -505,6 +506,73 @@ def validate_document(path: Path, version: str) -> None:
         entries = parse_dev_history(text)
         if not entries or entries[-1][0] != version:
             raise ChangelogError("development history does not end at the built firmware")
+
+
+def read_validated_document(path: Path, version: str) -> bytes:
+    """Snapshot one bounded regular local input without following a final symlink."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode) or not 0 <= before.st_size <= MAX_DOCUMENT_BYTES:
+            raise ChangelogError("document must be a bounded regular file")
+        raw = os.read(fd, MAX_DOCUMENT_BYTES + 1)
+        after = os.fstat(fd)
+        identity = lambda item: (item.st_dev, item.st_ino, item.st_size, item.st_mtime_ns)
+        if identity(before) != identity(after) or len(raw) != before.st_size:
+            raise ChangelogError("document changed while being read")
+    finally:
+        os.close(fd)
+    validate_document_bytes(raw, version)
+    return raw
+
+
+def validate_document(path: Path, version: str) -> None:
+    read_validated_document(path, version)
+
+
+def self_test_document_reader() -> None:
+    from unittest.mock import patch
+
+    version = "1.2.3"
+    raw = json.dumps({"version": version, "changelog": "One bounded change."}).encode() + b"\n"
+    with tempfile.TemporaryDirectory(prefix="changelog-reader-") as temporary:
+        root = Path(temporary)
+        path = root / "changelog.json"
+        path.write_bytes(raw)
+        assert read_validated_document(path, version) == raw
+        for body in (b"{", b"[]", b"x" * (MAX_DOCUMENT_BYTES + 1),
+                     json.dumps({"version": "1.2.4", "changelog": "Wrong version."}).encode()):
+            path.write_bytes(body)
+            try:
+                read_validated_document(path, version)
+            except ChangelogError:
+                pass
+            else:
+                raise AssertionError("invalid local changelog was admitted")
+        path.write_bytes(raw)
+        link = root / "symlink.json"
+        link.symlink_to(path)
+        for foreign in (link, root):
+            try:
+                read_validated_document(foreign, version)
+            except (OSError, ChangelogError):
+                pass
+            else:
+                raise AssertionError("nonregular or symlink changelog was admitted")
+        actual_read = os.read
+        def read_then_change(fd: int, maximum: int) -> bytes:
+            data = actual_read(fd, maximum)
+            path.write_bytes(b"changed while read")
+            return data
+        with patch.object(os, "read", read_then_change):
+            try:
+                read_validated_document(path, version)
+            except ChangelogError as error:
+                assert str(error) == "document changed while being read"
+            else:
+                raise AssertionError("changing local changelog was admitted")
+        path.write_bytes(raw)
+        assert read_validated_document(path, version) == raw
 
 
 def main() -> int:

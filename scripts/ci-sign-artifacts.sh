@@ -115,20 +115,22 @@ for target in $TARGETS; do
 done
 # EXACT_FOUR_TARGETS_END preflight
 
+# Refuse every old output before crossing the key boundary. Do not remove caller-owned files.
+python3 scripts/check-signed-root-inventory.py --require-empty .
+for output_dir in _fw _signed; do
+  [[ ! -e "$output_dir" && ! -L "$output_dir" ]] || {
+    echo "ERROR: signer output already exists: $output_dir" >&2
+    exit 1
+  }
+done
+
 signing_key="${OTA_SIGNING_KEY_FILE:-$repo_root/ota_signing_key.pem}"
 [[ -f "$signing_key" && ! -L "$signing_key" ]] || {
   echo "ERROR: signing key missing or not a regular file: $signing_key" >&2
   exit 1
 }
 
-rm -rf _fw _signed
-mkdir -p _fw _signed
-# Exact release output names only; never broaden this cleanup to arbitrary user files.
-rm -f tesla-key-esp32.bin tesla-key-esp32-s3.bin tesla-key-esp32-c3.bin tesla-key-esp32-c6.bin
-for suffix in "" -s3 -c3 -c6; do
-  rm -f "tesla-key-esp32${suffix}-${version}.bin" \
-    "tesla-key-esp32${suffix}-${version}-merged.bin"
-done
+mkdir _fw _signed
 
 # EXACT_FOUR_TARGETS_BEGIN sign
 for target in $TARGETS; do

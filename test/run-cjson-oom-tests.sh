@@ -122,7 +122,39 @@ fi
 # Compile the real effect-aware handler/outer-catch source through passive host adapters.
 python3 "$repo_root/test/generate_effect_reply_adapters.py" "$work/effect_reply_adapters.generated.hpp"
 "$cxx" -std=c++17 -Wall -Wextra -Werror ${sanitize_flags[@]+"${sanitize_flags[@]}"} \
-    -I"$repo_root/main" -I"$cjson_dir" -I"$work" \
-    "$repo_root/test/test_effect_reply_adapters.cpp" "$work/cJSON.o" -lm \
+    -I"$repo_root/test/stubs" -I"$repo_root/main" -I"$cjson_dir" -I"$work" \
+    "$repo_root/test/test_effect_reply_adapters.cpp" "$repo_root/main/stack_watch.cpp" "$work/cJSON.o" -lm \
     -o "$work/test_effect_reply_adapters"
 "$work/test_effect_reply_adapters"
+
+# Complete application/lease/status plus actual transport/parser/coordinator/raw-writer TUs.
+python3 "$repo_root/test/generate_ota_tls_adapter.py" "$work/ota_tls_adapter.generated.hpp"
+python3 - "$repo_root" <<'PYVERIFY'
+import hashlib,json,pathlib,sys,os
+r=pathlib.Path(sys.argv[1]);p=r/'test/ota_http_parser'
+for row in json.loads((p/'provenance.json').read_text())['files']:
+ body=(p/row['path']).read_bytes()
+ if len(body)!=row['bytes'] or hashlib.sha256(body).hexdigest()!=row['sha256']:
+  raise SystemExit('native HTTP parser fixture differs from pinned SDK body')
+ if os.environ.get('IDF_PATH'):
+  actual=pathlib.Path(os.environ['IDF_PATH'])/row['sdkPath']
+  if actual.read_bytes()!=body:raise SystemExit('native parser differs from actual pinned IDF component')
+PYVERIFY
+"$cc" -std=c11 -Wall -Wextra -Werror ${sanitize_flags[@]+"${sanitize_flags[@]}"} \
+    -I"$repo_root/test/ota_http_parser" -c "$repo_root/test/ota_http_parser/http_parser.c" -o "$work/http_parser.o"
+"$cxx" -std=c++17 -Wall -Wextra -Werror -pthread -DF145_HOST_TEST_HOOKS=1 ${sanitize_flags[@]+"${sanitize_flags[@]}"} \
+    -I"$repo_root/test/ota_stubs" -I"$repo_root/test/ota_http_parser" \
+    -I"$repo_root/main" -I"$cjson_dir" -I"$work" \
+    "$repo_root/test/test_ota_tls_admission.cpp" "$repo_root/main/ota_transport.cpp" \
+    "$repo_root/main/ota_http.cpp" "$repo_root/main/ota_coordinator.cpp" \
+    "$repo_root/main/ota_writer.cpp" "$repo_root/main/stack_watch.cpp" \
+    "$work/cJSON.o" "$work/http_parser.o" -lm -o "$work/test_ota_tls_admission"
+"$work/test_ota_tls_admission" normal
+"$work/test_ota_tls_admission" budget
+"$work/test_ota_tls_admission" cleanup-cas
+# These disposable process-terminal fixtures assert retained authority before _Exit. They
+# intentionally do not claim post-effect task lifetime/LSan reclamation evidence.
+"$work/test_ota_tls_admission" commit
+"$work/test_ota_tls_admission" uncertain
+# Failed destroy deliberately retains the allocated quarantine; no LSan reclamation claim.
+"$work/test_ota_tls_admission" cleanup-failed
