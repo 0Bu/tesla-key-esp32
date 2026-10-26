@@ -176,4 +176,3 @@ class Role(unittest.TestCase):
         self.assertEqual(S.validate(ROOT,target,observed,baseline,'config-repair'),len(units)) # effective restore
 
 if __name__=='__main__':unittest.main()
-
