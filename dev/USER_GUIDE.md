@@ -137,12 +137,15 @@ The web page labels a failed or timed-out device connection and retains the last
 A successful status refresh clears the notice. Vehicle actions use the named button inside the gauge;
 tapping the surrounding status card does not send a command.
 
-If the hero reports **Pairing paused**, normal automatic enrolment is blocked by a local storage or
-identity recovery condition. Storage checks and saved-key cleanup retry automatically. An ambiguous
-key commit or runtime/key mismatch requires a restart to reload the saved identity; inspect diagnostics
-if it returns. Do not regenerate the key as a recovery step. **Device recovery required** means a fatal
-runtime failure stopped vehicle services for this process. HTTP diagnostics are available only when
-HTTP startup succeeded; early boot failures can require serial diagnostics.
+If the hero reports **Pairing paused**, a local storage or identity recovery condition blocks
+normal automatic enrolment. The recovery notice describes it; storage checks and saved-key cleanup
+retry automatically. An ambiguous automatic first-key commit can request one guarded restart to
+reload the saved identity. Other mismatches remain paused; inspect diagnostics if the notice remains.
+Do not regenerate the key as a recovery step. Normal pairing has no extra key-send notice or button.
+**Device recovery required** names the first fatal component category and means vehicle services
+stopped for this process. HTTP diagnostics exist only when HTTP startup succeeded; early boot
+failures can require serial diagnostics. Keep the device powered and retain diagnostic evidence
+before following a recovery procedure.
 
 ## Troubleshooting
 

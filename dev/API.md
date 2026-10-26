@@ -82,9 +82,12 @@ dispatch; the same rule applies to vehicle-data routes.
   waiting within the same deadline without resending; if no confirmation arrives, its original
   uncertain reason is retained. Successful local transmission alone reports an uncertain
   confirmation timeout when the deadline expires and does not prove BLE reachability.
-  The default firmware budget is 20 s. In evcc's [stock template](https://github.com/evcc-io/evcc/blob/79b4a8b415859383c28c33e422c21cedbee79566/templates/definition/vehicle/tesla-ble.yaml),
-  `timeout` applies only to reads; setters retain the [10 s client default](https://github.com/evcc-io/evcc/blob/79b4a8b415859383c28c33e422c21cedbee79566/util/request/helper.go#L16)
-  and can time out before wake confirmation.
+  The default firmware budget is 20 s. In evcc's [stock template](https://github.com/evcc-io/evcc/blob/bf5c276cdb395443fda4601b99151c0a962d0db4/templates/definition/vehicle/tesla-ble.yaml),
+  `timeout` applies only to reads; setters retain the [10 s client default](https://github.com/evcc-io/evcc/blob/bf5c276cdb395443fda4601b99151c0a962d0db4/util/request/helper.go#L16)
+  and can time out before wake confirmation. The [custom vehicle example](examples/evcc-custom-vehicle.yaml)
+  sets each HTTP plugin's timeout to 30 s, including charge enable, current and wake setters.
+  Waiting at the [single HTTP worker](ARCHITECTURE.md#http-request-serialization) can still
+  exceed this timeout. Check state before repeating an uncertain action, as described above.
 
 > A **Charging-Manager** key may only run charging actions + wake. The car therefore **rejects**
 > `door_lock`/`door_unlock`, `flash_lights`/`honk_horn`, `set_sentry_mode` and
@@ -184,7 +187,14 @@ Changed MQTT/Syslog saves reserve the restart owner before writing; an occupied 
 without saving. A successful save returns `firmware_verification`: `already_valid`,
 `not_in_probation`, `confirmed`, or an explicit unconfirmed/uncertain code. `result:true` acknowledges
 saved configuration, not firmware confirmation. The reason explains refused readiness, BLE host or
-heap checks and uncertain SDK marking; the automatic restart still follows. Unchanged service
+heap checks and uncertain SDK marking; the automatic restart still follows. Confirmation and
+OTA entry share one configured INTERNAL-largest threshold, sampled freshly under their actual
+owners. Their allocator phases can differ; the confirmation query does not reclaim retained Operation
+or RTOS memory. See the [recovery reference contract](ARCHITECTURE.md#ota-self-update) for the selected
+threshold and measured scope. TLS checks use the separate record-capacity screen rather than reserving
+a handshake budget. The legacy `critical_heap`
+confirmation code now means insufficient OTA recovery headroom, independently of the unchanged 4,096 B
+sustained-critical restart policy. Cleanup-unknown resources leave a known Pending image unconfirmed. Unchanged service
 acknowledgements omit the field. Setup `/save` never confirms a candidate and displays any known
 unconfirmed/uncertain outcome; `provision.py` preserves that warning.
 
@@ -195,10 +205,17 @@ All of `/set_time`, `/set_mqtt`, `/set_syslog`, `/set_wifi` and `/set_ota` retur
 cannot be verified, and `500` when rotation is incomplete. Not-committed or ambiguous commits
 trigger a recovery reboot; a committed key with pending cleanup uses the supervisor retry path.
 `/ota/check` and `/ota/update` return `409` while another device operation owns their shared gate,
-`503` when the service is unavailable and `500` when worker startup fails. `/ota/update` also
+`503` when the service is unavailable or ordinary-entry recovery memory is insufficient, and `500`
+when worker startup fails. A memory refusal uses `not enough memory for update` in both async replies
+and the blocking check result, creates no Operation/task and withdraws a stale update offer. `/ota/update` also
 returns `409` while the running image is NEW/PENDING_VERIFY, or `503` if its state cannot be
 verified. These refusals create no OTA worker. A manifest check remains available during probation.
 The web UI preserves the device's refusal reason; a failed start does not trigger polling or retry.
+A retired timed-out writer can become idle after its raw handle is quiescent while its one network
+context remains quarantined; a new check/update still returns `409` until real cleanup Ack allows
+reclamation. This does not add a status field. A deadline, memory failure or terminal network-cleanup
+failure withdraws the update offer. Optional release-note failure is best-effort only after clean
+connection closure; details and blocking-SDK limits belong to [Architecture](ARCHITECTURE.md#ota-self-update).
 
 New MQTT and Syslog submissions accept at most 64 UTF-8 bytes; an unchanged stored value remains
 a no-write acknowledgement. Existing targets up to 120 bytes survive unrelated saves. When either
@@ -228,7 +245,7 @@ the uncertainty contract below.
 | `vehicle_data` | Wrapped `response`; `200` when all selected caches are usable; unusable required caches return `503`/`result:false`. Invalid URI/query/selectors retain `400`, VIN mismatch `404`. |
 | `body_controller_state` | Wrapped `response`; a completed retrieval attempt returns `200`; inspect `response.result` for its outcome. |
 | Configuration | Wrapped `response` for time/VIN/MQTT/Syslog/WiFi. Key generation is flat `{result,reason}`. Channel success is flat `{ok,result,channel}`; channel errors are wrapped. Invalid intake is `400`/`413`, unavailable resources `503`, failed persistence `500`. |
-| OTA start | Flat `{started,reason?}` for a check and `{result,reason}` for an update; `200` on start; `409` for busy/probation, `503` for unavailable service or unknown image state, `500` for worker startup failure. |
+| OTA start | Flat `{started,reason?}` for a check and `{result,reason}` for an update; `200` on start; `409` for busy/probation, `503` for unavailable service, insufficient ordinary-entry recovery memory or unknown image state, `500` for worker startup failure. |
 | Pre-effect REST OOM fallback | Flat `{result:false,reason:"out of memory"}`, `503`, even for routes whose normal envelope is wrapped. |
 | Degraded mutation reply | HTTP `200` with explicit application outcome, as described below; this status alone does not establish success. |
 
@@ -348,10 +365,24 @@ gate refuses the request before any save.
 | `tele` | `{climate, drive, tires, closures}` read-only telemetry, emitted only while the BLE link is up. |
 | `last_reboot` | `"heap:<n>"` — only when the heap watchdog ended the previous boot (`n` = consecutive such restarts); absent on ordinary boots. |
 | `pairing_blocked` | Optional cached reason: `key_reload_required`, `key_runtime_mismatch`, `key_storage_unavailable`, `key_cleanup_pending` or `vin_transition_pending`. Absent during normal pairing. Reading it does not probe storage or change identity. |
-| `sys` | Always present: `{board_mac, free_heap, min_free_heap, largest_block, uptime_s, wifi_reconnects, reset_reason, safe_mode, runtime_state, diag_dropped_lines?, stack_min_free_bytes?:{httpd?,vehicle?,auto_pair?,mqtt?}}`. |
+| `identity_state` | Cached recovery condition: `ok`, `reboot_required`, `cleanup_pending`, `vin_transition`, `storage_unavailable` or `unknown`. `ok` means Ready with no known local recovery block; it does not prove a usable key, session or vehicle acceptance. |
+| `sys` | Always present: `{board_mac, free_heap, min_free_heap, largest_block, uptime_s, wifi_reconnects, reset_reason, safe_mode, runtime_state, fatal_component?, diag_dropped_lines?, stack_min_free_quantum_bytes, stack_min_free_bytes:{<context>:number|null}}`. |
 | `last_crash` | Reset/report facts plus `artifact_present`, `raw_available`, `query_error`, `foreign_dump`, `checksum_verified`, `dump_identity` (`current`/`foreign`/`unverified`), and `summary_available`. A summary emits numeric `pc` (including zero), optional `task`/hex-string `backtrace`, and `corrupted`/`truncated`/`isr`; `elf_sha256` and `dump_elf_sha256` distinguish running and dump builds. Present for undismissed faults, artifacts or query errors. |
 
-`sys.runtime_state` is `booting`, `ready`, `safe_mode` or `fatal`. Fatal services remain stopped for this process; a status endpoint exists only if HTTP startup succeeded.
+`sys.stack_min_free_quantum_bytes` is 256. `sys.stack_min_free_bytes` always contains the 27
+[registered contexts](../main/logic/stack_context.hpp). A never-sampled context is `null`; a number
+is a conservative historical lower bound in bytes, rounded down to a multiple of 256. Thus 0
+means a real observation in 0–255 bytes, not an unsampled context or proof of an overflow.
+15872 is the saturated lower bound for observations at or above that value. The original
+`httpd`, `vehicle`, `auto_pair` and `mqtt` names remain; their formerly optional fields now use
+explicit nulls. Callback names identify entry contexts: several contexts may share a task,
+and one context may aggregate several caller tasks. MQTT event/probe dispatch and the logger
+are such aggregates; they do not establish a minimum for one dedicated SDK task. A snapshot is six
+independent atomic observations, not a globally simultaneous measurement. These diagnostics
+do not admit commands, maintenance or recovery. The supervisor's separate exact minimum
+retains its existing semantics.
+
+`sys.runtime_state` is `booting`, `ready`, `safe_mode` or `fatal`. Fatal services remain stopped for this process; a status endpoint exists only if HTTP startup succeeded. `sys.fatal_component` appears only for Fatal and names the first bounded component category (`clock`, `nvs`, `configuration`, `identity`, `bluetooth`, `http`, `network`, `vehicle`, `ota`, `heap_supervisor`, `application` or `unknown`). State and category come from one atomic cached snapshot; these fields do not probe storage/OTA metadata, restart, send a key or contact the vehicle.
 
 `sys.diag_dropped_lines` counts capture attempts lost to an unavailable or busy diagnostic ring;
 `syslog.dropped_lines` counts full-queue losses. Both are boot-local unsigned counters modulo 2^32,
@@ -360,8 +391,9 @@ omitted at zero. Clearing the ring does not reset the loss counter. Neither prov
 `ble.rssi` appears only when a live-link RSSI sample is available.
 `ble.phase` and `phase_s` appear together: `connecting` counts down to giving up, `waiting` to a
 retry, and zero means now. Heap fields are INTERNAL-only; PSRAM cannot mask them. The watchdog
-acts on `sys.largest_block`. Per-task stack values are boot minima, omitted until sampled; a
-measured zero remains visible. `sys.board_mac` is the physical eFuse identity.
+acts on `sys.largest_block`. All stack contexts use the nullable conservative boot minima and
+256-byte quantum described above; measured zero remains visible. `sys.board_mac` is the physical
+eFuse identity.
 
 Crash `backtrace`/`corrupted` exist only on Xtensa (esp32/s3). RISC-V (c3/c6) has no on-device
 backtrace; downloaded dumps unwind offline on every target.
@@ -399,12 +431,16 @@ tesla-key/<node>/closures    {locked,door,frunk,trunk,window,user}
 tesla-key/<node>/vehicle     {sleep_status: AWAKE | ASLEEP | IDLE | UNREACHABLE}
 tesla-key/<node>/device      {wifi_rssi?,ble_rssi?,ble_connected,paired,session_available,boot_time?,free_heap,
                               version,largest_block,min_free_heap,reset_reason,
-                              reset_reason_code,crash_dump,safe_mode,wifi_reconnects,
-                              mqtt_reconnects,httpd_stack_min_free_bytes?,
-                              vehicle_stack_min_free_bytes?,auto_pair_stack_min_free_bytes?,
-                              mqtt_stack_min_free_bytes?}
+                              reset_reason_code,crash_dump,safe_mode,runtime_state,fatal_component?,identity_state,
+                              wifi_reconnects,
+                              mqtt_reconnects,stack_min_free_quantum_bytes,
+                              <context>_stack_min_free_bytes}
 homeassistant/<sensor|binary_sensor>/<node>/<object>/config   (discovery, retained)
 ```
+
+The device topic uses the same context registry, nulls, quantum and saturated lower-bound
+semantics as `sys.stack_min_free_bytes`, flattened as `<context>_stack_min_free_bytes`.
+The original four flattened field names remain.
 
 The compatibility field `wifi_reconnects` counts network re-establishments after an outage, including
 Ethernet; live WiFi/Ethernet handovers do not increment it. Its discovery label is **Network reconnects**;
@@ -415,7 +451,7 @@ unseen value shows as *unknown* in HA, not a phantom `0`; range, rate and odomet
 metric (km, km/h). While a parked car sleeps the source polls pause and MQTT keeps serving the
 last-known retained values until the next active window.
 The device payload's `paired` and `session_available` retain their status-field meanings above;
-the broker connection's `availability` topic is independent of either session fact.
+the broker connection's `availability` topic is independent of either session fact. Its recovery fields use the same cached state names as `/status`; `fatal_component` is absent outside Fatal. They describe device recovery, not fresh vehicle authentication. They add no command topic or discovery entity.
 
 
 Configure brokers in the [user guide](USER_GUIDE.md#home-assistant-mqtt). Runtime ownership and publish failure behavior are in [Architecture](ARCHITECTURE.md#home-assistant-mqtt-bridge).
