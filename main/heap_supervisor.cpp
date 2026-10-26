@@ -1,8 +1,10 @@
+#include "stack_watch.hpp"
 #include "heap_supervisor.hpp"
 
 #include "ble_client.hpp"
 #include "heap_trend.hpp"
 #include "logic/heap_supervision.hpp"
+#include "logic/ota_lifetime.hpp"
 #include "logic/uptime.hpp"
 #include "net.hpp"
 #include "ota_update.hpp"
@@ -32,6 +34,7 @@ struct SupervisorState {
     NvsStorageAdapter* cfg{nullptr};
     HeapRecoveryBudget budget{HeapRecoveryBudget::seed(0, false)};
     HeapWatchdog watchdog;
+    ota::CriticalEpisode writer_grace;
     RecoveryHealthyRun healthy_run;
     RecoveryWriteCadence clear_write;
     RecoveryWriteCadence restart_write;
@@ -76,6 +79,8 @@ void report_degraded(SupervisorState& s, uint64_t now_ms, const char* reason,
 }
 
 [[noreturn]] void park_recovery() {
+    tk::stack_watch_sample(tk::StackWatch::HeapSupervisor); // before nonreturning park
+
     // Returning from restart or throwing after a confirmed effect grants no second attempt and
     // must not release the retained owner to an OTA/configuration operation.
     for (;;) vTaskDelay(pdMS_TO_TICKS(10000));
@@ -84,9 +89,8 @@ void report_degraded(SupervisorState& s, uint64_t now_ms, const char* reason,
 void maintain_healthy_run(SupervisorState& s, uint64_t now_ms) {
     const bool qualified = s.healthy_run.sample(now_ms, healthy_now(now_ms));
     if (!qualified) return;
-    // The effective heap allowance is RAM-only. Boot evidence, /status and the already-closed
-    // vehicle activity window are never changed or reopened by this maintenance.
-    (void)s.budget.decay_after_healthy_run(true);
+    // The common ledger owns all credit. Do not refill even the diagnostic streak before a
+    // confirmed durable clear. Immutable boot evidence and activity admission never reopen.
     if (!safe_mode_healthy_clear_pending() || !s.clear_write.due(now_ms)) return;
 
     OtaHealthCommitGuard owner;
@@ -100,8 +104,11 @@ void maintain_healthy_run(SupervisorState& s, uint64_t now_ms) {
     const bool still_qualified = s.healthy_run.sample(fresh_ms, healthy_now(fresh_ms));
     if (!still_qualified) return;
     s.clear_write.attempt(fresh_ms);
-    if (!safe_mode_clear_after_healthy_run(*s.cfg, owner, true))
+    if (!safe_mode_clear_after_healthy_run(*s.cfg, owner, true)) {
         report_degraded(s, fresh_ms, "healthy counter commit unconfirmed");
+        return;
+    }
+    (void)s.budget.decay_after_healthy_run(true);
 }
 
 void attempt_heap_restart(SupervisorState& s, uint64_t now_ms, const HeapVerdict& verdict) {
@@ -121,11 +128,11 @@ void attempt_heap_restart(SupervisorState& s, uint64_t now_ms, const HeapVerdict
     if (largest >= kHeapCriticalBytes || ota_is_busy()) return;
     const uint64_t fresh_ms = monotonic_ms();
     s.restart_write.attempt(fresh_ms);
-    // Safe Mode must remain latched across this SW reboot. A raw Stable query and a confirmed
-    // BootGuard >= threshold commit precede the final reason, even if an earlier ambiguous write
-    // happens to be visible on the same NVS handle. Pending/unknown never bypass this barrier.
-    if (!safe_mode_prepare_heap_restart(*s.cfg, owner)) {
-        report_degraded(s, fresh_ms, "safe-mode preservation unconfirmed");
+    // Reserve from the one durable ledger in every runtime mode. Stable, current ownership
+    // and a confirmed shared charge precede the separate consecutive-heap breadcrumb.
+    const auto reservation = safe_mode_prepare_heap_restart(*s.cfg, owner);
+    if (!reservation) {
+        report_degraded(s, fresh_ms, "shared restart reservation unconfirmed or exhausted");
         return;
     }
     const uint8_t next = static_cast<uint8_t>(s.budget.effective + 1);
@@ -141,14 +148,15 @@ void attempt_heap_restart(SupervisorState& s, uint64_t now_ms, const HeapVerdict
     s.shutdown_committed = true;
     try {
         ESP_LOGE(TAG, "HEAP EXHAUSTED for %u s (internal largest %u B < %u B) — "
-                      "RESTARTING (restart %u/%u, reboot_why=heap:%u)",
+                      "RESTARTING (heap streak %u, shared budget %u/%u, reboot_why=heap:%u)",
                  static_cast<unsigned>(verdict.critical_ms / 1000),
                  static_cast<unsigned>(largest), static_cast<unsigned>(kHeapCriticalBytes),
-                 static_cast<unsigned>(next), static_cast<unsigned>(kHeapMaxConsecutiveRestarts),
-                 static_cast<unsigned>(next));
+                 static_cast<unsigned>(next), static_cast<unsigned>(reservation.count),
+                 static_cast<unsigned>(kUnhealthyRestartLimit), static_cast<unsigned>(next));
     } catch (...) {}
     static_assert(!ota_reboot_confirms_pending_image(OtaRebootClass::AutomaticFaultRecovery));
     vTaskDelay(pdMS_TO_TICKS(300));
+    tk::stack_watch_sample(tk::StackWatch::HeapSupervisor); // before terminal effect
     esp_restart();
     park_recovery();
 }
@@ -163,7 +171,20 @@ void supervisor_iteration(SupervisorState& s) {
 
     // Critical evaluation precedes optional trend locking and logging. This sole writer keeps
     // sampling during Booting, portal, Safe Mode, Fatal and a dead/stalled Vehicle task.
-    if (verdict.action == HeapAction::Restart) attempt_heap_restart(s, now_ms, verdict);
+    const bool writer_busy = ota_is_busy();
+    const bool excused = s.writer_grace.excused(now_ms, largest, writer_busy,
+                                               ota::kCriticalWriterGraceMs);
+    if (verdict.action == HeapAction::Restart) {
+        if (writer_busy) {
+            if (!excused) ota_request_heap_abort();
+            report_degraded(s, now_ms, excused ? "OTA writer grace active" :
+                                              "awaiting OTA writer abort acknowledgement");
+        } else {
+            // ota_is_busy becomes false only after the actual writer is quiescent and its
+            // owner was released. A network-only quarantine cannot postpone safe recovery.
+            attempt_heap_restart(s, now_ms, verdict);
+        }
+    }
     maintain_healthy_run(s, now_ms);
 
     try {
@@ -195,9 +216,13 @@ void supervisor_iteration(SupervisorState& s) {
 }
 
 void heap_supervisor_task(void* arg) {
+    tk::stack_watch_sample(tk::StackWatch::HeapSupervisor); // current task at entry
+    tk::StackWatchScope f135_task_exit(tk::StackWatch::HeapSupervisor);
+
   try {
     SupervisorState s(*static_cast<const SupervisorStartup*>(arg));
     for (;;) {
+        tk::StackWatchScope f135_iteration_exit(tk::StackWatch::HeapSupervisor);
         try {
             supervisor_iteration(s);
         } catch (...) {

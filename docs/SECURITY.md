@@ -48,7 +48,7 @@ over 15 bytes.
 
 | Namespace / logical key (stored key where different) | Owner | Retention |
 |---|---|---|
-| `tesla_cfg/cfg` | HTTP/provisioning atomic config | durable across OTA |
+| `tesla_cfg/cfg` | HTTP/provisioning atomic config; separately gated default-off physical cfg repair | durable across OTA |
 | `tesla_cfg/wifi_ssid`, `wifi_pass`, `vin`, `mqtt_uri`, `syslog_uri` | legacy config mirror | downgrade compatibility |
 | `tesla_cfg/last_time` | clock | replaceable cache |
 | `tesla_cfg/vin_txn` | VIN transition | recovery journal |
@@ -307,3 +307,13 @@ The pinned Context7 package avoids floating updates but is neither an npm integr
 sandbox. First use executes downloaded code; service inputs leave the local boundary. Never send
 keys, credentials, dumps, unredacted captures or CI secrets; disable locally if policy forbids it.
 Firmware builds and CI do not depend on Context7.
+
+## Configuration-only physical maintenance
+
+The default-off [maintenance role](CONFIG_RECOVERY.md) can replace only the recognized corrupt
+`tesla_cfg/cfg` blob after independent full board/key/VIN authority, absent identity journals and
+internal non-cfg logical retention checks. It does not erase NVS, force legacy fallback or rotate
+identity. One uncertain set/commit parks without retry. Its separate non-OTA app/project/manifest
+requires independent source and signed-artifact admission; the ordinary protected publication and
+16-part channel paths do not publish maintenance artifacts. This source integration is unqualified
+until the owner document's build, signer and physical evidence are independently accepted.

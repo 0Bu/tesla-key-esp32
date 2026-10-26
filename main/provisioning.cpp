@@ -1,3 +1,4 @@
+#include "stack_watch.hpp"
 #include "provisioning.hpp"
 #include "ota_update.hpp"      // request-owned setup save/restart lease
 #include "logic/http_body.hpp" // http_body_read() — reassemble a multi-segment POST body
@@ -109,6 +110,8 @@ static bool form_field(std::string_view body, std::string_view key, std::string&
 // ─── HTTP handlers ────────────────────────────────────────────────────────────
 
 static esp_err_t form_get(httpd_req_t* req) {
+    tk::StackWatchScope f135_callback_exit(tk::StackWatch::CaptiveHttp);
+
   try {
     // The portal only auto-pops if the joining OS's connectivity probe gets the answer THAT OS
     // keys on — iOS asks for captive.apple.com/hotspot-detect.html, Android for /generate_204,
@@ -194,6 +197,7 @@ static void portal_save_continue(PortalSaveContext& context) noexcept {
         !context.restart.owns_gate()) return;
     try {
         vTaskDelay(pdMS_TO_TICKS(1000));
+        tk::stack_watch_sample(tk::StackWatch::CaptiveHttp); // before terminal effect
         esp_restart();
     } catch (...) { /* never retry or unwind into the httpd C callback */ }
 }
@@ -317,6 +321,8 @@ static esp_err_t save_post_impl(httpd_req_t* req, PortalSaveContext& context) {
 }
 
 static esp_err_t save_post(httpd_req_t* req) {
+    tk::StackWatchScope f135_callback_exit(tk::StackWatch::CaptiveHttp);
+
     PortalSaveContext context{};
     esp_err_t result = ESP_FAIL;
     try {
@@ -341,10 +347,14 @@ static std::atomic<bool> s_dns_stop{false};
 static std::atomic<bool> s_dns_running{false};
 
 static void dns_task(void*) {
+    tk::stack_watch_sample(tk::StackWatch::CaptiveDns); // current task at entry
+    tk::StackWatchScope f135_task_exit(tk::StackWatch::CaptiveDns);
+
     int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (sock < 0) {
         ESP_LOGW(TAG, "DNS socket failed");
         s_dns_running.store(false);
+        tk::stack_watch_sample(tk::StackWatch::CaptiveDns); // no C++ unwind on delete
         vTaskDelete(nullptr);
         return;
     }
@@ -357,6 +367,7 @@ static void dns_task(void*) {
         ESP_LOGW(TAG, "DNS bind failed");
         close(sock);
         s_dns_running.store(false);
+        tk::stack_watch_sample(tk::StackWatch::CaptiveDns); // no C++ unwind on delete
         vTaskDelete(nullptr);
         return;
     }
@@ -368,6 +379,7 @@ static void dns_task(void*) {
         ESP_LOGW(TAG, "DNS receive timeout not set — captive DNS off");
         close(sock);
         s_dns_running.store(false);
+        tk::stack_watch_sample(tk::StackWatch::CaptiveDns); // no C++ unwind on delete
         vTaskDelete(nullptr);
         return;
     }
@@ -377,6 +389,7 @@ static void dns_task(void*) {
     uint8_t buf[512];
     uint8_t reply[tk::kCaptiveDnsReplyMax];
     while (!s_dns_stop.load()) {
+        tk::StackWatchScope f135_iteration_exit(tk::StackWatch::CaptiveDns);
         sockaddr_in src{};
         socklen_t srclen = sizeof(src);
         const int n = recvfrom(sock, buf, sizeof(buf), 0, (sockaddr*)&src, &srclen);
@@ -390,6 +403,7 @@ static void dns_task(void*) {
     }
     close(sock);
     s_dns_running.store(false);
+    tk::stack_watch_sample(tk::StackWatch::CaptiveDns); // no C++ unwind on delete
     vTaskDelete(nullptr);
 }
 
@@ -550,7 +564,10 @@ static uint32_t portal_ap_clients() {
 void provisioning_run(NvsStorageAdapter& config_store) {
     portal_open(config_store, /*keep_station=*/false);
     // Never returns — the device stays in setup mode until the form reboots it.
-    while (true) vTaskDelay(pdMS_TO_TICKS(1000));
+    while (true) {
+        tk::StackWatchScope f135_portal_wait_exit(tk::StackWatch::Main);
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
 }
 
 void provisioning_run_with_retry(NvsStorageAdapter& config_store) {
@@ -570,6 +587,7 @@ void provisioning_run_with_retry(NvsStorageAdapter& config_store) {
     bool ap_open = true;
     const int64_t opened_us = esp_timer_get_time();
     for (;;) {
+        tk::StackWatchScope f135_portal_retry_exit(tk::StackWatch::Main);
         vTaskDelay(pdMS_TO_TICKS(1000));
         const uint32_t now_s = static_cast<uint32_t>((esp_timer_get_time() - opened_us) / 1000000);
         const uint32_t clients = ap_open ? portal_ap_clients() : 0;

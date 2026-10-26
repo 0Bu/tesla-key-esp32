@@ -1,0 +1,65 @@
+{
+  "scope": "UNQUALIFIED_RUNTIME_NEGATIVE_PLANS_ONLY_NOT_EXECUTED_BY_POSITIVE_DRIVER",
+  "reason": "Each future recipe needs successful generation/compile, a causally reviewed exact first native/Node oracle, owned quiescence, retained artifacts and restored positive. Generic nonzero is never credit.",
+  "inheritedPlans": [
+    {
+      "label": "stable raw image admission",
+      "path": "main/vehicle_pairing.cpp",
+      "old": "admission.stable = image == tk::ConfigImageResult::Valid ||\n                               image == tk::ConfigImageResult::Undefined;",
+      "new": "admission.stable = (void(image), true);"
+    },
+    {
+      "label": "durable journal requirement",
+      "path": "main/logic/identity_recovery.hpp",
+      "old": "in.journal_present;",
+      "new": "true;"
+    },
+    {
+      "label": "once-only reservation",
+      "path": "main/logic/identity_recovery.hpp",
+      "old": "if (reserved_ || !identity_reload_allowed(in)) return false;",
+      "new": "if (!identity_reload_allowed(in)) return false;"
+    },
+    {
+      "label": "sealed restart ownership",
+      "path": "main/vehicle_pairing.cpp",
+      "old": "owner.seal(); // retain admission through returning/throwing restart; never confirm an image",
+      "new": "// omitted seal"
+    },
+    {
+      "label": "automatic first-key provenance",
+      "path": "main/vehicle_pairing.cpp",
+      "old": "if (reload.load()) action.store(tk::AutomaticKeyAction::AutomaticCommitReload);",
+      "new": "(void)reload; (void)action;"
+    },
+    {
+      "label": "post-effect caller park",
+      "path": "main/vehicle_pairing.cpp",
+      "old": "for (;;) vTaskDelay(pdMS_TO_TICKS(10000)); // no retry after a sealed effect",
+      "new": "// omitted park"
+    },
+    {
+      "label": "HTTP identity visibility",
+      "path": "main/logic/status_model.hpp",
+      "old": "if (in.runtime_state) e.str(\"identity_state\", identity_recovery_state_name(\n        identity_recovery_state(in.pairing_block_reason, *in.runtime_state)));",
+      "new": "// omitted HTTP identity"
+    },
+    {
+      "label": "MQTT identity visibility",
+      "path": "main/mqtt_payloads.hpp",
+      "old": "json.string(root, \"identity_state\", tk::identity_recovery_state_name(\n            tk::identity_recovery_state(in.pairing_block_reason, in.runtime->state)));",
+      "new": "// omitted MQTT identity"
+    }
+  ],
+  "newPlans": [
+    {
+      "label": "final runtime claim omitted",
+      "path": "main/vehicle_pairing.cpp",
+      "old": "if (!tk::runtime_admission_try_claim_identity_reload()) return false;",
+      "new": "if (false) return false;",
+      "oracle": "Fatal-from-query/probe must be refused; exact first CHECK remains UNRUN/unqualified"
+    }
+  ],
+  "uiPlan": "Retain targeted original/omitted/restored F142 banner test, but qualify exact Node failure before execution credit.",
+  "executed": false
+}

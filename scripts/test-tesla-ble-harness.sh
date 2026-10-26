@@ -287,6 +287,9 @@ for result, name in (("uint32_t", "deadline_in_"), ("TickType_t", "ticks_until_"
     clocks.append(header[start:end])
 (out / "wake-clock.inc").write_text("\n".join(clocks) + "\n")
 PY_COMPLETION
+# Compile complete actual producer/mailbox/consumer methods, including the real RxFramer path.
+# A failed generation must stop before the test compiler can consume any old generated include.
+python3 "$ROOT_DIR/test/generate_ble_deferred_adapter.py" "$ROOT_DIR" "$BUILD_DIR"
 # tests/test_constants.h carries the official vehicle-command protocol test keys (never production).
 "$CXX" -std=c++20 -O2 -Wall -Wextra "$TB_LOG_FLAGS" \
     "$ROOT_DIR/test/test_tesla_ble_harness.cpp" \

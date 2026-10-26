@@ -1,3 +1,12 @@
+# TESLA_REPAIR_REQUIREMENTS_BEGIN
+set(TESLA_REPAIR_REQUIRES)
+if(CONFIG_TESLA_CONFIG_REPAIR_USB)
+    list(APPEND TESLA_REPAIR_REQUIRES esp_driver_uart)
+    if(CONFIG_IDF_TARGET_ESP32S3 OR CONFIG_IDF_TARGET_ESP32C3 OR CONFIG_IDF_TARGET_ESP32C6)
+        list(APPEND TESLA_REPAIR_REQUIRES esp_driver_usb_serial_jtag)
+    endif()
+endif()
+# TESLA_REPAIR_REQUIREMENTS_END
 idf_component_register(
     SRCS
         "main.cpp"
@@ -27,6 +36,10 @@ idf_component_register(
         "heap_supervisor.cpp"
         "config_blob.cpp"
         "ota_update.cpp"
+        "ota_transport.cpp"
+        "ota_http.cpp"
+        "ota_coordinator.cpp"
+        "ota_writer.cpp"
         "mqtt_ha.cpp"
         "syslog.cpp"
         "display.cpp"
@@ -37,6 +50,7 @@ idf_component_register(
         "${CMAKE_CURRENT_BINARY_DIR}/index.html.gz"
         "${CMAKE_CURRENT_BINARY_DIR}/setup.html.gz"
     REQUIRES
+        ${TESLA_REPAIR_REQUIRES}
         nvs_flash
         esp_wifi
         esp_eth
@@ -44,10 +58,9 @@ idf_component_register(
         esp_netif
         esp_http_server
         esp_app_format
-        esp_https_ota
         app_update
-        esp_http_client
         esp-tls
+        http_parser
         mbedtls
         bt
         lwip
@@ -57,6 +70,15 @@ idf_component_register(
         bootloader_support
         espcoredump
 )
+
+# TESLA_REPAIR_SOURCES_BEGIN
+if(CONFIG_TESLA_CONFIG_REPAIR_USB)
+    target_sources(${COMPONENT_LIB} PRIVATE
+        "config_repair.cpp"
+        "config_repair_console.cpp"
+    )
+endif()
+# TESLA_REPAIR_SOURCES_END
 
 # ── Warning policy for THIS component only ──
 # main/logic/ was never the exposed half: it is compiled by the host mock build with

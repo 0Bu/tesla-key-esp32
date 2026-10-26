@@ -153,7 +153,7 @@ fi
 # Authoritative gate builds (CI, reproducibility, firmware size) forbid caller-provided CCACHE_* variables
 is_authoritative_gate=0
 for arg in "$@"; do
-  if [[ "$arg" == *"ci-build"* ]] || [[ "$arg" == *"check-reproducible"* ]] || [[ "$arg" == *"check-firmware-size"* ]]; then
+  if [[ "$arg" == *"ci-build"* ]] || [[ "$arg" == *"check-reproducible"* ]] || [[ "$arg" == *"check-firmware-size"* ]] || [[ "$arg" == "scripts/build-config-repair.py" ]] || [[ "$arg" == "./scripts/build-config-repair.py" ]]; then
     is_authoritative_gate=1
     break
   fi

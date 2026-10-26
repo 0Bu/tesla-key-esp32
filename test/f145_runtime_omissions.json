@@ -1,0 +1,125 @@
+{
+  "status": "UNEXECUTED author recipes; independent operator/source qualification required",
+  "scope": "One exact production omission per disposable full-bound clone. Generator+compile must succeed; only specific actual runtime CHECK failure earns refusal. Source-gate refusal is a separate layer, never runtime credit. Restore exact bytes/modes and positive execution after each. Unknown process cleanup quarantines clone; no restore or next mutation.",
+  "cases": [
+    {
+      "id": "pre-init-largest",
+      "path": "main/ota_transport.cpp",
+      "before": "if (!tk::tls_attempt_affordable(r.largest_internal(r.context))) return NetResult::NoMemory;",
+      "occurrence": 0,
+      "after": "if (false) return NetResult::NoMemory;",
+      "expected": "normal fixture rejects actual init_calls==0 assertion for low INTERNAL (total free remains high)"
+    },
+    {
+      "id": "post-init-largest",
+      "path": "main/ota_transport.cpp",
+      "before": "if (!tk::tls_attempt_affordable(r.largest_internal(r.context))) return NetResult::NoMemory;",
+      "occurrence": 1,
+      "after": "if (false) return NetResult::NoMemory;",
+      "expected": "normal fixture rejects connects==0 for high,low INTERNAL sequence; real connect spy was entered"
+    },
+    {
+      "id": "total-free-is-not-largest",
+      "path": "main/ota_transport.cpp",
+      "before": "if (!tk::tls_attempt_affordable(r.largest_internal(r.context))) return NetResult::NoMemory;",
+      "occurrence": 0,
+      "after": "if (!((void)r.largest_internal(r.context), tk::tls_attempt_affordable(esp_get_free_heap_size()))) return NetResult::NoMemory;",
+      "expected": "normal fixture must reject init_calls==0; the consumed physical low sample repeats rather than causing sample-exhaustion credit"
+    },
+    {
+      "id": "image-manifest-equality",
+      "path": "main/ota_writer.cpp",
+      "before": "available != expected",
+      "after": "false",
+      "expected": "normal fixture mismatched 1.6.4 image must fail begins==0; no compilation/setup refusal counts"
+    },
+    {
+      "id": "inactive-partition-only",
+      "path": "main/ota_writer.cpp",
+      "before": "(s.partition_->address != 0x20000 && s.partition_->address != 0x210000)",
+      "after": "false",
+      "expected": "normal wrong 0x9000 partition must fail before raw begin; raw passive begin CHECK may expose forbidden partition first, record exact first CHECK"
+    },
+    {
+      "id": "abort-before-quiescence",
+      "path": "main/ota_writer.cpp",
+      "before": "const auto result = esp_ota_abort(h);",
+      "after": "const auto result = ESP_OK; (void)h;",
+      "expected": "normal stalled in-image read must fail aborts==1 after actual writer began; timeout or park cannot count"
+    },
+    {
+      "id": "verify-before-selector",
+      "path": "main/ota_writer.cpp",
+      "before": "const auto result = esp_ota_end(h);",
+      "after": "const auto result = ESP_OK; (void)h;",
+      "expected": "normal end-validation-failure case must reach a concrete forbidden selector/end CHECK; terminal _Exit success is WRONG_ORACLE, not a negative pass"
+    },
+    {
+      "id": "bounded-metadata-reserve",
+      "path": "main/ota_update.cpp",
+      "before": "out.reserve(tk::kOtaManifestMaxBytes);",
+      "after": "out.reserve(16384);",
+      "expected": "normal body-OOM fixture must reject init_calls==0 or expected NoMemory; actual first CHECK independently assessed"
+    },
+    {
+      "id": "sticky-critical-expiry",
+      "path": "main/logic/ota_lifetime.hpp",
+      "before": "expired_ = true;",
+      "after": "expired_ = false;",
+      "expected": "pure actual test_ota_lifetime deadline equality/zero-grace CHECK fails and full restored suite passes"
+    },
+    {
+      "id": "prefix-write-memory",
+      "path": "main/ota_coordinator.cpp",
+      "mode": "normal",
+      "before": "prefix_write == Effect::NoMemory ? Outcome::NoMemory : Outcome::WriterError",
+      "after": "Outcome::WriterError",
+      "expected": "Actual SDK NO_MEM fixture must fail its public kOtaNoMemory status CHECK. Prefix/payload SDK spies also assert one write effect, one live-handle abort; end is consumed and must not be aborted. Compiler/setup/source-gate/timeout is not runtime credit."
+    },
+    {
+      "id": "payload-write-memory",
+      "path": "main/ota_coordinator.cpp",
+      "mode": "normal",
+      "before": "payload_write == Effect::NoMemory ? Outcome::NoMemory : Outcome::WriterError",
+      "after": "Outcome::WriterError",
+      "expected": "Actual SDK NO_MEM fixture must fail its public kOtaNoMemory status CHECK. Prefix/payload SDK spies also assert one write effect, one live-handle abort; end is consumed and must not be aborted. Compiler/setup/source-gate/timeout is not runtime credit."
+    },
+    {
+      "id": "end-memory",
+      "path": "main/ota_coordinator.cpp",
+      "mode": "normal",
+      "before": "end == Effect::NoMemory ? Outcome::NoMemory : Outcome::WriterError",
+      "after": "Outcome::WriterError",
+      "expected": "Actual SDK NO_MEM fixture must fail its public kOtaNoMemory status CHECK. Prefix/payload SDK spies also assert one write effect, one live-handle abort; end is consumed and must not be aborted. Compiler/setup/source-gate/timeout is not runtime credit."
+    },
+    {
+      "id": "optional-cleanup-withdrawal",
+      "path": "main/ota_update.cpp",
+      "mode": "cleanup-failed",
+      "before": "changelog_fetch == OtaFetchResult::Failed",
+      "after": "false",
+      "expected": "After a prior real successful offer, manifest success followed by changelog destroy failure must fail !result.ok&&!result.update_available. Ordinary 404 with actual Closed remains a separate positive. No synthetic Ack/free is allowed; correct positive quarantine fixture exits before destructor/LSan reclamation."
+    },
+    {
+      "id": "actual-tightened-budget-bound",
+      "path": "main/logic/ota_lifetime.hpp",
+      "mode": "budget",
+      "before": "now >= deadline_",
+      "after": "false",
+      "expected": "Fake image-read clock jumps to 30000 only after actual raw begin/prefix, below immutable worker maximum but beyond actual CL-tightened Coordinator Budget. Removal must enter a forbidden raw write/end/selector and fail actual check_effect_admission CHECK(!reject_late_effect||now.load()<30000), not timeout, worker initial-deadline refusal or a pure mirror. Restored positive must reach Deadline+abort, no end/selector."
+    },
+    {
+      "id": "actual-cleanup-stale-cas",
+      "path": "main/ota_transport.cpp",
+      "mode": "cleanup-cas",
+      "before": "if (!j.control.compare_exchange_strong(observed,next,std::memory_order_acq_rel,\n                                                  std::memory_order_acquire)) continue;",
+      "after": "j.control.store(next,std::memory_order_release);",
+      "expected": "Host-only existing production hook pauses after observed load; actual coordinator expires and sets Retired; unchecked stale store erases it. Worker final-return/pause handshake must precede exact CHECK(operation->job.retired()&&operation->job.phase()==tk::ota::Phase::Acked) before join. Hook timeout, compiler error or earlier setup CHECK is WRONG_ORACLE. Restored positive joins and reclaims normally."
+    }
+  ],
+  "remaining": [
+    "All fifteen recipes and every positive fixture are UNEXECUTED; a separately reviewed owned-process operator must verify full input closure, required guard-module qualification, exact first CHECK and restoration before any runtime claim.",
+    "The application cases do not prove actual TCP/TLS allocation peaks, SDK ABI, RSA acceptance, flash failure semantics, RTOS reclaim or any four-target resource limit."
+  ],
+  "schemaNotes": "mode selects a native CLI branch; historical cases without mode use normal, except sticky-critical-expiry which uses the pure logic suite. Exactly one actual production omission per clone."
+}

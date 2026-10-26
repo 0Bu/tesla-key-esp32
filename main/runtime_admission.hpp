@@ -9,7 +9,10 @@ namespace tk {
 // health task and the two vehicle task entries are consumers.
 bool runtime_admission_mark_ready() noexcept;
 bool runtime_admission_mark_safe_mode() noexcept;
-void runtime_admission_mark_fatal() noexcept;
+void runtime_admission_mark_fatal(RuntimeFatalComponent component = RuntimeFatalComponent::Unknown) noexcept;
+RuntimeAdmissionSnapshot runtime_admission_snapshot() noexcept;
+// Sole automatic first-key reload; caller already owns ConfigRestart + command transaction.
+bool runtime_admission_try_claim_identity_reload() noexcept;
 bool runtime_admission_vehicle_ready() noexcept;
 RuntimeAdmissionAction runtime_admission_action() noexcept;
 RuntimeAdmissionState runtime_admission_state() noexcept;

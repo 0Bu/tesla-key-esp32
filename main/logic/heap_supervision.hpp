@@ -79,8 +79,10 @@ inline bool recovery_health_eligible(const RecoveryHealth& health) noexcept {
            health.largest_internal >= kHeapCriticalBytes;
 }
 
-// The boot record stays immutable. Only this task-local effective budget may decay; an error
-// seed must never become a usable restart allowance merely because time has passed.
+// The boot record stays immutable. This task-local heap streak is diagnostic only: the
+// BootGuard ledger must independently confirm each shared charge. Its conservative guard can
+// refuse a malformed/exhausted streak but never grants credit. Decay follows durable shared
+// zero; an error seed never becomes trusted because time passes.
 struct HeapRecoveryBudget {
     std::uint8_t effective;
     bool trusted;

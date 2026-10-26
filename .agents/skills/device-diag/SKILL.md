@@ -73,9 +73,14 @@ GATT codes. Redacted status/log exports still need inspection before sharing; du
 | BOOT/HEAP log | Reset and allocation milestones; periodic `internal_largest` is watchdog evidence, plain 8BIT may include PSRAM |
 
 A decreasing total and largest trend suggests leakage; stable total with falling largest suggests
-fragmentation. Under 4 KiB continuously for five minutes can trigger the capped watchdog; OTA clears
-the run. ARMED/countdown/recovered/OTA-cleared/EXHAUSTED/cap and next-BOOT breadcrumbs distinguish
-its escalation from panic, brownout or WDT. A healthy current sample does not explain a past reboot.
+fragmentation. Under 4 KiB continuously for five minutes can trigger the capped supervisor.
+The critical episode persists through OTA and new attempts; only an actual INTERNAL-largest sample
+of at least 4096 bytes clears it. A busy writer receives at most 300000 ms grace from the first
+critical sample, then an abort request. Restart waits for acknowledged writer quiescence; a
+network-only cleanup quarantine cannot extend the grace. Use the actual HEAP CRITICAL,
+"critical run ended", HEAP EXHAUSTED and next-BOOT breadcrumbs to distinguish this escalation from
+panic, brownout or WDT. [Architecture](../../../docs/ARCHITECTURE.md#heap-exhaustion-watchdog-last-resort-escalation)
+owns the policy. A healthy current sample does not explain a past reboot.
 
 ## 3. Symptom-based handoff
 

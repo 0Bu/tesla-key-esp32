@@ -1,5 +1,6 @@
 #pragma once
 #include "coredump_image.hpp"
+#include "stack_context.hpp"
 
 #include <cstdint>
 #include <cstdio>
@@ -12,6 +13,7 @@
 #include "health_gate.hpp"
 #include "session_availability.hpp"
 #include "runtime_admission.hpp"
+#include "identity_recovery.hpp"
 #include "vehicle_data.hpp"
 
 // Pure, hardware-free shaping of GET /status — the de-facto contract the web UI
@@ -162,14 +164,11 @@ struct Inputs {
     std::string reset_reason;          // logic/reset_reason.hpp slug for THIS boot
     bool        safe_mode{false};      // the latched boot-loop recovery state (safe_mode.cpp)
     std::optional<tk::RuntimeAdmissionState> runtime_state;
+    tk::RuntimeFatalComponent fatal_component{tk::RuntimeFatalComponent::Unknown};
     uint32_t diag_dropped_lines{0};
-    // Historical minimum free stack since boot, sampled by each owning task. nullopt means never
-    // sampled and is omitted: safe mode intentionally never starts three of these tasks. An
-    // engaged zero is a valid, critical measurement and must remain distinguishable from absence.
-    std::optional<uint32_t> httpd_stack_min_free_bytes;
-    std::optional<uint32_t> vehicle_stack_min_free_bytes;
-    std::optional<uint32_t> auto_pair_stack_min_free_bytes;
-    std::optional<uint32_t> mqtt_stack_min_free_bytes;
+    // Frozen cached context observations, quantized down to256-byte lower bounds.
+    // A zero code is unknown; measured lower bound zero remains distinct.
+    tk::stack_sample::Snapshot stack_context_samples{};
 
     // ── last_crash — emitted only when the boot is NOTABLE ────────────────────────────────────
     // have_crash is crash_is_notable(): a real fault reset, or a dump for this build still sitting
@@ -243,6 +242,8 @@ inline void emit_status(const Inputs& in, E& e) {
     if (in.paired_at > kEpochPlausibleFloor) e.num("paired_at", (double)in.paired_at);
     e.boolean("reauth", in.reauth);
     if (in.pairing_block_reason) e.str("pairing_blocked", in.pairing_block_reason);
+    if (in.runtime_state) e.str("identity_state", identity_recovery_state_name(
+        identity_recovery_state(in.pairing_block_reason, *in.runtime_state)));
 
     // ── wifi ──────────────────────────────────────────────────────────────────
     e.obj_begin("wifi");
@@ -434,21 +435,22 @@ inline void emit_status(const Inputs& in, E& e) {
     e.num("wifi_reconnects", (double)in.wifi_reconnects);
     e.str("reset_reason",    in.reset_reason.c_str());
     e.boolean("safe_mode",   in.safe_mode);
-    if (in.runtime_state) e.str("runtime_state", tk::runtime_admission_state_name(*in.runtime_state));
-    if (in.diag_dropped_lines) e.num("diag_dropped_lines", in.diag_dropped_lines);
-    if (in.httpd_stack_min_free_bytes || in.vehicle_stack_min_free_bytes ||
-        in.auto_pair_stack_min_free_bytes || in.mqtt_stack_min_free_bytes) {
-        e.obj_begin("stack_min_free_bytes");
-        if (in.httpd_stack_min_free_bytes)
-            e.num("httpd", (double)*in.httpd_stack_min_free_bytes);
-        if (in.vehicle_stack_min_free_bytes)
-            e.num("vehicle", (double)*in.vehicle_stack_min_free_bytes);
-        if (in.auto_pair_stack_min_free_bytes)
-            e.num("auto_pair", (double)*in.auto_pair_stack_min_free_bytes);
-        if (in.mqtt_stack_min_free_bytes)
-            e.num("mqtt", (double)*in.mqtt_stack_min_free_bytes);
-        e.obj_end();
+    if (in.runtime_state) {
+        e.str("runtime_state", tk::runtime_admission_state_name(*in.runtime_state));
+        if (*in.runtime_state == tk::RuntimeAdmissionState::Fatal)
+            e.str("fatal_component", tk::runtime_fatal_component_name(in.fatal_component));
     }
+    if (in.diag_dropped_lines) e.num("diag_dropped_lines", in.diag_dropped_lines);
+    e.num("stack_min_free_quantum_bytes", tk::stack_sample::kQuantumBytes);
+    e.obj_begin("stack_min_free_bytes");
+    for (unsigned slot = 0; slot < tk::kStackContextCount; ++slot) {
+        const auto context = static_cast<tk::StackContext>(slot);
+        const auto sample = tk::stack_sample::read(in.stack_context_samples, slot);
+        const char* name = tk::stack_context_name(context);
+        if (sample.sampled) e.num(name, sample.lower_bound_bytes);
+        else e.null(name);
+    }
+    e.obj_end();
     e.obj_end();
 
     // ── last_crash — only when this boot is NOTABLE ───────────────────────────

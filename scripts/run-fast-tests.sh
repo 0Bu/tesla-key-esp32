@@ -70,8 +70,11 @@ run_boundary() {
   python3 test/generate_heap_supervisor_adapter.py "$BUILD_DIR/heap_supervisor_adapter.generated.hpp"
   "$CXX" -std=c++17 -Wall -Wextra -Werror -Itest/stubs -Imain -I"$BUILD_DIR" \
     -o "$BUILD_DIR/heap_supervisor_tests" \
-    test/test_heap_supervisor.cpp main/safe_mode.cpp main/heap_trend.cpp
+    test/test_heap_supervisor.cpp main/safe_mode.cpp main/heap_trend.cpp main/stack_watch.cpp
   "$BUILD_DIR/heap_supervisor_tests"
+  "$CXX" -std=c++17 -Wall -Wextra -Werror -pthread -Itest/stubs -Imain \
+    -o "$BUILD_DIR/stack_sample_tests" test/test_stack_sample.cpp
+  "$BUILD_DIR/stack_sample_tests"
   python3 test/generate_syslog_adapters.py "$BUILD_DIR/syslog_adapters.generated.hpp"
   "$CXX" -std=c++17 -Wall -Wextra -Werror -Imain -I"$BUILD_DIR" \
     -o "$BUILD_DIR/syslog_runtime_tests" test/test_syslog_runtime.cpp
@@ -84,6 +87,7 @@ run_boundary() {
       -o "$BUILD_DIR/crash_runtime_${crash_arch}_tests" test/test_crash_runtime.cpp
     "$BUILD_DIR/crash_runtime_${crash_arch}_tests"
   done
+  python3 test/test_f137_host.py --source . --controls --execute-controlled-host-only
 }
 
 run_sanitizers() {

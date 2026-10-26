@@ -737,9 +737,18 @@ def relative_to_resolved(path: Path, resolved_root: Path) -> Path | None:
         return None
 
 
-def literal_main_sources(source_root: Path) -> set[Path]:
+def literal_main_sources(source_root: Path, role: str = "application") -> set[Path]:
     cmake_path = source_root / "main" / "CMakeLists.txt"
     cmake = cmake_path.read_text(encoding="utf-8")
+    if "TESLA_REPAIR" in cmake:
+        spec = importlib.util.spec_from_file_location("source_config_repair_contract", source_root / "scripts/config_repair_contract.py")
+        if spec is None or spec.loader is None:
+            raise SemanticsError("missing maintenance source inventory contract")
+        contract = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(contract)
+        cmake = contract.component_text(source_root, cmake, role)
+    elif role != "application":
+        raise SemanticsError("maintenance inventory cannot reuse the ordinary source graph")
     cmake_code = re.sub(r"#[^\n]*", "", cmake)
     blocks = re.findall(
         r"idf_component_register\s*\(\s*SRCS\s*(.*?)\n\s*"
@@ -958,6 +967,7 @@ def validate_local_non_main_source(
     relative: Path | None,
     target: str,
     build_root: Path,
+    project_name: str = "tesla-key-esp32",
 ) -> None:
     if relative is not None and relative.parts and relative.parts[0] == "managed_components":
         if len(relative.parts) < 3 or relative.parts[1] not in MANAGED_COMPONENTS:
@@ -976,7 +986,7 @@ def validate_local_non_main_source(
         normalized = build_relative.as_posix()
         expected_project_elf = f"project_elf_src_{target}.c"
         if normalized == expected_project_elf:
-            if output != f"CMakeFiles/tesla-key-esp32.elf.dir/{expected_project_elf}.obj":
+            if output != f"CMakeFiles/{project_name}.elf.dir/{expected_project_elf}.obj":
                 raise SemanticsError(f"generated project ELF source has unexpected output: {file_name}")
             return
         if normalized in NANOPB_GENERATED_SOURCES:
@@ -1227,6 +1237,13 @@ def validate_main_cmake_build_surface(source_root: Path) -> None:
     cmake = canonical_regular_file(
         source_root / "main/CMakeLists.txt", "main CMake contract"
     ).read_text(encoding="utf-8")
+    if "TESLA_REPAIR" in cmake:
+        spec = importlib.util.spec_from_file_location("build_config_repair_contract", source_root / "scripts/config_repair_contract.py")
+        if spec is None or spec.loader is None:
+            raise SemanticsError("missing maintenance source contract")
+        maintenance = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(maintenance)
+        cmake = maintenance.normal_component_text(source_root, cmake)
     code = re.sub(r"#[^\n]*", "", cmake)
     commands = tuple(
         match.group(1).lower()
@@ -1407,7 +1424,7 @@ def validate_linker_script(path: Path, build_root: Path, idf_root: Path) -> None
         raise SemanticsError(f"linker script contains indirect external-input directive: {path}")
 
 
-def validate_wl_option(token: str, build_root: Path, target: str) -> None:
+def validate_wl_option(token: str, build_root: Path, target: str, project_name: str = "tesla-key-esp32") -> None:
     """Allow only the literal, non-input-bearing GNU-ld options emitted by pinned IDF 6.1."""
     # ESP-IDF 6 turns orphan sections into link errors and wraps Picolibc's stdio buffer setup;
     # the longjmp wrap is emitted for the Xtensa targets only.
@@ -1421,7 +1438,7 @@ def validate_wl_option(token: str, build_root: Path, target: str) -> None:
         "-Wl,--wrap=longjmp",
         "-Wl,--undefined=FreeRTOS_openocd_params",
         f"-Wl,--defsym=IDF_TARGET_{target.upper()}=0",
-        f"-Wl,--Map={build_root / 'tesla-key-esp32.map'}",
+        f"-Wl,--Map={build_root / (project_name + '.map')}",
     }
     if token not in allowed:
         raise SemanticsError(f"final ELF link uses unreviewed/path-bearing -Wl option: {token}")
@@ -1497,8 +1514,9 @@ def resolve_link_library(
 def validate_link_and_archives(
     build_root: Path, idf_root: Path, target: str, firmware_outputs: dict[str, Path],
     command_loader: CommandLoader,
+    project_name: str = "tesla-key-esp32",
 ) -> None:
-    elf = "tesla-key-esp32.elf"
+    elf = project_name + ".elf"
     raw = command_loader(build_root, (elf,))[elf]
     if raw[:2] != (":", "&&") or raw[-2:] != ("&&", ":"):
         raise SemanticsError("final ELF link has a launcher, PRE_LINK or POST_BUILD command")
@@ -1542,7 +1560,7 @@ def validate_link_and_archives(
     while index < len(body):
         token = body[index]
         if token.startswith("-Wl,"):
-            validate_wl_option(token, build_root, target)
+            validate_wl_option(token, build_root, target, project_name)
             consumed.add(index)
             index += 1
             continue
@@ -1680,6 +1698,7 @@ def validate_app_binary_producer(
     command_loader: CommandLoader,
     *,
     process_runner: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run,
+    project_name: str = "tesla-key-esp32",
 ) -> None:
     tokens = command_loader(build_root, (".bin_timestamp",))[".bin_timestamp"]
     if len(tokens) < 20 or tokens[:3] != ("cd", str(build_root), "&&"):
@@ -1745,8 +1764,8 @@ def validate_app_binary_producer(
         "--flash-freq", expected_flash_frequency,
         "--flash-size", "4MB", "--elf-sha256-offset", "0xb0",
         "--flash-mmu-page-size", "64KB", "--secure-pad-v2",
-        *revision_args, "-o", str(build_root / "tesla-key-esp32.bin"),
-        str(build_root / "tesla-key-esp32.elf"),
+        *revision_args, "-o", str(build_root / (project_name + ".bin")),
+        str(build_root / (project_name + ".elf")),
     ]
     if elf2image != expected_elf2image:
         raise SemanticsError("ELF-to-app elf2image command/arguments drifted")
@@ -1756,11 +1775,11 @@ def validate_app_binary_producer(
         raise SemanticsError("ELF-to-app diagnostic command drifted")
     cmake = cmake_echo[0]
     pinned_tool(cmake, Path("/opt/esp/tools/cmake"), "cmake", "elf2image CMake")
-    if cmake_echo[1:] != ("-E", "echo", f"Generated {build_root / 'tesla-key-esp32.bin'}"):
+    if cmake_echo[1:] != ("-E", "echo", f"Generated {build_root / (project_name + '.bin')}"):
         raise SemanticsError("ELF-to-app diagnostic command drifted")
     final = tokens[second_chain + 1:]
     if final != (
-        cmake, "-E", "md5sum", str(build_root / "tesla-key-esp32.bin"), ">",
+        cmake, "-E", "md5sum", str(build_root / (project_name + ".bin")), ">",
         str(build_root / ".bin_timestamp"),
     ):
         raise SemanticsError("ELF-to-app timestamp producer drifted")
@@ -1768,12 +1787,12 @@ def validate_app_binary_producer(
     # Re-run the exact pinned elf2image invocation into an isolated target and compare bytes. This
     # binds the checked app to the checked ELF even if a later deterministic command had replaced
     # tesla-key-esp32.bin and updated its timestamp.
-    app = canonical_regular_file(build_root / "tesla-key-esp32.bin", "built unsigned app")
-    elf = canonical_regular_file(build_root / "tesla-key-esp32.elf", "linked firmware ELF")
+    app = canonical_regular_file(build_root / (project_name + ".bin"), "built unsigned app")
+    elf = canonical_regular_file(build_root / (project_name + ".elf"), "linked firmware ELF")
     if expected_elf2image[-1] != str(elf):
         raise SemanticsError("ELF-to-app input does not resolve to the audited ELF")
     with tempfile.TemporaryDirectory(prefix=".elf2image-check-", dir=build_root) as directory:
-        reproduced = Path(directory) / "tesla-key-esp32.bin"
+        reproduced = Path(directory) / (project_name + ".bin")
         reproduce_command = list(expected_elf2image)
         output_index = reproduce_command.index("-o") + 1
         reproduce_command[output_index] = str(reproduced)
@@ -1800,13 +1819,14 @@ def validate_app_binary_producer(
 def validate_default_app_command_inventory(
     commands: tuple[tuple[str, ...], ...], producer: tuple[str, ...],
     build_root: Path, idf_root: Path,
+    project_name: str = "tesla-key-esp32",
 ) -> None:
     """Pin every default-build command that names the final app or its timestamp."""
-    app = str(build_root / "tesla-key-esp32.bin")
+    app = str(build_root / (project_name + ".bin"))
     timestamp = str(build_root / ".bin_timestamp")
     relevant = tuple(
         tokens for tokens in commands
-        if any("tesla-key-esp32.bin" in token or ".bin_timestamp" in token for token in tokens)
+        if any((project_name + ".bin") in token or ".bin_timestamp" in token for token in tokens)
     )
     python_candidates = [
         token for tokens in relevant for token in tokens
@@ -1844,6 +1864,7 @@ def validate_default_app_command_inventory(
 def validate_build_graph_provenance(
     build_root: Path, target: str, source_root: Path, idf_root: Path | None,
     sdkconfig: Path, firmware_outputs: dict[str, Path], command_loader: CommandLoader,
+    project_name: str = "tesla-key-esp32",
 ) -> None:
     if idf_root is None:
         raise SemanticsError("IDF_PATH is required for link/app provenance validation")
@@ -1851,11 +1872,11 @@ def validate_build_graph_provenance(
     validate_main_cmake_build_surface(source_root)
     validate_generated_firmware_sources(firmware_outputs, source_root, build_root, target)
     validate_generated_producer_commands(build_root, source_root, idf_root, target, command_loader)
-    validate_link_and_archives(build_root, idf_root, target, firmware_outputs, command_loader)
-    validate_app_binary_producer(build_root, idf_root, sdkconfig, target, command_loader)
+    validate_link_and_archives(build_root, idf_root, target, firmware_outputs, command_loader, project_name)
+    validate_app_binary_producer(build_root, idf_root, sdkconfig, target, command_loader, project_name=project_name)
     producer = command_loader(build_root, (".bin_timestamp",))[".bin_timestamp"]
     validate_default_app_command_inventory(
-        load_ninja_default_commands(build_root), producer, build_root, idf_root
+        load_ninja_default_commands(build_root), producer, build_root, idf_root, project_name
     )
 
 
@@ -1869,7 +1890,10 @@ def validate(
     command_loader: CommandLoader = load_ninja_commands,
     graph_validator: GraphValidator | None = validate_build_graph_provenance,
     specs_validator: SpecsValidator = validate_picolibc_specs,
+    project_name: str = "tesla-key-esp32",
 ) -> int:
+    if project_name not in ("tesla-key-esp32", "tesla-key-config-repair"):
+        raise SemanticsError("unknown closed firmware project identity")
     injected = sorted(name for name in os.environ
                       if name in BUILD_INJECTION_ENV or name.startswith(("IDF_COMPONENT_", "TESLA_BLE_")))
     if injected:
@@ -1879,6 +1903,8 @@ def validate(
     if target not in TARGETS:
         raise SemanticsError(f"unsupported target: {target}")
     config = parse_sdkconfig(sdkconfig)
+    if (config.get("CONFIG_TESLA_CONFIG_REPAIR_USB") == "y") != (project_name == "tesla-key-config-repair"):
+        raise SemanticsError("effective maintenance configuration and actual source/project role differ")
     if config.get("CONFIG_IDF_TARGET") != target:
         raise SemanticsError(
             f"effective sdkconfig target is {config.get('CONFIG_IDF_TARGET')!r}, expected {target!r}"
@@ -1912,7 +1938,7 @@ def validate(
     picolibc = config.get("CONFIG_LIBC_PICOLIBC") == "y"
     allowed_specs = f"-specs={build_root / PICOLIBC_SPECS_RELATIVE}" if picolibc else None
     specs_compilers: set[Path] = set()
-    expected_main_sources = literal_main_sources(source_root)
+    expected_main_sources = literal_main_sources(source_root, "config-repair" if project_name == "tesla-key-config-repair" else "application")
     observed_main_sources: dict[Path, int] = {}
     main_outputs: dict[str, Path] = {}
     firmware_outputs: dict[str, Path] = {}
@@ -1965,11 +1991,11 @@ def validate(
                 is_literal_main_source = True
             else:
                 validate_local_non_main_source(
-                    file_name, source, output, local_relative, target, build_root
+                    file_name, source, output, local_relative, target, build_root, project_name
                 )
         elif relative_to(source, build_root) is not None:
             validate_local_non_main_source(
-                file_name, source, output, None, target, build_root
+                file_name, source, output, None, target, build_root, project_name
             )
         else:
             if idf_root is None or relative_to(source, idf_root / "components") is None:
@@ -2044,7 +2070,10 @@ def validate(
         sdkconfig,
         target,
     )
-    if graph_validator is not None:
+    if graph_validator is validate_build_graph_provenance:
+        validate_build_graph_provenance(build_root, target, source_root, idf_root, sdkconfig,
+                                        firmware_outputs, command_loader, project_name)
+    elif graph_validator is not None:
         graph_validator(
             build_root, target, source_root, idf_root, sdkconfig,
             firmware_outputs, command_loader,
@@ -2082,6 +2111,8 @@ def self_test_build_graph_contract(repository_root: Path) -> None:
         shutil.copy2(
             repository_root / "main/CMakeLists.txt", cmake_source / "main/CMakeLists.txt"
         )
+        (cmake_source / "scripts").mkdir()
+        shutil.copy2(repository_root / "scripts/config_repair_contract.py", cmake_source / "scripts/config_repair_contract.py")
         validate_root_cmake_link_surface(cmake_source)
         validate_main_cmake_build_surface(cmake_source)
         root_cmake = cmake_source / "CMakeLists.txt"
@@ -3524,6 +3555,7 @@ def main() -> int:
     parser.add_argument("--compile-commands", type=Path)
     parser.add_argument("--source-root", type=Path, default=Path.cwd())
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--role", choices=("application", "config-repair"), default="application")
     args = parser.parse_args()
     if args.self_test:
         self_test()
@@ -3531,13 +3563,20 @@ def main() -> int:
     if None in (args.target, args.sdkconfig, args.compile_commands):
         parser.error("--target, --sdkconfig and --compile-commands are required")
     try:
+        spec = importlib.util.spec_from_file_location("cli_config_repair_contract", args.source_root / "scripts/config_repair_contract.py")
+        if spec is None or spec.loader is None:
+            raise SemanticsError("missing maintenance role contract")
+        contract = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(contract)
+        project_name = contract.configured_project(args.role, args.sdkconfig, args.compile_commands.parent / "CMakeCache.txt")
         checked = validate(
             args.target,
             args.sdkconfig,
             args.compile_commands,
             args.source_root,
+            project_name=project_name,
         )
-    except (OSError, UnicodeError, SemanticsError) as exc:
+    except (OSError, UnicodeError, ValueError, SemanticsError) as exc:
         print(f"effective build semantics failed: {exc}", file=sys.stderr)
         return 1
     print(f"effective build semantics: PASS ({args.target}, {checked} main translation units at -Og)")

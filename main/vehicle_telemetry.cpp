@@ -545,11 +545,10 @@ void VehicleController::persist_discovered_mac_after_ready_() {
 }
 
 void VehicleController::process_ble_host_events_() {
-    if (!ble_event_queue_ || !ble_ || !client_) return;
+    if (!ble_host_events_ready_() || !ble_ || !client_) return;
 
-    if (ble_event_overflow_.exchange(false, std::memory_order_acq_rel)) {
-        BleHostEvent discarded{};
-        while (xQueueReceive(ble_event_queue_, &discarded, 0) == pdTRUE) {}
+    if (ble_events_.overflow.exchange(false, std::memory_order_acq_rel)) {
+        clear_ble_host_events_();
         // A lost byte or transition makes framing/state unknowable. Reset link and framer
         // first, then terminate the physical link. No stale LinkUp may become ready afterward.
         (void)apply_ble_link_state_(false);
@@ -563,7 +562,7 @@ void VehicleController::process_ble_host_events_() {
     }
 
     BleHostEvent event{};
-    while (xQueueReceive(ble_event_queue_, &event, 0) == pdTRUE) {
+    while (pop_ble_host_event_(event)) {
         const uint32_t current_generation = ble_->lifecycle_generation();
         if (!tk::ble_deferred_event_may_apply(event.kind, event.generation,
                                                current_generation)) {
@@ -1568,11 +1567,15 @@ void VehicleController::drive_command_runner_() {
 }
 
 void VehicleController::loop_task_fn_(void* arg) {
+    tk::stack_watch_sample(tk::StackWatch::Vehicle); // current task at entry
+    tk::StackWatchScope f135_task_exit(tk::StackWatch::Vehicle);
+
   try {
     auto* self = static_cast<VehicleController*>(arg);
     if (!self || !self->await_task_start_()) {
         // Cancellation is acknowledged inside await_task_start_(). No watchdog, mutex, BLE object
         // or vehicle state has been touched, so a second-create OOM unwinds without cross-core kill.
+        tk::stack_watch_sample(tk::StackWatch::Vehicle); // no C++ unwind on delete
         vTaskDelete(nullptr);
         return;
     }
@@ -1601,13 +1604,13 @@ void VehicleController::loop_task_fn_(void* arg) {
     tk::WakePollState wake_poll{};         // one-shot charge poll on the VCSEC wake edge (#264)
     tk::IterationFaultLog fault_log{};
     while (true) {
+        tk::StackWatchScope f135_iteration_exit(tk::StackWatch::Vehicle);
       // Feed the task watchdog FIRST and UNCONDITIONALLY, before anything that can block or throw.
       // Gating it on the work below would make a long-but-legitimate command look like a hang; put
       // after the work, a throw would skip it and turn an already-contained OOM into a reboot.
       if (watchdog.active()) esp_task_wdt_reset();
-      // Retrospective: FreeRTOS retains the lowest free stack ever observed for this task, so a
-      // top-of-loop sample records the deepest path of the previous cycle and no branch can skip it.
-      tk::stack_watch_sample(tk::StackWatch::Vehicle);
+      // FreeRTOS retains the historical low mark. The outer iteration scope records it after
+      // this round, including contained faults and early continues, after local guards retire.
 
       // Iteration-boundary containment (issue #204): the poll injections + bookkeeping below
       // call command builders and touch std::string caches that can throw std::bad_alloc.
@@ -1829,6 +1832,7 @@ void VehicleController::loop_task_fn_(void* arg) {
       try { ESP_LOGE(TAG, "vehicle loop boundary threw outside an iteration — stopping task"); }
       catch (...) {}
       // TaskWatchdogSubscription has already unwound and removed this task from TWDT.
+      tk::stack_watch_sample(tk::StackWatch::Vehicle); // no C++ unwind on delete
       vTaskDelete(nullptr);
   }
 }

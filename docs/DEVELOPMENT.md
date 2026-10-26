@@ -209,6 +209,14 @@ four-target contract. CI action inputs must still use the toolchain output, and 
 matrices must still contain exactly the four supported targets. This list is a migration checklist,
 not authorization to change any pin.
 
+## Configuration-only maintenance role
+
+The default-off [configuration recovery](CONFIG_RECOVERY.md#default-off-build-and-artifact-boundary)
+owner describes its separate project identity, unsigned four-target source/reproduction driver,
+resource gates and unqualified physical procedure. Its non-OTA apps never enter the normal16parts;
+ordinary source/compiler/partition/signature authority is not relaxed. Do not enable its config in
+an application build or treat its presence as a flashable or physically tested recovery product.
+
 ## Delivery
 
 Unsigned local images **cannot boot**. Use provenance-bound signed artifacts and the canonical

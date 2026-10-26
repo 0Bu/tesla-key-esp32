@@ -1,3 +1,4 @@
+#include "stack_watch.hpp"
 #include "led_status.hpp"
 #include "runtime_fault_log.hpp"
 
@@ -82,6 +83,9 @@ void apa_show(uint8_t r, uint8_t g, uint8_t b) {
 }
 
 void led_task(void* arg) {
+    tk::stack_watch_sample(tk::StackWatch::Led); // current task at entry
+    tk::StackWatchScope f135_task_exit(tk::StackWatch::Led);
+
   try {
     auto& v = *static_cast<VehicleController*>(arg);
 
@@ -101,6 +105,7 @@ void led_task(void* arg) {
     tk::IterationFaultLog fault_log{};
 
     for (int frame = 0;; ++frame) {
+        tk::StackWatchScope f135_iteration_exit(tk::StackWatch::Led);
       // ui_snapshot() and durable-session probes can fail under heap pressure. The OTA read
       // copies only its state enum; it does not materialize status strings. This is a cosmetic
       // task with no lock held across the frame, so contain any throw rather than let it unwind
@@ -126,6 +131,7 @@ void led_task(void* arg) {
     }
   } catch (...) {
       ESP_LOGE(TAG, "LED task boundary threw outside a frame — stopping task");
+      tk::stack_watch_sample(tk::StackWatch::Led); // no C++ unwind on delete
       vTaskDelete(nullptr);
   }
 }

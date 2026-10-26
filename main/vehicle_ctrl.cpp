@@ -21,6 +21,11 @@
 
 static const char* TAG = "vehicle_ctrl";
 
+#ifdef ESP_PLATFORM
+static_assert(sizeof(VehicleController) <= 8048 - 32,
+              "deferred FIFO must retain measured space for callback containment");
+#endif
+
 // ─── Boot reboot-reason (set once from app_main, read by /status) ────────────
 
 // Function-local static so it is constructed on first use, before app_main writes it — no
@@ -56,35 +61,42 @@ bool VehicleController::ble_rx_event_cb_(void* context, const uint8_t* data, siz
 
 bool VehicleController::enqueue_ble_link_event_(bool connected, uint16_t conn_handle,
                                                 uint32_t generation) noexcept {
-    if (!connected) {
-        auth_fail_streak_.store(0, std::memory_order_release);
-    }
-    BleHostEvent event{};
-    event.kind = connected ? tk::BleDeferredEventKind::LinkUp
-                           : tk::BleDeferredEventKind::LinkDown;
-    event.conn_handle = conn_handle;
-    event.generation = generation;
-    const bool queued = ble_event_queue_ &&
-                        xQueueSend(ble_event_queue_, &event, 0) == pdTRUE;
-    if (!queued) ble_event_overflow_.store(true, std::memory_order_release);
+    if (!connected) auth_fail_streak_.store(0, std::memory_order_release);
+    portENTER_CRITICAL(&ble_events_.mux);
+    const bool queued = ble_events_.ready &&
+                        ble_events_.queue.push_link(connected, conn_handle, generation);
+    portEXIT_CRITICAL(&ble_events_.mux);
+    if (!queued) ble_events_.overflow.store(true, std::memory_order_release);
     return queued;
 }
 
 bool VehicleController::enqueue_ble_rx_event_(const uint8_t* data, size_t size,
                                               uint32_t generation) noexcept {
-    if (!data || size == 0 || size > tk::kBleMaxWritePayload) {
-        ble_event_overflow_.store(true, std::memory_order_release);
-        return false;
-    }
-    BleHostEvent event{};
-    event.kind = tk::BleDeferredEventKind::Rx;
-    event.size = static_cast<uint16_t>(size);
-    event.generation = generation;
-    std::memcpy(event.data.data(), data, size);
-    const bool queued = ble_event_queue_ &&
-                        xQueueSend(ble_event_queue_, &event, 0) == pdTRUE;
-    if (!queued) ble_event_overflow_.store(true, std::memory_order_release);
+    portENTER_CRITICAL(&ble_events_.mux);
+    const bool queued = ble_events_.ready && ble_events_.queue.push_rx(data, size, generation);
+    portEXIT_CRITICAL(&ble_events_.mux);
+    if (!queued) ble_events_.overflow.store(true, std::memory_order_release);
     return queued;
+}
+
+bool VehicleController::ble_host_events_ready_() noexcept {
+    portENTER_CRITICAL(&ble_events_.mux);
+    const bool ready = ble_events_.ready;
+    portEXIT_CRITICAL(&ble_events_.mux);
+    return ready;
+}
+
+bool VehicleController::pop_ble_host_event_(BleHostEvent& event) noexcept {
+    portENTER_CRITICAL(&ble_events_.mux);
+    const bool present = ble_events_.ready && ble_events_.queue.pop(event);
+    portEXIT_CRITICAL(&ble_events_.mux);
+    return present;
+}
+
+void VehicleController::clear_ble_host_events_() noexcept {
+    portENTER_CRITICAL(&ble_events_.mux);
+    ble_events_.queue.clear();
+    portEXIT_CRITICAL(&ble_events_.mux);
 }
 
 bool VehicleController::recover_pending_key_rotation_at_boot_() {
@@ -162,18 +174,20 @@ bool VehicleController::init(const std::string& vin,
     command_mutex_ = xSemaphoreCreateMutex();
     cache_mutex_   = xSemaphoreCreateMutex();
     result_mutex_  = xSemaphoreCreateMutex();
-    ble_event_queue_ = xQueueCreateStatic(
-        kBleHostEventDepth, sizeof(BleHostEvent), ble_event_queue_storage_.data(),
-        &ble_event_queue_control_);
     // VehicleController is an ESSENTIAL component: without these primitives the command
     // serialization and cache locking cannot hold, so refuse to report a healthy controller
     // rather than run one that could deadlock or race (issue #204, Scenario C). app_main halts
     // boot on a false return.
-    if (!vehicle_mutex_ || !command_mutex_ || !cache_mutex_ || !result_mutex_ ||
-        !ble_event_queue_) {
+    if (!vehicle_mutex_ || !command_mutex_ || !cache_mutex_ || !result_mutex_) {
         ESP_LOGE(TAG, "synchronization primitive allocation failed");
         return false;
     }
+
+    // Initialize before registering either callback. This fixed FIFO allocates no SDK queue.
+    portENTER_CRITICAL(&ble_events_.mux);
+    ble_events_.queue.clear();
+    ble_events_.ready = true;
+    portEXIT_CRITICAL(&ble_events_.mux);
 
     client_ = std::make_unique<TeslaBLE::Client>();
     client_->set_vin(vin);

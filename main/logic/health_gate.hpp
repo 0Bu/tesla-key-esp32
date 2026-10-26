@@ -2,7 +2,7 @@
 // When may a freshly-OTA'd image cancel its own rollback? Pure, IDF-free, host-tested.
 //
 // WHAT THE MECHANISM IS. CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE leaves an image installed by
-// esp_https_ota in ESP_OTA_IMG_PENDING_VERIFY. The bootloader reverts to the previous slot if the
+// the public OTA writer in ESP_OTA_IMG_PENDING_VERIFY. The bootloader reverts to the previous slot if the
 // device reboots before the app calls esp_ota_mark_app_valid_cancel_rollback(). So the app's only
 // decision is WHEN to make that call — and that call is irreversible: it spends the one automatic
 // way back to a known-good build. For a normal blank-otadata first start with the pinned
@@ -43,6 +43,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstddef>
+#include "logic/ota_recovery_memory.hpp"
 
 namespace tk {
 
@@ -63,12 +64,12 @@ struct RuntimeHealthSample {
 
 template<typename Ready, typename Synced, typename Resets, typename Heap>
 inline RuntimeHealthSample sample_runtime_health(Ready ready, Synced synced, Resets resets,
-                                                 Heap heap, std::size_t critical_bytes) {
+                                                 Heap heap, std::size_t required_recovery_bytes) {
     if (!ready()) return {RuntimeHealthFailure::NotReady, 0};
     if (!synced()) return {RuntimeHealthFailure::HostUnsynced, 0};
     if (resets() != 0) return {RuntimeHealthFailure::HostReset, 0};
     const std::size_t largest = heap();
-    return {largest < critical_bytes ? RuntimeHealthFailure::CriticalHeap
+    return {!ota_recovery_memory_affordable(largest, required_recovery_bytes) ? RuntimeHealthFailure::CriticalHeap
                                     : RuntimeHealthFailure::None, largest};
 }
 

@@ -360,8 +360,8 @@ def probe_harness_invocations(source: str) -> None:
         (cache / ("mbedtls-" + MBEDTLS_COMMIT)).mkdir(parents=True)
         tools = work / "bin"
         tools.mkdir()
-        # Python heredoc generators and compiler/archive tools are passive here. Only the
-        # actual shell's requested native-guard invocations count; no copied guard decisions.
+        # Generators and compiler/archive tools are passive here. Trace the new whole-method
+        # generator and native guards through the actual shell, including failure propagation.
         stub = '''import json,os,sys
 from pathlib import Path
 name=Path(sys.argv[0]).name; args=sys.argv[1:]
@@ -373,7 +373,10 @@ elif name=="compiler":
         path=Path(args[args.index("-o")+1]); path.parent.mkdir(parents=True,exist_ok=True)
         path.write_text("#!/bin/sh\\nexit 0\\n"); path.chmod(0o700)
 elif name=="python3":
-    if args and args[0].endswith("/test/test_dependency_guards.py"):
+    if args and args[0].endswith("/test/generate_ble_deferred_adapter.py"):
+        with Path(os.environ["FLOW_TRACE"]).open("a") as out: out.write(json.dumps(args)+"\\n")
+        if os.environ["FLOW_FAIL_GUARD"]=="generate": raise SystemExit(37)
+    elif args and args[0].endswith("/test/test_dependency_guards.py"):
         with Path(os.environ["FLOW_TRACE"]).open("a") as out: out.write(json.dumps(args)+"\\n")
         kind="sanitize" if "--sanitize" in args else "normal"
         if os.environ["FLOW_FAIL_GUARD"]==kind: raise SystemExit(37)
@@ -410,7 +413,8 @@ elif name!="ar": raise SystemExit(2)
                    CACHE_DIR=str(cache), FLOW_MBEDTLS_COMMIT=MBEDTLS_COMMIT)
         for system, failure in (("Linux", ""), ("Darwin", ""),
                                 ("Linux", "normal"), ("Linux", "sanitize"),
-                                ("Darwin", "normal")):
+                                ("Darwin", "normal"), ("Linux", "generate"),
+                                ("Darwin", "generate")):
             build = work / ("host-" + system)
             library = build / ("mbedtls-" + MBEDTLS_COMMIT) / "tf-psa-crypto/core/libtfpsacrypto.a"
             library.parent.mkdir(parents=True, exist_ok=True)
@@ -426,9 +430,13 @@ elif name!="ar": raise SystemExit(2)
                 raise DependencyError("native dependency harness invocation flow timed out") from exc
             calls = [json.loads(line) for line in trace.read_text().splitlines()] if trace.exists() else []
             normal = [str(work / "test/test_dependency_guards.py"), "--component", str(component)]
+            generate = [str(work / "test/generate_ble_deferred_adapter.py"), str(work), str(build)]
             expected = [normal, normal + ["--sanitize"]] if system == "Linux" else [normal]
             if failure == "normal":
                 expected = [normal]
+            expected = [generate] + expected
+            if failure == "generate":
+                expected = [generate]
             expected_exit = 37 if failure else 0
             success_message = "PASS: tesla-ble integration harness verified successfully"
             require(run.returncode == expected_exit and calls == expected and
@@ -466,6 +474,10 @@ def self_test(root: Path) -> None:
         harness.replace('--component "$TB_DIR" --sanitize', '--sanitize'),
         harness.replace('--component "$TB_DIR"\n', '--component "$TB_DIR" || true\n'),
         harness.replace('--component "$TB_DIR" --sanitize\n', '--component "$TB_DIR" --sanitize || true\n'),
+        harness.replace('python3 "$ROOT_DIR/test/generate_ble_deferred_adapter.py" "$ROOT_DIR" "$BUILD_DIR"',
+                        '# omitted whole-method generation'),
+        harness.replace('python3 "$ROOT_DIR/test/generate_ble_deferred_adapter.py" "$ROOT_DIR" "$BUILD_DIR"',
+                        'python3 "$ROOT_DIR/test/generate_ble_deferred_adapter.py" "$ROOT_DIR" "$BUILD_DIR" || true'),
     ):
         try:
             probe_harness_invocations(changed)

@@ -1,21 +1,17 @@
 #pragma once
 // Pure, hardware-free crash-loop policy, shared with test/test_logic.cpp.
-// BootGuard owns the decimal NVS counter; the independent heap supervisor drives its long
-// healthy interval. Faults increment, verified heap SW restarts preserve, and uncertain evidence
-// cannot lower a verified count. Known clean resets retain the explicit recovery-exit policy.
-//
-// Four fault boots before a qualified 30-minute normal run latch Safe Mode. This bounds repeated
-// faults below that healthy interval, not arbitrary faults after a completed healthy run. Safe
-// Mode/portal/Fatal, stale Vehicle progress, host reset, OTA and low INTERNAL heap earn no clear.
-// The separate five-step heap budget is never added to this crash counter. Recovery, shared-NVS
-// and rollback limits are owned by docs/ARCHITECTURE.md and docs/SECURITY.md.
+// BootGuard owns one canonical decimal unhealthy-restart ledger. Fault boots charge it;
+// deliberate heap restarts reserve a unit before writing their separate diagnostic reason.
+// Verified heap SW boots preserve the reservation. Unknown evidence grants no allowance.
+// Safe Mode begins at four units; automatic heap recovery stops at five shared units.
+// Only a confirmed known-clean reset or qualified 30-minute normal run replenishes credit.
 #include "logic/heap_watchdog.hpp"
 #include "logic/reset_reason.hpp"
 #include <cstdint>
 
 namespace tk {
 
-// The fourth consecutive fault boot enters recovery before starting vehicle work.
+// The fourth shared unhealthy unit enters recovery on the next boot before Vehicle work.
 inline constexpr unsigned kBootFailThreshold = 4;
 
 // Elapsed qualified normal-runtime evidence, not raw uptime or the OTA confirmation timer.
@@ -61,6 +57,34 @@ inline bool boot_activity_seed_allowed(int reset_code, RebootReasonState reason)
 // and wrap back under the threshold — the one arithmetic accident that would silently un-latch
 // safe mode on the boot that needed it most.
 inline constexpr unsigned kBootFailMax = 100;
+inline constexpr unsigned kUnhealthyRestartLimit = 5;
+static_assert(kUnhealthyRestartLimit == kHeapMaxConsecutiveRestarts);
+
+// Conservative enrollment from legacy records, not reconstruction of their historical sum.
+// The already-reserved unit on a verified heap SW boot must not be charged a second time.
+inline constexpr unsigned boot_shared_count(unsigned stored, BootCounterCause cause,
+                                            RebootReasonState reason,
+                                            unsigned legacy_heap_streak) noexcept {
+    const unsigned previous = stored > kBootFailMax ? kBootFailMax : stored;
+    const bool legacy_verified = cause != BootCounterCause::Clean &&
+        reason == RebootReasonState::Present && legacy_heap_streak <= kHeapMaxConsecutiveRestarts;
+    const unsigned floor = legacy_verified && legacy_heap_streak > previous
+        ? legacy_heap_streak : previous;
+    if (cause == BootCounterCause::Clean) return 0;
+    if (cause != BootCounterCause::Fault) return floor;
+    return floor < kBootFailMax ? floor + 1 : kBootFailMax;
+}
+
+// Refusal leaves next untouched. Storage must independently confirm the resulting increment.
+inline constexpr bool boot_heap_reservation_next(unsigned observed, unsigned confirmed_floor,
+                                                 unsigned& next) noexcept {
+    if (observed > kBootFailMax || confirmed_floor > kBootFailMax) return false;
+    const unsigned current = observed > confirmed_floor ? observed : confirmed_floor;
+    if (current >= kUnhealthyRestartLimit) return false;
+    next = current + 1;
+    return true;
+}
+
 
 // Parse only the canonical decimal strings store_count() can produce. A present-but-empty,
 // signed, prefixed, overflowing or out-of-range value is storage ambiguity, not zero: the boot
@@ -95,7 +119,7 @@ inline constexpr unsigned boot_fail_next(unsigned stored, BootCounterCause cause
 
 // Latched once the count reaches the threshold — and it stays latched on every subsequent boot,
 // since only a qualified healthy run (or a known clean reset) ever writes the counter back down. No off-by-one:
-// the glue increments FIRST and asks about the result, so with a threshold of 4 the 4th crash boot
+// the glue charges FIRST and asks about the result, so with a threshold of 4 the 4th used unit
 // comes up in safe mode.
 inline constexpr bool boot_safe_mode(unsigned count) {
     return count >= kBootFailThreshold;

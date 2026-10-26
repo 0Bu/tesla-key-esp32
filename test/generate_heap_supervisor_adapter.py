@@ -72,6 +72,29 @@ progress_site = ('void actual_progress_caller(ProgressSelf* self) {\n'
                  'for (int once = 0; once != 1; ++once) {\n'
                  + caller + progress[0] + '\n}\n}')
 
+# Compile the complete real bootstrap sequence, including reason consumption, actual reset
+# classification, shared admission publication and essential task creation, in firmware order.
+boot_start = main.index('    const tk::RebootReasonRecord boot_reboot_record = VehicleController::take_reboot_reason(config_store);')
+boot_end = main.index('    // UDP Syslog forwarder', boot_start)
+bootstrap = 'void actual_recovery_bootstrap(NvsStorageAdapter& config_store) {\n' + main[boot_start:boot_end] + '\n}'
+
+# Execute the complete actual init activity-seed if/else, preserving the production member
+# store and predicate. The rest of init (library, key, task creation) is deliberately absent.
+init_source = (root / 'main/vehicle_ctrl.cpp').read_text()
+init_body = body_in(init_source, 'init')
+seed_anchor = '// Seed only a known clean boot with verified absent reboot evidence.'
+if init_body.count(seed_anchor) != 1:
+    raise AssertionError('ambiguous activity seed anchor inside actual Vehicle init')
+# Locate the complete conditional by its reviewed site, not the guard's implementation.
+# Omitting that guard/store in an isolated mutant must still compile and fail its numeric oracle.
+seed_start = init_body.index('    if (', init_body.index(seed_anchor))
+seed_open = init_body.index('{', seed_start)
+seed_end = balanced(scrub(init_body), seed_open, '{', '}', 'actual activity seed') + 1
+if init_body[seed_end:seed_end + 7] != ' else {':
+    raise AssertionError('actual activity seed must retain its complete else branch')
+seed_end = balanced(scrub(init_body), seed_end + 6, '{', '}', 'actual activity refusal') + 1
+activity_seed = ('void ActivitySeedFixture::run() {\n' + init_body[seed_start:seed_end] + '\n}')
+
 Path(sys.argv[1]).write_text('\n\n'.join([
     query, owners, complete_body('runtime_admission.cpp'),
-    complete_body('heap_supervisor.cpp'), fatal, vin, wifi, progress_site]) + '\n')
+    complete_body('heap_supervisor.cpp'), fatal, vin, wifi, progress_site, bootstrap, activity_seed]) + '\n')

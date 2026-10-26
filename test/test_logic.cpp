@@ -30,6 +30,7 @@
 #include "logic/clock_policy.hpp"
 #include "logic/effect_reply.hpp"
 #include "logic/config_commit.hpp"
+#include "logic/config_repair.hpp"
 #include "logic/ha_identity.hpp"
 #include "logic/units.hpp"
 #include "logic/uptime.hpp"
@@ -65,13 +66,17 @@
 #include "logic/config_request.hpp"
 #include "logic/heap_json_stream.hpp"
 #include "logic/heap_watchdog.hpp"
+#include "logic/ota_lifetime.hpp"
 #include "logic/heap_supervision.hpp"
 #include "logic/ota_contract.hpp"
+#include "logic/tls_memory.hpp"
+#include "logic/ota_recovery_memory.hpp"
 #include "logic/ota_changelog_range.hpp"
 #include "logic/task_start_gate.hpp"
 #include "logic/nimble_start_gate.hpp"
 #include "logic/ping_probe.hpp"
 #include "logic/runtime_admission.hpp"
+#include "logic/identity_recovery.hpp"
 #include "logic/charge_control.hpp"
 #include "logic/reset_reason.hpp"
 #include "logic/crashinfo.hpp"
@@ -86,6 +91,7 @@
 #include "logic/http_origin.hpp"
 #include "logic/ble_chunk.hpp"
 #include "logic/ble_deferred_event.hpp"
+#include "logic/ble_deferred_queue.hpp"
 #include "logic/wifi_rollback.hpp"
 #include "logic/redact.hpp"
 #include "logic/captive.hpp"
@@ -1084,12 +1090,15 @@ static void test_ota_contract() {
     for (const auto url : {"", "http://example.test/", "HTTPS://example.test/", "//example.test/", " https://example.test/", "https://"})
         CHECK(!tk::ota_https_url(url));
     using Start = tk::OtaStartResult;
-    for (const auto result : {Start::Started, Start::Busy, Start::PendingVerification, Start::Unavailable, Start::InternalError}) {
+    for (const auto result : {Start::Started, Start::Busy, Start::PendingVerification, Start::Unavailable, Start::InternalError,Start::NoMemory}) {
         CHECK(tk::ota_start_http_status(result) == (result == Start::Started ? 200 : result == Start::Busy || result == Start::PendingVerification ? 409 : result == Start::InternalError ? 500 : 503));
         CHECK(std::strlen(tk::ota_start_reason(result, true)) > 0);
         CHECK(std::strlen(tk::ota_start_reason(result, false)) > 0);
     }
     CHECK_STR(tk::ota_start_reason(Start::PendingVerification, false), "running firmware is still pending verification");
+    CHECK(tk::ota_start_http_status(Start::NoMemory)==503);
+    CHECK_STR(tk::ota_start_reason(Start::NoMemory,true),"not enough memory for update");
+    CHECK_STR(tk::ota_start_reason(Start::NoMemory,false),"not enough memory for update");
     CHECK_STR(tk::ota_verification_name(tk::OtaVerificationState::Stable), "stable");
     CHECK_STR(tk::ota_verification_name(tk::OtaVerificationState::PendingVerify), "pending_verify");
     CHECK_STR(tk::ota_verification_name(tk::OtaVerificationState::Unknown), "unknown");
@@ -1495,6 +1504,11 @@ static void test_task_start_gate() {
 }
 
 // ─── whole-runtime vehicle admission / partial-boot fault injection ──────────
+#include "config_repair_cases.hpp"
+static void test_config_repair() {
+    repair_fixture::cases();
+}
+
 static void test_runtime_admission() {
     CHECK(std::string(tk::runtime_admission_state_name(tk::RuntimeAdmissionState::Booting)) == "booting");
     CHECK(std::string(tk::runtime_admission_state_name(tk::RuntimeAdmissionState::Ready)) == "ready");
@@ -1541,6 +1555,85 @@ static void test_runtime_admission() {
     partial_boot.mark_fatal();
     CHECK(partial_boot.action() == Action::Stop);
     CHECK(!partial_boot.mark_ready());
+}
+
+// F142: cached names are diagnostic; only a fresh owned shell may reserve a restart.
+static void test_identity_recovery() {
+    using State = tk::RuntimeAdmissionState;
+    using Component = tk::RuntimeFatalComponent;
+    tk::RuntimeAdmissionGate gate;
+    CHECK(gate.snapshot().component == Component::Unknown);
+    CHECK(gate.mark_ready());
+    gate.mark_fatal(Component::Http);
+    CHECK(gate.snapshot().state == State::Fatal);
+    CHECK(gate.snapshot().component == Component::Http);
+    gate.mark_fatal(Component::Network); // first publication wins, never reopens
+    CHECK(gate.snapshot().component == Component::Http);
+    CHECK(!gate.mark_ready() && !gate.mark_safe_mode());
+    for (unsigned value = 0; value != 256; ++value) {
+        const auto snapshot = tk::runtime_admission_unpack(static_cast<std::uint8_t>(value));
+        CHECK(static_cast<unsigned>(snapshot.state) < 4);
+        CHECK(snapshot.state == State::Fatal || snapshot.component == Component::Unknown);
+        CHECK(static_cast<unsigned>(snapshot.component) <= 11);
+        const unsigned code = (value & ~tk::kRuntimeIdentityReloadClaim) >> 2;
+        CHECK(snapshot.component == (snapshot.state == State::Fatal && code <= 11
+              ? static_cast<Component>(code) : Component::Unknown));
+    }
+    for (unsigned code = 0; code <= 11; ++code) {
+        const auto encoded = tk::runtime_admission_pack(State::Fatal, static_cast<Component>(code));
+        CHECK(tk::runtime_admission_unpack(encoded).component == static_cast<Component>(code));
+        CHECK(tk::runtime_admission_unpack(encoded | tk::kRuntimeIdentityReloadClaim).component ==
+              static_cast<Component>(code));
+    }
+    tk::RuntimeAdmissionGate boot_claim;
+    CHECK(!boot_claim.try_claim_identity_reload());
+    CHECK(boot_claim.mark_ready() && boot_claim.try_claim_identity_reload());
+    CHECK(!boot_claim.try_claim_identity_reload() && boot_claim.vehicle_ready());
+    boot_claim.mark_fatal(Component::Identity);
+    CHECK(boot_claim.snapshot().component == Component::Identity && !boot_claim.vehicle_ready());
+    CHECK(!boot_claim.try_claim_identity_reload() && !boot_claim.mark_ready());
+    boot_claim.mark_fatal(Component::Network);
+    CHECK(boot_claim.snapshot().component == Component::Identity);
+    tk::RuntimeAdmissionGate fatal_first;
+    CHECK(fatal_first.mark_ready()); fatal_first.mark_fatal(Component::Unknown);
+    CHECK(!fatal_first.try_claim_identity_reload());
+    fatal_first.mark_fatal(Component::Http);
+    CHECK(fatal_first.snapshot().component == Component::Unknown);
+    tk::RuntimeAdmissionGate safe_claim;
+    CHECK(safe_claim.mark_safe_mode() && !safe_claim.try_claim_identity_reload());
+    CHECK(tk::runtime_fatal_component(nullptr) == Component::Unknown);
+    CHECK(tk::runtime_fatal_component("HTTP server") == Component::Http);
+    CHECK(tk::runtime_fatal_component("NimBLE host") == Component::Bluetooth);
+    CHECK(tk::runtime_fatal_component("future component") == Component::Unknown);
+    CHECK(tk::identity_recovery_state(nullptr, State::Ready) == tk::IdentityRecoveryState::Ok);
+    CHECK(tk::identity_recovery_state(nullptr, State::Fatal) == tk::IdentityRecoveryState::Unknown);
+    CHECK(tk::identity_recovery_state("future reason", State::Ready) == tk::IdentityRecoveryState::Unknown);
+    CHECK(std::string(tk::pairing_block_reason(false, false, false,
+          tk::AutomaticKeyAction::AutomaticCommitReload)) == "key_reload_required");
+    const tk::IdentityReloadAdmission admitted{true, true, true, false, false, false, true, true, true};
+    CHECK(tk::identity_reload_allowed(admitted));
+    for (unsigned fault = 0; fault != 9; ++fault) {
+        auto input = admitted;
+        switch (fault) {
+            case 0: input.ready = false; break;
+            case 1: input.automatic_commit = false; break;
+            case 2: input.reload_required = false; break;
+            case 3: input.vin_pending = true; break;
+            case 4: input.cleanup_pending = true; break;
+            case 5: input.recovered_boot = true; break;
+            case 6: input.stable = false; break;
+            case 7: input.journal_readable = false; break;
+            case 8: input.journal_present = false; break;
+        }
+        tk::IdentityReloadOnce retry;
+        CHECK(!tk::identity_reload_allowed(input));
+        CHECK(!retry.reserve(input) && !retry.reserved());
+        CHECK(retry.reserve(admitted) && retry.reserved());
+        CHECK(!retry.reserve(admitted));
+        // Fifteen minutes of unchanged supervisor input cannot re-arm a consumed restart.
+        for (unsigned elapsed_ms = 0; elapsed_ms <= 900000; elapsed_ms += 30000)
+            CHECK(!retry.reserve(admitted));
+    }
 }
 
 // `ota_confirm_pending_image()` already owns HealthCommit before consulting this gate. Pin the
@@ -2188,6 +2281,7 @@ struct CollectEmitter {
         else                           std::snprintf(b, sizeof b, "%.10g", v);
         out += joined(elem_name(k)) + "=" + b + "\n";
     }
+    void null(const char* k) { out += joined(elem_name(k)) + "=null\n"; }
     void boolean(const char* k, bool v) { out += joined(elem_name(k)) + (v ? "=true\n" : "=false\n"); }
 };
 
@@ -2197,6 +2291,7 @@ static void test_runtime_status_visibility() {
                      tk::RuntimeAdmissionState::SafeMode, tk::RuntimeAdmissionState::Fatal}) {
         tk::status::Inputs in;
         in.runtime_state = state;
+        in.fatal_component = tk::RuntimeFatalComponent::Http;
         in.pairing_block_reason = "key_reload_required";
         in.diag_dropped_lines = 17;
         in.syslog_dropped_lines = 23;
@@ -2206,6 +2301,9 @@ static void test_runtime_status_visibility() {
         CHECK(emitter.out.find("syslog.dropped_lines=23\n") != std::string::npos);
         CHECK(emitter.out.find(std::string("sys.runtime_state=\"") + tk::runtime_admission_state_name(state) + "\"\n") != std::string::npos);
         CHECK(emitter.out.find("pairing_blocked=\"key_reload_required\"\n") != std::string::npos);
+        CHECK(emitter.out.find("identity_state=\"reboot_required\"\n") != std::string::npos);
+        CHECK((emitter.out.find("sys.fatal_component=\"http\"\n") != std::string::npos) ==
+              (state == tk::RuntimeAdmissionState::Fatal));
     }
 }
 
@@ -2254,10 +2352,10 @@ static void test_status_model() {
     Inputs in;
     in.vin = "5YJ3E1EA7KF000316"; in.ip = "192.168.1.50"; in.version = "1.4.2";
     in.board_mac = "02:00:00:32:55:20";
-    in.httpd_stack_min_free_bytes = 4096;
-    in.vehicle_stack_min_free_bytes = 3072;
-    in.auto_pair_stack_min_free_bytes = 2048;
-    in.mqtt_stack_min_free_bytes = 1024;
+    in.stack_context_samples[0] = tk::stack_sample::merge(in.stack_context_samples[0], 0, 4096);
+    in.stack_context_samples[0] = tk::stack_sample::merge(in.stack_context_samples[0], 1, 3072);
+    in.stack_context_samples[0] = tk::stack_sample::merge(in.stack_context_samples[0], 2, 2048);
+    in.stack_context_samples[0] = tk::stack_sample::merge(in.stack_context_samples[0], 3, 1024);
     in.key_present = true; in.key_fingerprint = "AB:CD:EF:01";
     in.key_created = 1750000000; in.paired = true; in.paired_at = 1750500000;
     in.wifi_connected = true; in.wifi_ssid = "HomeNet"; in.wifi_rssi = -55; in.wifi_std = "Wi-Fi 6";
@@ -2396,37 +2494,61 @@ static void test_status_model() {
         "sys.wifi_reconnects=0\n"
         "sys.reset_reason=\"\"\n"
         "sys.safe_mode=false\n"
+        "sys.stack_min_free_quantum_bytes=256\n"
         "sys.stack_min_free_bytes{\n"
         "sys.stack_min_free_bytes.httpd=4096\n"
         "sys.stack_min_free_bytes.vehicle=3072\n"
         "sys.stack_min_free_bytes.auto_pair=2048\n"
-        "sys.stack_min_free_bytes.mqtt=1024\n"));
+        "sys.stack_min_free_bytes.mqtt=1024\n"
+        "sys.stack_min_free_bytes.main=null\n"
+        "sys.stack_min_free_bytes.heap_supervisor=null\n"
+        "sys.stack_min_free_bytes.display=null\n"
+        "sys.stack_min_free_bytes.led=null\n"
+        "sys.stack_min_free_bytes.ota_check=null\n"
+        "sys.stack_min_free_bytes.ota_writer=null\n"
+        "sys.stack_min_free_bytes.ota_gate=null\n"
+        "sys.stack_min_free_bytes.net_watchdog=null\n"
+        "sys.stack_min_free_bytes.syslog=null\n"
+        "sys.stack_min_free_bytes.captive_dns=null\n"
+        "sys.stack_min_free_bytes.captive_http=null\n"
+        "sys.stack_min_free_bytes.wifi_event=null\n"
+        "sys.stack_min_free_bytes.eth_event=null\n"
+        "sys.stack_min_free_bytes.mqtt_event=null\n"
+        "sys.stack_min_free_bytes.mqtt_probe_event=null\n"
+        "sys.stack_min_free_bytes.nimble_host=null\n"
+        "sys.stack_min_free_bytes.ble_scan_timer=null\n"
+        "sys.stack_min_free_bytes.diag_log_callback=null\n"
+        "sys.stack_min_free_bytes.sntp_sync=null\n"
+        "sys.stack_min_free_bytes.ping_net=null\n"
+        "sys.stack_min_free_bytes.ping_syslog=null\n"
+        "sys.stack_min_free_bytes.ota_network=null\n"
+        "sys.stack_min_free_bytes.ota_parser=null\n"));
 
-    // A task that has not sampled yet is absent. This matters in safe mode, where the vehicle,
+    // A context that has not sampled yet is explicitly null. In safe mode the vehicle,
     // pairing and MQTT tasks intentionally do not exist.
     Inputs stack_partial;
     stack_partial.vin = "UNKNOWN";
     stack_partial.version = "1.4.2";
-    stack_partial.httpd_stack_min_free_bytes = 1536;
+    stack_partial.stack_context_samples[0] = tk::stack_sample::merge(stack_partial.stack_context_samples[0], 0, 1536);
     CollectEmitter stack_out;
     tk::status::emit_status(stack_partial, stack_out);
     CHECK(stack_out.out.find("sys.stack_min_free_bytes.httpd=1536\n") != std::string::npos);
-    CHECK(stack_out.out.find("sys.stack_min_free_bytes.vehicle") == std::string::npos);
-    CHECK(stack_out.out.find("sys.stack_min_free_bytes.auto_pair") == std::string::npos);
-    CHECK(stack_out.out.find("sys.stack_min_free_bytes.mqtt") == std::string::npos);
+    CHECK(stack_out.out.find("sys.stack_min_free_bytes.vehicle=null\n") != std::string::npos);
+    CHECK(stack_out.out.find("sys.stack_min_free_bytes.auto_pair=null\n") != std::string::npos);
+    CHECK(stack_out.out.find("sys.stack_min_free_bytes.mqtt=null\n") != std::string::npos);
 
-    // Absence is distinct from a genuine zero-byte high-water mark: zero is a critical measured
-    // value and must not disappear behind the unsampled sentinel.
+    // Unknown is distinct from a measured lower bound of zero (raw0..255 bytes).
+    // Quantization must not turn a real sample into the unsampled sentinel.
     Inputs stack_zero;
     stack_zero.vin = "UNKNOWN";
     stack_zero.version = "1.4.2";
-    stack_zero.httpd_stack_min_free_bytes = 0;
+    stack_zero.stack_context_samples[0] = tk::stack_sample::merge(stack_zero.stack_context_samples[0], 0, 0);
     CollectEmitter stack_zero_out;
     tk::status::emit_status(stack_zero, stack_zero_out);
     CHECK(stack_zero_out.out.find("sys.stack_min_free_bytes.httpd=0\n") != std::string::npos);
-    CHECK(stack_zero_out.out.find("sys.stack_min_free_bytes.vehicle") == std::string::npos);
-    CHECK(stack_zero_out.out.find("sys.stack_min_free_bytes.auto_pair") == std::string::npos);
-    CHECK(stack_zero_out.out.find("sys.stack_min_free_bytes.mqtt") == std::string::npos);
+    CHECK(stack_zero_out.out.find("sys.stack_min_free_bytes.vehicle=null\n") != std::string::npos);
+    CHECK(stack_zero_out.out.find("sys.stack_min_free_bytes.auto_pair=null\n") != std::string::npos);
+    CHECK(stack_zero_out.out.find("sys.stack_min_free_bytes.mqtt=null\n") != std::string::npos);
 
     // Scenario 2 — asleep: BLE link down (dropped between polls), charge cache retained,
     // debounced VCSEC sleep proven; no devices seen, no connect failures.
@@ -2499,7 +2621,36 @@ static void test_status_model() {
         "sys.uptime_s=0\n"
         "sys.wifi_reconnects=0\n"
         "sys.reset_reason=\"\"\n"
-        "sys.safe_mode=false\n"));
+        "sys.safe_mode=false\n"
+        "sys.stack_min_free_quantum_bytes=256\n"
+        "sys.stack_min_free_bytes{\n"
+        "sys.stack_min_free_bytes.httpd=null\n"
+        "sys.stack_min_free_bytes.vehicle=null\n"
+        "sys.stack_min_free_bytes.auto_pair=null\n"
+        "sys.stack_min_free_bytes.mqtt=null\n"
+        "sys.stack_min_free_bytes.main=null\n"
+        "sys.stack_min_free_bytes.heap_supervisor=null\n"
+        "sys.stack_min_free_bytes.display=null\n"
+        "sys.stack_min_free_bytes.led=null\n"
+        "sys.stack_min_free_bytes.ota_check=null\n"
+        "sys.stack_min_free_bytes.ota_writer=null\n"
+        "sys.stack_min_free_bytes.ota_gate=null\n"
+        "sys.stack_min_free_bytes.net_watchdog=null\n"
+        "sys.stack_min_free_bytes.syslog=null\n"
+        "sys.stack_min_free_bytes.captive_dns=null\n"
+        "sys.stack_min_free_bytes.captive_http=null\n"
+        "sys.stack_min_free_bytes.wifi_event=null\n"
+        "sys.stack_min_free_bytes.eth_event=null\n"
+        "sys.stack_min_free_bytes.mqtt_event=null\n"
+        "sys.stack_min_free_bytes.mqtt_probe_event=null\n"
+        "sys.stack_min_free_bytes.nimble_host=null\n"
+        "sys.stack_min_free_bytes.ble_scan_timer=null\n"
+        "sys.stack_min_free_bytes.diag_log_callback=null\n"
+        "sys.stack_min_free_bytes.sntp_sync=null\n"
+        "sys.stack_min_free_bytes.ping_net=null\n"
+        "sys.stack_min_free_bytes.ping_syslog=null\n"
+        "sys.stack_min_free_bytes.ota_network=null\n"
+        "sys.stack_min_free_bytes.ota_parser=null\n"));
 
     // Scenario 3 — unreachable, scanning, found-but-can't-connect: devices listed, a
     // connect-fail streak with last-seen advert RSSI and a non-connectable target (the
@@ -2587,7 +2738,36 @@ static void test_status_model() {
         "sys.uptime_s=0\n"
         "sys.wifi_reconnects=0\n"
         "sys.reset_reason=\"\"\n"
-        "sys.safe_mode=false\n"));
+        "sys.safe_mode=false\n"
+        "sys.stack_min_free_quantum_bytes=256\n"
+        "sys.stack_min_free_bytes{\n"
+        "sys.stack_min_free_bytes.httpd=null\n"
+        "sys.stack_min_free_bytes.vehicle=null\n"
+        "sys.stack_min_free_bytes.auto_pair=null\n"
+        "sys.stack_min_free_bytes.mqtt=null\n"
+        "sys.stack_min_free_bytes.main=null\n"
+        "sys.stack_min_free_bytes.heap_supervisor=null\n"
+        "sys.stack_min_free_bytes.display=null\n"
+        "sys.stack_min_free_bytes.led=null\n"
+        "sys.stack_min_free_bytes.ota_check=null\n"
+        "sys.stack_min_free_bytes.ota_writer=null\n"
+        "sys.stack_min_free_bytes.ota_gate=null\n"
+        "sys.stack_min_free_bytes.net_watchdog=null\n"
+        "sys.stack_min_free_bytes.syslog=null\n"
+        "sys.stack_min_free_bytes.captive_dns=null\n"
+        "sys.stack_min_free_bytes.captive_http=null\n"
+        "sys.stack_min_free_bytes.wifi_event=null\n"
+        "sys.stack_min_free_bytes.eth_event=null\n"
+        "sys.stack_min_free_bytes.mqtt_event=null\n"
+        "sys.stack_min_free_bytes.mqtt_probe_event=null\n"
+        "sys.stack_min_free_bytes.nimble_host=null\n"
+        "sys.stack_min_free_bytes.ble_scan_timer=null\n"
+        "sys.stack_min_free_bytes.diag_log_callback=null\n"
+        "sys.stack_min_free_bytes.sntp_sync=null\n"
+        "sys.stack_min_free_bytes.ping_net=null\n"
+        "sys.stack_min_free_bytes.ping_syslog=null\n"
+        "sys.stack_min_free_bytes.ota_network=null\n"
+        "sys.stack_min_free_bytes.ota_parser=null\n"));
 
     // Scenario 4 — factory-fresh: no key, unpaired, no WiFi yet (portal case aside),
     // nothing cached, nothing heard. The contract still emits the empty wifi/mqtt/ble
@@ -2638,7 +2818,36 @@ static void test_status_model() {
         "sys.uptime_s=0\n"
         "sys.wifi_reconnects=0\n"
         "sys.reset_reason=\"\"\n"
-        "sys.safe_mode=false\n"));
+        "sys.safe_mode=false\n"
+        "sys.stack_min_free_quantum_bytes=256\n"
+        "sys.stack_min_free_bytes{\n"
+        "sys.stack_min_free_bytes.httpd=null\n"
+        "sys.stack_min_free_bytes.vehicle=null\n"
+        "sys.stack_min_free_bytes.auto_pair=null\n"
+        "sys.stack_min_free_bytes.mqtt=null\n"
+        "sys.stack_min_free_bytes.main=null\n"
+        "sys.stack_min_free_bytes.heap_supervisor=null\n"
+        "sys.stack_min_free_bytes.display=null\n"
+        "sys.stack_min_free_bytes.led=null\n"
+        "sys.stack_min_free_bytes.ota_check=null\n"
+        "sys.stack_min_free_bytes.ota_writer=null\n"
+        "sys.stack_min_free_bytes.ota_gate=null\n"
+        "sys.stack_min_free_bytes.net_watchdog=null\n"
+        "sys.stack_min_free_bytes.syslog=null\n"
+        "sys.stack_min_free_bytes.captive_dns=null\n"
+        "sys.stack_min_free_bytes.captive_http=null\n"
+        "sys.stack_min_free_bytes.wifi_event=null\n"
+        "sys.stack_min_free_bytes.eth_event=null\n"
+        "sys.stack_min_free_bytes.mqtt_event=null\n"
+        "sys.stack_min_free_bytes.mqtt_probe_event=null\n"
+        "sys.stack_min_free_bytes.nimble_host=null\n"
+        "sys.stack_min_free_bytes.ble_scan_timer=null\n"
+        "sys.stack_min_free_bytes.diag_log_callback=null\n"
+        "sys.stack_min_free_bytes.sntp_sync=null\n"
+        "sys.stack_min_free_bytes.ping_net=null\n"
+        "sys.stack_min_free_bytes.ping_syslog=null\n"
+        "sys.stack_min_free_bytes.ota_network=null\n"
+        "sys.stack_min_free_bytes.ota_parser=null\n"));
 
     // Scenario 5 — cold pack (issue #276): vehicle reports nominal battery_level (tag 114)
     // AND usable_battery_level (tag 115) with delta due to cold buffer.
@@ -2713,7 +2922,36 @@ static void test_status_model() {
         "sys.uptime_s=0\n"
         "sys.wifi_reconnects=0\n"
         "sys.reset_reason=\"\"\n"
-        "sys.safe_mode=false\n"));
+        "sys.safe_mode=false\n"
+        "sys.stack_min_free_quantum_bytes=256\n"
+        "sys.stack_min_free_bytes{\n"
+        "sys.stack_min_free_bytes.httpd=null\n"
+        "sys.stack_min_free_bytes.vehicle=null\n"
+        "sys.stack_min_free_bytes.auto_pair=null\n"
+        "sys.stack_min_free_bytes.mqtt=null\n"
+        "sys.stack_min_free_bytes.main=null\n"
+        "sys.stack_min_free_bytes.heap_supervisor=null\n"
+        "sys.stack_min_free_bytes.display=null\n"
+        "sys.stack_min_free_bytes.led=null\n"
+        "sys.stack_min_free_bytes.ota_check=null\n"
+        "sys.stack_min_free_bytes.ota_writer=null\n"
+        "sys.stack_min_free_bytes.ota_gate=null\n"
+        "sys.stack_min_free_bytes.net_watchdog=null\n"
+        "sys.stack_min_free_bytes.syslog=null\n"
+        "sys.stack_min_free_bytes.captive_dns=null\n"
+        "sys.stack_min_free_bytes.captive_http=null\n"
+        "sys.stack_min_free_bytes.wifi_event=null\n"
+        "sys.stack_min_free_bytes.eth_event=null\n"
+        "sys.stack_min_free_bytes.mqtt_event=null\n"
+        "sys.stack_min_free_bytes.mqtt_probe_event=null\n"
+        "sys.stack_min_free_bytes.nimble_host=null\n"
+        "sys.stack_min_free_bytes.ble_scan_timer=null\n"
+        "sys.stack_min_free_bytes.diag_log_callback=null\n"
+        "sys.stack_min_free_bytes.sntp_sync=null\n"
+        "sys.stack_min_free_bytes.ping_net=null\n"
+        "sys.stack_min_free_bytes.ping_syslog=null\n"
+        "sys.stack_min_free_bytes.ota_network=null\n"
+        "sys.stack_min_free_bytes.ota_parser=null\n"));
 
     // ── BLE phase countdown presence rules ────────────────────────────────────────────
     // phase_s rides WITH phase and is emitted even at 0. A countdown that vanished on its
@@ -3453,19 +3691,16 @@ static void test_heap_watchdog() {
     CHECK(heap_watch(e, {kHeapCriticalBytes,     0, false}).action == HeapAction::Ok);
     CHECK(heap_watch(e, {kHeapCriticalBytes - 1, 0, false}).action == HeapAction::Armed);
 
-    // An OTA legitimately holds the biggest allocations this firmware makes, so a low reading
-    // during one proves nothing — and a restart mid-install is the one reboot that could leave a
-    // half-written slot. It must CLEAR the run, not merely skip the sample: otherwise a critical
-    // run that began before the download would resume its clock and fire during it.
+    // OTA cannot reset the continuous critical hold. The actual supervisor separately
+    // applies writer grace and requires raw-writer abort/owner acknowledgement before effects.
     HeapWatchdog o;
     CHECK(heap_watch(o, {768, 0, false}).action == HeapAction::Armed);
-    HeapVerdict exc = heap_watch(o, {768, HOLD - 1, true});       // OTA starts mid-run
-    CHECK(exc.action == HeapAction::Recovered);
-    CHECK(exc.ota_excused);                    // the OTA cleared it, the heap did NOT heal
-    CHECK(exc.critical_ms == HOLD - 1);
-    CHECK(heap_watch(o, {768, HOLD,     true}).action  == HeapAction::Ok);       // still installing
-    CHECK(heap_watch(o, {768, HOLD + 1, false}).action == HeapAction::Armed);    // done: start over
-    CHECK(heap_watch(o, {768, 2 * HOLD, false}).action == HeapAction::Watching);
+    const auto held_during_ota = heap_watch(o, {768, HOLD - 1, true});
+    CHECK(held_during_ota.action == HeapAction::Watching && !held_during_ota.ota_excused);
+    CHECK(held_during_ota.critical_ms == HOLD - 1);
+    CHECK(heap_watch(o, {768, HOLD, true}).action == HeapAction::Restart);
+    CHECK(heap_watch(o, {768, HOLD + 1, false}).action == HeapAction::Restart);
+    CHECK(heap_watch(o, {768, 2 * HOLD, true}).action == HeapAction::Restart);
 
     // An OTA running while the heap is HEALTHY again is an ordinary recovery, not an excusal —
     // the two get different sentences in the log, so the distinction has to hold.
@@ -5881,6 +6116,51 @@ static void test_health_gate() {
 }
 
 // ─── MQTT broker URI + save-time pre-flight (logic/mqtt_uri.hpp) ───────────────────────────────
+static void test_ota_recovery_memory() {
+    const tk::OtaRecoveryRequirements profile{12345,6789};
+    CHECK(tk::ota_recovery_required_bytes_for(tk::OtaRecoveryUse::OperationEntry,profile)==12345);
+    CHECK(tk::ota_recovery_required_bytes_for(tk::OtaRecoveryUse::ImageConfirmation,profile)==12345);
+    CHECK(tk::ota_recovery_required_bytes_for(tk::OtaRecoveryUse::TlsAdmission,profile)==6789);
+    CHECK(tk::ota_recovery_required_bytes_for(static_cast<tk::OtaRecoveryUse>(255),profile)==0);
+    CHECK(tk::ota_recovery_required_bytes_for(tk::OtaRecoveryUse::OperationEntry)==tk::kOtaRecoveryEntryRequiredB);
+    CHECK(tk::ota_recovery_required_bytes_for(tk::OtaRecoveryUse::ImageConfirmation)==tk::kOtaRecoveryEntryRequiredB);
+    CHECK(tk::kOtaTlsInRecordBoundB==18445&&tk::kOtaTlsOutRecordBoundB==6157);
+    CHECK(tk::kOtaTlsRecordCapacityB==tk::kOtaTlsInRecordBoundB);
+    CHECK(tk::ota_recovery_required_bytes_for(tk::OtaRecoveryUse::TlsAdmission)==18445);
+    CHECK(!tk::ota_recovery_requirement_valid(0));
+    CHECK(tk::ota_recovery_requirement_valid(1));
+    CHECK(tk::ota_recovery_requirement_valid(SIZE_MAX));
+    CHECK(!tk::ota_recovery_memory_affordable(SIZE_MAX, 0));
+    CHECK(!tk::ota_recovery_memory_affordable(0, 1));
+    CHECK(tk::ota_recovery_memory_affordable(1, 1));
+    CHECK(!tk::ota_recovery_memory_affordable(12344, 12345));
+    CHECK(tk::ota_recovery_memory_affordable(12345, 12345));
+    CHECK(tk::ota_recovery_memory_affordable(12346, 12345));
+    CHECK(!tk::ota_recovery_memory_affordable(SIZE_MAX - 1, SIZE_MAX));
+    CHECK(tk::ota_recovery_memory_affordable(SIZE_MAX, SIZE_MAX));
+    for (size_t observed : {size_t(12344), size_t(12345), size_t(12346)}) {
+        const auto sample = tk::sample_runtime_health([] { return true; }, [] { return true; },
+            [] { return 0U; }, [&] { return observed; }, 12345);
+        CHECK(sample.healthy() == (observed == 12345 || observed == 12346));
+        CHECK(sample.largest == observed);
+    }
+    CHECK(!tk::sample_runtime_health([] { return true; }, [] { return true; },
+        [] { return 0U; }, [] { return SIZE_MAX; }, 0).healthy());
+}
+
+static void test_tls_memory() {
+    CHECK(tk::kTlsAttemptPolicyFloorB == 49152);
+    CHECK(!tk::tls_attempt_affordable(0));
+    CHECK(!tk::tls_attempt_affordable(49151));
+    CHECK(tk::tls_attempt_affordable(49152));
+    CHECK(tk::tls_attempt_affordable(49153));
+    CHECK(tk::tls_attempt_affordable(SIZE_MAX));
+    CHECK(tk::kMqttProbeHeapTlsB == tk::kTlsAttemptPolicyFloorB);
+    CHECK(tk::kMqttProbeHeapPlainB == 12288);
+    for (size_t n : {size_t(0), size_t(12287), size_t(12288), size_t(49151), size_t(49152)})
+        CHECK(tk::mqtt_probe_affordable(n, true) == tk::tls_attempt_affordable(n));
+}
+
 static void test_mqtt_uri() {
     CHECK(tk::mqtt_trim("  host:1883 \r\n") == "host:1883");
     CHECK(tk::mqtt_trim("   ").empty());
@@ -6142,6 +6422,71 @@ static void test_ble_chunk() {
 }
 
 // ─── Deferred NimBLE host events (logic/ble_deferred_event.hpp) ──────────────
+// Included only into test_logic.cpp; all behavior is the actual firmware pure FIFO header.
+static void test_ble_deferred_queue() {
+    using Q = tk::BleDeferredQueue;
+    using K = tk::BleDeferredEventKind;
+    Q queue;
+    Q::Event event;
+    event.generation = 77;
+    CHECK(!queue.pop(event));
+    CHECK(event.generation == 77);
+    CHECK(!queue.push_rx(nullptr, 1, 8));
+    uint8_t sample[245]{};
+    CHECK(!queue.push_rx(sample, 0, 8));
+    CHECK(!queue.push_rx(sample, 245, 8));
+    for (size_t total : {size_t{743}, size_t{2050}}) {
+        for (size_t chunk : {size_t{1}, size_t{20}, size_t{244}}) {
+            queue.clear();
+            for (size_t position = 0; position < total;) {
+                const size_t size = std::min(chunk, total - position);
+                for (size_t i = 0; i < size; ++i) sample[i] = static_cast<uint8_t>(position + i);
+                CHECK(queue.push_rx(sample, size, 8));
+                std::memset(sample, 0xa5, sizeof sample);
+                position += size;
+            }
+            CHECK(queue.cells_used() == (total + 243) / 244);
+            size_t read = 0;
+            while (queue.pop(event)) {
+                CHECK(event.kind == K::Rx && event.generation == 8);
+                CHECK(event.size > 0 && event.size <= 20);
+                for (size_t i = 0; i < event.size; ++i) CHECK(event.data[i] == static_cast<uint8_t>(read + i));
+                read += event.size;
+            }
+            CHECK(read == total);
+        }
+    }
+    for (unsigned round = 0; round != 64; ++round) {
+        CHECK(queue.push_link(false, 3, 8));
+        CHECK(queue.push_link(true, 4, 10));
+        CHECK(queue.push_rx(sample, 1, 10));
+        CHECK(queue.pop(event) && event.kind == K::LinkDown && event.generation == 8 && event.conn_handle == 3);
+        CHECK(queue.pop(event) && event.kind == K::LinkUp && event.generation == 10 && event.conn_handle == 4);
+        CHECK(queue.pop(event) && event.kind == K::Rx && event.generation == 10 && event.size == 1);
+        CHECK(queue.empty());
+    }
+    for (unsigned i = 0; i != 15; ++i) CHECK(queue.push_link(true, 3, 8));
+    std::memset(sample, 0x31, sizeof sample);
+    CHECK(queue.push_rx(sample, 243, 8));
+    std::memset(sample, 0x72, sizeof sample);
+    CHECK(!queue.push_rx(sample, 2, 8));
+    CHECK(queue.cells_used() == 16);
+    unsigned links = 0;
+    size_t bytes = 0;
+    while (queue.pop(event)) {
+        if (event.kind == K::Rx) {
+            for (size_t i = 0; i < event.size; ++i) CHECK(event.data[i] == 0x31);
+            bytes += event.size;
+        } else ++links;
+    }
+    CHECK(links == 15 && bytes == 243);
+    CHECK(queue.push_rx(sample, 1, 8));
+    CHECK(queue.push_rx(sample, 1, 10));
+    CHECK(queue.pop(event) && event.generation == 8 && event.size == 1);
+    CHECK(queue.pop(event) && event.generation == 10 && event.size == 1);
+    CHECK(queue.empty());
+}
+
 static void test_ble_deferred_event() {
     using K = tk::BleDeferredEventKind;
     CHECK(tk::ble_deferred_event_may_apply(K::LinkUp, 8, 8));
@@ -10574,7 +10919,205 @@ static void test_heap_supervision() {
     CHECK(logs.emit(900000, suppressed) && suppressed == UINT32_MAX);
 }
 
+static void test_shared_unhealthy_restart_ledger() {
+    using namespace tk;
+    CHECK(kBootFailThreshold == 4 && kUnhealthyRestartLimit == 5 && kBootHealthyS == 1800);
+    for (unsigned stored = 0; stored <= 101; ++stored) {
+        for (unsigned n = 0; n <= 6; ++n) {
+            const unsigned bounded = stored < 100 ? stored : 100;
+            const unsigned legacy_floor = n <= 5 && n > bounded ? n : bounded;
+            CHECK(boot_shared_count(stored, BootCounterCause::Clean, RebootReasonState::Missing, n) == 0);
+            CHECK(boot_shared_count(stored, BootCounterCause::HeapRecovery, RebootReasonState::Present, n) == legacy_floor);
+            CHECK(boot_shared_count(stored, BootCounterCause::Fault, RebootReasonState::Present, n) ==
+                  (legacy_floor < 100 ? legacy_floor + 1 : 100));
+            CHECK(boot_shared_count(stored, BootCounterCause::Fault, RebootReasonState::Error, n) ==
+                  (bounded < 100 ? bounded + 1 : 100));
+            CHECK(boot_shared_count(stored, BootCounterCause::Uncertain, RebootReasonState::Missing, n) == bounded);
+        }
+    }
+    for (unsigned observed = 0; observed <= 101; ++observed)
+        for (unsigned confirmed = 0; confirmed <= 101; ++confirmed) {
+            unsigned next = 199;
+            const bool allowed = boot_heap_reservation_next(observed, confirmed, next);
+            CHECK(allowed == (observed < 5 && confirmed < 5));
+            CHECK(next == (allowed ? (observed > confirmed ? observed : confirmed) + 1 : 199));
+        }
+    // Literal mixed sequence, preserving reserved H across SW admission and charging F once.
+    unsigned b = 0, next = 0;
+    CHECK(boot_heap_reservation_next(b, b, next) && next == 1); b = next;
+    CHECK(boot_shared_count(b, BootCounterCause::HeapRecovery, RebootReasonState::Present, 1) == 1);
+    b = boot_shared_count(b, BootCounterCause::Fault, RebootReasonState::Missing, 0); CHECK(b == 2);
+    CHECK(boot_heap_reservation_next(b, b, next) && next == 3); b = next;
+    b = boot_shared_count(b, BootCounterCause::Fault, RebootReasonState::Missing, 0); CHECK(b == 4 && boot_safe_mode(b));
+    CHECK(boot_heap_reservation_next(b, b, next) && next == 5); b = next;
+    CHECK(!boot_heap_reservation_next(b, b, next) && next == 5);
+}
+
+static void test_stack_context_logic() {
+    namespace sc = tk::stack_sample;
+    CHECK(tk::kStackContextCount == 27 && sizeof(sc::Snapshot) == 24);
+    CHECK(sc::kQuantumBytes == 256 && sc::kSaturationBytes == 15872);
+    CHECK(!sc::decode(0).sampled && !sc::decode(64).sampled);
+    CHECK(sc::encode(0) == 1 && sc::encode(255) == 1 && sc::encode(256) == 2);
+    CHECK(sc::decode(63).lower_bound_bytes == 15872 && sc::decode(63).saturated);
+    sc::Snapshot bank{};
+    for (unsigned slot = 0; slot != tk::kStackContextCount; ++slot) {
+        CHECK(!sc::read(bank, slot).sampled);
+        bank[slot / 5] = sc::merge(bank[slot / 5], slot % 5, slot * 256 + 255);
+        CHECK(sc::read(bank, slot).sampled && sc::read(bank, slot).lower_bound_bytes == slot * 256);
+        char key[tk::kStackMetricKeyBytes]{};
+        CHECK(tk::stack_context_metric_key(static_cast<tk::StackContext>(slot), key));
+        CHECK(std::string(key) == std::string(tk::stack_context_name(static_cast<tk::StackContext>(slot))) + "_stack_min_free_bytes");
+    }
+    CHECK(!sc::read(bank, sc::kCapacity).sampled && sc::any_sample(bank));
+    char refused[tk::kStackMetricKeyBytes] = "keep";
+    CHECK(!tk::stack_context_metric_key(tk::StackContext::Count, refused));
+    CHECK(std::string(refused) == "keep" && tk::stack_context_name(tk::StackContext::Count) == nullptr);
+}
+
+static void test_ota_lifetime() {
+    using namespace tk::ota;
+    Budget budget;
+    CHECK(budget.begin(100, 16384, kOperationTimePolicy));
+    CHECK(budget.deadline() == 26100);
+    CHECK(!budget.begin(200, 32768, kOperationTimePolicy));
+    CHECK(budget.live(101));
+    const auto first_deadline = budget.deadline();
+    CHECK(budget.tighten(8192));
+    CHECK(budget.deadline() == 25600 && budget.deadline() < first_deadline);
+    CHECK(!budget.tighten(0) && !budget.tighten(16385));
+    CHECK(budget.live(25599));
+    CHECK(!budget.live(25600) && !budget.live(200));
+    Budget backwards;
+    CHECK(backwards.begin(100, 16384, kOperationTimePolicy));
+    CHECK(backwards.live(120) && !backwards.live(119) && !backwards.live(121));
+    Budget overflow;
+    CHECK(!overflow.begin(UINT64_MAX - 1, 1, kOperationTimePolicy));
+    Budget invalid;
+    CHECK(!invalid.begin(0, 1, {15000,10000,0}));
+    CriticalEpisode episode;
+    CHECK(episode.excused(100,4095,true,20));
+    CHECK(episode.excused(119,4095,true,20));
+    CHECK(!episode.excused(120,4095,true,20));
+    CHECK(!episode.excused(119,4095,true,20)); // Cannot reopen expiry through a clock regression.
+    CHECK(!episode.excused(121,4095,false,900));
+    CHECK(!episode.excused(122,4095,true,900)); // Neither a gap nor new grace renews the episode.
+    CHECK(!episode.excused(123,4096,true,900)); // Only actual healthy INTERNAL clears it.
+    CHECK(episode.excused(124,4095,true,20));
+    CriticalEpisode early_backwards;
+    CHECK(early_backwards.excused(100,4095,true,20));
+    CHECK(early_backwards.excused(110,4095,true,20));
+    CHECK(!early_backwards.excused(109,4095,true,20));
+    CHECK(!early_backwards.excused(111,4095,true,20));
+    CriticalEpisode nonrenewing;
+    CHECK(nonrenewing.excused(0,4095,true,300000));
+    // Fifteen minutes, continuous low INTERNAL, alternating writer gaps and nominal new jobs.
+    for (uint64_t now=30000; now<=900000; now+=30000) {
+        const bool busy = (now/30000)%2 == 0;
+        CHECK(nonrenewing.excused(now,4095,busy,600000) == (busy && now<300000));
+    }
+    CHECK(!nonrenewing.excused(900001,4096,false,300000));
+    CHECK(nonrenewing.excused(900002,4095,true,300000));
+    CriticalEpisode zero;
+    CHECK(!zero.excused(1,4095,true,0));
+    CHECK(!zero.excused(2,4095,true,300000));
+}
+
+static void test_runtime_fatal_prefix_equivalence() {
+    using Component = tk::RuntimeFatalComponent;
+    struct Expected { const char* prefix; Component component; };
+    static constexpr Expected expected[]{
+        {"clock", Component::Clock},
+        {"NVS", Component::Nvs},
+        {"Tesla NVS", Component::Nvs},
+        {"configuration", Component::Configuration},
+        {"VIN ", Component::Identity},
+        {"initial key", Component::Identity},
+        {"NimBLE", Component::Bluetooth},
+        {"HTTP", Component::Http},
+        {"setup HTTP", Component::Http},
+        {"WiFi", Component::Network},
+        {"Ethernet", Component::Network},
+        {"W5500", Component::Network},
+        {"LAN", Component::Network},
+        {"setup AP", Component::Network},
+        {"setup WiFi", Component::Network},
+        {"Vehicle", Component::Vehicle},
+        {"vehicle runtime", Component::Vehicle},
+        {"OTA", Component::Ota},
+        {"heap supervisor", Component::HeapSupervisor},
+        {"app_main", Component::Application},
+        {"safe-mode runtime", Component::Application},
+    };
+    CHECK(tk::runtime_fatal_component(nullptr) == Component::Unknown);
+    CHECK(tk::runtime_fatal_component("") == Component::Unknown);
+    for (const auto& item : expected) {
+        CHECK(tk::runtime_fatal_component(item.prefix) == item.component);
+        const std::string extended = std::string(item.prefix) + " boundary detail";
+        CHECK(tk::runtime_fatal_component(extended.c_str()) == item.component);
+        const std::string embedded = std::string("x") + item.prefix;
+        CHECK(tk::runtime_fatal_component(embedded.c_str()) == Component::Unknown);
+        const std::string shortened(item.prefix, std::strlen(item.prefix) - 1);
+        CHECK(tk::runtime_fatal_component(shortened.c_str()) == Component::Unknown);
+    }
+    CHECK(tk::runtime_fatal_component("http") == Component::Unknown);
+    CHECK(tk::runtime_fatal_component("nvs") == Component::Unknown);
+    CHECK(tk::runtime_fatal_component("WiF") == Component::Unknown);
+}
+
+struct ControlCasProbe {
+    static constexpr bool is_always_lock_free = false;
+    uint32_t value, competing;
+    bool inject;
+    unsigned loads{0}, exchanges{0};
+    std::memory_order load_order{}, success_order{}, failure_order{};
+    uint32_t load(std::memory_order order) noexcept { ++loads; load_order=order; return value; }
+    bool compare_exchange_strong(uint32_t& expected, uint32_t desired,
+            std::memory_order success, std::memory_order failure) noexcept {
+        ++exchanges; success_order=success; failure_order=failure;
+        if (inject) { inject=false; value=competing; expected=value; return false; }
+        if (value!=expected) { expected=value; return false; }
+        value=desired; return true;
+    }
+};
+struct ControlNativeProbe {
+    static constexpr bool is_always_lock_free = true;
+    uint32_t value;
+    unsigned calls{0};
+    std::memory_order order{};
+    void fetch_or(uint32_t bits, std::memory_order memory) noexcept {
+        ++calls; order=memory; value|=bits;
+    }
+    uint32_t load(std::memory_order) = delete;
+    bool compare_exchange_strong(uint32_t&, uint32_t,
+        std::memory_order, std::memory_order) = delete;
+};
+static void test_ota_control_rmw() {
+    for (uint32_t phase=0; phase<8; ++phase) {
+        for (uint32_t flags : {0u,256u,512u,768u,UINT32_C(0xffff0000)}) {
+            const uint32_t seed=phase|flags;
+            for (uint32_t bits : {0u,256u,512u,768u}) {
+                for (bool race : {false,true}) {
+                    ControlCasProbe probe{seed,seed^1u,race};
+                    tk::ota::publish_control_bits(probe,bits);
+                    CHECK(probe.value==((race?(seed^1u):seed)|bits));
+                    CHECK(probe.loads==1 && probe.exchanges==(race?2u:1u));
+                    CHECK(probe.load_order==std::memory_order_acquire);
+                    CHECK(probe.success_order==std::memory_order_acq_rel);
+                    CHECK(probe.failure_order==std::memory_order_acquire);
+                }
+                ControlNativeProbe native{seed};
+                tk::ota::publish_control_bits(native,bits);
+                CHECK(native.calls==1 && native.value==(seed|bits));
+                CHECK(native.order==std::memory_order_acq_rel);
+            }
+        }
+    }
+}
+
 int main() {
+    test_shared_unhealthy_restart_ledger();
+    test_stack_context_logic();
     test_heap_supervision();
     test_iteration_fault();
     test_coredump_image();
@@ -10615,6 +11158,9 @@ int main() {
     test_ota_changelog_range();
     test_task_start_gate();
     test_runtime_admission();
+    test_runtime_fatal_prefix_equivalence();
+    test_config_repair();
+    test_identity_recovery();
     test_runtime_status_visibility();
     test_ota_confirm_runtime_admission_matrix();
     test_nimble_start_gate();
@@ -10630,6 +11176,8 @@ int main() {
     test_display_model();
     test_led();
     test_led_driver();
+    test_ota_lifetime();
+    test_ota_control_rmw();
     test_heap_watchdog();
     test_charge_control();
     test_active_window();
@@ -10651,10 +11199,13 @@ int main() {
     test_heap_history();
     test_heap_persist();
     test_health_gate();
+    test_tls_memory();
+    test_ota_recovery_memory();
     test_mqtt_uri();
     test_http_origin();
     test_ble_chunk();
     test_ble_deferred_event();
+    test_ble_deferred_queue();
     test_wifi_rollback();
     test_setup_portal();
     test_auto_enrollment();

@@ -929,9 +929,31 @@ with open(p, "r+", encoding="utf-8") as f:
     dd if=/dev/zero of="$fixture_stage/$tgt/tesla-key-esp32.bin" bs=1 count=4096 status=none
     "$GH_FAKE_REAL_PYTHON" -c 'import sys; open(sys.argv[1], "wb").write(b"\xff"*8192)' "$fixture_stage/$tgt/ota_data_initial.bin"
   done
-  local fixture_site
-  fixture_site="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/tesla-key-pages.XXXXXX")"
-  FIRMWARE_STAGE_DIR="$fixture_stage" "$contract_root/scripts/build-pages.sh" "$fixture_site" "1.0.1-dev.1" "$sha_c" >/dev/null
+  # The real assembler and its Git-based generator must see only this owned history.
+  # A new object store, no remote and an explicit cwd exclude the operator's worktree/refs.
+  local builder_repo="$tmp/actual-pages-repo" fixture_site builder_input
+  git -c core.hooksPath=/dev/null clone --quiet --template= --no-local --no-hardlinks \
+    --origin origin "$tmp" "$builder_repo"
+  git -C "$builder_repo" remote remove origin
+  [[ -d "$builder_repo/.git" && ! -L "$builder_repo/.git" \
+      && ! -e "$builder_repo/.git/commondir" \
+      && ! -e "$builder_repo/.git/objects/info/alternates" ]] || return 1
+  [[ -z "$(git -C "$builder_repo" remote)" \
+      && -z "$(git -C "$builder_repo" for-each-ref --format='%(refname)' refs/remotes/)" \
+      && "$(git -C "$builder_repo" rev-parse --verify "${sha_c}^{commit}")" == "$sha_c" ]] || return 1
+  rm -rf -- "$builder_repo/scripts" "$builder_repo/docs"
+  mkdir -p "$builder_repo/scripts"
+  for builder_input in build-pages.sh verify-vendored-esptool-js.sh check-pages-manifest.py check-otadata-contract.py generate-ota-changelog.py; do
+    cp -p "$contract_root/scripts/$builder_input" "$builder_repo/scripts/$builder_input"
+  done
+  cp -pR "$contract_root/docs" "$builder_repo/docs"
+  cp -p "$contract_root/LICENSE" "$builder_repo/LICENSE"
+  fixture_site="$builder_repo/_site"
+  (
+    cd "$builder_repo"
+    [[ "$PWD" == "$builder_repo" ]] || exit 1
+    FIRMWARE_STAGE_DIR="$fixture_stage" ./scripts/build-pages.sh "$fixture_site" "1.0.1-dev.1" "$sha_c" >/dev/null
+  )
   cp "$fixture_site/manifest.json" "$fake_live_dev"
   git -C "$tmp" checkout -q gh-pages
   cp "$fixture_site/manifest.json" "$tmp/dev/manifest.json"
@@ -940,7 +962,7 @@ with open(p, "r+", encoding="utf-8") as f:
   git -C "$tmp" commit -qm "dev-pages-actual-builder"
   git -C "$tmp" push -q origin gh-pages
   git -C "$tmp" checkout -q main
-  rm -rf "$fixture_site"
+  rm -rf -- "$builder_repo"
 
   got="$(PATH="$fakebin:$PATH" GITHUB_REPOSITORY=owner/repo GH_FAKE_RELEASE="$fake_release" \
     GH_FAKE_LIVE="$fake_live" GH_FAKE_LIVE_DEV="$fake_live_dev" changed_since_dev "$tmp" "$sha_d")"

@@ -1,3 +1,4 @@
+#include "stack_watch.hpp"
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>
@@ -49,6 +50,10 @@
 #include "logic/heap_watchdog.hpp"
 #include "logic/vin_transition.hpp"
 
+#if defined(CONFIG_TESLA_CONFIG_REPAIR_USB) && CONFIG_TESLA_CONFIG_REPAIR_USB
+#include "config_repair.hpp"
+#endif
+
 static const char* TAG = "main";
 
 // Retry ownership while a temporary operation is in flight. The one-second yield is a defined
@@ -56,6 +61,7 @@ static const char* TAG = "main";
 // restart remains authoritative and is never stolen. Stable/unknown metadata releases our lease.
 static void fatal_startup_rollback() noexcept {
     for (;;) {
+        tk::StackWatchScope f135_fatal_retry_exit(tk::StackWatch::Main);
         OtaFaultRestartGuard owner;
         if (!owner.held()) {
             vTaskDelay(pdMS_TO_TICKS(1000));
@@ -73,6 +79,7 @@ static void fatal_startup_rollback() noexcept {
             // uncertain effect so no other recovery crosses it; this never confirms an image.
             owner.seal();
             try {
+                tk::stack_watch_sample(tk::StackWatch::Main); // before terminal effect
                 const esp_err_t err = esp_ota_mark_app_invalid_rollback_and_reboot();
                 ESP_LOGE(TAG, "OTA rollback could not be started: %s", esp_err_to_name(err));
             } catch (...) {}
@@ -84,7 +91,8 @@ static void fatal_startup_rollback() noexcept {
 // An essential failure closes vehicle work permanently for this boot. PendingVerify actively
 // rolls back once its operation owner is available; Stable/unknown parks and preserves evidence.
 [[noreturn]] void boot_fatal(const char* component) {
-    tk::runtime_admission_mark_fatal();
+    tk::runtime_admission_mark_fatal(tk::runtime_fatal_component(component));
+    tk::stack_watch_sample(tk::StackWatch::Main); // before nonreturning park
     try {
         ESP_LOGE(TAG, "FATAL: essential component '%s' failed to initialize; refusing to run a "
                       "partial firmware", component);
@@ -192,6 +200,8 @@ static bool apply_ntp_clock_(tk::ClockSample supplied, int64_t entered_us,
 // Strong implementation of the pinned IDF weak extension seam. The SDK caller
 // sntp_set_system_time reaches this hook INSTEAD of its unguarded default clock write.
 extern "C" void sntp_sync_time(struct timeval* source) {
+    tk::StackWatchScope f135_callback_exit(tk::StackWatch::SntpSync);
+
     try {
         const int64_t entered_us = esp_timer_get_time();
         if (!source || sntp_get_sync_mode() != SNTP_SYNC_MODE_IMMED ||
@@ -287,11 +297,15 @@ static void log_heap(const char* where) {
 static bool s_ota_gate_link_expected = false;
 
 static void ota_health_gate_task(void*) {
+    tk::stack_watch_sample(tk::StackWatch::OtaGate); // current task at entry
+    tk::StackWatchScope f135_task_exit(tk::StackWatch::OtaGate);
+
   try {
     const esp_partition_t* running = esp_ota_get_running_partition();
     esp_ota_img_states_t st;
     if (esp_ota_get_state_partition(running, &st) != ESP_OK ||
         st != ESP_OTA_IMG_PENDING_VERIFY) {
+        tk::stack_watch_sample(tk::StackWatch::OtaGate); // no C++ unwind on delete
         vTaskDelete(nullptr);   // normal boot — nothing pending to confirm
         return;
     }
@@ -305,6 +319,7 @@ static void ota_health_gate_task(void*) {
     constexpr uint32_t kPollS = 5;
     const TickType_t   start  = xTaskGetTickCount();
     for (;;) {
+        tk::StackWatchScope f135_iteration_exit(tk::StackWatch::OtaGate);
         vTaskDelay(pdMS_TO_TICKS(kPollS * 1000));
         // The health timer is not proof that boot completed.  A late essential failure can leave
         // HTTP and this task alive while app_main is parked; Safe Mode intentionally omits the
@@ -314,6 +329,7 @@ static void ota_health_gate_task(void*) {
                 continue;
             case tk::RuntimeAdmissionAction::Stop:
                 ESP_LOGE(TAG, "OTA image remains pending: essential runtime was not admitted");
+                tk::stack_watch_sample(tk::StackWatch::OtaGate); // no C++ unwind on delete
                 vTaskDelete(nullptr);
                 return;
             case tk::RuntimeAdmissionAction::Run:
@@ -334,6 +350,7 @@ static void ota_health_gate_task(void*) {
             // loses to this owner while the heap re-check can still veto the commit.
             OtaHealthCommitGuard commit_guard;
             if (!commit_guard) continue;
+            if (!ota_recovery_reference_ready(commit_guard)) continue;
             const auto commit_health = ota_runtime_health();
             if (!commit_health.healthy()) continue;
             const size_t commit_largest = commit_health.largest;
@@ -364,10 +381,12 @@ static void ota_health_gate_task(void*) {
         }
         break;
     }
+    tk::stack_watch_sample(tk::StackWatch::OtaGate); // no C++ unwind on delete
     vTaskDelete(nullptr);
   } catch (...) {
     // An exception after a mark attempt cannot prove that rollback remains armed.
     ESP_LOGE(TAG, "OTA health-gate task threw; verification is uncertain and task stops");
+    tk::stack_watch_sample(tk::StackWatch::OtaGate); // no C++ unwind on delete
     vTaskDelete(nullptr);
   }
 }
@@ -386,11 +405,17 @@ __attribute__((noinline)) static void load_config_blob_verified(NvsStorageAdapte
 }
 
 extern "C" void app_main() {
+    tk::StackWatchScope f135_callback_exit(tk::StackWatch::Main);
+    tk::stack_watch_sample(tk::StackWatch::Main); // initial current startup task mark
+
   // Top-level exception boundary (issue #204): app_main runs C++ that allocates (std::string
   // config, make_unique, the component start()s). An uncaught throw would unwind into the C
   // startup that invoked app_main → std::terminate → abort — the same reboot, but with no
   // diagnostic. Contain it, log it, then roll back a pending image or halt a valid one.
   try {
+#if defined(CONFIG_TESLA_CONFIG_REPAIR_USB) && CONFIG_TESLA_CONFIG_REPAIR_USB
+    tk::repair::console_entry(); // terminal; no normal startup or writer coexists
+#else
     // Capture console output into the in-memory diagnostic ring (GET /diag).
     diag_log_init();
     initialize_clock_gate_();
@@ -491,16 +516,12 @@ extern "C" void app_main() {
     const tk::RebootReasonRecord boot_reboot_record = VehicleController::take_reboot_reason(config_store);
     VehicleController::set_boot_reboot_reason(boot_reboot_record);
 
-    // Boot-loop guard. The heap watchdog bounds the restarts IT chooses; this bounds the ones the
-    // SYSTEM forced — a panic, a brownout or a task-watchdog loop, none of which were counted by
-    // anything before. Past the threshold it latches safe mode and app_main below brings up WiFi +
-    // web UI + OTA ONLY, so a device that crashes on the vehicle path stays reachable in a browser
-    // instead of needing a USB cable. It also stops each boot re-opening the car's polling window,
-    // which is what turns a reboot loop into a flat traction battery.
-    // A verified heap SW reboot preserves the verified crash count; unknown boot evidence cannot
-    // clear it. Real fault reset codes still increment even beside a heap breadcrumb.
+    // One durable ledger charges real fault boots and deliberate heap recovery. Heap SW boots
+    // preserve their prior reservation; legacy verified counts set a conservative enrollment
+    // floor. Admission latches at four, before any normal Vehicle/auto-pair/MQTT task exists.
     const bool safe_mode = tk::safe_mode_begin(config_store,
-        tk::boot_counter_cause(tk::diag_crash_reset_info().code, boot_reboot_record.state), boot_reboot_record.state);
+        tk::boot_counter_cause(tk::diag_crash_reset_info().code, boot_reboot_record.state),
+        boot_reboot_record.state, boot_reboot_record.heap_restarts);
     if (safe_mode && !tk::runtime_admission_mark_safe_mode()) {
         boot_fatal("safe-mode runtime admission");
     }
@@ -534,11 +555,15 @@ extern "C" void app_main() {
     // self-heal to the /diag RAM ring, which the next restart erases. Queued lines survive until
     // WiFi is up, so this does reach the collector. The read itself stays above, before anything
     // else can reboot, so the value always describes the boot just made.
-    if (VehicleController::boot_reboot_reason()[0] != '\0') {
+    if (boot_reboot_record.state == tk::RebootReasonState::Present) {
         ESP_LOGW(TAG, "BOOT this boot was caused by the firmware itself: reason=%s — the previous "
                       "run restarted deliberately because its heap stayed unusable (also in "
                       "/status as last_reboot; see docs/ARCHITECTURE.md)",
-                 VehicleController::boot_reboot_reason());
+                 boot_reboot_record.text);
+    } else if (boot_reboot_record.state == tk::RebootReasonState::Error) {
+        ESP_LOGW(TAG, "BOOT reboot reason unavailable or invalid: reason=%s; "
+                      "previous reset cause is unverified",
+                 boot_reboot_record.text);
     }
 
     // Resolve WiFi credentials from the configuration snapshot verified above. With an armed VIN
@@ -714,6 +739,7 @@ extern "C" void app_main() {
                 owner.seal();
                 bootloader_random_disable();
                 vTaskDelay(pdMS_TO_TICKS(100));
+                tk::stack_watch_sample(tk::StackWatch::Main); // before terminal effect
                 esp_restart();
                 // An unexpected return is not authority to release the owner or continue startup.
                 for (;;) vTaskDelay(pdMS_TO_TICKS(10000));
@@ -779,6 +805,7 @@ extern "C" void app_main() {
                 static_assert(!tk::ota_reboot_confirms_pending_image(
                     tk::OtaRebootClass::AutomaticIdentityRecovery));
                 vTaskDelay(pdMS_TO_TICKS(300));
+                tk::stack_watch_sample(tk::StackWatch::Main); // before terminal effect
                 esp_restart();
             } else {
                 ESP_LOGE(TAG, "initial key generation incomplete (state=%d) — runtime remains fail-closed",
@@ -850,6 +877,7 @@ extern "C" void app_main() {
                             tk::OtaRebootClass::AutomaticWifiRollback));
                         owner.seal();
                         vTaskDelay(pdMS_TO_TICKS(300));
+                        tk::stack_watch_sample(tk::StackWatch::Main); // before terminal effect
                         esp_restart();
                         for (;;) vTaskDelay(pdMS_TO_TICKS(10000));
                     }
@@ -1041,7 +1069,9 @@ extern "C" void app_main() {
         ESP_LOGI(TAG, "tesla-key-esp32 running. API on port 80.");
     }
     // Main task is no longer needed; Vehicle loop + HTTP server run in their own tasks.
+    tk::stack_watch_sample(tk::StackWatch::Main); // before terminal effect
     vTaskDelete(nullptr);
+#endif // CONFIG_TESLA_CONFIG_REPAIR_USB
   } catch (const std::exception& e) {
       ESP_LOGE(TAG, "app_main initialization threw (%s)", e.what());
       boot_fatal("app_main exception boundary");

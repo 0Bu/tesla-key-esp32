@@ -1,5 +1,6 @@
 // Actual extracted clock shell and date getters. RTOS/libc/storage are passive deterministic
 // doubles. This does not emulate SDK timekeeping, NVS durability or a live SNTP connection.
+#include "stack_watch.hpp"
 #include "time_sync.hpp"
 #include "logic/nvs_contract.hpp"
 #include <atomic>
@@ -15,6 +16,12 @@
 
 static int checks;
 #define CHECK(x) do { ++checks; if (!(x)) { std::fprintf(stderr,"FAIL %d: %s\n",__LINE__,#x); std::exit(1); } } while (0)
+// Passive own-task SDK I/O only: the real stack_watch.cpp owns encoding/CAS/minimum logic.
+// The host stub ABI is UBaseType_t=unsigned, TaskHandle_t=void*; no SDK/target ABI is claimed.
+static unsigned f135_hwm_queries = 0;
+extern "C" unsigned uxTaskGetStackHighWaterMark(void* task) {
+    CHECK(task == nullptr); ++f135_hwm_queries; return 4096;
+}
 static bool held, busy, set_fail, set_throw, save_fail, save_throw;
 static int takes, gives, sets, saves, logs, weak_notices;
 static int64_t monotonic_us, wall_seconds, save_elapsed_us;
@@ -128,6 +135,7 @@ static void reset() {
 #endif
 }
 int main() {
+    CHECK(!tk::stack_watch_min_free_bytes(tk::StackWatch::SntpSync).has_value());
     reset();
     auto browser=apply_browser_clock(1750000000123.0);
     CHECK(browser.status==BrowserClockStatus::Applied && sets==1 && saves==0);
@@ -220,6 +228,8 @@ int main() {
     storage.text[tk::nvs_contract::kPairedAt]="1600000001";
     CHECK(vehicle.key_created_at()==1600000001 && vehicle.paired_at()==1600000001 && saves==0);
     vehicle.key_created_untrusted_.store(true); CHECK(vehicle.key_created_at()==0);
+    CHECK(f135_hwm_queries > 0);
+    CHECK(tk::stack_watch_min_free_bytes(tk::StackWatch::SntpSync) == 4096u);
     std::printf("OK %d actual clock/getter checks; pinned caller=%d\n",checks,
 #ifdef CLOCK_TEST_PINNED_SNTP
         1

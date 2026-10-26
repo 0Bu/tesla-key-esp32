@@ -10,7 +10,7 @@ namespace tk {
 
 // app_main calls once before the supervisor/services exist. Unknown storage fails closed.
 bool safe_mode_begin(NvsStorageAdapter& config_store, BootCounterCause cause,
-                     RebootReasonState reason);
+                     RebootReasonState reason, unsigned legacy_heap_streak = 0);
 bool safe_mode_active();
 
 // The supervisor is the only later caller. A pending clear represents a confirmed boot-time
@@ -22,9 +22,15 @@ bool safe_mode_clear_after_healthy_run(NvsStorageAdapter& config_store,
                                       const OtaHealthCommitGuard& owner,
                                       bool qualified_now) noexcept;
 
-// Under FaultRestart, freshly require Stable and commit the crash latch before reboot_why.
-// Reading back an uncommitted value is insufficient; failed/malformed storage is never repaired.
-bool safe_mode_prepare_heap_restart(NvsStorageAdapter& config_store,
-                                    const OtaFaultRestartGuard& owner) noexcept;
+// A typed, confirmed charge in the shared ledger; zero means no authority.
+struct SharedRestartReservation {
+    uint8_t count{0};
+    explicit operator bool() const noexcept { return count != 0; }
+};
+
+// Under FaultRestart, freshly require Stable and commit a shared unit in every runtime mode
+// before reboot_why. A readback after a failed commit never authorizes the reset.
+SharedRestartReservation safe_mode_prepare_heap_restart(NvsStorageAdapter& config_store,
+                                                       const OtaFaultRestartGuard& owner) noexcept;
 
 }  // namespace tk

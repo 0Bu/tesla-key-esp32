@@ -468,12 +468,26 @@ function render(s){
     }
   }
 
-  // Safe Mode recovery is separate from pairing, whose instructions belong in the hero.
-  var rb=$("safeModeBanner");
-  if(safe){
-    rb.classList.add('show');
-    setHTML(rb.querySelector('.bt'),'<b>Safe Mode active</b> — Vehicle Bluetooth, commands, and telemetry are stopped. Use this recovery dashboard to inspect diagnostics or update firmware.');
-  } else { rb.classList.remove('show'); }
+  // Fatal/identity recovery is distinct from normal automatic pairing; no manual key action.
+  var rb=$("safeModeBanner"), runtime=s.sys&&s.sys.runtime_state, identity=s.identity_state;
+  var recoveryText='';
+  if(runtime==='fatal'){
+    recoveryText='<b>Device recovery required</b> — '+esc(s.sys.fatal_component||'unknown')+
+      '. Vehicle services are stopped. Retain diagnostics and resolve the cause before restarting.';
+  } else if(safe){
+    recoveryText='<b>Safe Mode active</b> — Vehicle Bluetooth, commands, and telemetry are stopped. Use this recovery dashboard to inspect diagnostics or update firmware.';
+  } else if(identity==='reboot_required'){
+    recoveryText='<b>Identity recovery</b> — The saved identity needs to be reloaded. Keep the device powered while automatic recovery is evaluated; inspect diagnostics if this remains.';
+  } else if(identity==='cleanup_pending'){
+    recoveryText='<b>Identity recovery</b> — Saved-key cleanup is pending and will retry automatically.';
+  } else if(identity==='vin_transition'){
+    recoveryText='<b>Identity recovery</b> — A vehicle identity change is waiting for recovery. Inspect diagnostics if this remains.';
+  } else if(identity==='storage_unavailable'){
+    recoveryText='<b>Identity recovery</b> — Key storage is unavailable. The device will check again automatically.';
+  }
+  rb.classList.toggle('show',!!recoveryText);
+  if(recoveryText) setHTML(rb.querySelector('.bt'),recoveryText);
+  rb.querySelector('button').hidden=!(safe||runtime==='fatal');
 
   // setHTML preserves the hero animation phase between unchanged polls.
   var hic=$("hicon"), hl=$("hlabel"), hs=$("hsub"), hst=$("hstats");
@@ -484,14 +498,14 @@ function render(s){
   if(s.sys && s.sys.runtime_state==='fatal'){
     g={mode:'empty', glyph:'warn'};
     head='Device recovery required'; sub='Vehicle services are stopped. Inspect diagnostics and resolve the fault before restarting the device.';
-  } else if(blocked){
+  } else if(blocked || (identity && identity!=='ok' && identity!=='unknown')){
     g={mode:'empty', glyph:'key'};
     head='Pairing paused';
     sub=blocked==='key_storage_unavailable'
       ? 'Key storage is unavailable. The device will check again automatically.'
       : blocked==='key_cleanup_pending'
       ? 'Saved-key cleanup is pending. The device will retry automatically.'
-      : 'The saved identity must be reloaded. Restart the device; inspect diagnostics if this condition returns.';
+      : 'The saved identity needs recovery. Keep the device powered; inspect diagnostics if this remains.';
   } else if(configured && paired && s.reauth && !safe){
     g={mode:'neutral', glyph:'link'};
     head='Reconnecting…'; sub='Reconnecting automatically with your existing key.';

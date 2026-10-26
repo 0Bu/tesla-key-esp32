@@ -95,8 +95,9 @@ inline bool ping_probe_cleanup_completed(PingProbeControl& control) {
 inline PingProbeResult ping_probe_run(PingProbeControl& control,
                                       const esp_ping_config_t& config,
                                       TickType_t completion_timeout,
-                                      TickType_t stop_ack_timeout) {
-    if (!control.done) return PingProbeResult::Unavailable;
+                                      TickType_t stop_ack_timeout,
+                                      void (*on_end)(esp_ping_handle_t, void*) = ping_probe_on_end) {
+    if (!control.done || !on_end) return PingProbeResult::Unavailable;
     if (!ping_probe_cleanup_completed(control)) return PingProbeResult::PendingEnd;
 
     while (xSemaphoreTake(control.done, 0) == pdTRUE) {
@@ -108,7 +109,7 @@ inline PingProbeResult ping_probe_run(PingProbeControl& control,
     control.callback_args = {&control, generation};
     esp_ping_callbacks_t callbacks{};
     callbacks.cb_args = &control.callback_args;
-    callbacks.on_ping_end = ping_probe_on_end;
+    callbacks.on_ping_end = on_end;
 
     esp_ping_handle_t session = nullptr;
     if (esp_ping_new_session(&config, &callbacks, &session) != ESP_OK || !session) {

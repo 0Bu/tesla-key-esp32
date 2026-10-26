@@ -19,7 +19,29 @@ idf_build_set_property(DEPENDENCIES_LOCK "dependencies.lock.${IDF_TARGET}")
 # this specific format warning from an error for the whole build.
 idf_build_set_property(COMPILE_OPTIONS "-Wno-error=format" APPEND)
 
-project(tesla-key-esp32)
+# TESLA_BUILD_ROLE_BEGIN
+set(TESLA_BUILD_ROLE "application" CACHE STRING "Closed application or config-repair role")
+if(TESLA_BUILD_ROLE STREQUAL "application")
+    project(tesla-key-esp32)
+elseif(TESLA_BUILD_ROLE STREQUAL "config-repair")
+    project(tesla-key-config-repair)
+else()
+    message(FATAL_ERROR "Unknown firmware build role")
+endif()
+if(TESLA_BUILD_ROLE STREQUAL "config-repair")
+    string(LENGTH "${PROJECT_VER}" TESLA_REPAIR_VERSION_LENGTH)
+    if(NOT PROJECT_VER MATCHES "^cfgrepair-[0-9a-f]+$" OR NOT TESLA_REPAIR_VERSION_LENGTH EQUAL 26)
+        message(FATAL_ERROR "Maintenance version must be its separate source-fingerprint identity")
+    endif()
+    if(NOT CONFIG_TESLA_CONFIG_REPAIR_USB)
+        message(FATAL_ERROR "Maintenance role requires its explicit configuration")
+    endif()
+else()
+    if(CONFIG_TESLA_CONFIG_REPAIR_USB)
+        message(FATAL_ERROR "Maintenance configuration cannot build an application artifact")
+    endif()
+endif()
+# TESLA_BUILD_ROLE_END
 
 tesla_bind_dependency_admission()
 

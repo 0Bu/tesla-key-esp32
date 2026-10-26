@@ -6,13 +6,10 @@
 
 #include <string>
 
-// Pull-based OTA self-update. The device fetches manifest.json from a fixed HTTPS
-// URL (CONFIG_TESLA_OTA_MANIFEST_URL), compares its "version" to the running
-// firmware, and — when asked — downloads its per-target app image
-// (CONFIG_TESLA_OTA_FIRMWARE_BASE_URL + "tesla-key-esp32<suffix>.bin", where suffix is
-// empty, "-s3", "-c3" or "-c6") straight into
-// the inactive OTA slot via esp_https_ota, then reboots. esp_https_ota verifies the
-// image chip-id, so a wrong-target image is refused rather than flashed.
+// Pull-based signed OTA. One coordinator owns the shared device-operation lease and raw
+// inactive-slot writer. One separately quarantined ESP-TLS worker receives only a bounded Job;
+// all metadata/image/redirect legs share one nonrenewable admission deadline. Public SDK image
+// verification and the existing RSA update policy remain mandatory before boot selection.
 
 enum class OtaState { Idle, Checking, Downloading, Done, Error };
 
@@ -36,8 +33,8 @@ struct OtaCheckResult {
     unsigned    target_pr{0};
 };
 
-// Fetch the manifest and compare versions. Blocking (HTTPS GET, a few seconds) —
-// runs inside the background task spawned by ota_check_start(), not on the HTTP task.
+// Fetch the manifest and compare versions. Blocking background coordinator API; the separate
+// worker owns network calls. HTTP uses ota_check_start. This is not a hard SDK wall-time guarantee.
 // pr_number == 0 checks main channel; pr_number > 0 checks PR preview channel.
 OtaCheckResult ota_check(unsigned pr_number = 0);
 
@@ -74,6 +71,10 @@ bool ota_is_busy();
 // Is an active OTA download or flash-write installation running right now?
 // Returns true strictly during an active firmware download/installation task, not during idle checks.
 bool ota_is_updating();
+
+// Allocation-free request only. The coordinator aborts its writer and releases authority after
+// actual quiescence; a network-only quarantine never grants writer/restart authority.
+void ota_request_heap_abort() noexcept;
 
 // Safety gate for VIN/private-key mutations. A rollback-capable image may not write recovery
 // journals that the previous slot might interpret differently after an automatic rollback, and
@@ -180,6 +181,9 @@ tk::ConfigImageResult ota_config_image_state(const OtaConfigRestartGuard& owner)
 // Local Ready/sync/sticky-reset/INTERNAL-largest-block sample, ordered and allocation-free.
 // Only a fresh call under the caller's proper operation owner can precede an SDK mark attempt.
 tk::RuntimeHealthSample ota_runtime_health();
+// Read-only ordinary-reference query. Only this actually held owner may borrow the old
+// Operation; an unowned advisory health sample never reads its pointer or coordinator.
+bool ota_recovery_reference_ready(const OtaHealthCommitGuard& owner) noexcept;
 
 // Only a raw PENDING_VERIFY image after a successful user configuration save may be
 // confirmed, subject to Ready, current NimBLE sync/reset and fresh INTERNAL-largest-block
