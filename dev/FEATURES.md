@@ -175,8 +175,10 @@ Native Codex registration is generated from canonical reviewers/hooks and checke
 current hook trust and primary-checkout declarations remain separate runtime conditions. Both host
 jobs are mandatory for the aggregate build, alongside concurrent producer/independent target legs:
 `build` fails, rather than being skipped, unless every need succeeded.
-The PSA harness verifies v6.2.0 peer admission, domain hash isolation, encrypted VCSEC denial
+The PSA harness verifies v6.3.0 peer admission, domain hash isolation, encrypted VCSEC denial
 before telemetry and message refusal when the RNG fails.
-Upstream v6.2.0's charging-power estimator is not used by the native controller; charge telemetry
+Upstream v6.3.0's charging-power estimator is not used by the native controller; charge telemetry
 keeps the vehicle-reported power and phases.
+The optional upstream `Vehicle` poll-result callback is also unused by the native controller;
+completion does not establish telemetry freshness.
 [Runtime contract](ARCHITECTURE.md#pinned-tesla-ble-and-native-orchestration).
