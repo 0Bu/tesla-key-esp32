@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Host-side integration harness test against the real yoziru/tesla-ble v6.2.0 library (with the
+# Host-side integration harness test against the real yoziru/tesla-ble v6.3.0 library (with the
 # repository patch series, including the PSA port), Nanopb, and the exact Espressif Mbed TLS 4.1 /
 # TF-PSA-Crypto commit that the pinned ESP-IDF v6.1 builds into the firmware.
 #
