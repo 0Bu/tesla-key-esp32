@@ -49,7 +49,7 @@ tesla_bind_dependency_admission()
 idf_component_get_property(TESLA_BLE_COMPONENT_LIB yoziru__tesla-ble COMPONENT_LIB)
 target_compile_definitions(${TESLA_BLE_COMPONENT_LIB} PRIVATE TESLA_BLE_LOG_LEVEL=2)
 
-# yoziru/tesla-ble v6.2.0 binds Parental Controls actions into the VehicleAction oneof
+# yoziru/tesla-ble v6.3.0 binds Parental Controls actions into the VehicleAction oneof
 # that this firmware never sends (trimmed to preserve target flash budget), and pulls
 # in redundant force_update_session dead code on counter replay instead of aligning with
 # signer.go. Key regeneration and BLE orchestration are handled natively in the firmware.

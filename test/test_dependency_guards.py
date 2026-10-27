@@ -277,7 +277,7 @@ def main() -> None:
     manifest = json.loads((ROOT / "scripts/tesla-ble-patch-state.json").read_text())
     for row in manifest["files"]:
         assert hashlib.sha256((component / row["path"]).read_bytes()).hexdigest() == row["afterSha256"], row["path"]
-    # Unmodified v6.2.0 inputs used by the formatting probe, outside the patch touched-file set.
+    # Unmodified v6.3.0 inputs used by the formatting probe, outside the patch touched-file set.
     for relative, digest in {
         "include/defs.h": "cdfd3b7f8cde260251dc0b4002827e60d668cc6671d1d27451797963a4d47361",
         "src/logging_bridge.cpp": "1b1a50903727c016f2a427caab5c6a935ef12dfedc4b3e9f7c7d70efc1bab012",

@@ -86,7 +86,7 @@ current implementation. These are review questions, not substitute implementatio
 | OTA | Bounded complete manifest/JSON/version intake; exact manifest/descriptor equality, channel/preview/return exceptions; wrong target/signature; shared operation ownership; no false health confirmation from setup, automatic recovery or partial runtime; network/heap/NimBLE evidence. |
 | Network | Trial WiFi rollback, reconnect after proven lease, transport/lease/gateway-bound baseline and stale in-flight verdict rejection, no ICMP-induced restart; cached board detection before GPIO drive, ordered W5500 probe/all-later-board pin safety/partial unwind; route/lease ownership; quarantined asynchronous ping generations. |
 | MQTT/Syslog | TLS credentials/certification policy, no command subscription; presence/units/identity; discovery→availability→state retries and invalid-cache clearing; post-unlock sinks, bounded logging, generation-safe redaction and storm throttling. |
-| Build/publication | Exact four targets; v6.2.0 pin and full patch chain; pinned IDF/locks; effective-build closure and flags; both host gates plus concurrent producer/independent target legs; size/stack/projection; fresh independent bytes; protected key boundary; production RSA-PSS pin; immutable reuse, Release/Pages equality and stale-preview cleanup. |
+| Build/publication | Exact four targets; v6.3.0 pin and full patch chain; pinned IDF/locks; effective-build closure and flags; both host gates plus concurrent producer/independent target legs; size/stack/projection; fresh independent bytes; protected key boundary; production RSA-PSS pin; immutable reuse, Release/Pages equality and stale-preview cleanup. |
 
 ## Cross-cutting consistency
 
