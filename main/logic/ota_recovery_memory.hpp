@@ -8,8 +8,9 @@ namespace tk {
 enum class OtaRecoveryUse : std::uint8_t { TlsAdmission, ImageConfirmation, OperationEntry };
 // Shared policy threshold for confirmation and pre-operation admission, not identical
 // allocator phases. The named S3 series supports an operating-point policy, not a
-// necessary minimum or universal TLS guarantee. Reference queries reclaim no bytes.
-inline constexpr std::size_t kOtaRecoveryEntryRequiredB = 61440;
+// necessary minimum or universal TLS guarantee. The ordinary cold S3 workload completed
+// three transfers at 59392 B. Reference queries reclaim no bytes.
+inline constexpr std::size_t kOtaRecoveryEntryRequiredB = 59392;
 // Pinned fixed-buffer profile: IN16384/OUT4096 + conservative overhead2048 + header13.
 // The largest single-record request screen is not a complete TLS heap budget/reservation.
 inline constexpr std::size_t kOtaTlsInContentB = 16384;

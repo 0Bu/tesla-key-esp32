@@ -132,6 +132,36 @@ inline unsigned parse_pr_query(std::string_view query_val) {
     return val;
 }
 
+struct OtaQueryParameter {
+    bool present = false;
+    bool valid = true;
+    std::string_view value{};
+};
+
+// Match IDF's first case-insensitive key without decoding values. A supplied key without '='
+// is malformed rather than absent; unrelated query parameters keep their existing behavior.
+inline OtaQueryParameter ota_query_parameter(std::string_view query, std::string_view key) {
+    while (!query.empty()) {
+        const std::size_t amp = query.find('&');
+        const auto item = query.substr(0, amp);
+        const std::size_t equals = item.find('=');
+        const auto name = item.substr(0, equals);
+        bool matches = name.size() == key.size();
+        for (std::size_t i = 0; matches && i < name.size(); ++i) {
+            const char lower = name[i] >= 'A' && name[i] <= 'Z'
+                ? static_cast<char>(name[i] + ('a' - 'A')) : name[i];
+            matches = lower == key[i];
+        }
+        if (matches) {
+            return {true, equals != std::string_view::npos,
+                    equals == std::string_view::npos ? std::string_view{} : item.substr(equals + 1)};
+        }
+        if (amp == std::string_view::npos) break;
+        query.remove_prefix(amp + 1);
+    }
+    return {};
+}
+
 // Format the official GitHub Pages PR manifest URL safely without heap allocation.
 // URL format: "https://0bu.github.io/tesla-key-esp32/PR/<pr>/manifest.json"
 inline bool format_pr_manifest_url(unsigned pr_number, char* buf, std::size_t buf_len) {

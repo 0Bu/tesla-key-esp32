@@ -119,7 +119,7 @@ Lock-free targets use `fetch_or`; non-lock-free targets reuse the existing stron
 with acquire observation/failure and acquire/release success. Every retry recomputes the OR from
 its observed word, preserving phase and other flags. Already-set bits still perform a real RMW.
 
-Confirmation and OTA entry share the selected INTERNAL-largest threshold **61440 B** from
+Confirmation and OTA entry share the selected INTERNAL-largest threshold **59392 B** from
 `logic/ota_recovery_memory.hpp`. Their allocator phases are not identical. OTA entry may reclaim a
 clean previous Operation before sampling, before new Operation, task-stack, body or TLS allocations.
 Confirmation's read-only reference query leaves clean retained Operation and RTOS task/TCB memory
@@ -128,7 +128,17 @@ or a heap delta to make a sample pass. This conservative operating-point policy 
 necessary minimum or universal TLS guarantee; final non-injected bench, build and delivery acceptance
 remain separate.
 
-The named S3 fixed-INTERNAL/TLS1.2 AS series performed three manifest-only checks on the private
+The ordinary S3 cold-workload series completed three manifest transfers with a naturally reached
+59392-B operation-entry sample after the same HTTP/UI setup that exposed the old 61440-B refusal.
+Their TLS pre-context samples were 32768 B and post-context samples were at least 31744 B, above
+the separate 18445-B record screen. The following 103-s quiet interval retained 59392 B at all
+sampled ordinary points with increasing uptime and no observed crash. This selects a demonstrated
+operating point instead of refusing that recovered state; it does not identify a universal minimum
+or prove a TLS allocation margin between samples. Image writing, OTA probation and the physical
+allocator histories of the other three targets remain separate, unexercised boundaries of this
+series. It does not replace their build or delivery checks.
+
+The earlier S3 fixed-INTERNAL/TLS1.2 AS series performed three manifest-only checks on the private
 calibration profile. Post-reclaim operation-entry samples were 61440 B; one ordinary track sample
 was 57344 B and would wait/refuse under the selected policy. All sampled ordinary points in the
 final 104-s interval were 61440 B; this is not continuous instantaneous coverage. TLS pre/post policy
@@ -670,17 +680,14 @@ session-age epoch mismatch or prove RTC behavior on hardware.
 ## Configuration durability
 
 New MQTT/Syslog targets are limited to 64 UTF-8 bytes across HTTP and the UI. The version1
-encoder preserves existing targets up to 120 bytes through unrelated saves, while the unchanged
-reader retains its 256-byte string sanity bound. Short-value wire bytes and CRC/layout are
-unchanged. This is reader compatibility: an older 64-byte writer cannot save a configuration
-containing longer targets. Until both stored targets fit 64 bytes, every otherwise valid LAN WiFi
-submission receives the same refusal before credential comparison or trial staging. This includes
-unchanged credentials, so the refusal cannot reveal equality. With both targets within 64 bytes,
-unchanged WiFi retains its no-write success. Explicit service edits can shorten one target while
-preserving the other. Setup explicitly
-replaces WiFi and retires old trial state; it creates no rollback trial. Values above 120 bytes,
-already-active long-target trials and a downgrade retaining long targets remain unsupported
-recovery boundaries; nothing is silently truncated or disabled.
+encoder preserves existing targets up to 120 bytes through unrelated saves, including LAN WiFi
+trials and their credential rollback. The unchanged reader retains its 256-byte string sanity
+bound. Short-value wire bytes and CRC/layout are unchanged. Unchanged WiFi retains its no-write
+success after the shared restart/image-state admission. Explicit service edits can shorten one
+target while preserving the other. Setup explicitly replaces WiFi and retires old trial state;
+it creates no rollback trial. An older 64-byte writer cannot save a configuration containing longer
+targets, so a downgrade retaining them remains unsupported. Values above 120 bytes also remain
+unsupported; nothing is silently truncated or disabled.
 
 The encoder owns a private static 512-byte scratch buffer through a nonblocking operation permit.
 Busy/reentrant saves return false before encoding, logging or storage and never touch the owner's

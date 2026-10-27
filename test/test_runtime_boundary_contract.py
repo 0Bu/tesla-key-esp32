@@ -8489,13 +8489,6 @@ def require_config_encode_lease_contract(parts: dict[str, str]) -> None:
     require_before("wipe before publication", lease, "bytes[i] = 0;", "s_encode_active.clear(std::memory_order_release);")
     if any(token in lease for token in ("ESP_LOG", "save_", "xSemaphore", "vTaskDelay", "new ")):
         raise AssertionError("config lease construction/destruction must not call out or wait")
-    wifi = re.sub(r"\s+", " ", function_body_in(re.sub(r"\[\[gnu::noinline\]\]\s*", "", normalize_preprocessor_text(parts["http"])), "apply_wifi_submission_"))
-    require_before("uniform legacy refusal before credential comparison", wifi,
-                   "if (!tk::config_service_targets_fit_old_writer(cfg))",
-                   "if (cfg.wifi_ssid == ssid && cfg.wifi_pass == pass)")
-    condition = 'if (!tk::config_service_targets_fit_old_writer(cfg)) { return send_json(req, 409, make_response(false, "set_wifi", "", "shorten existing service addresses to 64 bytes before changing WiFi")); }'
-    if condition not in wifi: raise AssertionError("legacy long targets must terminally refuse before a new WiFi trial")
-    require_before("legacy refusal before trial", wifi, condition, "tk::stage_wifi_change(cfg, ssid, pass);")
 
 
 def self_test_config_encode_lease_contract(parts: dict[str, str]) -> None:
@@ -8504,25 +8497,12 @@ def self_test_config_encode_lease_contract(parts: dict[str, str]) -> None:
         ("configwipeomitted", "blob", "bytes[i] = 0;", "(void)bytes[i];"),
         ("configwipenonvolatile", "blob", "volatile uint8_t* bytes", "uint8_t* bytes"),
         ("configreleasebeforewipe", "blob", "for (size_t i = 0; i < s_encode_buffer.size(); ++i) bytes[i] = 0;\n        s_encode_active.clear(std::memory_order_release);", "s_encode_active.clear(std::memory_order_release);\n        for (size_t i = 0; i < s_encode_buffer.size(); ++i) bytes[i] = 0;"),
-        ("legacytrialguardbypassed", "http", "if (!tk::config_service_targets_fit_old_writer(cfg))", "if (false)"),
     )
     for label, key, before, after in variants:
         mutated = dict(parts)
         if before not in mutated[key]: raise AssertionError("config lease canary not applied: " + label)
         mutated[key] = mutated[key].replace(before, after, 1) + "\n// decoy: " + before + "\n"
         require_mutation_rejected(label, lambda mutated=mutated: require_config_encode_lease_contract(mutated))
-
-    # Move the actual branch across intervening ownership checks instead of assuming adjacency.
-    http = parts["http"]
-    legacy = re.search(r'    if \(!tk::config_service_targets_fit_old_writer\(cfg\)\) \{\n.*?\n    \}', http, re.S)
-    equality = re.search(r'    if \(cfg.wifi_ssid == ssid && cfg.wifi_pass == pass\) \{\n.*?\n    \}', http, re.S)
-    if not legacy or not equality or legacy.start() >= equality.start():
-        raise AssertionError("legacy ordering canary cannot locate actual production branches")
-    moved = http.replace(legacy.group(), "", 1)
-    moved = moved.replace(equality.group(), equality.group() + "\n\n" + legacy.group(), 1)
-    mutated = dict(parts)
-    mutated["http"] = moved + "\n// decoy: " + legacy.group() + "\n"
-    require_mutation_rejected("legacyrefusalaftercomparison", lambda: require_config_encode_lease_contract(mutated))
 
 
 def require_long_uptime_clocks(telemetry: str, trend: str, supervisor: str) -> None:
