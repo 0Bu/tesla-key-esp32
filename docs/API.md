@@ -218,11 +218,8 @@ failure withdraws the update offer. Optional release-note failure is best-effort
 connection closure; details and blocking-SDK limits belong to [Architecture](ARCHITECTURE.md#ota-self-update).
 
 New MQTT and Syslog submissions accept at most 64 UTF-8 bytes; an unchanged stored value remains
-a no-write acknowledgement. Existing targets up to 120 bytes survive unrelated saves. When either
-stored target exceeds 64 bytes, every otherwise valid `/set_wifi` request returns the same `409`
-before credential comparison, staging or writing; explicitly shorten those addresses first. This
-includes unchanged WiFi, so the refusal cannot reveal credential equality. With both targets within
-64 bytes, WiFi also acquires the shared restart lease and requires raw VALID or UNDEFINED before
+a no-write acknowledgement. Existing targets up to 120 bytes survive unrelated saves, including
+WiFi changes. WiFi acquires the shared restart lease and requires raw VALID or UNDEFINED before
 comparing credentials. Busy, pending, NEW, unsupported or unknown image state refuses every valid
 pair uniformly with `409`; unchanged admitted WiFi remains write/restart-free. See
 [configuration durability](ARCHITECTURE.md#configuration-durability) for older-writer limits.
@@ -230,10 +227,12 @@ pair uniformly with `409`; unchanged admitted WiFi remains write/restart-free. S
 Before NTP has committed, `/set_time` accepts only finite milliseconds in the interval from
 1700000000000 (inclusive) to January 1 of build year + 10 (exclusive). Clock admission can return
 `503` when busy or `500` when the clock syscall fails; neither response claims successful application.
-`/ota/check?ms=` uses canonical unsigned integer milliseconds in the same interval when fallback
-is needed. Invalid fallback input returns `400`, busy admission `503`, and failed application `500`,
-all with `started:false` and no check task start. Without `ms`, or after NTP has committed, a normal
-check needs no browser write. An updating-entry snapshot returns `409` before any clock/check effect;
+`/ota/check?ms=` accepts canonical unsigned integer milliseconds in the same interval, including
+when NTP is already synchronized. Malformed supplied `pr` or `ms` returns `400` before any clock
+change or OTA start; an absent `pr` selects the configured channel. Busy clock admission returns
+`503`, and failed application `500`, all with `started:false` and no check task start. Without `ms`,
+or with a valid timestamp after NTP has committed, a normal check needs no browser write.
+An updating-entry snapshot returns `409` before timestamp processing or any clock/check effect;
 it does not exclude an update starting later. Degraded replies after a possible clock effect follow
 the uncertainty contract below.
 

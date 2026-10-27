@@ -41,7 +41,7 @@ if [ -e "$repo_root/.git" ] || [ -L "$repo_root/.git" ]; then
     echo "idf-docker: cannot resolve the Git common directory" >&2; exit 1;
   }
   case "$git_common_abs" in
-    "$repo_root"/*) ;;
+    "$repo_root"/*) mount_flags+=(-v "$git_common_abs":"/project/${git_common_abs#"$repo_root"/}":ro) ;;
     *) mount_flags+=(-v "$git_common_abs":"$git_common_abs":ro) ;;
   esac
 fi

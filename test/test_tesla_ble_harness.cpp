@@ -2398,16 +2398,34 @@ int main() {
     {
         auto context = kat::loaded_client_context();
         Peer peer(UniversalMessage_Domain_DOMAIN_INFOTAINMENT, context, tc::TEST_VIN);
+        Signatures_SessionInfo info = Signatures_SessionInfo_init_zero;
+        std::memcpy(info.epoch, tc::TEST_EPOCH, sizeof info.epoch);
+        std::memcpy(info.publicKey.bytes, tc::EXPECTED_VEHICLE_PUBLIC_KEY, 65);
+        info.publicKey.size = 65;
+        info.clock_time = 2650;
+        info.counter = 6;
+        const bool ready = context && peer.update_session(&info) == TeslaBLE_Status_E_OK &&
+                           peer.is_initialized();
+        peer.set_counter(7);
+        uint8_t ad[128]{};
+        size_t ad_size = 0;
+        // Exercise the library's request builder against the independent official TLV vector;
+        // supplying that vector directly to encrypt() would not test metadata construction.
+        const bool built = ready && peer.construct_ad_buffer(
+            Signatures_SignatureType_SIGNATURE_TYPE_AES_GCM_PERSONALIZED, tc::TEST_VIN,
+            2655, ad, &ad_size, 2) == TeslaBLE_Status_E_OK;
+        expect(built && ad_size == metadata.size() && std::memcmp(ad, metadata.data(), ad_size) == 0,
+               "request metadata builder matches the official type, domain, VIN, epoch, expiry, counter and flags",
+               "request metadata builder diverges from the official command vector");
         std::vector<uint8_t> input = plaintext;
-        std::vector<uint8_t> ad = metadata;
-        uint8_t ciphertext[64];
+        uint8_t ciphertext[64]{};
         size_t ciphertext_size = 0;
-        uint8_t tag[16];
-        uint8_t nonce[12];
+        uint8_t tag[16]{};
+        uint8_t nonce[12]{};
         const bool encrypted =
-            context && peer.load_tesla_key(tc::EXPECTED_VEHICLE_PUBLIC_KEY, 65) == TeslaBLE_Status_E_OK &&
+            built &&
             peer.encrypt(input.data(), input.size(), ciphertext, sizeof ciphertext, &ciphertext_size, tag,
-                         ad.data(), ad.size(), nonce) == TeslaBLE_Status_E_OK &&
+                         ad, ad_size, nonce) == TeslaBLE_Status_E_OK &&
             ciphertext_size == plaintext.size();
         const auto reference = kat::gcm_encrypt(tc::EXPECTED_SESSION_KEY, std::vector<uint8_t>(nonce, nonce + 12),
                                                 kat::sha256(metadata), plaintext);

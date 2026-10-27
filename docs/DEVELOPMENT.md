@@ -34,8 +34,9 @@ registration/trust in sync in linked worktrees. Adapter parity does not prove ru
 Optional build acceleration: `IDF_FAST_BUILD=1` uses a container-native volume;
 `scripts/idf-docker.sh daemon start` keeps a warm container, and `daemon stop` releases it.
 The same limits and toolchain apply. USB flashing runs on the host, not Docker Desktop.
-For linked worktrees, only the external Git common directory is mounted read-only; the primary
-checkout's source files are not exposed. Daemon reuse checks the actual mount inventory as well
+Git metadata is mounted read-only in both layouts: a primary checkout has a `.git` overlay;
+a linked worktree exposes only its external Git common directory, without the primary checkout's
+source files. Daemon reuse checks the actual mount inventory as well
 as its image, resource limits and mount-policy label. An older, broader daemon is recreated.
 
 ## Exact dependency source admission

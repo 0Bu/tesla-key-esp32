@@ -18,8 +18,8 @@
 // pinned to ESP-IDF 5.x and re-verified unchanged on 6.1, where the enumerators are
 //   UNKNOWN=0 POWERON=1 EXT=2 SW=3 PANIC=4 INT_WDT=5 TASK_WDT=6 WDT=7
 //   DEEPSLEEP=8 BROWNOUT=9 SDIO=10 USB=11 JTAG=12 EFUSE=13 PWR_GLITCH=14 CPU_LOCKUP=15
-// and the .cpp that calls this should static_assert the handful it depends on against the IDF
-// enum (POWERON/SW/PANIC/INT_WDT/TASK_WDT/BROWNOUT is enough), so a future renumber is a build
+// and diag_crash.cpp static_asserts every mirrored value against the IDF
+// enum, so a future renumber is a build
 // error instead of a silently mislabelled crash. An unknown/newer code degrades to "unknown"
 // rather than asserting a cause nobody established.
 //

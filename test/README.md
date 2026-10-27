@@ -155,7 +155,8 @@ behavior claims. Mirrored C++/Python/JS presenters need parity checks, not merel
 
 The v6.2.0 real-library harness also checks fresh/forced/established/cleared-secret peer admission,
 monotonic session counters, domain request-hash isolation and invalid-domain lookup.
-The crypto harness checks official client/session derivation, HMAC/tag, AES-GCM, response-counter
+The crypto harness checks official client/session derivation, HMAC/tag, the library-built request
+metadata against the official TLV vector, AES-GCM, response-counter
 AAD (different from request counter), tampered-tag refusal, PEM compatibility and invalid keys.
 Disabling the real PSA RNG must refuse handshake and payload construction without emitting a frame.
 Fingerprint derivation remains covered by a host mirror; the IDF crypto shell is not compiled on
@@ -350,7 +351,11 @@ are operating-point policies, not universal allocation guarantees. Native fixtur
 the immutable requirement provider and separately inject
 12345B into actual TLS pre/post-context guards, timed probation (including post-owner resampling)
 and successful user-save confirmation. Existing default regressions remain unchanged. These
-host-only boundary values do not calibrate a safe production requirement. MQTT keeps its existing
+host-only boundary values do not calibrate a safe production requirement. Literal 59391/59392/59393
+regressions also cover the selected shared entry/confirmation decision and health sampler; restoring
+the old 61440-B policy must reject the naturally observed 59392-B operating point and fail those checks.
+The physical series and its limits are recorded in the [architecture](../docs/ARCHITECTURE.md#ota-self-update).
+MQTT keeps its existing
 `logic/tls_memory.hpp` policy. Runtime omission recipes remain unqualified until independently
 executed with exact first CHECKs and restoration positives.
 Effect-reply tests separately exercise all typed HTTP outcomes

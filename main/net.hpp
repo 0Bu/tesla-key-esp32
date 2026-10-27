@@ -13,9 +13,9 @@
 // Home Assistant config URL). Each was correct while WiFi was the only transport and silently
 // wrong the moment it was not.
 //
-// Threading: every getter here is a relaxed read of an atomic written by the event-loop task.
-// They are safe to call from any task at any time, including before net_init() — which is
-// what lets the display and LED tasks start before the link does and simply render "searching".
+// Link-state snapshots use atomic loads with the default sequentially consistent ordering.
+// They are available before net_init(), so display and LED tasks can render "searching" while
+// the link starts. Transport-specific readings use the initialization/lease guards below.
 namespace tk {
 
 // One-time bring-up of the shared substrate every transport needs: esp_netif and the default
@@ -35,7 +35,8 @@ void net_init();
 // panel clock is the same GPIO the probe would drive as SPI SCLK).
 bool net_eth_probe();
 
-// Bring up the Ethernet interface and wait up to CONFIG_TESLA_ETH_WAIT_S for a DHCP lease.
+// Bring up Ethernet, allow up to 4 s for PHY link, then wait up to three
+// CONFIG_TESLA_ETH_WAIT_S intervals for DHCP while the link remains present.
 // Returns true only with a lease in hand — a controller with no cable, a dead switch port or an
 // absent DHCP server all return false so the caller can give WiFi a turn. The driver keeps
 // running either way, so a cable plugged in later still comes up.
@@ -88,7 +89,8 @@ bool net_eth_present();
 unsigned net_reconnect_count();
 
 // The WiFi station's live RSSI in dBm. Returns false — leaving *rssi_dbm and ssid untouched —
-// whenever the active transport is not WiFi, or the station record cannot be read safely.
+// when no WiFi lease is held or the station record cannot be read. A retained WiFi lease
+// can still supply these readings while Ethernet carries the default route.
 // ssid must have room for 33 bytes (32 + NUL, per 802.11); pass nullptr if not wanted.
 //
 // The guard matters: esp_wifi_sta_get_ap_info() has transiently-null fields while the station
@@ -101,8 +103,8 @@ bool net_wifi_signal(int* rssi_dbm, char* ssid);
 // /status.eth; either pointer may be null.
 bool net_eth_phy(int* speed_mbps, bool* full_duplex);
 
-// A friendly 802.11 generation for the active WiFi link ("Wi-Fi 6", "802.11g", …), or
-// nullptr when the transport is not WiFi. Surfaced as /status.wifi.std.
+// The WiFi AP's advertised 802.11 generation ("Wi-Fi 6", "802.11g", …), or nullptr when no
+// WiFi lease is held or the station record cannot be read. Surfaced as /status.wifi.std.
 const char* net_wifi_standard();
 
 // Start the connectivity watchdog task (logic/net_link.hpp's watch_step drives it). Call once

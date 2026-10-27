@@ -115,13 +115,6 @@ inline constexpr size_t kConfigMaxWifiPassLen = 64;   // WPA2 passphrase 8..63, 
 inline constexpr size_t kConfigMaxVinLen      = 17;   // a VIN is exactly 17 (empty = unset)
 inline constexpr size_t kConfigMaxUriLen = kServiceTargetPreserveMaxBytes;
 
-// An older v1 writer cannot encode service fields above64. Refuse NEW LAN WiFi trials until
-// explicit service edits fit that writer; the preserved bytes are not silently shortened.
-inline bool config_service_targets_fit_old_writer(const ConfigBlob& config) noexcept {
-    return config.mqtt_uri.size() <= kServiceTargetInputMaxBytes &&
-           config.syslog_uri.size() <= kServiceTargetInputMaxBytes;
-}
-
 // The DECODE-side sanity bound on a stored string length, deliberately looser than the per-field
 // bounds above and deliberately not per-field. A reader stricter than the writer is a way to
 // turn a perfectly good stored configuration into a wiped one, so the reader's job here is only

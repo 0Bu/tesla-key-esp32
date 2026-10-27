@@ -48,6 +48,7 @@
 #include "logic/device_hostname.hpp"
 #include "logic/health_gate.hpp"
 #include "logic/heap_watchdog.hpp"
+#include "logic/reset_reason.hpp"
 #include "logic/vin_transition.hpp"
 
 #if defined(CONFIG_TESLA_CONFIG_REPAIR_USB) && CONFIG_TESLA_CONFIG_REPAIR_USB
@@ -249,22 +250,6 @@ static void restore_clock_from_nvs(NvsStorageAdapter& config_store) {
 
 // ─── app_main ─────────────────────────────────────────────────────────────────
 
-static const char* reset_reason_str(esp_reset_reason_t r) {
-    switch (r) {
-        case ESP_RST_POWERON:   return "POWERON";
-        case ESP_RST_EXT:       return "EXT";
-        case ESP_RST_SW:        return "SW(ota/restart)";
-        case ESP_RST_PANIC:     return "PANIC(abort/exception)";
-        case ESP_RST_INT_WDT:   return "INT_WDT";
-        case ESP_RST_TASK_WDT:  return "TASK_WDT";
-        case ESP_RST_WDT:       return "OTHER_WDT";
-        case ESP_RST_DEEPSLEEP: return "DEEPSLEEP";
-        case ESP_RST_BROWNOUT:  return "BROWNOUT";
-        case ESP_RST_SDIO:      return "SDIO";
-        default:                return "UNKNOWN";
-    }
-}
-
 // Heap-attribution probe: logs free + largest contiguous block at each init milestone.
 // The LARGEST free block (not total free) is what bounds big allocations (OTA TLS record
 // buffers, the tesla-ble session), so it's the number that decides whether the device
@@ -429,7 +414,7 @@ extern "C" void app_main() {
     // The values must still be read HERE, before NVS init, WiFi, the syslog queue and the
     // component start()s have allocated: sampled after all that, "free heap at boot" would
     // describe a boot that already happened rather than the state we came up in.
-    const char*    boot_reason      = reset_reason_str(esp_reset_reason());
+    const char*    boot_reason      = tk::reset_reason_slug(static_cast<int>(esp_reset_reason()));
     const unsigned boot_free        = (unsigned) esp_get_free_heap_size();
     const unsigned boot_min_free    = (unsigned) esp_get_minimum_free_heap_size();
     const unsigned boot_largest     = (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);

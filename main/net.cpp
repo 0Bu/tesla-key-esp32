@@ -391,10 +391,9 @@ void net_wifi_retry_station() {
 bool net_wifi_station_started() { return s_sta_started.load(); }
 
 // ── WiFi-only readings ────────────────────────────────────────────────────────
-// Both gate on net_kind() == Wifi, not merely on "something is up": esp_wifi_sta_get_ap_info()
-// has transiently-null fields while the station is associating and a concurrent read there
-// faults (LoadProhibited, EXCVADDR=0x1). Centralised here so no caller can forget the gate —
-// /status, MQTT and the display presenter each used to re-derive it.
+// Both readers require a WiFi lease, even when Ethernet carries the default route. A generic
+// "network up" flag cannot establish that the station is safe to query. Keep the guard here
+// so status, MQTT and display consumers do not re-derive it.
 
 bool net_wifi_signal(int* rssi_dbm, char* ssid) {
     // Gated on the WiFi LEASE, not on net_kind(): a board that fell back to WiFi and later had a

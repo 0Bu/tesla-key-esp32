@@ -1158,6 +1158,18 @@ static void test_ota_contract() {
     CHECK(tk::parse_pr_query("abc") == 0);
     CHECK(tk::parse_pr_query("") == 0);
 
+    CHECK(!tk::ota_query_parameter("ms=1800000000000", "pr").present);
+    CHECK(!tk::ota_query_parameter("prefixpr=7", "pr").present);
+    CHECK(!tk::ota_query_parameter("%70r=7", "pr").present);
+    CHECK(tk::ota_query_parameter("ms=1&PR=7", "pr").value == "7");
+    CHECK(tk::ota_query_parameter("pr=7&pr=8", "pr").value == "7");
+    CHECK(tk::ota_query_parameter("pr=", "pr").present);
+    CHECK(tk::ota_query_parameter("pr=", "pr").value.empty());
+    CHECK(tk::ota_query_parameter("pr", "pr").present);
+    CHECK(!tk::ota_query_parameter("pr", "pr").valid);
+    CHECK(!tk::ota_query_parameter("x=1&MS&y=2", "ms").valid);
+    CHECK(tk::ota_query_parameter("x=1&MS=1800000000000&y=2", "ms").value == "1800000000000");
+
     char url_buf[128];
     CHECK(tk::format_pr_manifest_url(326, url_buf, sizeof(url_buf)));
     CHECK(std::string_view(url_buf) == "https://0bu.github.io/tesla-key-esp32/PR/326/manifest.json");
@@ -5405,8 +5417,14 @@ static void test_reset_reason() {
     const char* expected[] = {"unknown", "power_on", "ext", "sw", "panic", "int_wdt",
         "task_wdt", "wdt", "deepsleep", "brownout", "sdio", "usb", "jtag", "efuse",
         "pwr_glitch", "cpu_lockup"};
-    for (int code = 0; code < 16; ++code)
+    // Independent literal fault set: all three watchdogs, panic, brownout, power glitch
+    // and CPU lockup. Do not derive the oracle from reset_is_fault itself.
+    const bool expected_fault[] = {false, false, false, false, true, true, true, true,
+        false, true, false, false, false, false, true, true};
+    for (int code = 0; code < 16; ++code) {
         CHECK(std::string(tk::reset_reason_slug(code)) == expected[code]);
+        CHECK(tk::reset_is_fault(code) == expected_fault[code]);
+    }
     for (int code : {-2147483647 - 1, -1, 16, 9999, 2147483647}) {
         CHECK(std::string(tk::reset_reason_slug(code)) == "unknown");
         CHECK(!tk::reset_is_fault(code));
@@ -6124,6 +6142,20 @@ static void test_ota_recovery_memory() {
     CHECK(tk::ota_recovery_required_bytes_for(static_cast<tk::OtaRecoveryUse>(255),profile)==0);
     CHECK(tk::ota_recovery_required_bytes_for(tk::OtaRecoveryUse::OperationEntry)==tk::kOtaRecoveryEntryRequiredB);
     CHECK(tk::ota_recovery_required_bytes_for(tk::OtaRecoveryUse::ImageConfirmation)==tk::kOtaRecoveryEntryRequiredB);
+    // A fresh ordinary S3 workload completed three checks at this recovered entry point.
+    // Both consumers must accept it; the next lower sample still fails closed.
+    for (const auto use : {tk::OtaRecoveryUse::OperationEntry, tk::OtaRecoveryUse::ImageConfirmation}) {
+        const auto required = tk::ota_recovery_required_bytes_for(use);
+        CHECK(!tk::ota_recovery_memory_affordable(59391, required));
+        CHECK(tk::ota_recovery_memory_affordable(59392, required));
+        CHECK(tk::ota_recovery_memory_affordable(59393, required));
+        for (const size_t observed : {size_t(59391), size_t(59392), size_t(59393)}) {
+            const auto sample = tk::sample_runtime_health([] { return true; }, [] { return true; },
+                [] { return 0U; }, [&] { return observed; }, required);
+            CHECK(sample.healthy() == (observed == 59392 || observed == 59393));
+            CHECK(sample.largest == observed);
+        }
+    }
     CHECK(tk::kOtaTlsInRecordBoundB==18445&&tk::kOtaTlsOutRecordBoundB==6157);
     CHECK(tk::kOtaTlsRecordCapacityB==tk::kOtaTlsInRecordBoundB);
     CHECK(tk::ota_recovery_required_bytes_for(tk::OtaRecoveryUse::TlsAdmission)==18445);
@@ -7365,7 +7397,6 @@ static void test_service_target_limits() {
     for (size_t mqtt : {0u,64u,65u,119u,120u,121u})
     for (size_t syslog : {0u,64u,65u,119u,120u,121u}) {
         config.mqtt_uri.assign(mqtt,'m'); config.syslog_uri.assign(syslog,'l');
-        CHECK(tk::config_service_targets_fit_old_writer(config)==(mqtt<=64 && syslog<=64));
         const size_t length=tk::config_blob_encode(config,encoded.data(),encoded.size());
         if (mqtt>120 || syslog>120) { CHECK(length==0); continue; }
         CHECK(length==233+mqtt+syslog); // fixed fields, prefixes/flags/CRC independently counted
