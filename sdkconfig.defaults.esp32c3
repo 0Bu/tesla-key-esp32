@@ -1,3 +1,7 @@
 # ESP32-C3-only defaults, merged after sdkconfig.defaults by `idf.py set-target esp32c3`.
 # The native USB-Serial/JTAG console is available on C3; classic ESP32 keeps UART0 instead.
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# Limit WiFi power in PHY init data, before either the setup AP or station starts.
+# Mitigate reported Super Mini startup failures (#415); this value is in dBm.
+CONFIG_ESP_PHY_MAX_WIFI_TX_POWER=10
