@@ -97,6 +97,7 @@ Details: [network](ARCHITECTURE.md#wifi--lan-connectivity).
 | Feature | Where | Prevents |
 |---|---|---|
 | Captive portal | `main/provisioning.cpp`, `logic/captive.hpp` | A setup portal that does not pop, or a DNS reply whose A record lands outside the answer section. |
+| ESP32-C3 WiFi power ceiling from startup | `sdkconfig.defaults.esp32c3` (`ESP_PHY_MAX_WIFI_TX_POWER`); [hardware limits](USER_GUIDE.md#hardware) | Default high-power WiFi startup on supply-sensitive C3 boards; candidate mitigation for the unverified Super Mini failure report in #415. |
 | Retrying setup portal | `main/provisioning.cpp`, `logic/setup_portal.hpp`, `main/main.cpp` | A board that boots faster than the router after a power cut staying offline in an unbounded, open setup portal. |
 | SPI Ethernet (W5500) | `net.cpp` (`CONFIG_TESLA_ETH_ENABLED`), `logic/eth_board.hpp`, `main/Kconfig.projbuild`; [network](ARCHITECTURE.md#wifi--lan-connectivity) | Running the BLE proxy on a radio that shares ONE antenna path with BLE. |
 | One image, multiple boards | `main/board.{cpp,hpp}`, `logic/eth_board.hpp` | Two copies of "which board is this" disagreeing on a SHARED pin (the T-Dongle-S3 panel clock is GPIO5, the PoE base's SPI SCLK). |
