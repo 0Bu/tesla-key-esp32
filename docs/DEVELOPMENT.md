@@ -222,7 +222,10 @@ an application build or treat its presence as a flashable or physically tested r
 
 Unsigned local images **cannot boot**. Use provenance-bound signed artifacts and the canonical
 `$flash-esp32`, `$deploy-bench`, `$ship` or `$usb-recovery` procedure, as appropriate. Every physical write
-requires explicit authorization for the board, target and scope. Verify every image's signature;
+requires explicit authorization for the board, target and scope. The user's explicit `$deploy-bench`
+instruction supplies its standard USB preflight/reset/read/flash and passive acceptance approval;
+identify and verify the concrete board/artifact without asking for that approval again.
+Verify every image's signature;
 production and preview artifacts must match the production public-key pin. An authorized local
 development image must match the supplied development key. Size/chip/version checks alone do not
 authenticate an image.
@@ -233,7 +236,8 @@ last. NVS stays intact. Merged-image writes and full erases destroy configuratio
 a separate trust lineage and needs an explicit key and scope.
 
 `$deploy` handles commit, push, PR creation, current-head reviews/CI and canonical squash merge,
-then observes the main build. It does not contact devices.
+then observes the main build. The user's explicit invocation authorizes those steps, including
+protected Dev signing/publication; no additional phase confirmation is needed. It does not contact devices.
 [`$deploy-bench`](../.agents/skills/deploy-bench/SKILL.md) identifies the physical USB bench across
 Tesla/Daikin firmware, flashes a signed PR preview or development-key image through `$flash-esp32`
 or an already-published image through `$usb-recovery`'s provenance and app-only steps, and tests

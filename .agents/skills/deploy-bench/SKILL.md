@@ -3,8 +3,9 @@ name: deploy-bench
 description: Identify the intended physical ESP32 bench among multiple USB boards, including benches currently running Tesla or Daikin firmware, delegate signed app-only USB flashing to flash-esp32 (or usb-recovery's steps for a published image), then test the implementation on that same board. Does not publish or merge repository changes.
 ---
 
-Invoke `$deploy-bench`. Read [AGENTS.md](../../../AGENTS.md) first; this workflow grants no
-additional authorization. Canonical skills live under `.agents/skills/`.
+Invoke `$deploy-bench`. Read [AGENTS.md](../../../AGENTS.md) first. The user's explicit invocation
+authorizes the workflow below; automatic selection by an agent does not. Canonical skills live
+under `.agents/skills/`.
 
 # deploy-bench — identify, USB-flash and test the bench
 
@@ -14,11 +15,17 @@ Test the implementation on the intended physical bench, even when its current fi
 [$usb-recovery](../usb-recovery/SKILL.md) steps 1 and 3 for an already-published image. [$deploy](../deploy/SKILL.md) owns commit, push, PR and merge; this skill does
 not perform those steps or deploy to a production device.
 
-Require explicit user authorization for the selected bench's USB mutation and the named live tests.
-Reuse sufficient scope from the current session. Resolve missing scope once the board, image and
-test plan are concrete; do not repeat an already satisfied approval. Vehicle commands, pairing,
-charge toggles and cluster access each need their separate applicable scope. Run multi-line shell
-blocks, here and in the delegated skills, through a scratch script as
+The user's own `$deploy-bench` invocation is explicit user authorization to identify the intended bench,
+reset/query that board over USB, read its bootloader and partition table without NVS, verify and
+flash the eligible signed app at `0x20000`, activate it by erasing `otadata@0xf000/0x2000`, and run
+same-board passive acceptance. Acceptance includes bounded serial logs and cache-only
+`GET /status`, `GET /diag?redact=1` and `GET /api/proxy/1/version`. It also covers a clean reset
+and timed boot check when serial release delays startup after a successful write/activation.
+Carry this scope into `$flash-esp32` or the delegated `$usb-recovery` steps; do not ask for USB or
+HTTP approval again after resolving the board, port, target and artifact. Ask for missing identity
+information only when selection remains ambiguous. Vehicle commands, pairing, charge toggles,
+cluster access, OTA, NVS/identity changes and broader recovery need separate scope.
+Run multi-line shell blocks, here and in the delegated skills, through a scratch script as
 [Development](../../../docs/DEVELOPMENT.md#running-workflow-shell-blocks) describes.
 
 ## 1. Bind the implementation and test plan
@@ -87,7 +94,8 @@ fall back to a production hostname or a cached address belonging to another boar
 
 Both app-only paths require a compatible installed bootloader and partition table.
 Verify these on the selected bench before writing, especially for Daikin, unknown firmware or stale
-layout evidence. Any necessary bounded flash reads must be separately in scope and exclude NVS.
+layout evidence. The user's workflow instruction covers the necessary bounded bootloader/table
+reads; they must exclude NVS.
 Check actual table integrity, chip/bootloader compatibility, app capacity and the exact permitted
 app/otadata ranges. An unfamiliar project is not permission to rewrite its bootloader/table, erase
 NVS or interpret its stored data as Tesla pairing. If compatibility cannot be established, stop for
@@ -120,8 +128,8 @@ key reuse, sleep/wake, charge commands or production behavior; record these as *
 
 ### 5b. Health verification
 
-Only with approval for these passive endpoints, set `DEVICE_IP` to the address verified for this
-physical bench. Keep it for all requests; no default production address. Observe stable version,
+Under the user's `$deploy-bench` authorization for these passive endpoints, set `DEVICE_IP` to the
+address verified for this physical bench. Keep it for all requests; no default production address. Observe stable version,
 uptime, safe mode/crash state, INTERNAL largest contiguous block and task stack margins. Review
 warnings in context, distinguishing expected unpaired bench state from a regression.
 
