@@ -485,11 +485,11 @@ def validate(root: Path) -> None:
 
     require(literal_assignment(root, "scripts/check-dependency-contract.py", "TARGETS") == TARGETS,
             "check-dependency-contract.py: exact target lock set/order drifted")
-    require(literal_assignment(root, "scripts/check-dependency-contract.py", "TESLA_VERSION") == "v6.2.0" and
+    require(literal_assignment(root, "scripts/check-dependency-contract.py", "TESLA_VERSION") == "v6.3.0" and
             literal_assignment(root, "scripts/check-dependency-contract.py", "TESLA_RESOLVED_COMMIT") ==
-            "a00f3872bf4ed166e1c81100ad33a072b126efa1" and
+            "f7e288e026a19e6bfac0b207922086e57460d860" and
             literal_assignment(root, "scripts/check-dependency-contract.py", "TESLA_COMPONENT_HASH") ==
-            "681b417f865b01683df3f1dd68a3e87ea95367c0b441aefd20832502d22029cf",
+            "243eea1e2060af370dd901ea82e22b2b5357e3c771bf2fa9915065ab01d28631",
             "check-dependency-contract.py: tesla-ble version/resolution contract drifted")
     require(literal_assignment(root, "scripts/check-otadata-contract.py", "OTADATA_SIZE") == 0x2000 and
             literal_assignment(root, "scripts/check-otadata-contract.py", "ERASED_BYTE") == 0xFF,
