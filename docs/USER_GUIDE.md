@@ -11,6 +11,12 @@ flashing; if the revision cannot be read, it continues and the bootloader remain
 An unreadable revision is not evidence of compatibility. esp32c3 builds keep ESP-IDF's default minimum of revision v0.3; esp32s3 and esp32c6
 have no revision floor. ESP32-S2 lacks BLE; H2/P4 lack WiFi.
 
+The esp32c3 image limits WiFi transmit power to **10 dBm**, including the setup AP and station
+startup. This is intended to mitigate the reported Super Mini startup failures in
+[#415](https://github.com/0Bu/tesla-key-esp32/issues/415), but can reduce WiFi range. The report has
+no serial reset log, so a brownout is not confirmed. If startup still fails, retain a serial boot
+log and check the USB cable, power supply and board antenna before erasing configuration.
+
 The pinned library also declares C5, but this firmware does not support it: restoring C5 requires
 separate firmware, signing-size and hardware acceptance. Undeclared chips such as esp32c61 need
 upstream support first. [Target decision](adr/0004-drop-esp32c5-target.md).
