@@ -1,0 +1,1 @@
+{"version":"1.6.2-PR-418","changelog":"Resolve skill-audit drift across skills and reviewers\nRefresh WiFi rollback status after config commits\nSeparate USB bench testing from publication\nMigrate to tesla-ble v5.3.0 and activate Codex guards\nRaise the vehicle_loop task stack to 10240 bytes"}
