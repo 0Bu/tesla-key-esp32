@@ -21,17 +21,16 @@ static const char* ota_state_str(OtaState s) {
 // No query timestamp or an already committed NTP clock needs no fallback write.
 // Required fallback values must be canonical bounded integer milliseconds.
 static BrowserClockStatus apply_browser_time_query_(GuardedReq rq) {
-    if (clock_synced_via_ntp()) return BrowserClockStatus::AlreadyNtpSynced;
     char q[kQueryBufBytes];
     const esp_err_t query = httpd_req_get_url_query_str(rq.req(), q, sizeof(q));
     if (query == ESP_ERR_NOT_FOUND) return BrowserClockStatus::AlreadyNtpSynced;
     if (query != ESP_OK) return BrowserClockStatus::Invalid;
-    char ms[24];
-    const esp_err_t found = httpd_query_key_value(q, "ms", ms, sizeof(ms));
-    if (found == ESP_ERR_NOT_FOUND) return BrowserClockStatus::AlreadyNtpSynced;
+    const auto ms = tk::ota_query_parameter(q, "ms");
+    if (!ms.present) return BrowserClockStatus::AlreadyNtpSynced;
     tk::ClockSample sample;
-    if (found != ESP_OK || !tk::clock_parse_query_ms(ms, clock_plausibility_ceiling(), sample))
+    if (!ms.valid || !tk::clock_parse_query_ms(ms.value, clock_plausibility_ceiling(), sample))
         return BrowserClockStatus::Invalid;
+    if (clock_synced_via_ntp()) return BrowserClockStatus::AlreadyNtpSynced;
     rq.reply()->state.attempting(tk::RequestEffect::Clock);
     const BrowserClockResult result = apply_browser_clock_sample(sample);
     if (result.status != BrowserClockStatus::Applied &&
@@ -40,15 +39,17 @@ static BrowserClockStatus apply_browser_time_query_(GuardedReq rq) {
     return result.status;
 }
 
-static unsigned parse_pr_param_(httpd_req_t* req) {
+static bool parse_pr_param_(httpd_req_t* req, unsigned& pr) {
+    pr = 0;
     char q[kQueryBufBytes];
-    if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK) {
-        char pr_str[16];
-        if (httpd_query_key_value(q, "pr", pr_str, sizeof(pr_str)) == ESP_OK) {
-            return tk::parse_pr_query(pr_str);
-        }
-    }
-    return 0;
+    const auto read = httpd_req_get_url_query_str(req, q, sizeof(q));
+    if (read == ESP_ERR_NOT_FOUND) return true;
+    if (read != ESP_OK) return false;
+    const auto value = tk::ota_query_parameter(q, "pr");
+    if (!value.present) return true;
+    if (!value.valid) return false;
+    pr = tk::parse_pr_query(value.value);
+    return pr != 0;
 }
 
 // GET /ota/check[?ms=<epoch>][&pr=<N>] — start a background version check, return at once.
@@ -60,6 +61,13 @@ esp_err_t handle_ota_check(GuardedReq rq) {
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid query string");
     }
     rq.reply()->state.shape = tk::ReplyShape::OtaCheck;
+    unsigned pr = 0;
+    if (!parse_pr_param_(req, pr)) {
+        tk::JsonBuilder json;
+        json.boolean(json.root(), "started", false);
+        json.string(json.root(), "reason", "invalid PR parameter");
+        return send_json(req, 400, json.release());
+    }
     // Entry snapshot: an update in progress forbids both fallback clock mutation and a new
     // check. This is not a global exclusion against an update starting after this snapshot.
     if (ota_is_updating()) {
@@ -79,7 +87,6 @@ esp_err_t handle_ota_check(GuardedReq rq) {
         return send_effect_json(rq, clock == BrowserClockStatus::Invalid ? 400
                                     : clock == BrowserClockStatus::Busy ? 503 : 500, json.release());
     }
-    const unsigned pr = parse_pr_param_(req);
     rq.reply()->state.attempting(tk::RequestEffect::OtaStart);
     const auto result = ota_check_start(pr);
     const bool started = result == tk::OtaStartResult::Started;
@@ -98,8 +105,14 @@ esp_err_t handle_ota_update(GuardedReq rq) {
     if (validate_query_string(req) != ESP_OK) {
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid query string");
     }
-    const unsigned pr = parse_pr_param_(req);
     rq.reply()->state.shape = tk::ReplyShape::FlatResult;
+    unsigned pr = 0;
+    if (!parse_pr_param_(req, pr)) {
+        tk::JsonBuilder json;
+        json.boolean(json.root(), "result", false);
+        json.string(json.root(), "reason", "invalid PR parameter");
+        return send_json(req, 400, json.release());
+    }
     rq.reply()->state.attempting(tk::RequestEffect::OtaStart);
     const auto result = ota_start(pr);
     const bool started = result == tk::OtaStartResult::Started;

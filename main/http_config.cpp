@@ -676,12 +676,6 @@ esp_err_t handle_set_syslog(GuardedReq rq) {
     tk::ConfigBlob cfg;
     if (!tk::cfg_load_for_update(*g_config, cfg)) return send_config_unreadable_(req, "set_wifi");
 
-    // Refuse uniformly before comparing credentials: the refusal must not reveal equality.
-    if (!tk::config_service_targets_fit_old_writer(cfg)) {
-        return send_json(req, 409, make_response(false, "set_wifi", "",
-            "shorten existing service addresses to 64 bytes before changing WiFi"));
-    }
-
     if (!rq.context->config_restart.try_begin())
         return send_json(req, 409, make_response(false, "set_wifi", "", tk::kConfigRestartBusyReason));
     if (!tk::config_wifi_may_save(ota_config_image_state(rq.context->config_restart)))

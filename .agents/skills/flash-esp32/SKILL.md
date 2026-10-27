@@ -68,14 +68,21 @@ fi
 
 To flash that local tree, the operator must provide an existing RSA-3072 development key. The
 skill must **not** generate one silently: changing the key changes the board's TOFU OTA trust
-anchor, so public Pages OTA will fail until a real CI-signed image is USB-flashed again. The block
-takes a private-key path. Such a path never goes into an agent's scratch script, and the secret
-guard rejects key files (`*.pem`, `*.key`, …) in agent commands, so the operator runs this block.
+anchor, so public Pages OTA will fail until a real CI-signed image is USB-flashed again. Keep the
+private-key path out of agent scratch scripts. An explicitly authorized agent may use only the
+standalone host-signer exception in [AGENTS.md](../../../AGENTS.md#secrets-and-delivery); the
+multi-line block below is operator-run. Verification uses the approved public digest without
+opening the private PEM again; its minimal environment excludes key and token variables.
+Set `DISPLAY_VERSION` to the compile's actual display version and
+`BENCH_SIGNING_PUBLIC_KEY_DIGEST_FILE` to the selected key's approved public digest file
+([production pin](../../../scripts/ota-signing-public-key.sha256) for that authority).
 
 ```bash
 set -euo pipefail
 : "${TARGET:?set TARGET to the target the compile block built}"
 : "${DEV_SIGNING_KEY_FILE:?set DEV_SIGNING_KEY_FILE to an explicit RSA-3072 development key}"
+: "${DISPLAY_VERSION:?set DISPLAY_VERSION to the actual compiled display version}"
+: "${BENCH_SIGNING_PUBLIC_KEY_DIGEST_FILE:?set the approved public digest file for the selected key}"
 [ -f "$DEV_SIGNING_KEY_FILE" ] && [ ! -L "$DEV_SIGNING_KEY_FILE" ] || {
   echo "REFUSING: signing key is missing, non-regular or a symlink" >&2; exit 1;
 }
@@ -86,7 +93,11 @@ SIGNED_APP=build/tesla-key-esp32.local-signed.bin
 [ ! -L "$SIGNED_APP" ] || { echo "REFUSING: signed output path is a symlink" >&2; exit 1; }
 espsecure.py sign_data --version 2 --keyfile "$DEV_SIGNING_KEY_FILE" \
   --output "$SIGNED_APP" build/tesla-key-esp32.bin
-espsecure.py verify_signature --version 2 --keyfile "$DEV_SIGNING_KEY_FILE" "$SIGNED_APP" || exit 1
+env -i PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin \
+  LANG=C LC_ALL=C PYTHONDONTWRITEBYTECODE=1 \
+  python3 -I -B scripts/check-firmware-artifacts.py --app-only --target "$TARGET" \
+  --version "$DISPLAY_VERSION" --app "$SIGNED_APP" --signed-app \
+  --expected-public-key-digest "$BENCH_SIGNING_PUBLIC_KEY_DIGEST_FILE" || exit 1
 SIGNED_SIZE=$(wc -c < "$SIGNED_APP" | tr -d ' ')
 (( SIGNED_SIZE <= 0x1e8000 )) || {
   echo "REFUSING: signed app is $SIGNED_SIZE bytes, over policy 0x1e8000" >&2; exit 1;
