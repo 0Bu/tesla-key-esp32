@@ -1,5 +1,16 @@
 menu "Tesla Key Configuration"
 
+    config TESLA_CONFIG_REPAIR_USB
+        bool "Explicit configuration-only physical maintenance image"
+        default n
+        help
+            Build only for a separately admitted config-repair role. This replaces ordinary
+            application startup with a bounded local UART0/USB-Serial-JTAG maintenance path.
+            It never enables a runtime or network recovery trigger and never erases NVS.
+            Ordinary application/OTA artifacts reject this option. Physical cfg writing and
+            restoration need their own exact-board authorization and reviewed procedure.
+
+
     config TESLA_WIFI_SSID
         string "WiFi SSID"
         default ""
@@ -47,9 +58,11 @@ menu "Tesla Key Configuration"
             images are published. The device appends "tesla-key-esp32<suffix>.bin" for
             its own chip — <suffix> is "" / -s3 / -c3 / -c6 (so "esp32" appears once),
             picked at compile time — one channel serves every supported target.
-            The image is downloaded and flashed to the inactive OTA slot by esp_https_ota,
-            which also verifies the image chip-id and refuses a wrong-target image. Must
-            be HTTPS (verified against the bundled CA roots).
+            A separate ESP-TLS worker downloads the image over HTTPS using bundled CA
+            roots and the original hostname for certificate verification and SNI. The
+            coordinator writes only the inactive OTA slot through public raw OTA APIs,
+            checks the image target and version, and verifies the signed image before
+            selecting it for boot.
 
     config TESLA_MQTT_BROKER_URI
         string "MQTT broker URI (Home Assistant)"

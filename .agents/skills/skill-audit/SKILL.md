@@ -29,7 +29,7 @@ implementation. This workflow establishes only its own gate; whole-project revie
    primary-checkout hook trust and parent runtime overrides. Global host/cluster skills are outside this project audit.
 2. Extract claims about paths, numbers, targets, pins, hooks, commands, permissions and evidence.
    Verify against source/config/scripts and owning docs with `rg` and safe host checks. The library
-   pin is v6.2.0 here; always compare to `main/idf_component.yml`, not this remembered value.
+   pin is v6.3.0 here; always compare to `main/idf_component.yml`, not this remembered value.
 3. Name a contradicting fact for every `SKILL-DRIFT` finding. Prose preference alone is not drift;
    whole-document quality is assessed by `$project-review`. Audit its mandatory material
    `DOC-QUALITY` blocker too.

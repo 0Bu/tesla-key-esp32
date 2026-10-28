@@ -1,5 +1,6 @@
 #pragma once
 #include "service_target_limits.hpp"
+#include "tls_memory.hpp"
 // The ONE place that turns a saved broker string into the URI the client actually dials, plus the
 // rules the save-time pre-flight is decided by. Pure, IDF-free, host-tested.
 //
@@ -105,7 +106,7 @@ inline bool mqtt_uri_is_tls(const std::string& uri) {
 // The thresholds are deliberately well above the raw buffer sizes. mbedTLS allocates the handshake
 // scratch, the certificate chain and the parsed CA on top of them, and the number that matters is
 // the LARGEST BLOCK — so a budget that merely equals the sum would still be a coin flip.
-inline constexpr size_t kMqttProbeHeapTlsB   = 48u * 1024u;
+inline constexpr size_t kMqttProbeHeapTlsB   = kTlsAttemptPolicyFloorB;
 inline constexpr size_t kMqttProbeHeapPlainB = 12u * 1024u;
 
 inline constexpr size_t mqtt_probe_heap_need(bool tls) {

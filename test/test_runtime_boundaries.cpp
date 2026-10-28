@@ -4,6 +4,7 @@
 #include "ping_probe.hpp"
 #include "reboot_reason.hpp"
 #include "safe_mode.hpp"
+#include "ota_update.hpp"
 #include "runtime_fault_log.hpp"
 #include "vehicle_ctrl_internal.hpp"
 #include "stack_watch.hpp"
@@ -75,6 +76,23 @@ TickType_t last_delay = 0;
 TickType_t fake_ticks = 0;
 UBaseType_t fake_stack_free = 0;
 unsigned stack_queries = 0;
+bool fake_isr = false;
+bool fake_can_yield = true;
+BaseType_t fake_scheduler_state = taskSCHEDULER_RUNNING;
+int current_task_token = 0;
+TaskHandle_t fake_current_task = &current_task_token;
+bool track_log_stack_queries = false;
+char log_stack_trace[16]{};
+unsigned log_stack_trace_size = 0;
+int throw_serial_sink = 0;
+int throw_syslog_sink = 0;
+
+void log_stack_step(char step) {
+    if (!track_log_stack_queries) return;
+    CHECK(log_stack_trace_size + 1 < sizeof(log_stack_trace));
+    log_stack_trace[log_stack_trace_size++] = step;
+    log_stack_trace[log_stack_trace_size] = '\0';
+}
 
 enum class PingScenario {
     SetupFail,
@@ -121,6 +139,8 @@ struct FakeMqttProbeOps {
 std::vector<std::string> FakeMqttProbeOps::events;
 
 int discard_log(const char* fmt, va_list ap) {
+    if (throw_serial_sink == 1) throw std::bad_alloc();
+    if (throw_serial_sink == 2) throw 17;
     if (capture_log_sinks) {
         char buffer[1024];
         const int n = vsnprintf(buffer, sizeof(buffer), fmt, ap);
@@ -133,9 +153,14 @@ int discard_log(const char* fmt, va_list ap) {
 int emit_log(const char* format, ...) {
     va_list ap;
     va_start(ap, format);
-    const int result = log_sink ? log_sink(format, ap) : 0;
-    va_end(ap);
-    return result;
+    try {
+        const int result = log_sink ? log_sink(format, ap) : 0;
+        va_end(ap);
+        return result;
+    } catch (...) {
+        va_end(ap);
+        throw;
+    }
 }
 void reset_storage(const char* value) {
     load_ok = true;
@@ -150,14 +175,6 @@ void reset_storage(const char* value) {
     stored_present = value && *value != '\0';
     saved_counts.clear();
     remove_calls = 0;
-}
-
-void reset_task_capture() {
-    created_task = nullptr;
-    created_task_arg = nullptr;
-    task_create_result = pdPASS;
-    deleted_tasks = 0;
-    last_delay = 0;
 }
 
 void reset_ping_capture(PingScenario scenario) {
@@ -249,7 +266,21 @@ extern "C" BaseType_t xSemaphoreGive(SemaphoreHandle_t sem) {
 
 extern "C" void vSemaphoreDelete(SemaphoreHandle_t sem) { delete sem; }
 
+extern "C" BaseType_t xPortInIsrContext() {
+    log_stack_step('I'); return fake_isr ? pdTRUE : pdFALSE;
+}
+extern "C" bool xPortCanYield() {
+    log_stack_step('Y'); return fake_can_yield;
+}
+extern "C" BaseType_t xTaskGetSchedulerState() {
+    log_stack_step('S'); return fake_scheduler_state;
+}
+extern "C" TaskHandle_t xTaskGetCurrentTaskHandle() {
+    log_stack_step('C'); return fake_current_task;
+}
 extern "C" UBaseType_t uxTaskGetStackHighWaterMark(TaskHandle_t task) {
+    log_stack_step('H');
+    if (track_log_stack_queries) CHECK(!last_mutex || !last_mutex->held);
     CHECK(task==nullptr); ++stack_queries; return fake_stack_free;
 }
 
@@ -271,19 +302,19 @@ static void test_actual_guard_unwind_and_stack_minima() {
     CHECK(occupied.held && occupied.gives==0);
     { tk::SemGuard guard(nullptr,0); CHECK(!guard); }
 
-    // Compile stack_watch.cpp itself. A real zero remains sampled, rising observations do
+    // Compile stack_watch.cpp itself. A measured lower bound0 remains sampled; rising observations do
     // not increase the retained minimum, and an invalid index never queries another task.
     const auto slot=tk::StackWatch::Httpd;
     CHECK(!tk::stack_watch_min_free_bytes(slot).has_value());
     CHECK(!tk::stack_watch_min_free_bytes(tk::StackWatch::Mqtt).has_value());
     for (uint32_t value : {1000U,1200U,600U,900U,0U,2000U}) {
         fake_stack_free=value; tk::stack_watch_sample(slot);
-        const uint32_t expected=value==1000U||value==1200U?1000U:value==600U||value==900U?600U:0U;
+        const uint32_t expected=value==1000U||value==1200U?768U:value==600U||value==900U?512U:0U;
         CHECK(tk::stack_watch_min_free_bytes(slot).has_value());
         CHECK(*tk::stack_watch_min_free_bytes(slot)==expected);
     }
     fake_stack_free=456; tk::stack_watch_sample(tk::StackWatch::Vehicle);
-    CHECK(*tk::stack_watch_min_free_bytes(tk::StackWatch::Vehicle)==456);
+    CHECK(*tk::stack_watch_min_free_bytes(tk::StackWatch::Vehicle)==256);
     CHECK(*tk::stack_watch_min_free_bytes(slot)==0);
     const auto before=stack_queries;
     tk::stack_watch_sample(tk::StackWatch::Count);
@@ -392,11 +423,15 @@ extern "C" int host_test_vprintf(const char* fmt, va_list ap) {
 }
 
 void syslog_send(const char* data, size_t len) {
+    if (throw_syslog_sink == 1) throw std::bad_alloc();
+    if (throw_syslog_sink == 2) throw 17;
     if (capture_log_sinks) {
         CHECK(!last_mutex || !last_mutex->held);
         captured_syslog.assign(data, len);
     }
 }
+
+tk::OtaVerificationState ota_verification_state() { return tk::OtaVerificationState::Stable; }
 
 // Minimal deterministic NvsStorageAdapter implementation for the real safe_mode.cpp glue. The
 // storage methods are fault seams: they can fail normally or throw, proving no exception can
@@ -1192,6 +1227,68 @@ static void test_diag_http_completion_matrix() {
     CHECK(terminating_chunks == 1);
 }
 
+static void test_actual_logger_stack_sampling() {
+    // The complete actual diag_log.cpp helper is compiled against these SDK doubles.
+    // Only the added sampling chain is tested for unsafe contexts; this does not claim
+    // that the pre-existing ring or Serial/syslog sink accepts arbitrary ISR logging.
+    CHECK(last_mutex != nullptr && !last_mutex->held);
+    capture_log_sinks = true;
+    track_log_stack_queries = true;
+    const auto before_min = tk::stack_watch_min_free_bytes(tk::StackWatch::DiagLogCallback);
+    for (int refusal : {0, 1, 2, 3, 4}) {
+        fake_isr = refusal == 0;
+        fake_can_yield = refusal != 1;
+        fake_scheduler_state = refusal == 2 ? taskSCHEDULER_NOT_STARTED :
+                               refusal == 3 ? taskSCHEDULER_SUSPENDED : taskSCHEDULER_RUNNING;
+        fake_current_task = refusal == 4 ? nullptr : &current_task_token;
+        log_stack_trace_size = 0; log_stack_trace[0] = '\0';
+        const auto queries = stack_queries;
+        emit_log("ordinary guarded diagnostic %d\n", refusal);
+        CHECK(std::strcmp(log_stack_trace, refusal == 0 ? "I" : refusal == 1 ? "IY" :
+                          refusal == 4 ? "IYSC" : "IYS") == 0);
+        CHECK(stack_queries == queries);
+        CHECK(tk::stack_watch_min_free_bytes(tk::StackWatch::DiagLogCallback) == before_min);
+        CHECK(captured_serial == captured_syslog);
+    }
+    fake_isr = false; fake_can_yield = true; fake_scheduler_state = taskSCHEDULER_RUNNING;
+    fake_current_task = &current_task_token;
+    fake_stack_free = 128; // A real observation retains a present zero lower bound.
+    for (int sink : {0, 1, 2}) {
+        for (int fault : {0, 1, 2}) {
+            if (sink == 0 && fault != 0) continue;
+            throw_serial_sink = sink == 1 ? fault : 0;
+            throw_syslog_sink = sink == 2 ? fault : 0;
+            log_stack_trace_size = 0; log_stack_trace[0] = '\0';
+            const auto queries = stack_queries;
+            bool caught = false;
+            try { emit_log("ordinary sink-unwind diagnostic\n"); }
+            catch (...) { caught = true; }
+            CHECK(caught == (fault != 0));
+            CHECK(std::strcmp(log_stack_trace, "IYSCH") == 0);
+            CHECK(stack_queries == queries + 1);
+            CHECK(tk::stack_watch_min_free_bytes(tk::StackWatch::DiagLogCallback) == 0u);
+            CHECK(!last_mutex->held);
+        }
+    }
+    throw_serial_sink = 0; throw_syslog_sink = 0;
+    log_stack_trace_size = 0; log_stack_trace[0] = '\0';
+    emit_log("E (1) mqtt_client: Error parse uri (1) = mqtt://example:secret@broker.invalid\n");
+    CHECK(std::strcmp(log_stack_trace, "IYSCH") == 0);
+    CHECK(captured_serial == tk::kDiagMqttUriErrorLine);
+    CHECK(captured_syslog == tk::kDiagMqttUriErrorLine);
+    CHECK(!last_mutex->held);
+    // Sampling itself has no allocator/log/sink call. The ordinary sink below is passive,
+    // and its capture strings are disabled so allocation denial targets the actual helper.
+    capture_log_sinks = false;
+    fail_global_allocation = true;
+    const auto queries = stack_queries;
+    emit_log("no-allocation diagnostic sample\n");
+    fail_global_allocation = false;
+    CHECK(stack_queries == queries + 1);
+    track_log_stack_queries = false;
+    diag_log_clear();
+}
+
 int main() {
     test_actual_guard_unwind_and_stack_minima();
     checks += test_coredump_hash();
@@ -1245,6 +1342,7 @@ int main() {
     diag_log_init();
     CHECK(log_hook_installs == previous_installs + 1);
     CHECK(last_mutex != nullptr);
+    test_actual_logger_stack_sampling();
     diag_log_clear();
     const auto drops_before = diag_log_dropped_lines();
     last_mutex->held = true;
@@ -1563,40 +1661,40 @@ int main() {
 
     // Real safe_mode_begin: ordinary progression still works and persists the exact next count.
     reset_storage("3");
-    CHECK(tk::safe_mode_begin(storage, true));
+    CHECK(tk::safe_mode_begin(storage, tk::BootCounterCause::Fault, tk::RebootReasonState::Missing));
     CHECK(saved_counts.size() == 1 && saved_counts[0] == "4");
     CHECK(tk::safe_mode_active());
 
     for (unsigned prior : {0u, 1u, 2u, 3u}) {
         const std::string before = std::to_string(prior);
         reset_storage(before.c_str());
-        CHECK(tk::safe_mode_begin(storage, true) == (prior == 3));
+        CHECK(tk::safe_mode_begin(storage, tk::BootCounterCause::Fault, tk::RebootReasonState::Missing) == (prior == 3));
         CHECK(saved_counts.size() == 1);
         CHECK(saved_counts[0] == std::to_string(prior + 1));
         CHECK(tk::safe_mode_active() == (prior == 3));
     }
 
     reset_storage("3");
-    CHECK(!tk::safe_mode_begin(storage, false));
+    CHECK(!tk::safe_mode_begin(storage, tk::BootCounterCause::Clean, tk::RebootReasonState::Missing));
     CHECK(saved_counts.size() == 1 && saved_counts[0] == "0");
     CHECK(!tk::safe_mode_active());
 
     // An intentional reset cannot bypass failed counter storage or hide a malformed record.
     reset_storage("3");
     load_ok = false;
-    CHECK(tk::safe_mode_begin(storage, false));
+    CHECK(tk::safe_mode_begin(storage, tk::BootCounterCause::Clean, tk::RebootReasonState::Missing));
     CHECK(saved_counts.empty());
     CHECK(tk::safe_mode_active());
 
     reset_storage("broken");
     stored_present = true;
-    CHECK(tk::safe_mode_begin(storage, false));
+    CHECK(tk::safe_mode_begin(storage, tk::BootCounterCause::Clean, tk::RebootReasonState::Missing));
     CHECK(saved_counts.empty());
     CHECK(tk::safe_mode_active());
 
     reset_storage("3");
     save_ok = false;
-    CHECK(tk::safe_mode_begin(storage, false));
+    CHECK(tk::safe_mode_begin(storage, tk::BootCounterCause::Clean, tk::RebootReasonState::Missing));
     CHECK(saved_counts.size() == 1 && saved_counts[0] == "0");
     CHECK(tk::safe_mode_active());
 
@@ -1604,7 +1702,7 @@ int main() {
         reset_storage("3");
         throw_on_load = fail_read;
         throw_on_save = !fail_read;
-        CHECK(tk::safe_mode_begin(storage, false));
+        CHECK(tk::safe_mode_begin(storage, tk::BootCounterCause::Clean, tk::RebootReasonState::Missing));
         CHECK(tk::safe_mode_active());
     }
 
@@ -1612,30 +1710,30 @@ int main() {
     // through app_main's boot decision.
     reset_storage("0");
     throw_on_load = true;
-    CHECK(tk::safe_mode_begin(storage, true));
+    CHECK(tk::safe_mode_begin(storage, tk::BootCounterCause::Fault, tk::RebootReasonState::Missing));
     CHECK(tk::safe_mode_active());
 
     reset_storage("0");
     throw_on_save = true;
-    CHECK(tk::safe_mode_begin(storage, true));
+    CHECK(tk::safe_mode_begin(storage, tk::BootCounterCause::Fault, tk::RebootReasonState::Missing));
     CHECK(tk::safe_mode_active());
 
     reset_storage("0");
     throw_other_on_load = true;
-    CHECK(tk::safe_mode_begin(storage, true));
+    CHECK(tk::safe_mode_begin(storage, tk::BootCounterCause::Fault, tk::RebootReasonState::Missing));
     CHECK(tk::safe_mode_active());
 
     // Ordinary NVS failures do not throw, but are just as safety-relevant: neither an unreadable
     // nor an unwritable crash counter may authorize the BLE/MQTT stack on a possible reboot loop.
     reset_storage("0");
     load_ok = false;
-    CHECK(tk::safe_mode_begin(storage, true));
+    CHECK(tk::safe_mode_begin(storage, tk::BootCounterCause::Fault, tk::RebootReasonState::Missing));
     CHECK(saved_counts.empty());
     CHECK(tk::safe_mode_active());
 
     reset_storage("0");
     save_ok = false;
-    CHECK(tk::safe_mode_begin(storage, true));
+    CHECK(tk::safe_mode_begin(storage, tk::BootCounterCause::Fault, tk::RebootReasonState::Missing));
     CHECK(saved_counts.size() == 1 && saved_counts[0] == "1");
     CHECK(tk::safe_mode_active());
 
@@ -1645,42 +1743,20 @@ int main() {
                                   "999999999999999999999999"}) {
         reset_storage(malformed);
         stored_present = true;
-        CHECK(tk::safe_mode_begin(storage, true));
+        CHECK(tk::safe_mode_begin(storage, tk::BootCounterCause::Fault, tk::RebootReasonState::Missing));
         CHECK(saved_counts.empty());
         CHECK(tk::safe_mode_active());
     }
 
-    // The healthy timer is a FreeRTOS C entry. A throwing NVS save is contained, the task deletes
-    // itself, and the counter remains armed instead of turning the exception into an abort loop.
+    // The independent supervisor now owns the qualified long-run clear. These real startup
+    // tests establish its pending work; actual owner/health/time/failure cases live in
+    // test_heap_supervisor.cpp, not an obsolete one-shot timer fixture.
     reset_storage("0");
-    CHECK(!tk::safe_mode_begin(storage, false));
-    reset_task_capture();
-    tk::safe_mode_arm_healthy_timer(storage);
-    CHECK(created_task != nullptr);
-    CHECK(created_task_arg == &storage);
-    throw_on_save = true;
-    created_task(created_task_arg);
-    CHECK(last_delay == 30000);
-    CHECK(deleted_tasks == 1);
-
-    // The catch-all is executable policy, not just source spelling: a non-allocation exception is
-    // contained by the same C task frame and still reaches vTaskDelete.
-    reset_storage("0");
-    CHECK(!tk::safe_mode_begin(storage, false));
-    reset_task_capture();
-    tk::safe_mode_arm_healthy_timer(storage);
-    CHECK(created_task != nullptr);
-    throw_other_on_save = true;
-    created_task(created_task_arg);
-    CHECK(deleted_tasks == 1);
-
-    // A latched safe mode intentionally does not arm the timer: survival with BLE/MQTT disabled
-    // is not evidence that the failing full stack recovered.
+    CHECK(!tk::safe_mode_begin(storage, tk::BootCounterCause::Fault, tk::RebootReasonState::Missing));
+    CHECK(tk::safe_mode_healthy_clear_pending());
     reset_storage("3");
-    CHECK(tk::safe_mode_begin(storage, true));
-    reset_task_capture();
-    tk::safe_mode_arm_healthy_timer(storage);
-    CHECK(created_task == nullptr);
+    CHECK(tk::safe_mode_begin(storage, tk::BootCounterCause::Fault, tk::RebootReasonState::Missing));
+    CHECK(!tk::safe_mode_healthy_clear_pending());
 
     // The heap watchdog may reboot only after the next counter is durable. Exercise the real
     // noexcept glue against normal failures and both exception classes; no failure can be

@@ -22,6 +22,7 @@ SOURCE_SUFFIXES = {
 }
 
 EXPECTED_DIRECT_CALLS = {
+    "main/config_repair_store.hpp": Counter({'close': 3, 'commit': 1, 'entry_find': 1, 'entry_info': 1, 'entry_next': 1, 'flash_init': 1, 'get_blob': 7, 'get_i16': 1, 'get_i32': 1, 'get_i64': 1, 'get_i8': 1, 'get_str': 3, 'get_u16': 1, 'get_u32': 1, 'get_u64': 1, 'get_u8': 1, 'open_from_partition': 4, 'release_iterator': 1, 'set_blob': 1}),
     "main/nvs_storage.cpp": Counter({
         "get_blob": 6, "commit": 4, "get_str": 4, "set_blob": 2,
         "close": 1, "open": 1, "erase_key": 1, "set_str": 1,
@@ -41,7 +42,7 @@ NVS_FUNCTION_IDENTIFIERS = frozenset(
 # identifier is rejected, even without a following '(', so a new API cannot hide behind a simple
 # function pointer, alias or wrapper. This is deliberately lexical; the mutation suite pins the
 # boundary and exact direct-call tuples below pin every allowed function use.
-NON_FUNCTION_NVS_IDENTIFIERS = frozenset({"contract", "flash", "handle_t"})
+NON_FUNCTION_NVS_IDENTIFIERS = frozenset({"contract", "flash", "handle_t", "type_t", "iterator_t", "entry_info_t"})
 
 
 def require(condition: bool, message: str) -> None:
@@ -418,6 +419,15 @@ def validate(root: Path) -> None:
                 f"production NVS namespace bypasses registry constants: {path.relative_to(root)}")
     display = (main / "display.cpp").read_text(encoding="utf-8")
     validate_display_direct_u8(display)
+    repair = (main / "config_repair_store.hpp").read_text(encoding="utf-8")
+    repair_code = cpp_code_only(repair)
+    require(repair_code.count("NVS_READWRITE") == 1 and
+            token_signature("nvs_open_from_partition(kPartition,nvs_contract::kConfigNamespace,NVS_READWRITE,&write.value)") in token_signature(repair) and
+            token_signature("nvs_set_blob(write.value,nvs_contract::kConfigBlob,bytes,size)") in token_signature(repair) and
+            token_signature("return nvs_commit(write.value)==ESP_OK;") in token_signature(repair) and
+            "write_used_=true" in repair_code and
+            repair_code.index("write_used_=true") < repair_code.index("NVS_READWRITE"),
+            "maintenance cfg-only sealed single-write tuple drifted")
     validate_direct_call_inventory(main)
 
 
@@ -440,6 +450,8 @@ def self_test(root: Path) -> None:
         raise ContractError("NVS physical-name validator accepted sixteen bytes")
 
     mutations = (
+        ("main/config_repair_store.hpp", "nvs_contract::kConfigBlob,bytes,size", "nvs_contract::kPrivateKey,bytes,size", "cfg-only"),
+        ("main/config_repair_store.hpp", "write_used_=true;", "write_used_=false;", "cfg-only"),
         ("main/logic/nvs_contract.hpp",
          '{Namespace::Config, kLastTime, kLastTime, StorageApi::String,',
          '{Namespace::Config, kLastTime, "last_time_2", StorageApi::String,', "exact 19-entry"),

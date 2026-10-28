@@ -131,6 +131,19 @@ def load_module(path: Path, name: str) -> Any:
     return module
 
 
+def changelog_policy() -> Any:
+    return load_module(
+        Path(__file__).resolve().parent / "generate-ota-changelog.py", "ota_changelog_policy"
+    )
+
+
+def read_expected_changelog(path: Path, version: str) -> bytes:
+    try:
+        return changelog_policy().read_validated_document(path, version)
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise AcceptanceError(f"invalid expected changelog: {exc}") from exc
+
+
 def verify_snapshot(
     pages_base: str,
     release_base: str,
@@ -138,6 +151,7 @@ def verify_snapshot(
     source_sha: str,
     release_metadata: Any,
     *,
+    expected_changelog: bytes,
     attempts: int,
     interval: float,
     fetcher: Fetcher,
@@ -151,6 +165,14 @@ def verify_snapshot(
         raise AcceptanceError("invalid expected release version or source SHA")
     if not 1 <= attempts <= 20 or not 0 <= interval <= 60:
         raise AcceptanceError("acceptance polling bounds are invalid")
+
+    metadata_policy = changelog_policy()
+    try:
+        if not isinstance(expected_changelog, bytes):
+            raise AcceptanceError("expected changelog must be immutable bytes")
+        metadata_policy.validate_document_bytes(expected_changelog, version)
+    except (ValueError, RuntimeError) as exc:
+        raise AcceptanceError(f"invalid expected changelog: {exc}") from exc
 
     scripts_dir = Path(__file__).resolve().parent
     release_validator = load_module(scripts_dir / "check-release-assets.py", "release_asset_validator")
@@ -196,7 +218,14 @@ def verify_snapshot(
                         )
                     (site / name).write_bytes(data)
                 manifest_validator.validate(site, source_sha, version)
-                return byte_validator.verify(site, release, version)
+                count = byte_validator.verify(site, release, version)
+                served_changelog = fetcher(
+                    exact_url(pages_base, "changelog.json", cache_key),
+                    metadata_policy.MAX_DOCUMENT_BYTES,
+                )
+                if served_changelog != expected_changelog:
+                    raise AcceptanceError("deployed changelog bytes do not match the expected snapshot")
+                return count
             except (AcceptanceError, OSError, ValueError, RuntimeError) as exc:
                 last_error = exc
                 if attempt < attempts:
@@ -208,6 +237,7 @@ def verify_snapshot(
 
 def self_test() -> None:
     version = "1.2.3"
+    expected_changelog = json.dumps({"version": version, "changelog": "One bounded change."}).encode()
     source_sha = "0123456789abcdef0123456789abcdef01234567"
     pages_base = "https://pages.example.invalid/firmware"
     release_base = "https://release.example.invalid/v1.2.3"
@@ -218,7 +248,7 @@ def self_test() -> None:
             "01.2.3",
             source_sha,
             {},
-            attempts=1,
+            expected_changelog=expected_changelog, attempts=1,
             interval=0,
             fetcher=lambda _url, _timeout: b"",
         )
@@ -227,6 +257,7 @@ def self_test() -> None:
     else:
         raise AssertionError("non-canonical leading-zero release version was accepted")
     mappings: dict[str, bytes] = {}
+    mappings[urllib.parse.urlsplit(exact_url(pages_base, "changelog.json")).path] = expected_changelog
     builds: list[dict[str, Any]] = []
     release_assets: list[dict[str, Any]] = []
     for index, (family, target, suffix, boot_offset) in enumerate(TARGETS):
@@ -295,10 +326,121 @@ def self_test() -> None:
         version,
         source_sha,
         release_metadata,
-        attempts=2,
+        expected_changelog=expected_changelog, attempts=2,
         interval=0,
         fetcher=fake_fetch,
     ) == 16
+
+    # Metadata is a separately bound object in each complete firmware snapshot.
+    changelog_path = urllib.parse.urlsplit(exact_url(pages_base, "changelog.json")).path
+    for invalid in (
+        b"", b"{", b"[]", b"x" * 1026, "not bytes",
+        json.dumps({"version": "1.2.4", "changelog": "Wrong version."}).encode(),
+    ):
+        external: list[str] = []
+        try:
+            verify_snapshot(
+                pages_base, release_base, version, source_sha, release_metadata,
+                expected_changelog=invalid, attempts=2, interval=0,
+                fetcher=lambda url, _limit: external.append(url) or b"",
+            )
+        except AcceptanceError:
+            pass
+        else:
+            raise AssertionError("invalid immutable changelog was accepted")
+        assert not external, "invalid local metadata reached a network fetch"
+
+    with tempfile.TemporaryDirectory(prefix="release-changelog-input-") as directory:
+        local = Path(directory) / "changelog.json"
+        local.write_bytes(expected_changelog)
+        assert read_expected_changelog(local, version) == expected_changelog
+        linked = local.with_name("linked.json")
+        linked.symlink_to(local)
+        for invalid_path in (linked, local.parent, local.with_name("missing.json")):
+            try:
+                read_expected_changelog(invalid_path, version)
+            except AcceptanceError:
+                pass
+            else:
+                raise AssertionError("foreign immutable changelog input was accepted")
+
+    different_notes = json.dumps({"version": version, "changelog": "Different valid notes."}).encode()
+    mappings[changelog_path] = different_notes
+    try:
+        try:
+            verify_snapshot(
+                pages_base, release_base, version, source_sha, release_metadata,
+                expected_changelog=expected_changelog, attempts=2, interval=0,
+                fetcher=fake_fetch, sleeper=lambda _: None,
+            )
+        except AcceptanceError:
+            pass
+        else:
+            raise AssertionError("same-version different changelog bytes were accepted")
+        # A valid omission must make that same unsafe snapshot pass, rather than fail
+        # on an unrelated fixture, schema or import error.
+        import inspect
+        body = inspect.getsource(verify_snapshot)
+        needle = "                if served_changelog != expected_changelog:"
+        assert body.count(needle) == 1
+        scope = dict(globals())
+        exec(compile(body.replace(needle, "                if False:"),
+                     "<omitted-served-changelog-comparison>", "exec"), scope)
+        assert scope["verify_snapshot"](
+            pages_base, release_base, version, source_sha, release_metadata,
+            expected_changelog=expected_changelog, attempts=1, interval=0, fetcher=fake_fetch,
+        ) == 16
+    finally:
+        mappings[changelog_path] = expected_changelog
+
+    part_names = [part["path"] for build in builds for part in build["parts"]]
+    for failure in ("length", "content", "404"):
+        events: list[tuple[str, str]] = []
+        def metadata_propagation(url: str, maximum: int) -> bytes:
+            parsed = urllib.parse.urlsplit(url)
+            name = parsed.path.rsplit("/", 1)[-1]
+            key = urllib.parse.parse_qs(parsed.query).get("accept", [""])[0]
+            events.append((key, name))
+            if key == source_sha + "-1" and name == "changelog.json":
+                if failure == "404":
+                    raise AcceptanceError("metadata has not propagated")
+                return expected_changelog[:-1] if failure == "length" else different_notes
+            return fake_fetch(url, maximum)
+        assert verify_snapshot(
+            pages_base, release_base, version, source_sha, release_metadata,
+            expected_changelog=expected_changelog, attempts=2, interval=0,
+            fetcher=metadata_propagation, sleeper=lambda _: None,
+        ) == 16
+        assert [name for key, name in events if key == source_sha + "-2"] == [
+            "manifest.json", *part_names, "changelog.json"
+        ]
+
+    events = []
+    def alternating_metadata(url: str, maximum: int) -> bytes:
+        parsed = urllib.parse.urlsplit(url)
+        name = parsed.path.rsplit("/", 1)[-1]
+        key = urllib.parse.parse_qs(parsed.query).get("accept", [""])[0]
+        events.append((key, name))
+        if key:
+            attempt = int(key.removeprefix(source_sha + "-"))
+            if (attempt % 2 == 1 and name == part_names[0]) or (
+                attempt % 2 == 0 and name == "changelog.json"
+            ):
+                raise AcceptanceError("no attempt has both firmware and metadata")
+        return fake_fetch(url, maximum)
+    try:
+        verify_snapshot(
+            pages_base, release_base, version, source_sha, release_metadata,
+            expected_changelog=expected_changelog, attempts=4, interval=0,
+            fetcher=alternating_metadata, sleeper=lambda _: None,
+        )
+    except AcceptanceError:
+        pass
+    else:
+        raise AssertionError("firmware and metadata successes accumulated across attempts")
+    assert [key for key, name in events if name == "manifest.json"] == [
+        source_sha + f"-{n}" for n in (1, 2, 3, 4)
+    ]
 
     for label, value in (("false", False), ("missing", None)):
         invalid_release = json.loads(json.dumps(release_metadata))
@@ -313,7 +455,7 @@ def self_test() -> None:
                 version,
                 source_sha,
                 invalid_release,
-                attempts=1,
+                expected_changelog=expected_changelog, attempts=1,
                 interval=0,
                 fetcher=fake_fetch,
             )
@@ -332,7 +474,7 @@ def self_test() -> None:
         try:
             verify_snapshot(
                 pages_base, release_base, version, source_sha, release_metadata,
-                attempts=2, interval=0, fetcher=fake_fetch, sleeper=lambda _: None,
+                expected_changelog=expected_changelog, attempts=2, interval=0, fetcher=fake_fetch, sleeper=lambda _: None,
             )
         except AcceptanceError:
             return
@@ -374,7 +516,7 @@ def self_test() -> None:
             version,
             source_sha,
             release_metadata,
-            attempts=3,
+            expected_changelog=expected_changelog, attempts=3,
             interval=0.25,
             fetcher=fake_fetch,
             sleeper=sleeps.append,
@@ -406,10 +548,10 @@ def self_test() -> None:
 
             assert verify_snapshot(
                 pages_base, release_base, version, source_sha, release_metadata,
-                attempts=2, interval=0.25, fetcher=propagating, sleeper=sleeps.append,
+                expected_changelog=expected_changelog, attempts=2, interval=0.25, fetcher=propagating, sleeper=sleeps.append,
             ) == 16
             assert sleeps == [0.25]
-            assert [name for key, name in calls if key == source_sha + "-2"] == ["manifest.json", *part_names]
+            assert [name for key, name in calls if key == source_sha + "-2"] == ["manifest.json", *part_names, "changelog.json"]
             assert len([name for key, name in calls if not key]) == 4
             assert all(not key for key, _name in calls[:4]), "Release bytes were not checked before Pages"
 
@@ -430,7 +572,7 @@ def self_test() -> None:
     try:
         verify_snapshot(
             pages_base, release_base, version, source_sha, release_metadata,
-            attempts=3, interval=0.25, fetcher=alternating, sleeper=sleeps.append,
+            expected_changelog=expected_changelog, attempts=3, interval=0.25, fetcher=alternating, sleeper=sleeps.append,
         )
     except AcceptanceError:
         pass
@@ -453,7 +595,7 @@ def self_test() -> None:
         return fake_fetch(url, maximum)
     assert verify_snapshot(
         pages_base, release_base, version, source_sha, release_metadata,
-        attempts=6, interval=10, fetcher=delayed, sleeper=advance,
+        expected_changelog=expected_changelog, attempts=6, interval=10, fetcher=delayed, sleeper=advance,
     ) == 16
     assert waits == [10, 20, 40] and clock[0] == 70
 
@@ -477,7 +619,7 @@ def self_test() -> None:
             version,
             source_sha,
             release_metadata,
-            attempts=3,
+            expected_changelog=expected_changelog, attempts=3,
             interval=0.25,
             fetcher=corrupt_release,
             sleeper=sleeps.append,
@@ -505,6 +647,7 @@ def main() -> int:
     parser.add_argument("--release-json", type=Path)
     parser.add_argument("--version")
     parser.add_argument("--source-sha")
+    parser.add_argument("--expected-changelog-file", type=Path)
     parser.add_argument("--attempts", type=int, default=6)
     parser.add_argument("--interval", type=float, default=10.0)
     parser.add_argument("--timeout", type=float, default=20.0)
@@ -519,8 +662,9 @@ def main() -> int:
         args.release_json,
         args.version,
         args.source_sha,
+        args.expected_changelog_file,
     ):
-        parser.error("Pages/Release URLs and JSON, --version and --source-sha are required")
+        parser.error("Pages/Release URLs and JSON, --version, --source-sha and --expected-changelog-file are required")
     if not 1 <= args.timeout <= 60:
         parser.error("--timeout must be between 1 and 60 seconds")
 
@@ -539,20 +683,21 @@ def main() -> int:
         if args.release_json.is_symlink() or not args.release_json.is_file():
             raise AcceptanceError("Release JSON must be a regular non-symlink file")
         release_metadata = json.loads(args.release_json.read_text(encoding="utf-8"))
+        expected_changelog = read_expected_changelog(args.expected_changelog_file, args.version)
         count = verify_snapshot(
             args.pages_base_url,
             args.release_base_url,
             args.version,
             args.source_sha,
             release_metadata,
-            attempts=args.attempts,
+            expected_changelog=expected_changelog, attempts=args.attempts,
             interval=args.interval,
             fetcher=network_fetch,
         )
     except (OSError, UnicodeError, json.JSONDecodeError, AcceptanceError) as exc:
         print(f"published Release/Pages acceptance failed: {exc}", file=sys.stderr)
         return 1
-    print(f"published Release/Pages acceptance: PASS ({count}/16 byte-bound parts)")
+    print(f"published Release/Pages acceptance: PASS ({count}/16 byte-bound parts plus changelog metadata)")
     return 0
 
 

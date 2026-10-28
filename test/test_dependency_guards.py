@@ -142,7 +142,8 @@ struct Client {
 """
 SESSION_MAIN = r"""
 int main(int argc,char** argv) {
- if(argc!=2)return 2;const int mode=std::atoi(argv[1]);Client client;
+ if(argc!=2)return 2;
+ const int mode=std::atoi(argv[1]);Client client;
  client.security.secret.fill(0x11);client.info.secret.fill(0x55);
  if(mode!=0&&mode!=7)client.security.retained=true;
  if(mode==2)client.security.valid=false;
@@ -215,7 +216,8 @@ struct Peer {
 """
 SESSION_LOAD_MAIN = r"""
 int main(int argc,char** argv){
- if(argc!=2)return 2;const int mode=std::atoi(argv[1]);Peer peer;
+ if(argc!=2)return 2;
+ const int mode=std::atoi(argv[1]);Peer peer;
  std::array<uint8_t,65> key{};key[0]=4;
  if(mode==2)key[0]=2;
  if(mode==4){peer.has_shared_secret_=true;peer.is_valid_=true;peer.tesla_public_key_.fill(0x71);peer.shared_secret_sha1_.fill(0x72);}
@@ -275,7 +277,7 @@ def main() -> None:
     manifest = json.loads((ROOT / "scripts/tesla-ble-patch-state.json").read_text())
     for row in manifest["files"]:
         assert hashlib.sha256((component / row["path"]).read_bytes()).hexdigest() == row["afterSha256"], row["path"]
-    # Unmodified v6.2.0 inputs used by the formatting probe, outside the patch touched-file set.
+    # Unmodified v6.3.0 inputs used by the formatting probe, outside the patch touched-file set.
     for relative, digest in {
         "include/defs.h": "cdfd3b7f8cde260251dc0b4002827e60d668cc6671d1d27451797963a4d47361",
         "src/logging_bridge.cpp": "1b1a50903727c016f2a427caab5c6a935ef12dfedc4b3e9f7c7d70efc1bab012",

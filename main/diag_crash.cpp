@@ -22,12 +22,22 @@
 
 namespace tk {
 static const char* TAG = "diag_crash";
+static_assert(static_cast<int>(ResetCode::Unknown) == ESP_RST_UNKNOWN, "reset enum drift");
 static_assert(static_cast<int>(ResetCode::PowerOn) == ESP_RST_POWERON, "reset enum drift");
+static_assert(static_cast<int>(ResetCode::Ext) == ESP_RST_EXT, "reset enum drift");
 static_assert(static_cast<int>(ResetCode::Sw) == ESP_RST_SW, "reset enum drift");
 static_assert(static_cast<int>(ResetCode::Panic) == ESP_RST_PANIC, "reset enum drift");
 static_assert(static_cast<int>(ResetCode::IntWdt) == ESP_RST_INT_WDT, "reset enum drift");
 static_assert(static_cast<int>(ResetCode::TaskWdt) == ESP_RST_TASK_WDT, "reset enum drift");
+static_assert(static_cast<int>(ResetCode::OtherWdt) == ESP_RST_WDT, "reset enum drift");
+static_assert(static_cast<int>(ResetCode::DeepSleep) == ESP_RST_DEEPSLEEP, "reset enum drift");
 static_assert(static_cast<int>(ResetCode::Brownout) == ESP_RST_BROWNOUT, "reset enum drift");
+static_assert(static_cast<int>(ResetCode::Sdio) == ESP_RST_SDIO, "reset enum drift");
+static_assert(static_cast<int>(ResetCode::Usb) == ESP_RST_USB, "reset enum drift");
+static_assert(static_cast<int>(ResetCode::Jtag) == ESP_RST_JTAG, "reset enum drift");
+static_assert(static_cast<int>(ResetCode::Efuse) == ESP_RST_EFUSE, "reset enum drift");
+static_assert(static_cast<int>(ResetCode::PwrGlitch) == ESP_RST_PWR_GLITCH, "reset enum drift");
+static_assert(static_cast<int>(ResetCode::CpuLockup) == ESP_RST_CPU_LOCKUP, "reset enum drift");
 static_assert(CONFIG_APP_RETRIEVE_LEN_ELF_SHA == 64, "full dump identity required");
 #if defined(CONFIG_ESP_COREDUMP_CHECK_BOOT) || defined(CONFIG_ESP_COREDUMP_CAPTURE_DRAM)
 #error "Use the bounded project reader; keep SDK boot parsing and DRAM capture disabled"

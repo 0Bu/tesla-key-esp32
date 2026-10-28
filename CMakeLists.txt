@@ -4,6 +4,8 @@ cmake_minimum_required(VERSION 3.16)
 # graph; everything main actually needs is pulled in through REQUIRES or idf_component.yml.
 set(COMPONENTS main)
 
+include("${CMAKE_CURRENT_LIST_DIR}/cmake/admit-dependency-sources.cmake")
+
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
 # Component Manager lockfiles encode the selected chip target. A single shared lockfile would be
@@ -17,13 +19,37 @@ idf_build_set_property(DEPENDENCIES_LOCK "dependencies.lock.${IDF_TARGET}")
 # this specific format warning from an error for the whole build.
 idf_build_set_property(COMPILE_OPTIONS "-Wno-error=format" APPEND)
 
-project(tesla-key-esp32)
+# TESLA_BUILD_ROLE_BEGIN
+set(TESLA_BUILD_ROLE "application" CACHE STRING "Closed application or config-repair role")
+if(TESLA_BUILD_ROLE STREQUAL "application")
+    project(tesla-key-esp32)
+elseif(TESLA_BUILD_ROLE STREQUAL "config-repair")
+    project(tesla-key-config-repair)
+else()
+    message(FATAL_ERROR "Unknown firmware build role")
+endif()
+if(TESLA_BUILD_ROLE STREQUAL "config-repair")
+    string(LENGTH "${PROJECT_VER}" TESLA_REPAIR_VERSION_LENGTH)
+    if(NOT PROJECT_VER MATCHES "^cfgrepair-[0-9a-f]+$" OR NOT TESLA_REPAIR_VERSION_LENGTH EQUAL 26)
+        message(FATAL_ERROR "Maintenance version must be its separate source-fingerprint identity")
+    endif()
+    if(NOT CONFIG_TESLA_CONFIG_REPAIR_USB)
+        message(FATAL_ERROR "Maintenance role requires its explicit configuration")
+    endif()
+else()
+    if(CONFIG_TESLA_CONFIG_REPAIR_USB)
+        message(FATAL_ERROR "Maintenance configuration cannot build an application artifact")
+    endif()
+endif()
+# TESLA_BUILD_ROLE_END
+
+tesla_bind_dependency_admission()
 
 # Exclude library debug/verbose argument evaluation and formatting from firmware builds.
 idf_component_get_property(TESLA_BLE_COMPONENT_LIB yoziru__tesla-ble COMPONENT_LIB)
 target_compile_definitions(${TESLA_BLE_COMPONENT_LIB} PRIVATE TESLA_BLE_LOG_LEVEL=2)
 
-# yoziru/tesla-ble v6.2.0 binds Parental Controls actions into the VehicleAction oneof
+# yoziru/tesla-ble v6.3.0 binds Parental Controls actions into the VehicleAction oneof
 # that this firmware never sends (trimmed to preserve target flash budget), and pulls
 # in redundant force_update_session dead code on counter replay instead of aligning with
 # signer.go. Key regeneration and BLE orchestration are handled natively in the firmware.

@@ -1,3 +1,4 @@
+#include "stack_watch.hpp"
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>
@@ -34,6 +35,7 @@
 #include "diag_log.hpp"
 #include "diag_crash.hpp"
 #include "safe_mode.hpp"
+#include "heap_supervisor.hpp"
 #include "runtime_admission.hpp"
 #include "config_blob.hpp"
 #include "ota_update.hpp"
@@ -46,34 +48,59 @@
 #include "logic/device_hostname.hpp"
 #include "logic/health_gate.hpp"
 #include "logic/heap_watchdog.hpp"
+#include "logic/reset_reason.hpp"
 #include "logic/vin_transition.hpp"
+
+#if defined(CONFIG_TESLA_CONFIG_REPAIR_USB) && CONFIG_TESLA_CONFIG_REPAIR_USB
+#include "config_repair.hpp"
+#endif
 
 static const char* TAG = "main";
 
-// An essential startup failure is permanent for the current boot. A pending OTA image must
-// actively roll back; merely parking the task would leave the device wedged on the unverified
-// slot until somebody resets it. An already-valid image is halted instead of automatically
-// rebooted, because a reboot loop repeatedly opens the vehicle polling window while erasing the
-// most useful in-memory diagnostic context.
-[[noreturn]] void boot_fatal(const char* component) {
-    // First close every vehicle-active ingress and release any background task still waiting at
-    // the boot barrier.  HTTP/OTA recovery may remain alive on an already-valid image, but a
-    // partial runtime is never allowed to scan, connect, pair or command the car.
-    tk::runtime_admission_mark_fatal();
-    ESP_LOGE(TAG, "FATAL: essential component '%s' failed to initialize; refusing to run a "
-                  "partial firmware", component);
-
-    const esp_partition_t* running = esp_ota_get_running_partition();
-    esp_ota_img_states_t state{};
-    if (running && esp_ota_get_state_partition(running, &state) == ESP_OK &&
-        state == ESP_OTA_IMG_PENDING_VERIFY) {
-        ESP_LOGE(TAG, "fatal startup failure on pending OTA image — rolling back");
-        vTaskDelay(pdMS_TO_TICKS(250));
-        const esp_err_t err = esp_ota_mark_app_invalid_rollback_and_reboot();
-        ESP_LOGE(TAG, "OTA rollback could not be started: %s", esp_err_to_name(err));
+// Retry ownership while a temporary operation is in flight. The one-second yield is a defined
+// retry cadence, not a timeout that silently abandons PendingVerify rollback. A sealed competing
+// restart remains authoritative and is never stolen. Stable/unknown metadata releases our lease.
+static void fatal_startup_rollback() noexcept {
+    for (;;) {
+        tk::StackWatchScope f135_fatal_retry_exit(tk::StackWatch::Main);
+        OtaFaultRestartGuard owner;
+        if (!owner.held()) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+        try {
+            const esp_partition_t* running = esp_ota_get_running_partition();
+            esp_ota_img_states_t state{};
+            if (!running || esp_ota_get_state_partition(running, &state) != ESP_OK ||
+                state != ESP_OTA_IMG_PENDING_VERIFY) return;
+            try { ESP_LOGE(TAG, "fatal startup failure on pending OTA image — rolling back"); }
+            catch (...) {}
+            vTaskDelay(pdMS_TO_TICKS(250));
+            // The SDK can change metadata before reporting an error. Retain ownership after this
+            // uncertain effect so no other recovery crosses it; this never confirms an image.
+            owner.seal();
+            try {
+                tk::stack_watch_sample(tk::StackWatch::Main); // before terminal effect
+                const esp_err_t err = esp_ota_mark_app_invalid_rollback_and_reboot();
+                ESP_LOGE(TAG, "OTA rollback could not be started: %s", esp_err_to_name(err));
+            } catch (...) {}
+            return;
+        } catch (...) { return; }
     }
+}
 
-    ESP_LOGE(TAG, "valid image halted after fatal startup failure; external reset required");
+// An essential failure closes vehicle work permanently for this boot. PendingVerify actively
+// rolls back once its operation owner is available; Stable/unknown parks and preserves evidence.
+[[noreturn]] void boot_fatal(const char* component) {
+    tk::runtime_admission_mark_fatal(tk::runtime_fatal_component(component));
+    tk::stack_watch_sample(tk::StackWatch::Main); // before nonreturning park
+    try {
+        ESP_LOGE(TAG, "FATAL: essential component '%s' failed to initialize; refusing to run a "
+                      "partial firmware", component);
+    } catch (...) {}
+    fatal_startup_rollback();
+    try { ESP_LOGE(TAG, "fatal startup halted; external reset or OTA recovery required"); }
+    catch (...) {}
     for (;;) vTaskDelay(pdMS_TO_TICKS(10000));
 }
 
@@ -174,6 +201,8 @@ static bool apply_ntp_clock_(tk::ClockSample supplied, int64_t entered_us,
 // Strong implementation of the pinned IDF weak extension seam. The SDK caller
 // sntp_set_system_time reaches this hook INSTEAD of its unguarded default clock write.
 extern "C" void sntp_sync_time(struct timeval* source) {
+    tk::StackWatchScope f135_callback_exit(tk::StackWatch::SntpSync);
+
     try {
         const int64_t entered_us = esp_timer_get_time();
         if (!source || sntp_get_sync_mode() != SNTP_SYNC_MODE_IMMED ||
@@ -221,22 +250,6 @@ static void restore_clock_from_nvs(NvsStorageAdapter& config_store) {
 
 // ─── app_main ─────────────────────────────────────────────────────────────────
 
-static const char* reset_reason_str(esp_reset_reason_t r) {
-    switch (r) {
-        case ESP_RST_POWERON:   return "POWERON";
-        case ESP_RST_EXT:       return "EXT";
-        case ESP_RST_SW:        return "SW(ota/restart)";
-        case ESP_RST_PANIC:     return "PANIC(abort/exception)";
-        case ESP_RST_INT_WDT:   return "INT_WDT";
-        case ESP_RST_TASK_WDT:  return "TASK_WDT";
-        case ESP_RST_WDT:       return "OTHER_WDT";
-        case ESP_RST_DEEPSLEEP: return "DEEPSLEEP";
-        case ESP_RST_BROWNOUT:  return "BROWNOUT";
-        case ESP_RST_SDIO:      return "SDIO";
-        default:                return "UNKNOWN";
-    }
-}
-
 // Heap-attribution probe: logs free + largest contiguous block at each init milestone.
 // The LARGEST free block (not total free) is what bounds big allocations (OTA TLS record
 // buffers, the tesla-ble session), so it's the number that decides whether the device
@@ -269,11 +282,15 @@ static void log_heap(const char* where) {
 static bool s_ota_gate_link_expected = false;
 
 static void ota_health_gate_task(void*) {
+    tk::stack_watch_sample(tk::StackWatch::OtaGate); // current task at entry
+    tk::StackWatchScope f135_task_exit(tk::StackWatch::OtaGate);
+
   try {
     const esp_partition_t* running = esp_ota_get_running_partition();
     esp_ota_img_states_t st;
     if (esp_ota_get_state_partition(running, &st) != ESP_OK ||
         st != ESP_OTA_IMG_PENDING_VERIFY) {
+        tk::stack_watch_sample(tk::StackWatch::OtaGate); // no C++ unwind on delete
         vTaskDelete(nullptr);   // normal boot — nothing pending to confirm
         return;
     }
@@ -287,6 +304,7 @@ static void ota_health_gate_task(void*) {
     constexpr uint32_t kPollS = 5;
     const TickType_t   start  = xTaskGetTickCount();
     for (;;) {
+        tk::StackWatchScope f135_iteration_exit(tk::StackWatch::OtaGate);
         vTaskDelay(pdMS_TO_TICKS(kPollS * 1000));
         // The health timer is not proof that boot completed.  A late essential failure can leave
         // HTTP and this task alive while app_main is parked; Safe Mode intentionally omits the
@@ -296,6 +314,7 @@ static void ota_health_gate_task(void*) {
                 continue;
             case tk::RuntimeAdmissionAction::Stop:
                 ESP_LOGE(TAG, "OTA image remains pending: essential runtime was not admitted");
+                tk::stack_watch_sample(tk::StackWatch::OtaGate); // no C++ unwind on delete
                 vTaskDelete(nullptr);
                 return;
             case tk::RuntimeAdmissionAction::Run:
@@ -316,6 +335,7 @@ static void ota_health_gate_task(void*) {
             // loses to this owner while the heap re-check can still veto the commit.
             OtaHealthCommitGuard commit_guard;
             if (!commit_guard) continue;
+            if (!ota_recovery_reference_ready(commit_guard)) continue;
             const auto commit_health = ota_runtime_health();
             if (!commit_health.healthy()) continue;
             const size_t commit_largest = commit_health.largest;
@@ -346,10 +366,12 @@ static void ota_health_gate_task(void*) {
         }
         break;
     }
+    tk::stack_watch_sample(tk::StackWatch::OtaGate); // no C++ unwind on delete
     vTaskDelete(nullptr);
   } catch (...) {
     // An exception after a mark attempt cannot prove that rollback remains armed.
     ESP_LOGE(TAG, "OTA health-gate task threw; verification is uncertain and task stops");
+    tk::stack_watch_sample(tk::StackWatch::OtaGate); // no C++ unwind on delete
     vTaskDelete(nullptr);
   }
 }
@@ -368,11 +390,17 @@ __attribute__((noinline)) static void load_config_blob_verified(NvsStorageAdapte
 }
 
 extern "C" void app_main() {
+    tk::StackWatchScope f135_callback_exit(tk::StackWatch::Main);
+    tk::stack_watch_sample(tk::StackWatch::Main); // initial current startup task mark
+
   // Top-level exception boundary (issue #204): app_main runs C++ that allocates (std::string
   // config, make_unique, the component start()s). An uncaught throw would unwind into the C
   // startup that invoked app_main → std::terminate → abort — the same reboot, but with no
   // diagnostic. Contain it, log it, then roll back a pending image or halt a valid one.
   try {
+#if defined(CONFIG_TESLA_CONFIG_REPAIR_USB) && CONFIG_TESLA_CONFIG_REPAIR_USB
+    tk::repair::console_entry(); // terminal; no normal startup or writer coexists
+#else
     // Capture console output into the in-memory diagnostic ring (GET /diag).
     diag_log_init();
     initialize_clock_gate_();
@@ -386,7 +414,7 @@ extern "C" void app_main() {
     // The values must still be read HERE, before NVS init, WiFi, the syslog queue and the
     // component start()s have allocated: sampled after all that, "free heap at boot" would
     // describe a boot that already happened rather than the state we came up in.
-    const char*    boot_reason      = reset_reason_str(esp_reset_reason());
+    const char*    boot_reason      = tk::reset_reason_slug(static_cast<int>(esp_reset_reason()));
     const unsigned boot_free        = (unsigned) esp_get_free_heap_size();
     const unsigned boot_min_free    = (unsigned) esp_get_minimum_free_heap_size();
     const unsigned boot_largest     = (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
@@ -470,19 +498,23 @@ extern "C" void app_main() {
     // reboot, so it always describes the boot just made, and surface it in /status: a device that
     // self-healed at 04:00 must be able to say so, or the next investigation starts from scratch
     // exactly the way this one did.
-    VehicleController::set_boot_reboot_reason(VehicleController::take_reboot_reason(config_store));
+    const tk::RebootReasonRecord boot_reboot_record = VehicleController::take_reboot_reason(config_store);
+    VehicleController::set_boot_reboot_reason(boot_reboot_record);
 
-    // Boot-loop guard. The heap watchdog bounds the restarts IT chooses; this bounds the ones the
-    // SYSTEM forced — a panic, a brownout or a task-watchdog loop, none of which were counted by
-    // anything before. Past the threshold it latches safe mode and app_main below brings up WiFi +
-    // web UI + OTA ONLY, so a device that crashes on the vehicle path stays reachable in a browser
-    // instead of needing a USB cable. It also stops each boot re-opening the car's polling window,
-    // which is what turns a reboot loop into a flat traction battery.
-    // A deliberate esp_restart() (a successfully persisted rebooting configuration save, setup
-    // portal save, or OTA) reports ESP_RST_SW and is NOT a fault, so ordinary reboots never count.
-    const bool safe_mode = tk::safe_mode_begin(config_store, tk::diag_crash_reset_info().fault);
+    // One durable ledger charges real fault boots and deliberate heap recovery. Heap SW boots
+    // preserve their prior reservation; legacy verified counts set a conservative enrollment
+    // floor. Admission latches at four, before any normal Vehicle/auto-pair/MQTT task exists.
+    const bool safe_mode = tk::safe_mode_begin(config_store,
+        tk::boot_counter_cause(tk::diag_crash_reset_info().code, boot_reboot_record.state),
+        boot_reboot_record.state, boot_reboot_record.heap_restarts);
     if (safe_mode && !tk::runtime_admission_mark_safe_mode()) {
         boot_fatal("safe-mode runtime admission");
+    }
+
+    // Essential before optional Syslog/Ethernet or a non-returning setup portal. The independent
+    // task remains alive if vehicle initialization fails or its loop later stops making progress.
+    if (!tk::heap_supervisor_start(config_store, boot_reboot_record)) {
+        boot_fatal("heap supervisor");
     }
 
     // UDP Syslog forwarder for the diag log (NVS "syslog_uri" / CONFIG_TESLA_SYSLOG_SERVER;
@@ -508,11 +540,15 @@ extern "C" void app_main() {
     // self-heal to the /diag RAM ring, which the next restart erases. Queued lines survive until
     // WiFi is up, so this does reach the collector. The read itself stays above, before anything
     // else can reboot, so the value always describes the boot just made.
-    if (VehicleController::boot_reboot_reason()[0] != '\0') {
+    if (boot_reboot_record.state == tk::RebootReasonState::Present) {
         ESP_LOGW(TAG, "BOOT this boot was caused by the firmware itself: reason=%s — the previous "
                       "run restarted deliberately because its heap stayed unusable (also in "
                       "/status as last_reboot; see docs/ARCHITECTURE.md)",
-                 VehicleController::boot_reboot_reason());
+                 boot_reboot_record.text);
+    } else if (boot_reboot_record.state == tk::RebootReasonState::Error) {
+        ESP_LOGW(TAG, "BOOT reboot reason unavailable or invalid: reason=%s; "
+                      "previous reset cause is unverified",
+                 boot_reboot_record.text);
     }
 
     // Resolve WiFi credentials from the configuration snapshot verified above. With an armed VIN
@@ -650,47 +686,54 @@ extern "C" void app_main() {
             bootloader_random_disable();
             boot_fatal("VIN transition consistency verification");
         }
-        if (recovery == tk::VinTransitionRecovery::RollBackPreviousVin) {
-            ESP_LOGW(TAG, "interrupted VIN change detected before key commit — restoring %s",
-                     marker.previous_vin.empty() ? "unconfigured VIN"
-                                                 : marker.previous_vin.c_str());
-            cfg_blob.vin = marker.previous_vin;
-            if (!tk::cfg_save(config_store, cfg_blob)) {
-                bootloader_random_disable();
-                boot_fatal("VIN transition rollback");
+        // The early heap supervisor can now run while bootstrap is blocked. Serialize the
+        // complete repair mutation/restart window against it without granting OTA confirmation.
+        // Return errors out of the lease scope before boot_fatal parks a Stable image.
+        const char* recovery_failure = [&]() -> const char* {
+            OtaConfigRestartGuard owner;
+            if (!owner.try_begin()) return "VIN transition recovery ownership";
+            bool must_restart = false;
+            if (recovery == tk::VinTransitionRecovery::RollBackPreviousVin) {
+                ESP_LOGW(TAG, "interrupted VIN change detected before key commit — restoring previous VIN");
+                cfg_blob.vin = marker.previous_vin;
+                if (!tk::cfg_save(config_store, cfg_blob)) return "VIN transition rollback";
+                if (!config_store.remove(tk::nvs_contract::kVinTransition))
+                    return "VIN transition marker cleanup";
+                must_restart = true;
+            } else if (recovery == tk::VinTransitionRecovery::ClearMarker) {
+                // Only the verified old-key + old-VIN quadrant may retire the journal without a
+                // repair reboot. The verified 2x2 classification above remains unchanged.
+                if (!config_store.remove(tk::nvs_contract::kVinTransition))
+                    return "VIN transition marker cleanup";
+            } else if (recovery == tk::VinTransitionRecovery::CompleteNewIdentity) {
+                ESP_LOGW(TAG, "interrupted VIN change detected after key commit — completing cleanup");
+                const bool vcsec_removed = tesla_store.remove(tk::nvs_contract::kSessionVcsec);
+                const bool info_removed = tesla_store.remove(tk::nvs_contract::kSessionInfotainment);
+                const bool paired_removed = tesla_store.remove(tk::nvs_contract::kPairedAt);
+                const bool mac_removed = config_store.remove(tk::nvs_contract::kBleMac);
+                if (!tk::vin_transition_cleanup_ready_for_marker_removal(
+                        vcsec_removed, info_removed, paired_removed, mac_removed))
+                    return "VIN transition completion";
+                if (!config_store.remove(tk::nvs_contract::kVinTransition))
+                    return "VIN transition marker cleanup";
+                must_restart = true;
             }
-            if (!config_store.remove(tk::nvs_contract::kVinTransition)) {
+            if (must_restart) {
+                static_assert(!tk::ota_reboot_confirms_pending_image(
+                    tk::OtaRebootClass::AutomaticIdentityRecovery));
+                owner.seal();
                 bootloader_random_disable();
-                boot_fatal("VIN transition marker cleanup");
+                vTaskDelay(pdMS_TO_TICKS(100));
+                tk::stack_watch_sample(tk::StackWatch::Main); // before terminal effect
+                esp_restart();
+                // An unexpected return is not authority to release the owner or continue startup.
+                for (;;) vTaskDelay(pdMS_TO_TICKS(10000));
             }
+            return nullptr;
+        }();
+        if (recovery_failure) {
             bootloader_random_disable();
-            vTaskDelay(pdMS_TO_TICKS(100));
-            esp_restart();
-        } else if (recovery == tk::VinTransitionRecovery::ClearMarker) {
-            // Only the verified old-key + old-VIN quadrant may retire the journal without a repair
-            // reboot. No other state falls through to this erase.
-            if (!config_store.remove(tk::nvs_contract::kVinTransition)) {
-                bootloader_random_disable();
-                boot_fatal("VIN transition marker cleanup");
-            }
-        } else if (recovery == tk::VinTransitionRecovery::CompleteNewIdentity) {
-            ESP_LOGW(TAG, "interrupted VIN change detected after key commit — completing cleanup");
-            const bool vcsec_removed = tesla_store.remove(tk::nvs_contract::kSessionVcsec);
-            const bool info_removed = tesla_store.remove(tk::nvs_contract::kSessionInfotainment);
-            const bool paired_removed = tesla_store.remove(tk::nvs_contract::kPairedAt);
-            const bool mac_removed = config_store.remove(tk::nvs_contract::kBleMac);
-            if (!tk::vin_transition_cleanup_ready_for_marker_removal(
-                    vcsec_removed, info_removed, paired_removed, mac_removed)) {
-                bootloader_random_disable();
-                boot_fatal("VIN transition completion");
-            }
-            if (!config_store.remove(tk::nvs_contract::kVinTransition)) {
-                bootloader_random_disable();
-                boot_fatal("VIN transition marker cleanup");
-            }
-            bootloader_random_disable();
-            vTaskDelay(pdMS_TO_TICKS(100));
-            esp_restart();
+            boot_fatal(recovery_failure);
         }
     }
 
@@ -747,6 +790,7 @@ extern "C" void app_main() {
                 static_assert(!tk::ota_reboot_confirms_pending_image(
                     tk::OtaRebootClass::AutomaticIdentityRecovery));
                 vTaskDelay(pdMS_TO_TICKS(300));
+                tk::stack_watch_sample(tk::StackWatch::Main); // before terminal effect
                 esp_restart();
             } else {
                 ESP_LOGE(TAG, "initial key generation incomplete (state=%d) — runtime remains fail-closed",
@@ -802,19 +846,27 @@ extern "C" void app_main() {
             // exact situation being able to change WiFi over the LAN exists to avoid.
             ESP_LOGE(TAG, "WiFi credential change failed — restoring the previous network and "
                           "rebooting (reported on /status as wifi.rolled_back)");
-            cfg_blob.wifi_ssid = cfg_blob.wifi_ssid_backup;
-            cfg_blob.wifi_pass = cfg_blob.wifi_pass_backup;
-            cfg_blob.wifi_ssid_backup.clear();
-            cfg_blob.wifi_pass_backup.clear();
-            cfg_blob.wifi_rollback_active = false;
-            cfg_blob.wifi_rolled_back     = true;   // the ONLY trace: the reboot shows the old SSID
-            if (tk::cfg_save(config_store, cfg_blob)) {
-                // This automatic policy reboot is evidence that the trial path failed, not proof
-                // that a pending image is healthy. Keep bootloader rollback armed.
-                static_assert(!tk::ota_reboot_confirms_pending_image(
-                    tk::OtaRebootClass::AutomaticWifiRollback));
-                vTaskDelay(pdMS_TO_TICKS(300));
-                esp_restart();
+            {
+                OtaConfigRestartGuard owner;
+                if (owner.try_begin()) {
+                    cfg_blob.wifi_ssid = cfg_blob.wifi_ssid_backup;
+                    cfg_blob.wifi_pass = cfg_blob.wifi_pass_backup;
+                    cfg_blob.wifi_ssid_backup.clear();
+                    cfg_blob.wifi_pass_backup.clear();
+                    cfg_blob.wifi_rollback_active = false;
+                    cfg_blob.wifi_rolled_back = true;
+                    if (tk::cfg_save(config_store, cfg_blob)) {
+                        // Automatic rollback never confirms a candidate. Retain the actual owner
+                        // through restart so heap recovery cannot cross this committed repair.
+                        static_assert(!tk::ota_reboot_confirms_pending_image(
+                            tk::OtaRebootClass::AutomaticWifiRollback));
+                        owner.seal();
+                        vTaskDelay(pdMS_TO_TICKS(300));
+                        tk::stack_watch_sample(tk::StackWatch::Main); // before terminal effect
+                        esp_restart();
+                        for (;;) vTaskDelay(pdMS_TO_TICKS(10000));
+                    }
+                }
             }
             // The restore lives in NVS alone, so an unpersisted one would be re-decided identically
             // on every boot — a reboot loop we cannot write our way out of. Fall through to the
@@ -991,10 +1043,8 @@ extern "C" void app_main() {
         }
     }
 
-    // Arm the bounded kBootHealthyS (30 s) crash-counter window after initialization. The timer
-    // stays disabled in safe mode. This proves survival of that startup window, not long-term
-    // health; a later unrelated crash begins a new sequence after a successful counter clear.
-    tk::safe_mode_arm_healthy_timer(config_store);
+    // The early heap supervisor qualifies crash-counter maintenance from a continuous healthy
+    // normal runtime. Raw uptime and the separate OTA health timer grant no crash-counter clear.
 
     if (safe_mode) {
         ESP_LOGW(TAG, "tesla-key-esp32 running in SAFE MODE on port 80 — web UI, /status and OTA "
@@ -1004,7 +1054,9 @@ extern "C" void app_main() {
         ESP_LOGI(TAG, "tesla-key-esp32 running. API on port 80.");
     }
     // Main task is no longer needed; Vehicle loop + HTTP server run in their own tasks.
+    tk::stack_watch_sample(tk::StackWatch::Main); // before terminal effect
     vTaskDelete(nullptr);
+#endif // CONFIG_TESLA_CONFIG_REPAIR_USB
   } catch (const std::exception& e) {
       ESP_LOGE(TAG, "app_main initialization threw (%s)", e.what());
       boot_fatal("app_main exception boundary");

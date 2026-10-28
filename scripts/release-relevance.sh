@@ -9,12 +9,20 @@ set -euo pipefail
 contract_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 VERSION_RE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
 SELF_TEST_PYTHON=""  # Set only by this script's isolated --self-test fixture.
-RELEVANT_RE='^(main/|patches/tesla-ble/|docs/(index\.html|installer-bootstrap\.mjs|serial-port-release\.mjs|web-installer\.mjs|vendor/)|CMakeLists\.txt$|sdkconfig\.defaults(\.[a-z0-9]+)?$|dependencies\.lock\.[a-z0-9]+$|esp-idf-toolchain\.txt$|partitions\.csv$|version\.txt$|\.github/workflows/(build|signed-pr-preview|pr-preview-cleanup)\.yml$|scripts/firmware-(size|stack)-baseline\.json$|scripts/ota-signing-public-key\.sha256$|scripts/tesla-ble-patch-state\.json$|scripts/(ci-build-all|ci-build-verify|ci-sign-artifacts|next-version|select-release-version|release-relevance|test-release-contract|check-reproducible-build|idf-docker|idf-version|build-pages|publish-pages-branch|apply-tesla-ble-patches)\.sh$|scripts/(check-idf-container-mounts|apply-tesla-ble-patches|check-build-artifact-inventory|check-build-gate-contract|check-pages-manifest|check-pages-source|wait-pages-build|check-dev-pages|check-release-pages-bytes|check-release-assets|check-signed-root-inventory|prepare-reused-release|check-published-release|check-firmware-artifacts|check-partition-contract|check-dependency-contract|check-otadata-contract|check-build-semantics|check-stack-usage|check-sdkconfig-defaults|report-firmware-size|generate-ota-changelog)\.py$)'
+RELEVANT_RE='^(cmake/admit-dependency-sources\.cmake$|scripts/dependency_source\.py$|scripts/nanopb-source\.json$|main/|patches/tesla-ble/|docs/(index\.html|installer-bootstrap\.mjs|serial-port-release\.mjs|web-installer\.mjs|vendor/|[^./][^/]*\.md$)|CMakeLists\.txt$|sdkconfig\.defaults(\.[a-z0-9]+)?$|dependencies\.lock\.[a-z0-9]+$|esp-idf-toolchain\.txt$|partitions\.csv$|version\.txt$|\.github/workflows/(build|signed-pr-preview|pr-preview-cleanup)\.yml$|scripts/firmware-(size|stack)-baseline\.json$|scripts/ota-signing-public-key\.sha256$|scripts/tesla-ble-patch-state\.json$|scripts/(ci-build-all|ci-build-verify|ci-sign-artifacts|next-version|select-release-version|release-relevance|test-release-contract|check-reproducible-build|idf-docker|idf-version|build-pages|publish-pages-branch|apply-tesla-ble-patches)\.sh$|scripts/(check-idf-container-mounts|apply-tesla-ble-patches|check-build-artifact-inventory|check-build-gate-contract|check-pages-manifest|check-pages-source|wait-pages-build|check-dev-pages|check-release-pages-bytes|check-release-assets|check-signed-root-inventory|prepare-reused-release|check-published-release|check-firmware-artifacts|check-partition-contract|check-dependency-contract|check-otadata-contract|check-build-semantics|check-stack-usage|check-sdkconfig-defaults|report-firmware-size|generate-ota-changelog)\.py$)'
 
 validate_sha() {
   local repo_root="$1" sha="$2"
   [[ "$sha" =~ ^[0-9a-f]{40}$ ]] \
     && git -C "$repo_root" cat-file -e "${sha}^{commit}" 2>/dev/null
+}
+
+relevant_paths() {
+  local path relevant=no
+  while IFS= read -r -d '' path; do
+    if [[ "$path" =~ $RELEVANT_RE ]]; then relevant=yes; fi
+  done
+  printf '%s\n' "$relevant"
 }
 
 parse_manifest_identity() {
@@ -107,9 +115,9 @@ sys.exit(1)
 #   * and ancestry of that source SHA in the current main snapshot.
 # Any missing, stale or unreadable authority is not a usable baseline.
 find_published_pages_baseline() {
-  local repo_root="$1" current_sha="$2" repository manifest identity source_sha version tag tag_sha
+  local repo_root="$1" current_sha="$2" repository identity source_sha version tag tag_sha
   local release_json pages_json live_base live_url live_manifest live_identity live_source live_version
-  local acceptance_dir acceptance_json release_metadata_file python_cmd
+  local acceptance_dir acceptance_json release_metadata_file python_cmd published_commit branch_manifest_file
   python_cmd="${SELF_TEST_PYTHON:-python3}"
   validate_sha "$repo_root" "$current_sha" || return 2
   command -v "$python_cmd" >/dev/null 2>&1 && command -v gh >/dev/null 2>&1 \
@@ -120,30 +128,42 @@ find_published_pages_baseline() {
   git -C "$repo_root" fetch --quiet --tags --force --prune --prune-tags origin || return 2
   git -C "$repo_root" fetch --quiet --no-tags --force origin \
     refs/heads/gh-pages:refs/remotes/origin/gh-pages || return 2
-  manifest="$(git -C "$repo_root" show refs/remotes/origin/gh-pages:manifest.json 2>/dev/null)" \
+  published_commit="$(git -C "$repo_root" rev-parse --verify 'refs/remotes/origin/gh-pages^{commit}' 2>/dev/null)" || return 2
+  [[ "$published_commit" =~ ^[0-9a-f]{40}$ ]] || return 2
+  acceptance_dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/tesla-release-baseline.XXXXXX")" \
     || return 2
-  identity="$(printf '%s' "$manifest" | parse_manifest_identity "$python_cmd")" || return 2
+  branch_manifest_file="$acceptance_dir/branch_manifest.json"
+  if ! git -C "$repo_root" show "$published_commit:manifest.json" > "$branch_manifest_file" 2>/dev/null \
+      || ! git -C "$repo_root" show "$published_commit:changelog.json" > "$acceptance_dir/changelog.json" 2>/dev/null; then
+    rm -rf -- "$acceptance_dir"
+    return 2
+  fi
+  identity="$(parse_manifest_identity "$python_cmd" < "$branch_manifest_file")" || { rm -rf -- "$acceptance_dir"; return 2; }
   source_sha="${identity%%$'\t'*}"
   version="${identity#*$'\t'}"
-  validate_sha "$repo_root" "$source_sha" || return 2
-  [[ "$version" =~ $VERSION_RE ]] || return 2
-  git -C "$repo_root" merge-base --is-ancestor "$source_sha" "$current_sha" || return 2
+  validate_sha "$repo_root" "$source_sha" || { rm -rf -- "$acceptance_dir"; return 2; }
+  [[ "$version" =~ $VERSION_RE ]] || { rm -rf -- "$acceptance_dir"; return 2; }
+  git -C "$repo_root" merge-base --is-ancestor "$source_sha" "$current_sha" || { rm -rf -- "$acceptance_dir"; return 2; }
+  "$python_cmd" "$contract_root/scripts/generate-ota-changelog.py" \
+    --validate "$acceptance_dir/changelog.json" --version "$version" >/dev/null \
+    || { rm -rf -- "$acceptance_dir"; return 2; }
 
   tag="v$version"
-  tag_sha="$(git -C "$repo_root" rev-parse "${tag}^{commit}" 2>/dev/null)" || return 2
-  [[ "$tag_sha" == "$source_sha" ]] || return 2
+  tag_sha="$(git -C "$repo_root" rev-parse "${tag}^{commit}" 2>/dev/null)" || { rm -rf -- "$acceptance_dir"; return 2; }
+  [[ "$tag_sha" == "$source_sha" ]] || { rm -rf -- "$acceptance_dir"; return 2; }
 
-  release_json="$(gh api "repos/$repository/releases/latest" 2>/dev/null)" || return 2
+  release_json="$(gh api "repos/$repository/releases/latest" 2>/dev/null)" || { rm -rf -- "$acceptance_dir"; return 2; }
   printf '%s' "$release_json" \
-    | validate_release_json "$python_cmd" "$tag" "$source_sha" "$version" || return 2
+    | validate_release_json "$python_cmd" "$tag" "$source_sha" "$version" || { rm -rf -- "$acceptance_dir"; return 2; }
   release_metadata_file="$(mktemp "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/tesla-release-metadata.XXXXXX")" \
-    || return 2
+    || { rm -rf -- "$acceptance_dir"; return 2; }
   if ! printf '%s' "$release_json" > "$release_metadata_file" \
       || ! "$python_cmd" "$contract_root/scripts/check-release-assets.py" \
         "$release_metadata_file" --metadata-only \
         --version "$version" --source-sha "$source_sha" \
         --expect-state published-immutable >/dev/null; then
     rm -f -- "$release_metadata_file"
+    rm -rf -- "$acceptance_dir"
     return 2
   fi
   rm -f -- "$release_metadata_file"
@@ -153,30 +173,29 @@ find_published_pages_baseline() {
   # lag. Read the configured Pages URL and require the live root manifest to advertise the exact
   # same stable release identity. Any API, TLS, HTTP, JSON or cache-liveness uncertainty fails
   # closed so a same-SHA rerun retries publication/deployment.
-  pages_json="$(gh api "repos/$repository/pages" 2>/dev/null)" || return 2
+  pages_json="$(gh api "repos/$repository/pages" 2>/dev/null)" || { rm -rf -- "$acceptance_dir"; return 2; }
   printf '%s' "$pages_json" \
-    | "$python_cmd" "$contract_root/scripts/check-pages-source.py" - >/dev/null || return 2
-  live_base="$(printf '%s' "$pages_json" | parse_pages_url "$python_cmd")" || return 2
+    | "$python_cmd" "$contract_root/scripts/check-pages-source.py" - >/dev/null || { rm -rf -- "$acceptance_dir"; return 2; }
+  live_base="$(printf '%s' "$pages_json" | parse_pages_url "$python_cmd")" || { rm -rf -- "$acceptance_dir"; return 2; }
   live_url="${live_base%/}/manifest.json?release-relevance=$current_sha"
   live_manifest="$(curl --fail --location --silent --show-error --max-time 20 \
-    --retry 2 --retry-all-errors -H 'Cache-Control: no-cache' "$live_url" 2>/dev/null)" || return 2
-  live_identity="$(printf '%s' "$live_manifest" | parse_manifest_identity "$python_cmd")" || return 2
+    --retry 2 --retry-all-errors -H 'Cache-Control: no-cache' "$live_url" 2>/dev/null)" || { rm -rf -- "$acceptance_dir"; return 2; }
+  live_identity="$(printf '%s' "$live_manifest" | parse_manifest_identity "$python_cmd")" || { rm -rf -- "$acceptance_dir"; return 2; }
   live_source="${live_identity%%$'\t'*}"
   live_version="${live_identity#*$'\t'}"
-  [[ "$live_source" == "$source_sha" && "$live_version" == "$version" ]] || return 2
+  [[ "$live_source" == "$source_sha" && "$live_version" == "$version" ]] || { rm -rf -- "$acceptance_dir"; return 2; }
 
   # A matching manifest is only an intent signal. It must never suppress reconciliation until all
   # 16 live Pages parts are byte-identical to the four immutable Release images. Reuse the same
   # bounded validator as the post-publication acceptance step so a partial CDN update (new
   # manifest, stale binary) keeps the cumulative release gate red on the next main run.
-  acceptance_dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/tesla-release-baseline.XXXXXX")" \
-    || return 2
   acceptance_json="$acceptance_dir/release.json"
   if ! printf '%s' "$release_json" > "$acceptance_json" \
       || ! "$python_cmd" "$contract_root/scripts/check-published-release.py" \
         --pages-base-url "$live_base" \
         --release-base-url "https://github.com/$repository/releases/download/$tag" \
         --release-json "$acceptance_json" \
+        --expected-changelog-file "$acceptance_dir/changelog.json" \
         --version "$version" --source-sha "$source_sha" \
         --attempts 1 --interval 0 --timeout 20 >/dev/null; then
     rm -rf -- "$acceptance_dir"
@@ -201,16 +220,12 @@ changed_since_release() {
   # Disable rename folding so both the deletion and addition paths are considered. Otherwise a
   # `main/foo.cpp -> docs/foo.cpp` move is rendered only as docs/foo.cpp and loses the firmware
   # side of the change, suppressing a required Release.
-  files="$(git -C "$repo_root" diff --name-only --no-renames "$baseline" "$current_sha")" || {
+  files="$(git -C "$repo_root" diff --name-only -z --no-renames "$baseline" "$current_sha" | relevant_paths)" || {
     echo "cannot diff Release/Pages baseline $baseline to $current_sha" >&2
     printf 'yes\n'
     return 0
   }
-  if printf '%s\n' "$files" | grep -Eq "$RELEVANT_RE"; then
-    printf 'yes\n'
-  else
-    printf 'no\n'
-  fi
+  printf '%s\n' "$files"
 }
 
 # find_published_dev_baseline <repo> <current-sha>
@@ -227,7 +242,7 @@ changed_since_release() {
 find_published_dev_baseline() {
   local repo_root="$1" current_sha="$2" repository manifest identity source_sha version
   local pages_json live_base live_url live_manifest live_identity live_source live_version
-  local python_cmd dev_version_re branch_manifest_sha live_manifest_sha
+  local python_cmd dev_version_re branch_manifest_sha live_manifest_sha published_commit
   python_cmd="${SELF_TEST_PYTHON:-python3}"
   dev_version_re='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$'
   validate_sha "$repo_root" "$current_sha" || return 2
@@ -243,8 +258,11 @@ find_published_dev_baseline() {
   tmp_dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/tesla-dev-baseline.XXXXXX")" || return 2
   local branch_manifest_file="$tmp_dir/branch_manifest.json"
   local live_manifest_file="$tmp_dir/live_manifest.json"
+  local branch_changelog_file="$tmp_dir/changelog.json"
 
-  if ! git -C "$repo_root" show refs/remotes/origin/gh-pages:dev/manifest.json > "$branch_manifest_file" 2>/dev/null; then
+  published_commit="$(git -C "$repo_root" rev-parse --verify 'refs/remotes/origin/gh-pages^{commit}' 2>/dev/null)" || { rm -rf "$tmp_dir"; return 2; }
+  [[ "$published_commit" =~ ^[0-9a-f]{40}$ ]] || { rm -rf "$tmp_dir"; return 2; }
+  if ! git -C "$repo_root" show "$published_commit:dev/manifest.json" > "$branch_manifest_file" 2>/dev/null; then
     rm -rf "$tmp_dir"
     return 2
   fi
@@ -255,6 +273,12 @@ find_published_dev_baseline() {
   validate_sha "$repo_root" "$source_sha" || { rm -rf "$tmp_dir"; return 2; }
   [[ "$version" =~ $dev_version_re ]] || { rm -rf "$tmp_dir"; return 2; }
   git -C "$repo_root" merge-base --is-ancestor "$source_sha" "$current_sha" || { rm -rf "$tmp_dir"; return 2; }
+  if ! git -C "$repo_root" show "$published_commit:dev/changelog.json" > "$branch_changelog_file" 2>/dev/null \
+      || ! "$python_cmd" "$contract_root/scripts/generate-ota-changelog.py" \
+        --validate "$branch_changelog_file" --version "$version" >/dev/null; then
+    rm -rf "$tmp_dir"
+    return 3
+  fi
 
   pages_json="$(gh api "repos/$repository/pages" 2>/dev/null)" || { rm -rf "$tmp_dir"; return 2; }
   printf '%s' "$pages_json" \
@@ -288,6 +312,7 @@ find_published_dev_baseline() {
   if ! "$python_cmd" "$contract_root/scripts/check-dev-pages.py" --verify-live \
     --pages-base-url "${live_base%/}" --version "$version" --source-sha "$source_sha" \
     --expected-manifest-sha "$branch_manifest_sha" \
+    --expected-changelog-file "$branch_changelog_file" \
     --attempts 1 --interval 0 --timeout 20 >/dev/null; then
     rm -rf "$tmp_dir"
     return 3
@@ -316,16 +341,12 @@ changed_since_dev() {
     return $?
   fi
   # Disable rename folding so both the deletion and addition paths are considered.
-  files="$(git -C "$repo_root" diff --name-only --no-renames "$baseline" "$current_sha")" || {
+  files="$(git -C "$repo_root" diff --name-only -z --no-renames "$baseline" "$current_sha" | relevant_paths)" || {
     echo "cannot diff dev/Pages baseline $baseline to $current_sha" >&2
     printf 'yes\n'
     return 0
   }
-  if printf '%s\n' "$files" | grep -Eq "$RELEVANT_RE"; then
-    printf 'yes\n'
-  else
-    printf 'no\n'
-  fi
+  printf '%s\n' "$files"
 }
 
 changed_for_pr() {
@@ -340,16 +361,12 @@ changed_for_pr() {
     printf 'yes\n'
     return 0
   }
-  files="$(git -C "$repo_root" diff --name-only --no-renames "$base_sha" "$head_sha")" || {
+  files="$(git -C "$repo_root" diff --name-only -z --no-renames "$base_sha" "$head_sha" | relevant_paths)" || {
     echo "cannot diff PR base $base_sha to $head_sha; failing closed to yes" >&2
     printf 'yes\n'
     return 0
   }
-  if printf '%s\n' "$files" | grep -Eq "$RELEVANT_RE"; then
-    printf 'yes\n'
-  else
-    printf 'no\n'
-  fi
+  printf '%s\n' "$files"
 }
 
 write_fake_release() {
@@ -382,6 +399,9 @@ write_pages_manifest() {
   local path="$1" version="$2" sha="$3"
   printf '{"name":"tesla-key-esp32","layoutVersion":2,"sourceSha":"%s","version":"%s","builds":[{},{},{},{}]}\n' \
     "$sha" "$version" > "$path"
+  if [[ "${path##*/}" == manifest.json ]]; then
+    printf '{"version":"%s","changelog":"One bounded change."}\n' "$version" > "${path%/*}/changelog.json"
+  fi
 }
 
 self_test() {
@@ -411,7 +431,7 @@ self_test() {
 
   git -C "$tmp" checkout -qb gh-pages
   write_pages_manifest "$tmp/manifest.json" 1.0.0 "$sha_r"
-  git -C "$tmp" add manifest.json
+  git -C "$tmp" add manifest.json changelog.json
   git -C "$tmp" commit -qm pages-r
   git -C "$tmp" push -q origin gh-pages
   git -C "$tmp" checkout -q main
@@ -455,8 +475,22 @@ CURL_WRAPPER
   cat > "$fakebin/python3" <<'PYTHON_WRAPPER'
 #!/usr/bin/env bash
 set -eu
+require_changelog_input() {
+  local script="$1" expected="" version="" i next
+  for ((i=1; i<=$#; i++)); do
+    case "${!i}" in
+      --expected-changelog-file) next=$((i+1)); expected="${!next}" ;;
+      --version) next=$((i+1)); version="${!next}" ;;
+    esac
+  done
+  [ -n "$expected" ] && [ -n "$version" ] || exit 98
+  "$GH_FAKE_REAL_PYTHON" "${script%/*}/generate-ota-changelog.py" \
+    --validate "$expected" --version "$version" >/dev/null
+  [ "${GH_FAKE_CHANGELOG_MISMATCH:-0}" != 1 ] || exit 1
+}
 case "${1:-}" in
   */check-dev-pages.py)
+    require_changelog_input "$@"
     # Same wiring fixture for the dev channel: the validator owns the byte-level mutations.
     if [[ "${GH_FAKE_DEV_BYTES_STALE:-0}" == 1 ]]; then
       exit 1
@@ -475,6 +509,16 @@ case "${1:-}" in
     exit 0
     ;;
   */check-published-release.py)
+    require_changelog_input "$@"
+    if [ -n "${GH_FAKE_EXPECTED_ROOT_MANIFEST:-}" ]; then
+      expected=""
+      for ((i=1; i<=$#; i++)); do
+        if [[ "${!i}" == --expected-changelog-file ]]; then
+          next=$((i+1)); expected="${!next}"
+        fi
+      done
+      cmp "${expected%/*}/branch_manifest.json" "$GH_FAKE_EXPECTED_ROOT_MANIFEST" || exit 97
+    fi
     # The validator owns byte-level mutation tests. This wiring fixture makes a partial live
     # snapshot observable without opening a real HTTPS listener in the shell self-test.
     if [[ "${GH_FAKE_LIVE_BYTES_STALE:-0}" == 1 ]]; then
@@ -492,14 +536,14 @@ PYTHON_WRAPPER
   write_fake_release "$fake_release" 1.0.0 "$sha_r"
   write_pages_manifest "$fake_live" 1.0.0 "$sha_r"
 
-  # Timeline: A changes firmware, then docs-only B advances main before A can publish. The event
-  # before..B diff is docs-only, but the authoritative published baseline R..B includes A.
+  # Timeline: A changes firmware, then unshipped Markdown B advances main before A can publish.
+  # The event before..B diff omits firmware, but the authoritative baseline R..B includes A.
   printf 'firmware-a\n' >> "$tmp/main/firmware.cpp"
   git -C "$tmp" add main/firmware.cpp
   git -C "$tmp" commit -qm firmware-a
   sha_a="$(git -C "$tmp" rev-parse HEAD)"
-  printf 'docs-b\n' > "$tmp/docs/README.md"
-  git -C "$tmp" add docs/README.md
+  printf 'unshipped-b\n' > "$tmp/README.md"
+  git -C "$tmp" add README.md
   git -C "$tmp" commit -qm docs-b
   sha_b="$(git -C "$tmp" rev-parse HEAD)"
   git -C "$tmp" push -q origin main
@@ -527,7 +571,7 @@ PYTHON_WRAPPER
   # than going green while the public OTA manifest still advertises R.
   git -C "$tmp" checkout -q gh-pages
   write_pages_manifest "$tmp/manifest.json" 1.0.1 "$sha_a"
-  git -C "$tmp" add manifest.json
+  git -C "$tmp" add manifest.json changelog.json
   git -C "$tmp" commit -qm pages-a
   git -C "$tmp" push -q origin gh-pages
   git -C "$tmp" checkout -q main
@@ -539,8 +583,8 @@ PYTHON_WRAPPER
     return 1
   }
 
-  # Once branch, live Pages and latest Release all authoritatively represent A, docs-only B is not
-  # firmware relevant and must not cut another Release.
+  # Once branch, live Pages and latest Release all authoritatively represent A, unshipped
+  # Markdown B is not relevant and must not cut another Release.
   write_pages_manifest "$fake_live" 1.0.1 "$sha_a"
   got="$(
     export PATH="$fakebin:$PATH"
@@ -559,6 +603,34 @@ PYTHON_WRAPPER
     changed_since_release "$tmp" "$sha_b")"
   [[ "$got" == no ]] || {
     echo "fully published A incorrectly made docs-only B release-relevant: $got" >&2; return 1;
+  }
+  got="$(PATH="$fakebin:$PATH" GITHUB_REPOSITORY=owner/repo GH_FAKE_RELEASE="$fake_release" \
+    GH_FAKE_LIVE="$fake_live" GH_FAKE_CHANGELOG_MISMATCH=1 \
+    changed_since_release "$tmp" "$sha_b")"
+  [[ "$got" == yes ]] || {
+    echo "root metadata mismatch suppressed reconciliation: $got" >&2; return 1;
+  }
+  git -C "$tmp" checkout -q gh-pages
+  cp "$tmp/changelog.json" "$fakebin/held-root-changelog.json"
+  git -C "$tmp" rm -q changelog.json
+  git -C "$tmp" commit -qm root-metadata-missing
+  git -C "$tmp" push -q origin gh-pages
+  git -C "$tmp" checkout -q main
+  got="$(PATH="$fakebin:$PATH" GITHUB_REPOSITORY=owner/repo GH_FAKE_RELEASE="$fake_release" \
+    GH_FAKE_LIVE="$fake_live" changed_since_release "$tmp" "$sha_b")"
+  [[ "$got" == yes ]] || {
+    echo "missing root metadata suppressed reconciliation: $got" >&2; return 1;
+  }
+  git -C "$tmp" checkout -q gh-pages
+  cp "$fakebin/held-root-changelog.json" "$tmp/changelog.json"
+  git -C "$tmp" add changelog.json
+  git -C "$tmp" commit -qm root-metadata-restored
+  git -C "$tmp" push -q origin gh-pages
+  git -C "$tmp" checkout -q main
+  got="$(PATH="$fakebin:$PATH" GITHUB_REPOSITORY=owner/repo GH_FAKE_RELEASE="$fake_release" \
+    GH_FAKE_LIVE="$fake_live" changed_since_release "$tmp" "$sha_b")"
+  [[ "$got" == no ]] || {
+    echo "restored root metadata failed acceptance: $got" >&2; return 1;
   }
 
   "$real_python" -c '
@@ -735,13 +807,14 @@ with open(p, "r+", encoding="utf-8") as f:
     return 1
   fi
 
-  # PR relevance test: docs-only diff produces no, firmware diff produces yes, bad SHA fails closed
+  # PR relevance: shipped Markdown and firmware produce yes; a bad SHA fails closed.
   git -C "$tmp" checkout -q -b pr-branch
   echo "test doc edit" >> "$tmp/docs/README.md"
-  git -C "$tmp" commit -qam "edit docs"
+  git -C "$tmp" add docs/README.md
+  git -C "$tmp" commit -qm "edit docs"
   sha_pr_docs="$(git -C "$tmp" rev-parse HEAD)"
   got="$(changed_for_pr "$tmp" "$sha_c" "$sha_pr_docs")"
-  [[ "$got" == no ]] || { echo "docs-only PR expected no, got: $got" >&2; return 1; }
+  [[ "$got" == yes ]] || { echo "shipped Markdown PR expected yes, got: $got" >&2; return 1; }
 
   echo "void foo() {}" >> "$tmp/main/firmware.cpp"
   git -C "$tmp" add main/firmware.cpp
@@ -766,15 +839,15 @@ with open(p, "r+", encoding="utf-8") as f:
   git -C "$tmp" checkout -q gh-pages
   mkdir -p "$tmp/dev"
   write_pages_manifest "$tmp/dev/manifest.json" "1.0.1-dev.1" "$sha_c"
-  git -C "$tmp" add dev/manifest.json
+  git -C "$tmp" add dev/manifest.json dev/changelog.json
   git -C "$tmp" commit -qm "dev-pages-c"
   git -C "$tmp" push -q origin gh-pages
   git -C "$tmp" checkout -q main
   write_pages_manifest "$fake_live_dev" "1.0.1-dev.1" "$sha_c"
 
-  # Now docs-only commit D on main should be NOT relevant for dev, but WOULD be relevant for release
-  printf 'docs-d\n' >> "$tmp/docs/README.md"
-  git -C "$tmp" add docs/README.md
+  # Unshipped Markdown D is irrelevant for Dev, but C's earlier firmware still needs a Release.
+  printf 'unshipped-d\n' >> "$tmp/README.md"
+  git -C "$tmp" add README.md
   git -C "$tmp" commit -qm docs-d
   sha_d="$(git -C "$tmp" rev-parse HEAD)"
   got_rel="$(PATH="$fakebin:$PATH" GITHUB_REPOSITORY=owner/repo GH_FAKE_RELEASE="$fake_release" \
@@ -786,6 +859,35 @@ with open(p, "r+", encoding="utf-8") as f:
     GH_FAKE_LIVE="$fake_live" GH_FAKE_LIVE_DEV="$fake_live_dev" changed_since_dev "$tmp" "$sha_d")"
   [[ "$got" == no ]] || {
     echo "docs-only D against published dev baseline expected no, got: $got" >&2; return 1;
+  }
+  got="$(PATH="$fakebin:$PATH" GITHUB_REPOSITORY=owner/repo GH_FAKE_RELEASE="$fake_release" \
+    GH_FAKE_LIVE="$fake_live" GH_FAKE_LIVE_DEV="$fake_live_dev" GH_FAKE_CHANGELOG_MISMATCH=1 \
+    changed_since_dev "$tmp" "$sha_d" 2>"$tmp/dev-metadata-mismatch.err")"
+  [[ "$got" == yes ]] && grep -q "reconciliation stays open" "$tmp/dev-metadata-mismatch.err" || {
+    echo "dev metadata mismatch did not keep reconciliation open: $got" >&2; return 1;
+  }
+  git -C "$tmp" checkout -q gh-pages
+  cp "$tmp/dev/changelog.json" "$fakebin/held-dev-changelog.json"
+  git -C "$tmp" rm -q dev/changelog.json
+  git -C "$tmp" commit -qm dev-metadata-missing
+  git -C "$tmp" push -q origin gh-pages
+  git -C "$tmp" checkout -q main
+  got="$(PATH="$fakebin:$PATH" GITHUB_REPOSITORY=owner/repo GH_FAKE_RELEASE="$fake_release" \
+    GH_FAKE_LIVE="$fake_live" GH_FAKE_LIVE_DEV="$fake_live_dev" \
+    changed_since_dev "$tmp" "$sha_d" 2>"$tmp/dev-metadata-missing.err")"
+  [[ "$got" == yes ]] && grep -q "reconciliation stays open" "$tmp/dev-metadata-missing.err" || {
+    echo "missing dev metadata fell back to Release: $got" >&2; return 1;
+  }
+  git -C "$tmp" checkout -q gh-pages
+  cp "$fakebin/held-dev-changelog.json" "$tmp/dev/changelog.json"
+  git -C "$tmp" add dev/changelog.json
+  git -C "$tmp" commit -qm dev-metadata-restored
+  git -C "$tmp" push -q origin gh-pages
+  git -C "$tmp" checkout -q main
+  got="$(PATH="$fakebin:$PATH" GITHUB_REPOSITORY=owner/repo GH_FAKE_RELEASE="$fake_release" \
+    GH_FAKE_LIVE="$fake_live" GH_FAKE_LIVE_DEV="$fake_live_dev" changed_since_dev "$tmp" "$sha_d")"
+  [[ "$got" == no ]] || {
+    echo "restored dev metadata failed acceptance: $got" >&2; return 1;
   }
 
   # A dev channel whose manifest identity is current but whose served bytes do not match that
@@ -827,17 +929,40 @@ with open(p, "r+", encoding="utf-8") as f:
     dd if=/dev/zero of="$fixture_stage/$tgt/tesla-key-esp32.bin" bs=1 count=4096 status=none
     "$GH_FAKE_REAL_PYTHON" -c 'import sys; open(sys.argv[1], "wb").write(b"\xff"*8192)' "$fixture_stage/$tgt/ota_data_initial.bin"
   done
-  local fixture_site
-  fixture_site="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/tesla-key-pages.XXXXXX")"
-  FIRMWARE_STAGE_DIR="$fixture_stage" "$contract_root/scripts/build-pages.sh" "$fixture_site" "1.0.1-dev.1" "$sha_c" >/dev/null
+  # The real assembler and its Git-based generator must see only this owned history.
+  # A new object store, no remote and an explicit cwd exclude the operator's worktree/refs.
+  local builder_repo="$tmp/actual-pages-repo" fixture_site builder_input
+  git -c core.hooksPath=/dev/null clone --quiet --template= --no-local --no-hardlinks \
+    --origin origin "$tmp" "$builder_repo"
+  git -C "$builder_repo" remote remove origin
+  [[ -d "$builder_repo/.git" && ! -L "$builder_repo/.git" \
+      && ! -e "$builder_repo/.git/commondir" \
+      && ! -e "$builder_repo/.git/objects/info/alternates" ]] || return 1
+  [[ -z "$(git -C "$builder_repo" remote)" \
+      && -z "$(git -C "$builder_repo" for-each-ref --format='%(refname)' refs/remotes/)" \
+      && "$(git -C "$builder_repo" rev-parse --verify "${sha_c}^{commit}")" == "$sha_c" ]] || return 1
+  rm -rf -- "$builder_repo/scripts" "$builder_repo/docs"
+  mkdir -p "$builder_repo/scripts"
+  for builder_input in build-pages.sh verify-vendored-esptool-js.sh check-pages-manifest.py check-otadata-contract.py generate-ota-changelog.py; do
+    cp -p "$contract_root/scripts/$builder_input" "$builder_repo/scripts/$builder_input"
+  done
+  cp -pR "$contract_root/docs" "$builder_repo/docs"
+  cp -p "$contract_root/LICENSE" "$builder_repo/LICENSE"
+  fixture_site="$builder_repo/_site"
+  (
+    cd "$builder_repo"
+    [[ "$PWD" == "$builder_repo" ]] || exit 1
+    FIRMWARE_STAGE_DIR="$fixture_stage" ./scripts/build-pages.sh "$fixture_site" "1.0.1-dev.1" "$sha_c" >/dev/null
+  )
   cp "$fixture_site/manifest.json" "$fake_live_dev"
   git -C "$tmp" checkout -q gh-pages
   cp "$fixture_site/manifest.json" "$tmp/dev/manifest.json"
-  git -C "$tmp" add dev/manifest.json
+  cp "$fixture_site/changelog.json" "$tmp/dev/changelog.json"
+  git -C "$tmp" add dev/manifest.json dev/changelog.json
   git -C "$tmp" commit -qm "dev-pages-actual-builder"
   git -C "$tmp" push -q origin gh-pages
   git -C "$tmp" checkout -q main
-  rm -rf "$fixture_site"
+  rm -rf -- "$builder_repo"
 
   got="$(PATH="$fakebin:$PATH" GITHUB_REPOSITORY=owner/repo GH_FAKE_RELEASE="$fake_release" \
     GH_FAKE_LIVE="$fake_live" GH_FAKE_LIVE_DEV="$fake_live_dev" changed_since_dev "$tmp" "$sha_d")"
@@ -878,6 +1003,106 @@ with open(p, "r+", encoding="utf-8") as f:
     echo "generate-ota-changelog script change was not dev-relevant: $got" >&2; return 1;
   }
 
+  # Each classifier sees one actual operation against its immediate published baseline.
+  # Re-publish only inside this owned inert fixture; no old image is relabeled in production.
+  local markdown_counter=2 markdown_case markdown_base markdown_head markdown_version markdown_expected
+  for markdown_case in add edit rename delete unicode-name newline-name dependency-helper dependency-manifest dependency-cmake unshipped-root unshipped-nested unshipped-hidden unshipped-newline; do
+    markdown_base="$(git -C "$tmp" rev-parse HEAD)"
+    markdown_version="1.0.$markdown_counter"
+    markdown_counter=$((markdown_counter + 1))
+    git -C "$tmp" tag "v$markdown_version" "$markdown_base"
+    git -C "$tmp" push -q origin main --tags
+    git -C "$tmp" checkout -q gh-pages
+    write_pages_manifest "$tmp/manifest.json" "$markdown_version" "$markdown_base"
+    write_pages_manifest "$tmp/dev/manifest.json" "$markdown_version-dev.1" "$markdown_base"
+    if [[ "$markdown_case" == add ]]; then
+      printf '\n \n' >> "$tmp/manifest.json"
+      cp "$tmp/manifest.json" "$tmp/root-raw-manifest-expected.json"
+    fi
+    git -C "$tmp" add manifest.json changelog.json dev/manifest.json dev/changelog.json
+    git -C "$tmp" commit -qm "metadata-baseline-$markdown_case"
+    git -C "$tmp" push -q origin gh-pages
+    git -C "$tmp" checkout -q main
+    write_fake_release "$fake_release" "$markdown_version" "$markdown_base"
+    write_pages_manifest "$fake_live" "$markdown_version" "$markdown_base"
+    write_pages_manifest "$fake_live_dev" "$markdown_version-dev.1" "$markdown_base"
+    got="$(PATH="$fakebin:$PATH" GITHUB_REPOSITORY=owner/repo GH_FAKE_RELEASE="$fake_release" \
+      GH_FAKE_LIVE="$fake_live" changed_since_release "$tmp" "$markdown_base")"
+    [[ "$got" == no ]] || { echo "settled root metadata baseline was not accepted: $markdown_case" >&2; return 1; }
+    if [[ "$markdown_case" == add ]]; then
+      got="$(PATH="$fakebin:$PATH" GITHUB_REPOSITORY=owner/repo GH_FAKE_RELEASE="$fake_release" \
+        GH_FAKE_LIVE="$fake_live" GH_FAKE_EXPECTED_ROOT_MANIFEST="$tmp/root-raw-manifest-expected.json" \
+        changed_since_release "$tmp" "$markdown_base")"
+      [[ "$got" == no ]] || { echo "root baseline did not retain exact branch manifest trailing bytes: $got" >&2; return 1; }
+    fi
+    got="$(PATH="$fakebin:$PATH" GITHUB_REPOSITORY=owner/repo GH_FAKE_RELEASE="$fake_release" \
+      GH_FAKE_LIVE="$fake_live" GH_FAKE_LIVE_DEV="$fake_live_dev" changed_since_dev "$tmp" "$markdown_base")"
+    [[ "$got" == no ]] || { echo "settled dev metadata baseline was not accepted: $markdown_case" >&2; return 1; }
+    [[ "$(changed_for_pr "$tmp" "$markdown_base" "$markdown_base")" == no ]] || return 1
+    markdown_expected=yes
+    case "$markdown_case" in
+      add)
+        printf 'shipped addition\n' > "$tmp/docs/relevance-fixture.md"
+        git -C "$tmp" add docs/relevance-fixture.md
+        ;;
+      edit)
+        printf 'shipped edit\n' >> "$tmp/docs/relevance-fixture.md"
+        git -C "$tmp" add docs/relevance-fixture.md
+        ;;
+      rename) git -C "$tmp" mv docs/relevance-fixture.md docs/relevance-renamed.md ;;
+      delete) git -C "$tmp" rm -q docs/relevance-renamed.md ;;
+      unicode-name)
+        printf 'shipped Unicode path\n' > "$tmp/docs/API–guide.md"
+        git -C "$tmp" add docs/API–guide.md
+        ;;
+      newline-name)
+        printf 'shipped newline path\n' > "$tmp/docs/"$'API\nguide.md'
+        git -C "$tmp" add "docs/"$'API\nguide.md'
+        ;;
+      dependency-helper|dependency-manifest|dependency-cmake)
+        # Each production dependency owner must independently trigger all three selectors.
+        case "$markdown_case" in
+          dependency-helper) contract_path=scripts/dependency_source.py ;;
+          dependency-manifest) contract_path=scripts/nanopb-source.json ;;
+          dependency-cmake) contract_path=cmake/admit-dependency-sources.cmake ;;
+        esac
+        mkdir -p "$tmp/${contract_path%/*}"
+        printf 'changed dependency source admission\n' > "$tmp/$contract_path"
+        git -C "$tmp" add "$contract_path"
+        ;;
+      unshipped-root)
+        printf 'unshipped edit\n' >> "$tmp/README.md"
+        git -C "$tmp" add README.md
+        markdown_expected=no
+        ;;
+      unshipped-nested)
+        mkdir -p "$tmp/docs/adr"
+        printf 'unshipped nested addition\n' > "$tmp/docs/adr/relevance-fixture.md"
+        git -C "$tmp" add docs/adr/relevance-fixture.md
+        markdown_expected=no
+        ;;
+      unshipped-hidden)
+        printf 'not copied by the Pages glob\n' > "$tmp/docs/.hidden-guide.md"
+        git -C "$tmp" add docs/.hidden-guide.md
+        markdown_expected=no
+        ;;
+      unshipped-newline)
+        printf 'unshipped path containing a relevant-looking line\n' > "$tmp/"$'README\nmain.md'
+        git -C "$tmp" add $'README\nmain.md'
+        markdown_expected=no
+        ;;
+    esac
+    git -C "$tmp" commit -qm "markdown-$markdown_case"
+    markdown_head="$(git -C "$tmp" rev-parse HEAD)"
+    got="$(PATH="$fakebin:$PATH" GITHUB_REPOSITORY=owner/repo GH_FAKE_RELEASE="$fake_release" \
+      GH_FAKE_LIVE="$fake_live" changed_since_release "$tmp" "$markdown_head")"
+    [[ "$got" == "$markdown_expected" ]] || { echo "root Markdown relevance wrong: $markdown_case/$got" >&2; return 1; }
+    got="$(PATH="$fakebin:$PATH" GITHUB_REPOSITORY=owner/repo GH_FAKE_RELEASE="$fake_release" \
+      GH_FAKE_LIVE="$fake_live" GH_FAKE_LIVE_DEV="$fake_live_dev" changed_since_dev "$tmp" "$markdown_head")"
+    [[ "$got" == "$markdown_expected" ]] || { echo "dev Markdown relevance wrong: $markdown_case/$got" >&2; return 1; }
+    got="$(changed_for_pr "$tmp" "$markdown_base" "$markdown_head")"
+    [[ "$got" == "$markdown_expected" ]] || { echo "PR Markdown relevance wrong: $markdown_case/$got" >&2; return 1; }
+  done
   echo "release relevance self-test: PASS"
 }
 

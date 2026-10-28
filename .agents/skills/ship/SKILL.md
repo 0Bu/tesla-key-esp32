@@ -323,7 +323,9 @@ The device requires exact manifest/image version identity, selected channel/PR e
 valid RSA signature. Eligibility includes the documented same-core preview/Dev and return-to-Release
 exceptions in `docs/ARCHITECTURE.md`. Rollback stays armed until the image has run 90 s with
 admitted runtime, a healthy NimBLE host, a proven network lease and an INTERNAL largest block
-≥4 KiB (`logic/health_gate.hpp`; [Architecture](../../../docs/ARCHITECTURE.md) owns the rule) — so
+meeting the shared `ImageConfirmation` policy in
+[`logic/ota_recovery_memory.hpp`](../../../main/logic/ota_recovery_memory.hpp)
+(`logic/health_gate.hpp`; [Architecture](../../../docs/ARCHITECTURE.md) owns the integration) — so
 a flashed image that never reaches the LAN is not committed, and after 600 s it is left pending
 for the next reboot to roll back.
 

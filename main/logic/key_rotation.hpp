@@ -140,6 +140,7 @@ enum class AutomaticKeyAction : uint8_t {
     StorageUnavailable,
     RebootRequired,
     RecoveryRequired,
+    AutomaticCommitReload, // actual first-key mutation began under AutomaticKey + FIFO ownership
 };
 
 constexpr AutomaticKeyAction decide_automatic_key_action(bool probe_ok,
@@ -165,7 +166,7 @@ constexpr AutomaticKeyAction decide_automatic_key_action(bool probe_ok,
 // Cached visibility only: no storage probe, identity change or new recovery action.
 constexpr const char* pairing_block_reason(bool key_reload, bool cleanup_pending,
                                            bool vin_pending, AutomaticKeyAction action) noexcept {
-    if (key_reload) return "key_reload_required";
+    if (key_reload || action == AutomaticKeyAction::AutomaticCommitReload) return "key_reload_required";
     if (vin_pending) return "vin_transition_pending";
     if (cleanup_pending) return "key_cleanup_pending";
     if (action == AutomaticKeyAction::StorageUnavailable) return "key_storage_unavailable";

@@ -1,3 +1,4 @@
+#include "stack_watch.hpp"
 // Network transport layer — the implementation behind net.hpp.
 //
 // This file was carved out of main.cpp, where the WiFi station, its endless-reconnect
@@ -50,6 +51,8 @@
 #include "logic/net_link.hpp"
 #include "logic/wifi_rollback.hpp"
 #include "ping_probe.hpp"
+#include "runtime_fault_log.hpp"
+#include <esp_timer.h>
 
 static const char* TAG = "net";
 
@@ -205,6 +208,8 @@ static std::atomic<bool> s_rollback_active{false};
 static std::atomic<bool> s_sta_started{false};
 
 static void wifi_event_handler(void*, esp_event_base_t base, int32_t event_id, void* data) {
+    tk::StackWatchScope f135_callback_exit(tk::StackWatch::WifiEvent);
+
     try {
       if (base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
@@ -386,10 +391,9 @@ void net_wifi_retry_station() {
 bool net_wifi_station_started() { return s_sta_started.load(); }
 
 // ── WiFi-only readings ────────────────────────────────────────────────────────
-// Both gate on net_kind() == Wifi, not merely on "something is up": esp_wifi_sta_get_ap_info()
-// has transiently-null fields while the station is associating and a concurrent read there
-// faults (LoadProhibited, EXCVADDR=0x1). Centralised here so no caller can forget the gate —
-// /status, MQTT and the display presenter each used to re-derive it.
+// Both readers require a WiFi lease, even when Ethernet carries the default route. A generic
+// "network up" flag cannot establish that the station is safe to query. Keep the guard here
+// so status, MQTT and display consumers do not re-derive it.
 
 bool net_wifi_signal(int* rssi_dbm, char* ssid) {
     // Gated on the WiFi LEASE, not on net_kind(): a board that fell back to WiFi and later had a
@@ -750,6 +754,8 @@ static const int ETH_GOT_IP_BIT = BIT0;
 // what keeps the WiFi stack switched off on a wired board: "no cable" and "cable in, DHCP still
 // thinking" call for opposite answers at the boot deadline.
 static void eth_event_handler(void*, esp_event_base_t base, int32_t event_id, void* data) {
+    tk::StackWatchScope f135_callback_exit(tk::StackWatch::EthEvent);
+
     try {
       if (base == ETH_EVENT && event_id == ETHERNET_EVENT_CONNECTED) {
         ESP_LOGI(TAG, "Ethernet link up");
@@ -1004,6 +1010,11 @@ struct GatewaySample {
 // on its own inability to measure. The per-cycle esp_ping session is a deliberate, accepted minor
 // cost (a transient ~2.5 KB ping task ~1.5 s out of every 30 s; same-size alloc/free, no monotonic
 // growth).
+static void ping_net_on_end(esp_ping_handle_t handle, void* args) noexcept {
+    tk::StackWatchScope f135_callback_exit(tk::StackWatch::PingNet);
+    tk::ping_probe_on_end(handle, args);
+}
+
 static GatewaySample gateway_reachable() {
     GatewaySample out;
     if (!s_wd.done) return out;  // watchdog not fully initialised yet
@@ -1048,7 +1059,7 @@ static GatewaySample gateway_reachable() {
     const PingProbeResult result = ping_probe_run(
         s_wd, cfg,
         pdMS_TO_TICKS(kWdPingCount * (kWdPingTimeoutMs + 250) + 2000),
-        pdMS_TO_TICKS(2000));
+        pdMS_TO_TICKS(2000), ping_net_on_end);
     // A verdict about a changed route or lease is not evidence for the current gateway.
     if (s_kind.load() != kind || net_active_netif() != netif ||
         lease_generation(kind) != out.identity.lease_generation) return out;
@@ -1109,13 +1120,18 @@ static void net_recover(tk::GatewayIdentity sampled) {
 }
 
 static void net_watchdog_task(void*) {
+    tk::stack_watch_sample(tk::StackWatch::NetWatchdog); // current task at entry
+    tk::StackWatchScope f135_task_exit(tk::StackWatch::NetWatchdog);
+
     try {
       tk::LinkWatch watch{};
       tk::GatewayIdentity watched_identity{};
       tk::GatewayBaseline baselines[2]{};
+      tk::IterationFaultLog faults{};
       for (;;) {
+        tk::StackWatchScope f135_iteration_exit(tk::StackWatch::NetWatchdog);
         vTaskDelay(pdMS_TO_TICKS(kWdPeriodS * 1000));
-
+        try {
         // When the link already knows it is down, the transport's own reconnect path owns
         // recovery — there is nothing to detect (the ghost case is link=up by definition) and
         // logging every period would fill the 16 KB /diag ring across a long router outage.
@@ -1159,9 +1175,26 @@ static void net_watchdog_task(void*) {
                 net_recover(sample.identity);
                 break;
         }
+        } catch (...) {
+            // An observation or a partially attempted recovery is uncertain.
+            // Require a new matching positive gateway reply before another reset.
+            watch = tk::LinkWatch{};
+            watched_identity = {};
+            baselines[0] = {};
+            baselines[1] = {};
+            try {
+                tk::report_iteration_fault(faults,
+                    static_cast<std::uint64_t>(esp_timer_get_time()) / 1000u,
+                    [](std::uint32_t suppressed) {
+                        ESP_LOGW(TAG, "network watchdog iteration failed; proof cleared (suppressed=%u)",
+                                 static_cast<unsigned>(suppressed));
+                    });
+            } catch (...) {}
+        }
       }
     } catch (...) {
-        ESP_LOGE(TAG, "network watchdog task threw; stopping watchdog task");
+        try { ESP_LOGE(TAG, "network watchdog boundary failed; stopping task"); } catch (...) {}
+        tk::stack_watch_sample(tk::StackWatch::NetWatchdog); // no C++ unwind on delete
         vTaskDelete(nullptr);
     }
 }

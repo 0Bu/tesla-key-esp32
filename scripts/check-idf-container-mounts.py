@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bind daemon reuse to exact mounts, including read-only external Git metadata."""
+"""Bind daemon reuse to exact mounts, including read-only Git metadata in both layouts."""
 import argparse
 import copy
 import hashlib
@@ -23,8 +23,9 @@ def expected_mounts(repo, common, volume):
         common = os.path.normpath(common)
         if not os.path.isabs(common):
             raise ValueError("absolute Git common directory is required")
-        if os.path.commonpath((repo, common)) != repo:
-            mounts.append({"Type": "bind", "Source": common, "Destination": common, "RW": False})
+        destination = (os.path.normpath("/project/" + os.path.relpath(common, repo))
+                       if os.path.commonpath((repo, common)) == repo else common)
+        mounts.append({"Type": "bind", "Source": common, "Destination": destination, "RW": False})
     return sorted(mounts, key=lambda m: m["Destination"])
 
 
@@ -55,7 +56,23 @@ def self_test():
     repo, common = "/work tree/selected", "/primary tree/.git"
     expected = expected_mounts(repo, common, "idf-build-test")
     validate(list(reversed(expected)), expected)
-    assert len(expected_mounts(repo, repo + "/.git", "v")) == 3
+    primary = expected_mounts(repo, repo + "/.git", "v")
+    assert len(primary) == 4
+    assert {"Type": "bind", "Source": repo + "/.git", "Destination": "/project/.git", "RW": False} in primary
+    validate(primary, primary)
+    for remove_overlay in (False, True):
+        altered = copy.deepcopy(primary)
+        metadata = next(m for m in altered if m["Destination"] == "/project/.git")
+        if remove_overlay:
+            altered.remove(metadata)
+        else:
+            metadata["RW"] = True
+        try:
+            validate(altered, primary)
+        except ValueError:
+            continue
+        raise AssertionError("writable primary Git metadata accepted")
+    assert len(expected_mounts(repo, "", "v")) == 3
     assert len(expected) == 4
     assert mount_label(expected) != mount_label(expected_mounts(repo, "/other/.git", "idf-build-test"))
     cases = [None, {}, [], expected + [expected[0]], expected[:-1]]

@@ -126,7 +126,7 @@ test('all four firmware locks pin the reviewed source and five upstream-supporte
   const targets = ['esp32', 'esp32s3', 'esp32c3', 'esp32c6'];
   for (const target of targets) {
     const lock = readFileSync(`dependencies.lock.${target}`, 'utf8');
-    assert.match(lock, /version: a00f3872bf4ed166e1c81100ad33a072b126efa1/);
+    assert.match(lock, /version: f7e288e026a19e6bfac0b207922086e57460d860/);
     assert.match(lock, new RegExp(`^target: ${target}$`, 'm'));
     const listed = [...lock.matchAll(/^    - (esp32(?:s3|c3|c6|c5)?)$/gm)].map((match) => match[1]);
     assert.deepEqual(listed, [...targets, 'esp32c5']);

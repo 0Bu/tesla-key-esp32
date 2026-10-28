@@ -197,16 +197,10 @@ static cJSON* build_status_object(bool redact) {
     in.uptime_s        = (uint32_t)(esp_timer_get_time() / 1000000);
     in.wifi_reconnects = tk::net_reconnect_count();
     in.safe_mode       = tk::safe_mode_active();
-    in.runtime_state   = tk::runtime_admission_state();
+    const auto runtime = tk::runtime_admission_snapshot(); // one coherent byte; cache-only
+    in.runtime_state = runtime.state;
+    in.fatal_component = runtime.component;
     in.diag_dropped_lines = diag_log_dropped_lines();
-    in.httpd_stack_min_free_bytes =
-        tk::stack_watch_min_free_bytes(tk::StackWatch::Httpd);
-    in.vehicle_stack_min_free_bytes =
-        tk::stack_watch_min_free_bytes(tk::StackWatch::Vehicle);
-    in.auto_pair_stack_min_free_bytes =
-        tk::stack_watch_min_free_bytes(tk::StackWatch::AutoPair);
-    in.mqtt_stack_min_free_bytes =
-        tk::stack_watch_min_free_bytes(tk::StackWatch::Mqtt);
 
     // ── last_crash ────────────────────────────────────────────────────────────────────────────
     // The live snapshot queries bounded header metadata and rechecks admission after borrowing
@@ -238,10 +232,7 @@ static cJSON* build_status_object(bool redact) {
 
     // The last-known charge snapshot ("last" / "last_seen_s", shown on the asleep card
     // regardless of link state) is emitted by the model from in.charge + in.last_seen.
-    tk::JsonBuilder json;
-    tk::StatusJsonEmitter e(json);
-    tk::status::emit_status(in, e);
-    return e.release();
+    return tk::emit_status_object(in);
 }
 
 // GET /status — the live snapshot. The web UI's feed: app.js polls this every 4 s, and it also
