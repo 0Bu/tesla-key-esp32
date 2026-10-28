@@ -2765,14 +2765,21 @@ test("both hero failure branches consume the parity-checked warning threshold", 
 test("F142 recovery banner distinguishes fatal and cached identity states", () => {
   const {context, element} = loadUi();
   const base = {paired: true, key_present: true, vin: "5YJ3E1EA7KF000316", link: "idle"};
-  context.render({...base, identity_state: "ok", sys: {runtime_state: "fatal", fatal_component: "<script>"}});
   const banner = element("safeModeBanner");
-  assert.equal(banner.classList.contains("show"), true);
-  assert.match(banner.querySelector(".bt").innerHTML, /Device recovery required/);
-  assert.match(banner.querySelector(".bt").innerHTML, /&lt;script&gt;/);
-  assert.doesNotMatch(banner.querySelector(".bt").innerHTML, /<script>/);
-  assert.equal(banner.querySelector("button").hidden, false);
-  assert.equal(context.heroActFn, null);
+  for (const [component, escaped] of [
+    ["<script>", "&lt;script&gt;"],
+    ["<SCRIPT>alert(1)</SCRIPT>", "&lt;SCRIPT&gt;alert(1)&lt;/SCRIPT&gt;"],
+    ['<ScRiPt>alert(1)</ScRiPt foo="bar">', '&lt;ScRiPt&gt;alert(1)&lt;/ScRiPt foo=&quot;bar&quot;&gt;'],
+    ["<img src=x onerror='alert(1)'>&", "&lt;img src=x onerror=&#39;alert(1)&#39;&gt;&amp;"]
+  ]) {
+    context.render({...base, identity_state: "ok", sys: {runtime_state: "fatal", fatal_component: component}});
+    assert.equal(banner.classList.contains("show"), true);
+    assert.equal(banner.querySelector(".bt").innerHTML,
+      '<b>Device recovery required</b> — ' + escaped +
+      '. Vehicle services are stopped. Retain diagnostics and resolve the cause before restarting.', component);
+    assert.equal(banner.querySelector("button").hidden, false);
+    assert.equal(context.heroActFn, null);
+  }
   for (const identity of ["reboot_required", "cleanup_pending", "vin_transition", "storage_unavailable"]) {
     context.render({...base, identity_state: identity, sys: {runtime_state: "ready"}});
     assert.equal(banner.classList.contains("show"), true, identity);

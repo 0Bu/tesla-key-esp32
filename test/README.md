@@ -101,6 +101,16 @@ classification, default-argument behavior, live dismissal, no replay retry after
 exception, bounded packet formatting and socket/send errors. It opens no socket and does not
 establish UDP delivery or live-device behavior. The fast boundary selector also runs this adapter.
 
+`eth_startup_cleanup_tests` compiles the complete production Ethernet resource owner, cleanup and
+fatal/fallback callers. Passive SDK doubles retain pending RX even after a successful stop; every
+post-activation result must retain the whole graph. Pre-activation acquisition prefixes, failed
+unregister/glue/uninstall/MAC/PHY/SPI steps and exact release order run through the actual body.
+The controls runner rejects four compiled unsafe variants and restores the passing source.
+The model admits only the reviewed IDF toolchain and W5500 git/path/version. CMake, direct fallback,
+fast boundary and Linux sanitizer paths execute the native matrix; wiring controls reject omissions
+and propagate failures. These are modeled ownership/order checks, not real SDK ABI, cross-core task
+quiescence, physical RX, reboot, heap/stack margin or hardware proof.
+
 `crash_runtime_xtensa_tests` and `crash_runtime_riscv_tests` compile actual `diag_crash.cpp`
 against passive SDK/partition/PSA facades. They cover each boot read failure/exception, hash API
 failure, foreign/short identity, absent/error partition lookup, wrong installed extent, allocation
@@ -156,7 +166,10 @@ behavior claims. Mirrored C++/Python/JS presenters need parity checks, not merel
 The v6.3.0 real-library harness also checks fresh/forced/established/cleared-secret peer admission,
 monotonic session counters, domain request-hash isolation and invalid-domain lookup.
 The crypto harness checks official client/session derivation, HMAC/tag, the library-built request
-metadata against the official TLV vector, AES-GCM, response-counter
+metadata against the official TLV vector, and a real Client request against independently rebuilt
+wire metadata and AES-GCM ciphertext/tag. Changed counter, expiry, epoch, flags and tag controls
+exercise that comparison. The real peer replay window checks zero, duplicates, reordering, the
+63/64-counter boundary and a fresh window after the next request. It also checks response-counter
 AAD (different from request counter), tampered-tag refusal, PEM compatibility and invalid keys.
 Disabling the real PSA RNG must refuse handshake and payload construction without emitting a frame.
 Fingerprint derivation remains covered by a host mirror; the IDF crypto shell is not compiled on
@@ -166,6 +179,11 @@ The native NVS suite exercises actual config-save ordering, blob/mirror set/comm
 real vector-allocation failure after the length probe. Source pins cover every configuration
 read-modify-save refusal and fatal boot configuration validation. These do not simulate NVS durability.
 Presenter parity likewise proves decisions, not physical pixels.
+
+The runtime source gate also pins Charging Manager enrollment, explicit background no-wake
+policies, the cache/local accessor allowlist for status/MQTT/display/LED/MCP consumers, command-owned
+slot cleanup, three-valued sleep inputs and reset/evidence-gated boot activity. Its source mutation
+controls are lexical checks, not a general C++ dataflow proof or physical no-wake acceptance.
 
 SessionInfo continuity checks use the existing published V1 vector for initial and established
 refreshes in both domains. Ordinary direct-API cases reject missing, malformed or different keys
@@ -299,6 +317,7 @@ WiFi-driver callback framing, a physical exported log or complete sanitation.
 | `scripts/repo-lint.sh` | Syntax/local links, workflow-policy and host-gate mutation canaries, logic ownership and protocol wiring |
 | `test_deploy_candidate.py` | Actual downloaded-candidate YAML step, four-target argument/order and failure propagation for both channels, disposable RSA fixtures and semantic consumer-omission/restoration controls. Host registration executes the shipped shell prefix with passive tools and catches commented, skipped, backgrounded or ignored-failure calls. Initial inventory commands are explicit inert spies; no publication or production key. |
 | `tools/agent-config/selftest.sh` / `test_codex_setup.py` | Canonical skills/reviewers/hooks, native adapter parity/trust boundaries, read-only scopes, owner contracts, exact content and approval/artifact canaries |
+| `test_hook_read_contract.py` | Offline complete-hook payloads and parser controls: literal search/JSON-query data, active option parsing, config/preprocessor/glob/wrapper/substitution refusals, isolated hash-pinned partition reader and input ownership. Payload commands are never executed; no device, publication or NVS operation. |
 | `scripts/release-relevance.sh --self-test` | Mandatory release/Dev/PR selectors and publication-authority fixtures; the strict host suite gives this separate serial gate 120 seconds. |
 | `scripts/test-build-contracts.sh` | No arguments retain the complete standalone contract, including relevance. The explicit `--build-and-manifest` profile runs the remaining block only after the strict host suite's mandatory relevance gate; it has its own 120-second limit. The two serial gates permit 240 seconds combined, rather than the former single 120-second aggregate. Targets, pins, partitions, generated artifacts, size/stack/effective-build and publication contracts; validator self-tests isolate offsets, digest syntax, unsigned-prefix/size reuse, production pins, signed padding/image binding and complete Release/Pages bytes with deterministic disposable fixtures. Pages controls cover build-state/CLI consumption, bounded backoff beyond 50 seconds, delayed size/hash/404 failures for each of 16 parts, independent complete retries, bounded persistent failures, separate manifest/Release-byte delegation and immutable-input rejection before polling; no real signing key |
 | `scripts/test-pr-gates.sh` | Exact-head review records, relevance, canonical Git command boundaries and shared-library loss using fixtures; `ci-heal.sh` refusals with stubbed `git`/`gh` |

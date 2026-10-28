@@ -68,7 +68,8 @@ workflow scripts and [deep document owners](../../../docs/README.md), not histor
   CI (successful `build`, no other check queued, cancelled or failed; a lone failing
   `current-head-records` counts as records pending), local HEAD equality, mergeability/relevance
   and unchanged-head check before merge-readiness stamping, then a passing new
-  `current-head-records` run and all checks green before readiness or merge; Phase 3 pre-push records attest the
+  `current-head-records` run (or, when the stamp leaves the PR body unchanged and so starts no run,
+  a passing latest run) and all checks green before readiness or merge; Phase 3 pre-push records attest the
   independently reviewed local fix commit; iteration cap, actual red/green selftests and separate
   merge authority.
 - **`$vehicle-command-audit`**: upstream/local/pinned-library feasibility, lexical full patch chain,

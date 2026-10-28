@@ -685,6 +685,11 @@ gate_bash_actions() {
   local raw="$1" normalized_raw segments segment payload git_rest segment_count shell_unsafe=0
   local action_env_unsafe=0 emitted_create emitted_merge emitted_push lex_kind raw_lex_kind scan_raw
   local dynamic_scan git_command alias_kind gh_rest gh_command line_continuation
+  # Only proven literal read argv may contain inert action names. Unknown forms continue through
+  # every conservative wrapper, substitution and publication check below.
+  if printf '%s' "$raw" | python3 "$(dirname "${BASH_SOURCE[0]}")/shell_read.py" 2>/dev/null; then
+    return 0
+  fi
   # Remove shell line continuations before classifying the command. Bash 3.2 and Bash 5.x assign
   # opposite meanings to the one- vs two-backslash inline patterns here. Holding the exact bytes
   # in a quoted variable avoids that pattern-parser drift without broadening newline handling.

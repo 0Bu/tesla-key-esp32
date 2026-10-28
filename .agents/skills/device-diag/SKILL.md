@@ -94,7 +94,7 @@ owns the policy. A healthy current sample does not explain a past reboot.
 | MQTT disconnected, uptime stable | Network or broker/TLS failure, not proof of crash | Inspect transport/error; never downgrade TLS silently |
 | OTA invalid/signature-bad | Wrong authority is one possibility; corruption/chip/revision also need exclusion | Verified `$usb-recovery` only after matching evidence and separate approval |
 | Boot loop before app_main after local flash | Unsigned app fails startup signature check | Signed-artifact recovery, separately authorized |
-| `reauth:true` or `paired:false` | Attention hint or no observed stored VCSEC session; neither proves deletion on the car. `reauth` may coexist with `paired:true`. | Preserve identity and stored sessions; inspect the evidence, then propose separately authorized same-key enrollment if needed. |
+| `reauth:true` or `paired:false` | Attention hint or no observed stored VCSEC session; neither proves deletion on the car. `reauth` may coexist with `paired:true`. | Preserve identity and stored sessions; inspect the evidence. Same-key enrollment retries automatically; if it is needed, propose the user's step from the [User guide](../../../docs/USER_GUIDE.md#pairing-and-identity): NFC keycard on the reader, then the touchscreen confirmation. |
 
 ## Result
 

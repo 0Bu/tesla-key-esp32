@@ -513,25 +513,28 @@ struct EthStartupResources {
 };
 
 static bool eth_cleanup_startup(EthStartupResources& r) {
-    bool clean = true;
-
-    // esp_eth_start() changes the driver's FSM before auto-negotiation, event posting and timer
-    // activation.  A failing call can therefore still require stop(); ESP_ERR_INVALID_STATE is
-    // the harmless case where it never crossed that boundary (or already returned to STOP).
-    if (r.start_attempted && r.handle) {
-        const esp_err_t err = esp_eth_stop(r.handle);
-        if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-            ESP_LOGE(TAG, "W5500 partial driver stop failed: %s", esp_err_to_name(err));
-            clean = false;
+    // A partial start can enable RX before the link timer starts. Neither stop() nor deleting
+    // the MAC proves that every in-flight RX callback has exited. All callers after activation
+    // already park fatally, so retain the entire graph until reboot instead of freeing anything
+    // an RX task or event handler may still reference. Stop is only a best-effort quieting step.
+    if (r.start_attempted) {
+        if (r.handle) {
+            const esp_err_t err = esp_eth_stop(r.handle);
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "W5500 partial driver stop failed: %s", esp_err_to_name(err));
+            }
         }
+        return false;
     }
 
+    // Before activation, polling/RX was never enabled. Only a confirmed teardown step permits
+    // the next dependent resource to be released; any failure leaves the remaining tail intact.
     if (r.ip_handler_registered) {
         const esp_err_t err = esp_event_handler_unregister(
             IP_EVENT, IP_EVENT_ETH_GOT_IP, eth_event_handler);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "W5500 IP handler unregister failed: %s", esp_err_to_name(err));
-            clean = false;
+            return false;
         }
         r.ip_handler_registered = false;
     }
@@ -540,13 +543,13 @@ static bool eth_cleanup_startup(EthStartupResources& r) {
             ETH_EVENT, ESP_EVENT_ANY_ID, eth_event_handler);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "W5500 event handler unregister failed: %s", esp_err_to_name(err));
-            clean = false;
+            return false;
         }
         r.eth_handler_registered = false;
     }
 
-    // Callbacks need coherent globals during activation.  Retract them only after the driver is
-    // stopped and the application handlers are gone, before any pointed-to object is destroyed.
+    // Retract published globals only after the application handlers are gone and before any
+    // pointed-to object is destroyed. The activated path above deliberately keeps them coherent.
     if (r.published) {
         if (s_eth_handle == r.handle) s_eth_handle = nullptr;
         if (s_eth_glue == r.glue) s_eth_glue = nullptr;
@@ -561,54 +564,45 @@ static bool eth_cleanup_startup(EthStartupResources& r) {
         const esp_err_t err = esp_eth_del_netif_glue(r.glue);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "W5500 netif glue release failed: %s", esp_err_to_name(err));
-            clean = false;
+            return false;
         }
         r.glue = nullptr;
+    }
+    // Glue release drops its driver reference. Keep netif/events/SPI alive through driver and
+    // MAC teardown even though this pre-activation path has never enabled packet delivery.
+    if (r.handle) {
+        const esp_err_t err = esp_eth_driver_uninstall(r.handle);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "W5500 driver uninstall failed: %s", esp_err_to_name(err));
+            return false;
+        }
+        r.handle = nullptr;
+    }
+    if (r.mac) {
+        const esp_err_t err = r.mac->del(r.mac);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "W5500 MAC release failed: %s", esp_err_to_name(err));
+            return false;
+        }
+        r.mac = nullptr;
+    }
+    if (r.phy) {
+        const esp_err_t err = r.phy->del(r.phy);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "W5500 PHY release failed: %s", esp_err_to_name(err));
+            return false;
+        }
+        r.phy = nullptr;
     }
     if (r.netif) {
         esp_netif_destroy(r.netif);
         r.netif = nullptr;
     }
-
-    // The driver owns the initialized MAC/PHY relationship but not the objects themselves:
-    // uninstall deinitializes them, then their explicit del methods release their allocations.
-    // If uninstall fails, deleting either object or its SPI device would create a live dangling
-    // driver; leave that tail intact and force a fatal boot instead of manufacturing a UAF.
-    bool driver_released = true;
-    if (r.handle) {
-        const esp_err_t err = esp_eth_driver_uninstall(r.handle);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "W5500 driver uninstall failed: %s", esp_err_to_name(err));
-            driver_released = false;
-            clean = false;
-        } else {
-            r.handle = nullptr;
-        }
-    }
-    if (driver_released) {
-        if (r.phy) {
-            const esp_err_t err = r.phy->del(r.phy);
-            if (err != ESP_OK) {
-                ESP_LOGE(TAG, "W5500 PHY release failed: %s", esp_err_to_name(err));
-                clean = false;
-            }
-            r.phy = nullptr;
-        }
-        if (r.mac) {
-            const esp_err_t err = r.mac->del(r.mac);
-            if (err != ESP_OK) {
-                ESP_LOGE(TAG, "W5500 MAC release failed: %s", esp_err_to_name(err));
-                clean = false;
-            }
-            r.mac = nullptr;
-        }
-    }
     if (r.events) {
         vEventGroupDelete(r.events);
         r.events = nullptr;
     }
-    if (driver_released && !eth_release_spi_bus()) clean = false;
-    return clean;
+    return eth_release_spi_bus();
 }
 
 static bool eth_startup_fallback(EthStartupResources& r) {
@@ -883,8 +877,8 @@ bool net_start_eth() {
 
     // Construction is complete.  Publish one coherent set immediately before activation: the
     // event-loop task may run a link/IP callback before esp_eth_start() returns, and that callback
-    // must already find its matching netif, event group and driver handle.  A start failure
-    // retracts this set before destroying any resource.
+    // must already find its matching netif, event group and driver handle. A start failure
+    // retains this coherent set while the existing fatal boot path parks the application.
     s_eth_events = r.events;
     s_eth_netif = r.netif;
     s_eth_handle = r.handle;

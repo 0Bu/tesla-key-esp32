@@ -99,7 +99,7 @@ Details: [network](ARCHITECTURE.md#wifi--lan-connectivity).
 | Captive portal | `main/provisioning.cpp`, `logic/captive.hpp` | A setup portal that does not pop, or a DNS reply whose A record lands outside the answer section. |
 | ESP32-C3 WiFi power ceiling from startup | `sdkconfig.defaults.esp32c3` (`ESP_PHY_MAX_WIFI_TX_POWER`); [hardware limits](USER_GUIDE.md#hardware) | Default high-power WiFi startup on supply-sensitive C3 boards; candidate mitigation for the unverified Super Mini failure report in #415. |
 | Retrying setup portal | `main/provisioning.cpp`, `logic/setup_portal.hpp`, `main/main.cpp` | A board that boots faster than the router after a power cut staying offline in an unbounded, open setup portal. |
-| SPI Ethernet (W5500) | `net.cpp` (`CONFIG_TESLA_ETH_ENABLED`), `logic/eth_board.hpp`, `main/Kconfig.projbuild`; [network](ARCHITECTURE.md#wifi--lan-connectivity) | Running the BLE proxy on a radio that shares ONE antenna path with BLE. |
+| SPI Ethernet (W5500) | `net.cpp` (`CONFIG_TESLA_ETH_ENABLED`), `logic/eth_board.hpp`, `main/Kconfig.projbuild`; [network](ARCHITECTURE.md#wifi--lan-connectivity) | Radio contention with BLE, or RX callbacks reaching freed startup resources. |
 | One image, multiple boards | `main/board.{cpp,hpp}`, `logic/eth_board.hpp` | Two copies of "which board is this" disagreeing on a SHARED pin (the T-Dongle-S3 panel clock is GPIO5, the PoE base's SPI SCLK). |
 | Transport seam | `main/net.hpp`, `net.cpp`, `logic/net_link.hpp` | A network layer that can only be WiFi: one contract (`net_is_up` / `net_kind` / `net_active_netif`) replaces a predicate `extern`ed in five modules and an ifkey hardcoded in three. |
 | Gateway ICMP watchdog | `net.cpp` `net_watchdog_task`, `logic/net_link.hpp` `watch_step()` | The "ghost association" that fires no disconnect event. |
@@ -144,7 +144,7 @@ unresolved material findings prevent a clean verdict.
 
 | Feature | Where | Prevents |
 |---|---|---|
-| Runner-neutral agent policy and five SHA-bound PR gates | `AGENTS.md`, `.agents/`, `.codex/`, `tools/agent-hooks/`, `tools/agent-config/`, `scripts/with-host-python.sh`; [build and review](DEVELOPMENT.md) | Unsafe authority, stale review records, polling changes escaping protocol review, or publishing personal/private identifiers or non-English PR/docs content. |
+| Runner-neutral agent policy and five SHA-bound PR gates | `AGENTS.md`, `.agents/`, `.codex/`, `tools/agent-hooks/`, `tools/agent-config/`, `scripts/with-host-python.sh`; [build and review](DEVELOPMENT.md) and [bounded read forms](DEVELOPMENT.md#standalone-read-checks) | Unsafe authority, stale review records, polling changes escaping protocol review, publishing personal/private identifiers or non-English PR/docs content, or mistaking verified read forms for publication/partition writes. |
 | Publication and USB bench workflows authorized by user invocation | `AGENTS.md`, `.agents/skills/deploy/SKILL.md`, `.agents/skills/deploy-bench/SKILL.md`, `test/test_deploy_target.py`; [delivery](DEVELOPMENT.md#delivery) | Repeated approval requests for an instructed workflow, a Git/PR workflow silently contacting devices, flashing the wrong board, or accepting tests from a different artifact or target. |
 | Shared app/bootloader version admission | `scripts/check-bootloader-compat.py`, `scripts/bootloader-references.json`, USB paths in `flash-esp32`, `ship` and `usb-recovery`; [retained bootloader](../.agents/skills/usb-recovery/SKILL.md#retained-bootloader-compatibility) | An app-only USB write admitting an older-IDF app, unknown bootloader provenance or chip mismatch. |
 | Resource-bounded build container with exact mounts | `scripts/idf-docker.sh`, `scripts/check-idf-container-mounts.py`, `scripts/check-build-gate-contract.py` | A compile starving shared services, build code changing Git metadata, or a linked-worktree build reaching primary source files through an overly broad mount. |
@@ -173,8 +173,8 @@ unresolved material findings prevent a clean verdict.
 
 Native Codex registration is generated from canonical reviewers/hooks and checked for parity;
 current hook trust and primary-checkout declarations remain separate runtime conditions. Both host
-jobs are mandatory for the aggregate build, alongside concurrent producer/independent target legs:
-`build` fails, rather than being skipped, unless every need succeeded.
+jobs and the producer target legs are needs of the aggregate `build`; the independent target legs
+run concurrently and feed the separate `independent-rebuild` join.
 The PSA harness verifies v6.3.0 peer admission, domain hash isolation, encrypted VCSEC denial
 before telemetry and message refusal when the RNG fails.
 Upstream v6.3.0's charging-power estimator is not used by the native controller; charge telemetry

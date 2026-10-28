@@ -445,10 +445,11 @@ if ! esptool --chip "$TARGET" -p "$PORT" erase_region 0xf000 0x2000; then
 fi
 ```
 
-**A board with no auto-reset** — hold BOOT continuously through the probe above and both
-commands below, and add `--before no-reset --after no-reset` to each. The download-mode port
-node can differ from the app node, which is why the probe re-detects rather than reusing an
-earlier port. Release BOOT and replug afterwards.
+**A board with no auto-reset** — run the block below instead of the one above; it already passes
+`--before no-reset --after no-reset` to both commands. Hold BOOT continuously through the probe
+(which retries with `--before no-reset` itself), the retained-bootloader read (`NO_AUTO_RESET=1`)
+and this block. The download-mode port node can differ from the app node, which is why the probe
+re-detects rather than reusing an earlier port. Release BOOT and replug afterwards.
 
 ```bash
 set -euo pipefail

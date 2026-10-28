@@ -307,7 +307,7 @@ command shown with `<placeholders>` runs inline once each holds its literal valu
 blocks this way:
 
 1. Write the blocks approved for this call, unchanged and in document order, to one script in the
-   session's scratch directory with the file-writing tool, not a shell redirect.
+   runner's scratch directory (or `$TMPDIR`) with the file-writing tool, not a shell redirect.
 2. Run it with one static command, `bash <script-path>`. Put inputs the blocks require (`PR`,
    `TARGET`, `PORT`, `RUNID`, `DEVICE_IP`, …) in front as literal `NAME=value` assignments
    so the hooks still see them.
@@ -317,7 +317,28 @@ blocks this way:
 
 Never put `git push`, `gh pr create`, `gh pr merge`, or a key, NVS or credential path into such a
 script: those stay standalone, statically bound commands that the hooks inspect, or the operator's
-step. A script grants no authorization; every approval boundary of the workflow still applies.
+step. The hooks see only `bash <script-path>`, not the script's contents, so they cannot enforce
+this rule; the agent writing the script does. A script grants no authorization; every approval
+boundary of the workflow still applies.
+
+### Standalone read checks
+
+The publication classifier recognizes bounded literal reads so quoted search/query data can name
+publication commands without being treated as commands themselves. Use `rg --no-config` with
+literal arguments and the supported ordinary search options; preprocessors, hostname commands,
+unquoted globs, expansions, wrappers and pipelines retain conservative classification. GitHub CLI
+exceptions require a supported `pr`/`run` read command with active `--json` and `--jq`/`-q` options.
+For example, run `rg --no-config -n 'git push|gh pr merge' AGENTS.md` as a separate shell call.
+Secret and partition guards still apply to these reads.
+
+The partition guard permits only the reviewed validator's isolated, input-only invocation from the
+repository root: `python3 -I -S scripts/check-partition-contract.py --csv partitions.csv`.
+An optional final `--binary <file>` may name an existing regular file within that worktree; a
+symlink or an external path is rejected. The validator's exact SHA-256 is pinned in the hook.
+Changing it needs review and a deliberate pin update. Python isolation prevents repository or
+environment imports from replacing its standard-library dependencies. Bare Python, alternate
+scripts, extra flags, redirections and chained commands receive no exception. These classifications
+grant no device-read, publication or vehicle authority.
 
 ## Reviews and documentation
 
