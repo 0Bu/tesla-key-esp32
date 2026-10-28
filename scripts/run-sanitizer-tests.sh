@@ -159,9 +159,9 @@ cmake -S test -B "$work/build" -DCMAKE_BUILD_TYPE=Debug \
     -DCMAKE_C_FLAGS="${c_flags[*]}" \
     -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined,leak" >/dev/null
 cmake --build "$work/build" --parallel \
-    --target logic_tests nvs_storage_tests runtime_boundary_tests clock_runtime_tests config_commit_tests syslog_runtime_tests crash_runtime_xtensa_tests crash_runtime_riscv_tests heap_supervisor_tests stack_sample_tests
+    --target logic_tests nvs_storage_tests runtime_boundary_tests clock_runtime_tests config_commit_tests syslog_runtime_tests eth_startup_cleanup_tests crash_runtime_xtensa_tests crash_runtime_riscv_tests heap_supervisor_tests stack_sample_tests
 
-for target in logic_tests nvs_storage_tests runtime_boundary_tests clock_runtime_tests config_commit_tests syslog_runtime_tests crash_runtime_xtensa_tests crash_runtime_riscv_tests heap_supervisor_tests stack_sample_tests; do
+for target in logic_tests nvs_storage_tests runtime_boundary_tests clock_runtime_tests config_commit_tests syslog_runtime_tests eth_startup_cleanup_tests crash_runtime_xtensa_tests crash_runtime_riscv_tests heap_supervisor_tests stack_sample_tests; do
     binary="$work/build/$target"
     if [ ! -x "$binary" ]; then
         echo "sanitizer-gate: declared target did not produce an executable: $target" >&2
