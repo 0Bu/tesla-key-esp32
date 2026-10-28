@@ -287,8 +287,8 @@ test("failed OTA check cannot turn an idle status into up-to-date", async () => 
   await context.otaCheck();
 
   assert.equal(context.otaBusy, false);
-  assert.match(element("otaStat").innerHTML, /HTTP 503/);
-  assert.doesNotMatch(element("otaStat").innerHTML, /up to date/);
+  assert.match(element("toasts").children[0].innerHTML, /HTTP 503/);
+  assert.doesNotMatch(element("toasts").children[0].innerHTML, /up to date/);
 });
 
 test("OTA status schema, deadline and missed-done idle recovery fail closed", async () => {
@@ -300,7 +300,7 @@ test("OTA status schema, deadline and missed-done idle recovery fail closed", as
   context.otaPhase = "update";
   context.otaDeadline = Date.now() - 1;
   context.otaPoll();
-  assert.match(element("otaStat").innerHTML, /update timed out/);
+  assert.match(element("toasts").children[0].innerHTML, /update timed out/);
 
   let rebootArgs = null;
   context.waitReboot = (expected) => { rebootArgs = { expected }; };
@@ -310,7 +310,7 @@ test("OTA status schema, deadline and missed-done idle recovery fail closed", as
   context.otaExpectedVersion = "1.4.76";
   context.otaProgress({ state: "idle", update_available: false });
   assert.deepEqual(rebootArgs, { expected: "1.4.76" });
-  assert.match(element("otaStat").innerHTML, /verifying/);
+  assert.match(element("toasts").children[0].innerHTML, /Verifying/);
 });
 
 test("OTA versions use the canonical 31-byte firmware descriptor grammar", () => {
@@ -326,9 +326,8 @@ test("device page exposes keyboard and live-region semantics", () => {
   assert.doesNotMatch(html, /<button[^>]+id="verLink"[^>]*aria-label=/, "#verLink is named by its visible version and channel text");
   assert.match(html, /<button[^>]+id="verLink"[^>]+title="Change update channel"/);
   assert.match(html, /<button[^>]+id="fwCheckBtn"[^>]+aria-label="Check for firmware updates"/);
-  // #toasts is the single live region; #otaStat must not announce the same OTA text twice.
-  assert.match(html, /id="otaStat"[^>]+aria-hidden="true"/);
-  assert.doesNotMatch(html, /id="otaStat"[^>]+aria-live/);
+  // Action feedback belongs only in the bottom popup, including for sighted users.
+  assert.doesNotMatch(html, /id="otaStat"/);
   assert.match(html, /id="toasts"[^>]+role="status"[^>]+aria-live="polite"/);
 });
 
@@ -880,10 +879,10 @@ test("a destructive confirmation starts on Cancel and an indeterminate OTA phase
   assert.equal(context.document.activeElement, element("askOk"));
   context.askClose(false);
 
-  context.otaInline("", "", "indet");
+  context.otaBarProgress("indet");
   assert.equal(element("otaBar").classList.contains("indet"), true);
   assert.equal(element("otaFill").style.width, undefined, "no static width is painted for an unknown amount");
-  context.otaInline("", "", 42);
+  context.otaBarProgress(42);
   assert.equal(element("otaBar").classList.contains("indet"), false);
   assert.equal(element("otaFill").style.width, "42%");
 });
@@ -1175,7 +1174,7 @@ test("askOpen uses adaptive focus: input on desktop pointer:fine, card container
   context.askClose(null);
 });
 
-test("otaProgress throttles download toasts to 10% milestones while maintaining smooth inline progress", () => {
+test("otaProgress throttles download toasts to 10% milestones while maintaining the Firmware row progress bar", () => {
   const { context, element } = loadUi();
   const c = element("toasts");
 
@@ -2503,7 +2502,7 @@ test("uncertain OTA starts preserve their reason and never start polling or retr
     await context[action]();
     assert.equal(calls.length,1);
     assert.match(calls[0],action==='otaCheck'?/^\/ota\/check/:/^\/ota\/update/);
-    assert.match(element('otaStat').innerHTML,/operation outcome unknown; reply degraded/);
+    assert.match(element('toasts').children[0].innerHTML,/operation outcome unknown; reply degraded/);
   }
 });
 
@@ -2519,7 +2518,7 @@ test("OTA start refusals retain device reasons without polling or retrying", asy
       await context[action]();
       assert.equal(calls.length,1);
       assert.equal(calls[0].options.headers['X-Requested-With'],'XMLHttpRequest');
-      assert.match(element('otaStat').innerHTML,/pending verification &lt;&amp;&gt;/);
+      assert.match(element('toasts').children[0].innerHTML,/pending verification &lt;&amp;&gt;/);
       assert.equal(context.otaBusy,false);
     }
     for (const body of [null,{reason:42},'unreadable']) {
@@ -2529,7 +2528,7 @@ test("OTA start refusals retain device reasons without polling or retrying", asy
       }}; };
       await context[action]();
       assert.equal(calls.length,1);
-      assert.match(element('otaStat').innerHTML,/HTTP 503/);
+      assert.match(element('toasts').children[0].innerHTML,/HTTP 503/);
     }
   }
 });
@@ -2564,7 +2563,7 @@ test("OTA refusal bodies share the start deadline and cannot leave the UI locked
     assert.equal(body,true); assert.equal(typeof expire,'function');
     expire(); await pending;
     assert.equal(aborted,true); assert.equal(calls,1); assert.equal(context.otaBusy,false);
-    assert.match(element('otaStat').innerHTML,/request timed out/);
+    assert.match(element('toasts').children[0].innerHTML,/request timed out/);
   }
 });
 
