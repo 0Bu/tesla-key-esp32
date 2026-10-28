@@ -23,10 +23,10 @@
     },
     {
       "customType": "regex",
-      "description": "Bump the esptool-js version pinned in the browser installer",
-      "managerFilePatterns": ["/^docs/index\\.html$/"],
+      "description": "Notify about a new esptool-js release for the browser installer. The bump fails the vendored-runtime hash gate until the bundle, its notices and their pins are re-vendored and reviewed.",
+      "managerFilePatterns": ["/^scripts/verify-vendored-esptool-js\\.sh$/"],
       "matchStrings": [
-        "esptool-js@(?<currentValue>[0-9]+(\\.[0-9]+){0,2})/"
+        "\\nversion=(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)\\n"
       ],
       "datasourceTemplate": "npm",
       "depNameTemplate": "esptool-js"

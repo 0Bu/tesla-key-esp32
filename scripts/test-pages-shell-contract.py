@@ -73,13 +73,13 @@ def check(shell: str) -> None:
             for relative, source in (
                 ("LICENSE", root / "LICENSE"),
                 ("THIRD_PARTY.md", root / "docs/THIRD_PARTY.md"),
-                ("vendor/esptool-js-0.6.1.LICENSE", root / "docs/vendor/esptool-js-0.6.1.LICENSE"),
+                ("vendor/esptool-js-0.7.0.LICENSE", root / "docs/vendor/esptool-js-0.7.0.LICENSE"),
                 ("vendor/pako-2.1.0.LICENSE", root / "docs/vendor/pako-2.1.0.LICENSE"),
                 ("vendor/pako-2.1.0.zlib.README", root / "docs/vendor/pako-2.1.0.zlib.README"),
             ):
                 assert (output / relative).read_bytes() == source.read_bytes(), relative
             footer = (output / "index.html").read_text().split('<footer class="installer-footer">', 1)[1].split("</footer>", 1)[0]
-            assert 'href="./LICENSE">AGPL-3.0</a>' in footer
+            assert 'href="./LICENSE" target="_blank" rel="noopener noreferrer">AGPL-3.0</a>' in footer
             assert 'href="./THIRD_PARTY.md"' in footer
             assert "MIT" not in footer
     print("pages-shell-contract: PASS (real assembler, four targets, absent/present ref, shipped licenses)")

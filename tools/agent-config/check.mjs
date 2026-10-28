@@ -125,7 +125,7 @@ const reviewedSkillSha256 = new Map([
   ["feature-docs", "ec0d24372fb754fde7c91e9d6917b78a348e06addb93299ceb5412fca758dcdb"],
   ["flash-esp32", "aa0994acc8cd332ca6503ddcda40c99c8344bfc7c1a7ec1f74086d89e5204db0"],
   ["mock-test", "f211408296d1e21018c37288eb7e6f51226ebb7c5f34e3d9b851b0874aabb17b"],
-  ["ota-release-verify", "7a223646746f6a6e22601b2259ec8b96811aff452036f1c5c8a37d3d188c36cc"],
+  ["ota-release-verify", "d4ee18eaace248bce3d2fe84ae7f9811514601859226b49a44a4108636759dfa"],
   ["pr-hygiene", "4a56b16765c6fd3527df54e9c93faed61ca5bf0c0a083668bd6747915982a961"],
   ["project-review", "b888badbf89d878af2083f80cd883ca2a2b63e64e0e01615677c4bae1fcbc266"],
   ["ship", "5fbeccfb74e33da75b7acf6e506c41b3056f3fb812705d524136c15348488420"],
