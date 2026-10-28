@@ -270,7 +270,8 @@ separate results; a failed acceptance does not repeat signing or grant a recover
 ### Retained-bootloader references
 
 `scripts/check-bootloader-compat.py` compares stable ESP-IDF descriptors before an app-only USB
-write. Some IDF bootloaders omit that descriptor. These require a byte match to
+write. For some bootloaders esptool reports no ESP-IDF version (esptool 5.6.0 on the esp32c6 v6.1
+bootloader, although the image carries a descriptor). These require a byte match to
 [`scripts/bootloader-references.json`](../scripts/bootloader-references.json), never a guessed
 version or the assumption that the current app's bootloader is installed. The selected target's
 reference binds image length/SHA-256, source commit, CI run/artifact identity and ZIP digest,
@@ -286,7 +287,7 @@ source `e1c3197596575728f336bec9eee0eafc4a0793f6`, and match the separately acce
 That workflow's host sanitizer failure remains a publication blocker; these references certify
 only the recorded bootloader bytes and toolchain, with no app-delivery or whole-workflow approval.
 
-For a descriptorless image, accept only the exact recorded image or the full confirmed project
+For an image whose ESP-IDF version esptool does not report, accept only the exact recorded image or the full confirmed project
 bootloader region with an all-`0xff` suffix: `0x1000/0x7000` on ESP32, `0x0/0x8000` on S3/C3/C6.
 Unknown bytes, partial padding, missing provenance or a wrong target fail closed. Collection
 belongs to the explicitly identified board and approved read plan; the checker contacts no device.

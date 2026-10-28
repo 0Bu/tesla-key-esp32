@@ -41,8 +41,8 @@ Every app-only path below retains the installed bootloader. Before its write, co
 [retained-bootloader preflight](../usb-recovery/SKILL.md#retained-bootloader-compatibility).
 The read must be in the approved target/port plan, with the project layout established first;
 keep the collected file local. For a local build set `APP="$SIGNED_APP"` for that preflight;
-leave `BOOTLOADER` unset because these paths do not replace it. Descriptorless images need the
-shared preflight's exact reviewed reference match. Unknown/unreadable metadata,
+leave `BOOTLOADER` unset because these paths do not replace it. Bootloaders whose ESP-IDF version
+esptool does not report need the shared preflight's exact reviewed reference match. Unknown/unreadable metadata,
 a wrong chip or an older-IDF app stops before writing; broader recovery needs separate scope.
 The checks below repeat the shared offline comparison against those collected bytes.
 

@@ -1001,4 +1001,4 @@ if __name__ == "__main__":
     elif mode == "parity":
         sys.exit(cmd_parity(arg or "build_mock/display_golden.tsv"))
     else:
-        print("usage: display_sim.py [png|states|states-portrait|search|scroll|cheader|parity] [outfile]")
+        print("usage: display_sim.py [png|states|states-portrait|search|scroll|cheader|parity|font-parity] [outfile]")

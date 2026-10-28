@@ -127,7 +127,10 @@ warnings in context, distinguishing expected unpaired bench state from a regress
 
 ```bash
 : "${DEVICE_IP:?set the verified address of the selected physical bench}"
-curl --connect-timeout 3 --max-time 5 -fsS "http://$DEVICE_IP/status" | jq '{version, paired, heap: .sys.free_heap, min_heap: .sys.min_free_heap, largest_block: .sys.largest_block, uptime: .sys.uptime_s}'
+curl --connect-timeout 3 --max-time 5 -fsS "http://$DEVICE_IP/status" | jq '{version, paired,
+  heap: .sys.free_heap, min_heap: .sys.min_free_heap, largest_block: .sys.largest_block,
+  uptime: .sys.uptime_s, safe_mode: .sys.safe_mode, reset_reason: .sys.reset_reason,
+  last_reboot, last_crash, stack_min_free_bytes: .sys.stack_min_free_bytes}'
 curl --connect-timeout 3 --max-time 5 -fsS "http://$DEVICE_IP/api/proxy/1/version" | jq .
 BENCH_DIAG=$(curl --connect-timeout 3 --max-time 5 -fsS "http://$DEVICE_IP/diag?redact=1") || exit 1
 printf '%s\n' "$BENCH_DIAG" | grep -iE 'error|warn|fail|panic' || true
