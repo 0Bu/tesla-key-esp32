@@ -295,6 +295,14 @@ This admission does not prove bootability, signature authority, physical identit
 
 ## Running workflow shell blocks
 
+Quoted jq and search expressions remain literal data during command classification. Guarded
+publication arguments retain their original quotes, so expanding body-file and target paths are
+still rejected. Shell execution wrappers and substitutions use conservative scanning.
+The only Python exception to the partition write guard is the standalone, digest-bound
+`python3 scripts/check-partition-contract.py --csv partitions.csv` in the hook's own worktree,
+optionally with one literal `--binary` path. Additional options, wrappers, changed validators and
+ambiguous working directories remain blocked; the secret guard runs first.
+
 The project hooks judge each shell tool call by its text before the shell runs it. Sent inline,
 most multi-line blocks in `.agents/skills/` are rejected: the PR gate cannot rule out that a
 command substitution or an arithmetic assignment such as `X=$((…))` yields a publish or merge

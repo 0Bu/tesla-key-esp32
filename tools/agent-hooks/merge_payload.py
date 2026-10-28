@@ -11,6 +11,8 @@ import shlex
 import sys
 from typing import Any
 
+from shell_syntax import shell_stdin_execution
+
 
 ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=(.*)$", re.DOTALL)
 SHELLS = {"bash", "dash", "sh", "zsh"}
@@ -375,12 +377,7 @@ def parse_gh(tokens: list[str], index: int, inherited: dict[str, str]) -> dict[s
 
 
 def shell_executes_stdin(source: str) -> bool:
-    shell = r"(?:bash|dash|sh|zsh)"
-    if re.search(rf"\|[^|;\n]*\b{shell}\b", source):
-        return True
-    if re.search(rf"\b{shell}\b[^;&|\n]*(?:<<<|(?<!<)<(?!<))", source):
-        return True
-    return re.search(rf"\b{shell}\b(?:\s+-[^;&|\n]*)*\s+-s(?:\s|$)", source) is not None
+    return shell_stdin_execution(source)
 
 
 def find_merge(source: str, depth: int = 0) -> dict[str, str] | None:

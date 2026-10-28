@@ -211,6 +211,7 @@ expect_ag_guard deny "$ag_xss_payload" 'Antigravity top-level decision deny for 
 
 if python3 - "$root" "$hook" <<'PY'
 import importlib.util,pathlib,sys
+sys.path.insert(0,str(pathlib.Path(sys.argv[2]).parent))
 spec=importlib.util.spec_from_file_location("h",sys.argv[2]); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 r=pathlib.Path(sys.argv[1])
 assert m.eligible_format_path(r,"main/main.cpp")==r/"main/main.cpp"
@@ -222,6 +223,7 @@ then pass_case 'formatter targets only first-party C/C++'; else fail_case 'forma
 
 if python3 - "$hook" "$tmp" <<'PY'
 import contextlib,importlib.util,io,json,pathlib,subprocess,sys
+sys.path.insert(0,str(pathlib.Path(sys.argv[1]).parent))
 spec=importlib.util.spec_from_file_location("h",sys.argv[1]); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 r=pathlib.Path(sys.argv[2])/"stop"; (r/"scripts").mkdir(parents=True)
 script=r/"scripts/run-mock-tests.sh"; script.write_text("#!/bin/sh\nexit 0\n"); script.chmod(0o755)
