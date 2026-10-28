@@ -100,8 +100,8 @@ cp "$docs/index.html" "$docs/installer-bootstrap.mjs" \
   "$docs/serial-port-release.mjs" "$docs/web-installer.mjs" "$out/"
 cp "$repo_root/LICENSE" "$out/LICENSE"
 mkdir -p "$out/vendor"
-cp "$docs/vendor/esptool-js-0.6.1.bundle.js" \
-  "$docs/vendor/esptool-js-0.6.1.LICENSE" \
+cp "$docs/vendor/esptool-js-0.7.0.bundle.js" \
+  "$docs/vendor/esptool-js-0.7.0.LICENSE" \
   "$docs/vendor/pako-2.1.0.LICENSE" "$docs/vendor/pako-2.1.0.zlib.README" "$out/vendor/"
 for md in "$docs"/*.md; do
   [[ -e "$md" ]] && cp "$md" "$out/"
