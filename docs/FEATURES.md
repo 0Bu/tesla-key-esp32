@@ -173,8 +173,8 @@ unresolved material findings prevent a clean verdict.
 
 Native Codex registration is generated from canonical reviewers/hooks and checked for parity;
 current hook trust and primary-checkout declarations remain separate runtime conditions. Both host
-jobs are mandatory for the aggregate build, alongside concurrent producer/independent target legs:
-`build` fails, rather than being skipped, unless every need succeeded.
+jobs and the producer target legs are needs of the aggregate `build`; the independent target legs
+run concurrently and feed the separate `independent-rebuild` join.
 The PSA harness verifies v6.3.0 peer admission, domain hash isolation, encrypted VCSEC denial
 before telemetry and message refusal when the RNG fails.
 Upstream v6.3.0's charging-power estimator is not used by the native controller; charge telemetry
