@@ -215,7 +215,8 @@ merged image or touch `nvs@0x9000/0x6000`.
 Collect a fresh local `BOOT_IMAGE` for this identified board with the
 [retained-bootloader preflight](../usb-recovery/SKILL.md#retained-bootloader-compatibility), after
 establishing its project layout. Leave `BOOTLOADER` unset: this branch retains it. The shared
-check below requires an exact reviewed reference for a descriptorless bootloader and refuses an
+check below requires an exact reviewed reference for a bootloader whose ESP-IDF version esptool
+does not report and refuses an
 older-IDF app, unknown/unreadable metadata or a different chip before the
 app write. The collected bytes are evidence for this board, not a reusable fleet assumption:
 

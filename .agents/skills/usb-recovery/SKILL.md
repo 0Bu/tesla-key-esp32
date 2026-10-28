@@ -380,8 +380,8 @@ pick can select the wrong device even when both share the same chip family.
 The shared checker accepts stable `vMAJOR.MINOR[.PATCH]` descriptors only. Prerelease, development,
 dirty or unknown suffixes stop instead of being treated as equal to a stable release. This
 metadata comparison does not replace signed-artifact validation or prove runtime compatibility.
-Descriptorless bootloaders require an exact match to the independently checked
-[reference catalog](../../../scripts/bootloader-references.json), including its bound toolchain
+Bootloaders whose ESP-IDF version esptool does not report require an exact match to the
+independently checked [reference catalog](../../../scripts/bootloader-references.json), including its bound toolchain
 and source/run/artifact provenance. Only the exact image or a complete project bootloader region
 with an all-`0xff` suffix is accepted. Partial padding, altered bytes and unknown references stop;
 there is no caller-supplied version override. The [reference contract](../../../docs/DEVELOPMENT.md#retained-bootloader-references)
