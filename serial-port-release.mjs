@@ -1,138 +1,127 @@
+// Serial-port ownership shared by every installer operation. A lease names the one operation that
+// may touch a port; it is released only once native closure or hand-over is confirmed, otherwise it
+// stays quarantined so no later operation can race a still-pending native call.
+const portLeases = new WeakMap();
+const releaseRequests = new WeakMap();
+const ownershipListeners = new Set();
+const SERIAL_PERMISSION_TIMEOUT_MS = 10000;
+
 function namedError(name, message) {
   const error = new Error(message);
   error.name = name;
   return error;
 }
 
-export function supportsSerialForget(serial, SerialPortCtor) {
-  return Boolean(
-    serial &&
-    typeof serial.getPorts === "function" &&
-    typeof serial.requestPort === "function" &&
-    SerialPortCtor &&
-    SerialPortCtor.prototype &&
-    typeof SerialPortCtor.prototype.forget === "function"
-  );
+function notifyOwnership() {
+  for (const listener of ownershipListeners) {
+    try { listener(); } catch (_error) {}
+  }
 }
 
-export async function grantedSerialPorts(serial) {
-  const ports = await serial.getPorts();
+export function subscribeSerialOwnership(listener) {
+  ownershipListeners.add(listener);
+  return () => ownershipListeners.delete(listener);
+}
+
+export function serialPortLease(port) {
+  return port && portLeases.get(port);
+}
+
+export function acquireSerialPortLease(port, kind) {
+  if (!port || serialPortLease(port)) {
+    throw namedError("InvalidStateError", "Port busy: a previous operation is still closing.");
+  }
+  const lease = { port, kind, phase: kind };
+  portLeases.set(port, lease);
+  notifyOwnership();
+  return lease;
+}
+
+export function updateSerialPortLease(lease, phase) {
+  if (serialPortLease(lease.port) === lease) {
+    lease.phase = phase;
+    notifyOwnership();
+  }
+}
+
+export function releaseSerialPortLease(lease) {
+  if (serialPortLease(lease.port) === lease) {
+    portLeases.delete(lease.port);
+    notifyOwnership();
+  }
+}
+
+export function serialPortIsOpen(port) {
+  return Boolean(port && (port.readable != null || port.writable != null));
+}
+
+export function supportsSerialForget(serial, SerialPortCtor) {
+  return Boolean(serial && typeof serial.getPorts === "function" &&
+    typeof serial.requestPort === "function" && SerialPortCtor &&
+    typeof SerialPortCtor.prototype?.forget === "function");
+}
+
+async function awaitNativeReleaseStep(request, call, description) {
+  let timer;
+  const native = Promise.resolve().then(call);
+  timer = setTimeout(() => {
+    request.failure = namedError("SerialPermissionTimeoutError",
+      `${description} timed out. The native browser operation is still pending; no release is confirmed. Wait for it to settle before trying again.`);
+    request.rejectForeground(request.failure);
+    notifyOwnership();
+  }, SERIAL_PERMISSION_TIMEOUT_MS);
+  let result;
+  try { result = await native; }
+  finally { clearTimeout(timer); }
+  if (request.failure) throw request.failure;
+  return result;
+}
+
+async function nativeReleaseGrants(serial, request) {
+  const ports = await awaitNativeReleaseStep(request, () => serial.getPorts(), "Reading serial-port permissions");
   return Array.isArray(ports) ? ports : Array.from(ports || []);
 }
 
-// A single granted port can be released directly. Only ask the browser to identify the target
-// when this site already has access to multiple ports; never open the chooser merely to discover
-// that there is no permission to revoke.
-export async function releaseSelectedSerialPort(serial, beforeForget = null) {
-  const grantedPorts = await grantedSerialPorts(serial);
-  if (grantedPorts.length === 0) {
-    throw namedError("NotFoundError", "This site has no serial-port permission to remove.");
+function checkReleaseAllowed(controller) {
+  if (controller?.isReleaseBlocked()) {
+    throw namedError("InvalidStateError", "Wait for the installer or reset operation and its cleanup to finish before releasing any serial port.");
   }
+}
 
-  const port = grantedPorts.length === 1 ? grantedPorts[0] : await serial.requestPort();
-  if (!port || typeof port.forget !== "function") {
-    throw namedError("NotSupportedError", "This browser cannot forget serial ports.");
-  }
-
-  // Give the owner of this exact port a chance to close its streams before forget(). A foreign
-  // owner cannot be closed here and an active flash deliberately rejects the callback, so the
-  // open-port guard below remains the final safety boundary.
-  if (typeof beforeForget === "function") await beforeForget(port);
-
-  if (port.readable != null || port.writable != null) {
-    throw namedError("InvalidStateError", "The serial port is still open.");
-  }
-
-  await port.forget();
-  return port;
+// Removes this page's permission for one port, which the browser lists as "paired". The port must
+// still be granted and closed, and it is held under the shared native-port lease meanwhile, so no
+// installer operation can open it while the permission is being removed.
+export async function forgetSerialPort(serial, port, { controller = null } = {}) {
+  if (releaseRequests.has(serial)) throw namedError("InvalidStateError", "A serial-port release is already in progress.");
+  const request = {};
+  const expired = new Promise((_, reject) => { request.rejectForeground = reject; });
+  expired.catch(() => {});
+  releaseRequests.set(serial, request);
+  notifyOwnership();
+  let lease;
+  // This task keeps awaiting the real native promises after the foreground deadline. Its finally
+  // owns the request and port lease; the raced caller cannot free them or start a second release.
+  const actual = (async () => {
+    try {
+      if (typeof port?.forget !== "function") throw namedError("NotSupportedError", "This browser cannot forget serial ports.");
+      lease = acquireSerialPortLease(port, "release");
+      const granted = await nativeReleaseGrants(serial, request);
+      checkReleaseAllowed(controller);
+      if (!granted.includes(port)) throw namedError("NotFoundError", "This port is not paired with this page.");
+      if (serialPortIsOpen(port)) throw namedError("InvalidStateError", "The serial port is still open. Disconnect it first.");
+      await awaitNativeReleaseStep(request, () => port.forget(), "Removing the serial-port permission");
+      return port;
+    } finally {
+      if (lease) releaseSerialPortLease(lease);
+      if (releaseRequests.get(serial) === request) releaseRequests.delete(serial);
+      notifyOwnership();
+    }
+  })();
+  actual.catch(() => {});
+  return Promise.race([actual, expired]);
 }
 
 export function releaseFeedback(error) {
-  switch (error && error.name) {
-    case "NotFoundError":
-      return { kind: "info", message: "No port released." };
-    case "InvalidStateError":
-      return {
-        kind: "error",
-        message: "The serial port is busy. Finish the current operation or close it in the other tab or app, then try again."
-      };
-    case "NotSupportedError":
-      return {
-        kind: "error",
-        message: "This browser cannot remove serial-port permissions."
-      };
-    default:
-      return {
-        kind: "error",
-        message: "Could not release the serial port. Close other serial applications and try again."
-      };
-  }
-}
-
-export async function attachSerialPortRelease({
-  serial,
-  SerialPortCtor,
-  container,
-  button,
-  status,
-  refreshTarget = globalThis,
-  onBeforeRelease = null,
-  onReleased = null
-}) {
-  if (!container || !button || !status) {
-    throw new Error("Serial port release controls are incomplete.");
-  }
-  if (!supportsSerialForget(serial, SerialPortCtor)) {
-    container.hidden = true;
-    return false;
-  }
-
-  const refreshVisibility = async () => {
-    try {
-      container.hidden = (await grantedSerialPorts(serial)).length === 0;
-    } catch (_error) {
-      container.hidden = true;
-    }
-    return !container.hidden;
-  };
-  const scheduleRefresh = () => refreshVisibility();
-
-  // A grant can change while the native installer/chooser has focus, and a device can be attached
-  // or removed without reloading the page. Re-check instead of preserving a stale visible button.
-  if (typeof serial.addEventListener === "function") {
-    serial.addEventListener("connect", scheduleRefresh);
-    serial.addEventListener("disconnect", scheduleRefresh);
-  }
-  if (refreshTarget && typeof refreshTarget.addEventListener === "function") {
-    refreshTarget.addEventListener("focus", scheduleRefresh);
-    refreshTarget.addEventListener("pageshow", scheduleRefresh);
-  }
-
-  container.hidden = true;
-  button.addEventListener("click", async () => {
-    button.disabled = true;
-    button.setAttribute("aria-busy", "true");
-    status.hidden = false;
-    status.dataset.kind = "info";
-    status.textContent = "Releasing serial port…";
-
-    try {
-      await releaseSelectedSerialPort(serial, onBeforeRelease);
-      if (typeof onReleased === "function") await onReleased();
-      status.dataset.kind = "success";
-      status.textContent = "Serial port released — it is no longer paired with this site.";
-      await refreshVisibility();
-    } catch (error) {
-      const feedback = releaseFeedback(error);
-      status.dataset.kind = feedback.kind;
-      status.textContent = feedback.message;
-      await refreshVisibility();
-    } finally {
-      button.disabled = false;
-      button.removeAttribute("aria-busy");
-    }
-  });
-
-  await refreshVisibility();
-  return true;
+  if (error?.name === "NotFoundError") return { kind: "info", message: "port not paired" };
+  return { kind: "error", message: error?.message || "unknown error" };
 }
