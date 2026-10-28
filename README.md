@@ -16,10 +16,12 @@ wake and read access.
 
 ## 1. Install and configure
 
-1. Open the [web installer](https://0bu.github.io/tesla-key-esp32/), click **Select USB device** and
-   select the serial port. Choose **Erase everything** for a first installation, which erases
-   existing configuration and keys, or **Keep configuration** for an already compatible
-   installation. Then click **Install firmware**.
+1. Open the [web installer](https://0bu.github.io/tesla-key-esp32/), click **Connect** and select
+   the serial port. The installer reads the installed firmware. Use **Clean flash** for a first
+   installation; it erases all flash after a confirmation. **Flash** keeps configuration and keys
+   and is offered for an existing tesla-key-esp32 installation. If the log says the installed
+   firmware is unknown, use Flash only when the board already runs tesla-key-esp32. The log then
+   shows the new boot.
 2. Join `tesla-key-esp32-setup`. Open `http://192.168.4.1` if the setup page does not appear.
 3. Save WiFi credentials and VIN. After the reboot, open `http://tesla-key-esp32.local`, or use
    the IP shown by your router. The installer itself does not configure WiFi.
