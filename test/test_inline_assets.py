@@ -58,6 +58,73 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(CSS.prune(result), result)
 
 
+class JavaScriptTests(unittest.TestCase):
+    def test_whole_line_only_with_exact_whitespace_and_unicode_byte_offsets(self):
+        raw = '// Erklärung\r\n\t// another\rvar x="// literal"; // inline\n'.encode()
+        expected = b' ' * len('// Erklärung'.encode()) + b'\r\n\t          \rvar x="// literal"; // inline\n'
+        result = CSS.prune_js(raw)
+        self.assertEqual(result, expected)
+        self.assertEqual(len(result), len(raw))
+        self.assertEqual(CSS.prune_js(result), result)
+
+    def test_block_comments_are_opaque(self):
+        raw = b'/* note\n// inside block\n`template` \\\n*/\n/* one line */\n'
+        self.assertEqual(CSS.prune_js(raw), raw)
+
+    def test_binary_line_boundaries_do_not_split_valid_string_data(self):
+        for separator in (b'\xc2\x85', b'\x1c', b'\x1d', b'\x1e'):
+            raw = b'var value="prefix' + separator + b'// literal string";\n'
+            with self.subTest(separator=separator):
+                self.assertEqual(CSS.prune_js(raw), raw)
+                self.assertEqual(CSS.prune_js(raw + b'// ordinary comment\n'),
+                                 raw + b' ' * len(b'// ordinary comment') + b'\n')
+
+    def test_legal_annotations_and_html_context_are_preserved(self):
+        for comment in (b'//! notice', b'//# sourceMappingURL=x', b'//@ sourceURL=x',
+                        b'// SPDX-License-Identifier: MIT', b'// Copyright', b'// @LICENSE',
+                        b'// @preserve', b'// <!--', b'// -->', b'// <ScRiPt', b'// </ScRiPt>'):
+            raw = comment + b'\r\nvar x=1;\n'
+            with self.subTest(comment=comment):
+                self.assertEqual(CSS.prune_js(raw), raw)
+
+    def test_regex_quotes_and_automatic_semicolon_insertion_in_actual_node(self):
+        raw = (b'function value(){ return\n// ASI must remain\n{ok:1}; }\n'
+               b'var pattern=/[&<>"\']/g;\nvar url="https://example.invalid/path";\n'
+               b'console.log(JSON.stringify([value(),pattern.test("&"),url]));\n')
+        pruned = CSS.prune_js(raw)
+        self.assertNotEqual(pruned, raw)
+        outputs = []
+        for script in (raw, pruned):
+            result = subprocess.run(['node', '-'], input=script, capture_output=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr.decode())
+            self.assertEqual(result.stderr, b'')
+            outputs.append(result.stdout)
+        self.assertEqual(outputs, [b'[null,true,"https://example.invalid/path"]\n'] * 2)
+
+    def test_unsupported_multiline_contexts_fail_instead_of_guessing(self):
+        for raw in (b'const x=`a\n// literal text\nb`;', b'var x="a\\\n// literal";',
+                    b'var x="a\\\r\n// literal";', b'var x=1; /* inline */',
+                    b'/* comment */ var x=1;', b'/* open', b'/* open\n// still open',
+                    b'\0', b'\xff', b'\x0b', b'\x0c', b'\xe2\x80\xa8', b'\xe2\x80\xa9',
+                    b'x' * (CSS.MAX_BYTES + 1)):
+            with self.subTest(raw=raw[:50]), self.assertRaises(ValueError):
+                CSS.prune_js(raw)
+
+    def test_actual_app_code_lines_are_exact_and_comments_remain_in_source(self):
+        raw = (WWW / 'app.js').read_bytes()
+        result = CSS.prune_js(raw)
+        self.assertEqual(len(result), len(raw))
+        changed = 0
+        for before, after in zip(raw.splitlines(keepends=True), result.splitlines(keepends=True)):
+            if before != after:
+                changed += 1
+                self.assertTrue(before.lstrip(b' \t').startswith(b'//'))
+                self.assertEqual(after, bytes(value if value in CSS.SPACE else 32 for value in before))
+        self.assertGreater(changed, 0)
+        self.assertEqual(CSS.prune_js(result), result)
+        self.assertEqual((WWW / 'app.js').read_bytes(), raw)
+
+
 class CMakeTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="tesla-inline-assets-")
@@ -74,12 +141,12 @@ class CMakeTests(unittest.TestCase):
             "-P", str(self.www / "inline_assets.cmake"),
         ], capture_output=True, timeout=15)
 
-    def test_actual_cli_preserves_markup_js_and_exact_css_bytes(self):
+    def test_actual_cli_preserves_markup_and_exact_pruned_asset_bytes(self):
         raw = b'/* note */\r\n.x{content:"${KEEP};@KEEP@"}\r\n'
         (self.www / "style.css").write_bytes(raw)
         page = (self.www / "index.html").read_bytes()
         js = (self.www / "app.js").read_bytes()
-        expected = page.replace(b'/*@@INLINE:style.css@@*/\n', CSS.prune(raw)).replace(b'//@@INLINE:app.js@@\n', js)
+        expected = page.replace(b'/*@@INLINE:style.css@@*/\n', CSS.prune(raw)).replace(b'//@@INLINE:app.js@@\n', CSS.prune_js(js))
         result = self.generate()
         self.assertEqual(result.returncode, 0, result.stderr.decode())
         self.assertEqual(self.output.read_bytes(), expected)
@@ -103,7 +170,7 @@ class CMakeTests(unittest.TestCase):
                 helper.write_bytes(replacement)
             result = self.generate()
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn(b'CSS comment pruning failed', result.stderr)
+            self.assertIn(b'web asset comment pruning failed', result.stderr)
             self.assertEqual(self.output.read_bytes(), b'stale')
 
     def test_prune_failure_removes_previously_validated_stale_output(self):

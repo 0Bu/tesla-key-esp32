@@ -69,7 +69,7 @@ inline const char* config_commit_reason(ConfigImageResult image) noexcept {
         case ConfigImageResult::HostReset:
             return "configuration saved for the next boot; firmware unconfirmed: BLE host reset";
         case ConfigImageResult::CriticalHeap:
-            return "configuration saved for the next boot; firmware unconfirmed: critical internal heap";
+            return "configuration saved for the next boot; firmware unconfirmed: insufficient OTA recovery headroom";
         default:
             return "configuration saved for the next boot; firmware verification is uncertain";
     }

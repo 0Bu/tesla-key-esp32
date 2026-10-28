@@ -35,7 +35,7 @@ Read task-specific contracts through the [documentation index](docs/README.md).
   `scripts/ci-build-all.sh` is the CI entry point.
 - `esp-idf-toolchain.txt` pins ESP-IDF **v6.1** and its container digest. Use
   `scripts/idf-docker.sh`; preserve its **1.5 CPU / 1800 MiB** limits. Do not substitute host IDF.
-- `main/idf_component.yml` pins `yoziru/tesla-ble` **v6.2.0**. The ordered, hash-checked series in
+- `main/idf_component.yml` pins `yoziru/tesla-ble` **v6.3.0**. The ordered, hash-checked series in
   `patches/tesla-ble/` is fail-closed. Pins, patches, locks, trims, wire behavior and key compatibility
   require a separately authorized dependency migration and protocol-vector review.
 - `teslamotors/vehicle-command` is normative for BLE protocol behavior. Record every departure in

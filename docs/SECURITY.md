@@ -48,12 +48,12 @@ over 15 bytes.
 
 | Namespace / logical key (stored key where different) | Owner | Retention |
 |---|---|---|
-| `tesla_cfg/cfg` | HTTP/provisioning atomic config | durable across OTA |
+| `tesla_cfg/cfg` | HTTP/provisioning atomic config; separately gated default-off physical cfg repair | durable across OTA |
 | `tesla_cfg/wifi_ssid`, `wifi_pass`, `vin`, `mqtt_uri`, `syslog_uri` | legacy config mirror | downgrade compatibility |
 | `tesla_cfg/last_time` | clock | replaceable cache |
 | `tesla_cfg/vin_txn` | VIN transition | recovery journal |
 | `tesla_cfg/ble_mac` | BLE discovery | replaceable cache |
-| `tesla_cfg/reboot_why` | heap watchdog | recovery journal |
+| `tesla_cfg/reboot_why` | independent heap supervisor | recovery journal |
 | `tesla_cfg/boot_fails` | boot guard | recovery journal |
 | `tesla_cfg/disp_rot` | display | durable across OTA |
 | `tesla_cfg/disp_flip` | display | read-only legacy migration |
@@ -233,25 +233,28 @@ carries the exact 12 root files, 16 signer-owned layout inputs, `dist/` diagnost
 `_site/` Pages content. Stable deploy rechecks the root/site binding and Release assets, then
 revalidates authority before invoking the branch publisher. Dev deploy binds current main and the
 exact staged snapshot without Release metadata and rechecks Pages source before invoking its
-publisher. Each Dev push attempt or unchanged-byte build request also rechecks staged SOURCE_SHA
-against fresh remote main. Root publication does not repeat Release-candidate authority inside each
-publisher retry. Cumulative stable relevance uses a branch/live snapshot bound to an immutable
-Release/tag. Dev relevance checks branch/live manifest byte identity and every served part against
-its declared size/hash, without requiring a Release; absent authority falls back to the stable
-baseline, while mismatched served bytes keep reconciliation open.
+publisher. Each root or Dev push attempt and unchanged-byte build request rechecks staged
+SOURCE_SHA against fresh remote main. Root uses the same per-attempt staged-source/current-main
+admission; immutable Release authority is checked before the publisher.
+Cumulative relevance reads the manifest and changelog from one exact branch commit. Stable
+acceptance binds firmware to an immutable Release/tag; Dev checks its declared sizes/hashes without
+requiring a Release. Both require exact served changelog bytes. Absent Dev authority falls back to
+the stable baseline; known metadata or served-byte mismatches keep reconciliation open.
 
 Stable and Dev acceptance first observe the latest Pages build with up to eight status reads and
 exponential delays capped at 60 seconds (310 seconds of default waiting). Queued/building, failed
 builds and unavailable status have distinct diagnostics before byte acceptance starts. This latest
 build observation is a readiness hint, not provenance for a particular firmware snapshot.
-Post-publication byte acceptance then retries the complete manifest and all 16 Pages parts with
+Post-publication byte acceptance then retries the complete manifest, all 16 Pages parts and changelog with
 exponential delays capped at 60 seconds (190 seconds of default waiting). Each attempt uses a fresh
 cache key and must independently pass all
 identity, size, hash and byte-binding checks. Results from incomplete attempts are never combined.
-Invalid staged Dev bytes or immutable Release metadata/assets fail before Pages polling. This
+Invalid staged Dev bytes, expected changelog or immutable Release metadata/assets fail before Pages polling. This
 handles delayed CDN propagation; it does not establish an atomic CDN snapshot.
-A docs-only or stale run must not replace unrepresented firmware. Published Markdown-only edits
-are not themselves release-relevant and wait for the next relevant publication.
+A stale run must not replace unrepresented firmware. Top-level `docs/*.md` files are shipped Pages
+content, so their changes follow the normal four-target build, independent rebuild and protected
+Dev publication. Older firmware is never relabelled with a newer documentation source SHA. Unshipped
+root Markdown and nested ADR files do not independently select publication; stable Release remains manual.
 
 `main` pushes publish signed **Dev** bytes to `dev/` without a GitHub Release; retries may sign fresh
 RSA-PSS bytes. Official stable releases use manual `workflow_dispatch` with `release: true`, publishing
@@ -312,3 +315,13 @@ The pinned Context7 package avoids floating updates but is neither an npm integr
 sandbox. First use executes downloaded code; service inputs leave the local boundary. Never send
 keys, credentials, dumps, unredacted captures or CI secrets; disable locally if policy forbids it.
 Firmware builds and CI do not depend on Context7.
+
+## Configuration-only physical maintenance
+
+The default-off [maintenance role](CONFIG_RECOVERY.md) can replace only the recognized corrupt
+`tesla_cfg/cfg` blob after independent full board/key/VIN authority, absent identity journals and
+internal non-cfg logical retention checks. It does not erase NVS, force legacy fallback or rotate
+identity. One uncertain set/commit parks without retry. Its separate non-OTA app/project/manifest
+requires independent source and signed-artifact admission; the ordinary protected publication and
+16-part channel paths do not publish maintenance artifacts. This source integration is unqualified
+until the owner document's build, signer and physical evidence are independently accepted.

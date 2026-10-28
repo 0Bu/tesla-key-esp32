@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 REPO = Path(__file__).resolve().parents[1]
 PUBLISHER = REPO / "scripts/publish-pages-branch.sh"
@@ -68,7 +69,11 @@ if fault == "diff" and cmd == "diff":
     sys.exit(2)
 if fault == "main_read" and cmd == "ls-remote":
     sys.exit(1)
-if fault in ["newer_dev", "pages_conflict"] and cmd == "push":
+if fault == "main_read_second" and cmd == "ls-remote":
+    from pathlib import Path
+    if Path(os.environ["TEST_CALLS"]).read_text().splitlines().count("git ls-remote") == 2:
+        sys.exit(1)
+if fault in ["newer_dev", "pages_conflict", "main_read_second"] and cmd == "push":
     from pathlib import Path
     import subprocess
     marker = Path(os.environ["TEST_CONFLICT_MARKER"])
@@ -288,14 +293,107 @@ for child in src.iterdir():
         paths = self.git_run("--git-dir", str(self.remote), "ls-tree", "-r", "--name-only", "gh-pages").stdout
         self.assertEqual(paths, "PR/42/index.html\n")
 
-    def test_successful_empty_remote(self):
+    def test_channel_refuses_empty_remote_without_main(self):
         empty = self.root / "empty.git"
         self.git_run("init", "--bare", "--quiet", str(empty))
         self.remote = empty
         self.env["TEST_REMOTE"] = str(empty)
-        self.assertEqual(self.publish("root").returncode, 0)
+        self.dev_manifest()
+        self.assert_failure_before_publish("root", "")
+        self.assert_failure_before_publish("dev", "")
+        self.assertEqual(self.publish("pr").returncode, 0)
         paths = self.git_run("--git-dir", str(empty), "ls-tree", "-r", "--name-only", "gh-pages").stdout
-        self.assertEqual(paths, "index.html\n")
+        self.assertEqual(paths, "PR/42/index.html\nPR/42/manifest.json\n")
+
+    def test_root_candidate_identity_and_main_admission(self):
+        self.existing_pages()
+        self.assert_failure_before_publish("root", "")
+        self.dev_manifest("0" * 40)
+        self.assert_failure_before_publish("root", "")
+        self.dev_manifest()
+        self.assert_failure_before_publish("root", "main_read")
+        self.env["SOURCE_SHA"] = ""
+        self.assert_failure_before_publish("root", "")
+
+    def test_root_current_and_unchanged_attempts(self):
+        self.existing_pages()
+        self.dev_manifest()
+        for _ in range(2):
+            self.calls.write_text("")
+            result = self.publish("root")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            events = self.calls.read_text().splitlines()
+            self.assertEqual(events.count("git ls-remote"), 1)
+            self.assertEqual(events.count("pages POST"), 1)
+            boundary = "git push" if "git push" in events else "pages POST"
+            self.assertLess(events.index("git ls-remote"), events.index(boundary))
+
+    def test_root_retry_refuses_newer_main(self):
+        self.existing_pages()
+        self.dev_manifest()
+        result = self.publish("root", "newer_dev")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("refusing stale root publication", result.stderr)
+        events = self.calls.read_text()
+        self.assertEqual(events.count("git clone"), 2)
+        self.assertEqual(events.count("git push"), 1)
+        self.assertEqual(events.count("git ls-remote"), 2)
+        self.assertNotIn("pages POST", events)
+        self.assertEqual(self.git_run("--git-dir", str(self.remote), "show",
+                                      "gh-pages:index.html").stdout, "old root\n")
+
+    def test_root_retry_succeeds_with_current_main(self):
+        self.existing_pages()
+        self.dev_manifest()
+        result = self.publish("root", "pages_conflict")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        events = self.calls.read_text()
+        self.assertEqual(events.count("git clone"), 2)
+        self.assertEqual(events.count("git push"), 2)
+        self.assertEqual(events.count("git ls-remote"), 2)
+        self.assertEqual(events.count("pages POST"), 1)
+
+    def test_root_retry_refuses_unreadable_second_main(self):
+        self.existing_pages()
+        self.dev_manifest()
+        result = self.publish("root", "main_read_second")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cannot verify current main for root", result.stderr)
+        events = self.calls.read_text()
+        self.assertEqual(events.count("git clone"), 2)
+        self.assertEqual(events.count("git push"), 1)
+        self.assertEqual(events.count("git ls-remote"), 2)
+        self.assertNotIn("pages POST", events)
+
+    def test_root_unchanged_bytes_refuse_stale_main(self):
+        self.existing_pages()
+        self.dev_manifest()
+        self.assertEqual(self.publish("root").returncode, 0)
+        self.git_run("-C", str(self.seed), "checkout", "--quiet", "main")
+        (self.seed / "SOURCE_ONLY").write_text("newer Main\n")
+        self.seed_commit("Newer Main source fixture")
+        self.git_run("-C", str(self.seed), "push", "--quiet", str(self.remote), "HEAD:main")
+        self.assert_failure_before_publish("root", "")
+
+    def test_effective_root_only_guard_omission(self):
+        source = PUBLISHER.read_text()
+        needle = '  case "$mode" in root|dev) ;; *) return 0 ;; esac'
+        self.assertEqual(source.count(needle), 1)
+        mutant = self.root / "publisher-with-root-guard-omitted.sh"
+        mutant.write_text(source.replace(needle, '  case "$mode" in dev) ;; *) return 0 ;; esac'))
+        mutant.chmod(0o700)
+        victim = PagesPublishTest("test_root_retry_refuses_newer_main")
+        victim.setUp()
+        try:
+            with patch(__name__ + ".PUBLISHER", mutant):
+                with self.assertRaises(AssertionError):
+                    victim.test_root_retry_refuses_newer_main()
+            events = victim.calls.read_text()
+            self.assertEqual(events.count("git clone"), 2)
+            self.assertEqual(events.count("git push"), 2)
+            self.assertEqual(events.count("pages POST"), 1)
+        finally:
+            victim.doCleanups()
 
 
 if __name__ == "__main__":

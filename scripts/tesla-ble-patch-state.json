@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "sourceCommit": "a00f3872bf4ed166e1c81100ad33a072b126efa1",
+  "sourceCommit": "f7e288e026a19e6bfac0b207922086e57460d860",
   "patches": [
     {
       "name": "0004-drop-unused-parental-controls-actions.patch",
@@ -66,8 +66,8 @@
     },
     {
       "path": "src/vehicle.cpp",
-      "beforeSha256": "bdb505f66075e78f6cc29572b200472960843c7b552e8bb5c7e080c7c6b9caf9",
-      "afterSha256": "bd901e63e1f3b6dff89f7abb3ff3cd1d4abbb75ffeda9b6458a0e295cbed7d11"
+      "beforeSha256": "f56a0f582fa737eb3073715d954b004ee979b972afaa62dfdbfc548d2979d359",
+      "afterSha256": "cb00f655fae92316909845d543c9c58204b867b6296b97b3cadb1a72f5828484"
     },
     {
       "path": "src/vin_utils.cpp",

@@ -1,0 +1,408 @@
+{
+  "schema": "f135-exact-owner-hooks-v1",
+  "base": "Explicit current-task and callback entry owners; cached diagnostics only.",
+  "rows": [
+    {
+      "kind": "task",
+      "path": "main/main.cpp",
+      "entry": "ota_health_gate_task",
+      "context": "OtaGate",
+      "entrySample": true,
+      "iteration": "for (;;) {",
+      "boundaryScope": true,
+      "terminalDeleteExplicit": true
+    },
+    {
+      "kind": "task",
+      "path": "main/heap_supervisor.cpp",
+      "entry": "heap_supervisor_task",
+      "context": "HeapSupervisor",
+      "entrySample": true,
+      "iteration": "for (;;) {",
+      "boundaryScope": true,
+      "terminalDeleteExplicit": true
+    },
+    {
+      "kind": "task",
+      "path": "main/ota_update.cpp",
+      "entry": "ota_check_task",
+      "context": "OtaCheck",
+      "entrySample": true,
+      "iteration": null,
+      "boundaryScope": true,
+      "terminalDeleteExplicit": true
+    },
+    {
+      "kind": "task",
+      "path": "main/ota_update.cpp",
+      "entry": "ota_task",
+      "context": "OtaWriter",
+      "entrySample": true,
+      "iteration": null,
+      "boundaryScope": true,
+      "terminalDeleteExplicit": true
+    },
+    {
+      "kind": "task",
+      "path": "main/syslog.cpp",
+      "entry": "syslog_task",
+      "context": "Syslog",
+      "entrySample": true,
+      "iteration": "while (true) {",
+      "boundaryScope": true,
+      "terminalDeleteExplicit": true
+    },
+    {
+      "kind": "task",
+      "path": "main/provisioning.cpp",
+      "entry": "dns_task",
+      "context": "CaptiveDns",
+      "entrySample": true,
+      "iteration": "while (!s_dns_stop.load()) {",
+      "boundaryScope": true,
+      "terminalDeleteExplicit": true
+    },
+    {
+      "kind": "task",
+      "path": "main/vehicle_telemetry.cpp",
+      "entry": "loop_task_fn_",
+      "context": "Vehicle",
+      "entrySample": true,
+      "iteration": "while (true) {",
+      "boundaryScope": true,
+      "terminalDeleteExplicit": true
+    },
+    {
+      "kind": "task",
+      "path": "main/vehicle_pairing.cpp",
+      "entry": "auto_pair_task_fn_",
+      "context": "AutoPair",
+      "entrySample": true,
+      "iteration": "while (true) {",
+      "boundaryScope": true,
+      "terminalDeleteExplicit": true
+    },
+    {
+      "kind": "task",
+      "path": "main/display.cpp",
+      "entry": "display_task",
+      "context": "Display",
+      "entrySample": true,
+      "iteration": "for (;;) {",
+      "boundaryScope": true,
+      "terminalDeleteExplicit": true
+    },
+    {
+      "kind": "task",
+      "path": "main/net.cpp",
+      "entry": "net_watchdog_task",
+      "context": "NetWatchdog",
+      "entrySample": true,
+      "iteration": "for (;;) {",
+      "boundaryScope": true,
+      "terminalDeleteExplicit": true
+    },
+    {
+      "kind": "task",
+      "path": "main/led_status.cpp",
+      "entry": "led_task",
+      "context": "Led",
+      "entrySample": true,
+      "iteration": "for (int frame = 0;; ++frame) {",
+      "boundaryScope": true,
+      "terminalDeleteExplicit": true
+    },
+    {
+      "kind": "task",
+      "path": "main/ble_client.cpp",
+      "entry": "nimble_host_task",
+      "context": "NimbleHost",
+      "entrySample": true,
+      "iteration": null,
+      "boundaryScope": true,
+      "terminalDeleteExplicit": true
+    },
+    {
+      "kind": "task",
+      "path": "main/mqtt_ha.cpp",
+      "entry": "publisher_task",
+      "context": "Mqtt",
+      "entrySample": true,
+      "iteration": "while (true) {",
+      "boundaryScope": true,
+      "terminalDeleteExplicit": true
+    },
+    {
+      "kind": "callback",
+      "path": "main/ble_client.cpp",
+      "entry": "on_sync_cb",
+      "context": "NimbleHost",
+      "placement": "function-first, before local lock guards",
+      "boundaryScope": true
+    },
+    {
+      "kind": "callback",
+      "path": "main/ble_client.cpp",
+      "entry": "on_reset_cb",
+      "context": "NimbleHost",
+      "placement": "function-first, before local lock guards",
+      "boundaryScope": true
+    },
+    {
+      "kind": "callback",
+      "path": "main/ble_client.cpp",
+      "entry": "gap_event_cb",
+      "context": "NimbleHost",
+      "placement": "function-first, before local lock guards",
+      "boundaryScope": true
+    },
+    {
+      "kind": "callback",
+      "path": "main/ble_client.cpp",
+      "entry": "svc_disc_cb",
+      "context": "NimbleHost",
+      "placement": "function-first, before local lock guards",
+      "boundaryScope": true
+    },
+    {
+      "kind": "callback",
+      "path": "main/ble_client.cpp",
+      "entry": "chr_disc_cb",
+      "context": "NimbleHost",
+      "placement": "function-first, before local lock guards",
+      "boundaryScope": true
+    },
+    {
+      "kind": "callback",
+      "path": "main/ble_client.cpp",
+      "entry": "dsc_disc_cb",
+      "context": "NimbleHost",
+      "placement": "function-first, before local lock guards",
+      "boundaryScope": true
+    },
+    {
+      "kind": "callback",
+      "path": "main/ble_client.cpp",
+      "entry": "subscribe_write_cb",
+      "context": "NimbleHost",
+      "placement": "function-first, before local lock guards",
+      "boundaryScope": true
+    },
+    {
+      "kind": "callback",
+      "path": "main/ble_client.cpp",
+      "entry": "scan_timeout_cb",
+      "context": "BleScanTimer",
+      "placement": "function-first, before local lock guards",
+      "boundaryScope": true
+    },
+    {
+      "kind": "callback",
+      "path": "main/provisioning.cpp",
+      "entry": "form_get",
+      "context": "CaptiveHttp",
+      "placement": "function-first, before local lock guards",
+      "boundaryScope": true
+    },
+    {
+      "kind": "callback",
+      "path": "main/provisioning.cpp",
+      "entry": "save_post",
+      "context": "CaptiveHttp",
+      "placement": "function-first, before local lock guards",
+      "boundaryScope": true
+    },
+    {
+      "kind": "callback",
+      "path": "main/net.cpp",
+      "entry": "wifi_event_handler",
+      "context": "WifiEvent",
+      "placement": "function-first, before local lock guards",
+      "boundaryScope": true
+    },
+    {
+      "kind": "callback",
+      "path": "main/net.cpp",
+      "entry": "eth_event_handler",
+      "context": "EthEvent",
+      "placement": "function-first, before local lock guards",
+      "boundaryScope": true
+    },
+    {
+      "kind": "callback",
+      "path": "main/mqtt_ha.cpp",
+      "entry": "mqtt_event_handler",
+      "context": "MqttEvent",
+      "placement": "function-first, before local lock guards",
+      "boundaryScope": true
+    },
+    {
+      "kind": "callback",
+      "path": "main/http_config.cpp",
+      "entry": "on_mqtt_probe",
+      "context": "MqttProbeEvent",
+      "placement": "function-first, before local lock guards",
+      "boundaryScope": true
+    },
+    {
+      "kind": "callback",
+      "path": "main/main.cpp",
+      "entry": "sntp_sync_time",
+      "context": "SntpSync",
+      "placement": "function-first, before local lock guards",
+      "boundaryScope": true
+    },
+    {
+      "kind": "callback",
+      "path": "main/http_server.cpp",
+      "entry": "handle_all",
+      "context": "Httpd",
+      "placement": "function-first, before local lock guards",
+      "boundaryScope": true
+    },
+    {
+      "kind": "callback",
+      "path": "main/main.cpp",
+      "entry": "app_main",
+      "context": "Main",
+      "placement": "function-first, before local lock guards",
+      "boundaryScope": true
+    },
+    {
+      "kind": "callback",
+      "path": "main/net.cpp",
+      "entry": "ping_net_on_end",
+      "context": "PingNet",
+      "placement": "fixed-role wrapper around unchanged common completion body",
+      "boundaryScope": true
+    },
+    {
+      "kind": "callback",
+      "path": "main/syslog.cpp",
+      "entry": "ping_syslog_on_end",
+      "context": "PingSyslog",
+      "placement": "fixed-role wrapper around unchanged common completion body",
+      "boundaryScope": true
+    },
+    {
+      "kind": "callback",
+      "path": "main/diag_log.cpp",
+      "entry": "diag_vprintf_",
+      "context": "DiagLogCallback",
+      "placement": "local exit helper, ISR/CanYield/scheduler/current-task refusal",
+      "boundaryScope": true,
+      "qualification": "safe task-backed aggregate only; unsafe remains unknown"
+    },
+    {
+      "kind": "nested-callback",
+      "path": "main/vehicle_ctrl.cpp",
+      "entry": "ble_link_event_cb_",
+      "context": "NimbleHost",
+      "placement": "covered by sampled outer host callbacks; inner POD-only source unchanged",
+      "coveredBy": [
+        "on_reset_cb",
+        "gap_event_cb",
+        "subscribe_write_cb"
+      ]
+    },
+    {
+      "kind": "nested-callback",
+      "path": "main/vehicle_ctrl.cpp",
+      "entry": "ble_rx_event_cb_",
+      "context": "NimbleHost",
+      "placement": "covered by sampled outer host callbacks; inner POD-only source unchanged",
+      "coveredBy": [
+        "gap_event_cb"
+      ]
+    },
+    {
+      "kind": "task",
+      "path": "main/ota_transport.cpp",
+      "entry": "ota_network_task",
+      "context": "OtaNetwork",
+      "entrySample": true,
+      "boundaryScope": true,
+      "terminalDeleteExplicit": true,
+      "qualification": "Only global sampler/self-delete follows final Job access; no task-reclamation inference."
+    },
+    {
+      "kind": "callback",
+      "path": "main/ota_http.cpp",
+      "entry": "parser_begin",
+      "context": "OtaParser",
+      "boundaryScope": true,
+      "placement": "exit scope before local parsing state",
+      "qualification": "Actual coordinator-caller aggregate, not the network task or a dedicated SDK task."
+    },
+    {
+      "kind": "callback",
+      "path": "main/ota_http.cpp",
+      "entry": "parser_field",
+      "context": "OtaParser",
+      "boundaryScope": true,
+      "placement": "exit scope before local parsing state",
+      "qualification": "Actual coordinator-caller aggregate, not the network task or a dedicated SDK task."
+    },
+    {
+      "kind": "callback",
+      "path": "main/ota_http.cpp",
+      "entry": "parser_value",
+      "context": "OtaParser",
+      "boundaryScope": true,
+      "placement": "exit scope before local parsing state",
+      "qualification": "Actual coordinator-caller aggregate, not the network task or a dedicated SDK task."
+    },
+    {
+      "kind": "callback",
+      "path": "main/ota_http.cpp",
+      "entry": "parser_headers",
+      "context": "OtaParser",
+      "boundaryScope": true,
+      "placement": "exit scope before local parsing state",
+      "qualification": "Actual coordinator-caller aggregate, not the network task or a dedicated SDK task."
+    },
+    {
+      "kind": "callback",
+      "path": "main/ota_http.cpp",
+      "entry": "parser_body",
+      "context": "OtaParser",
+      "boundaryScope": true,
+      "placement": "exit scope before local parsing state",
+      "qualification": "Actual coordinator-caller aggregate, not the network task or a dedicated SDK task."
+    },
+    {
+      "kind": "callback",
+      "path": "main/ota_http.cpp",
+      "entry": "parser_complete",
+      "context": "OtaParser",
+      "boundaryScope": true,
+      "placement": "exit scope before local parsing state",
+      "qualification": "Actual coordinator-caller aggregate, not the network task or a dedicated SDK task."
+    },
+    {
+      "kind": "callback",
+      "path": "main/ota_http.cpp",
+      "entry": "parser_chunk",
+      "context": "OtaParser",
+      "boundaryScope": true,
+      "placement": "exit scope before local parsing state",
+      "qualification": "Actual coordinator-caller aggregate, not the network task or a dedicated SDK task."
+    },
+    {
+      "kind": "callback",
+      "path": "main/ota_http.cpp",
+      "entry": "parser_chunk_done",
+      "context": "OtaParser",
+      "boundaryScope": true,
+      "placement": "exit scope before local parsing state",
+      "qualification": "Actual coordinator-caller aggregate, not the network task or a dedicated SDK task."
+    }
+  ],
+  "laneCount": 27,
+  "ownerRows": 44,
+  "baselineTaskEntries": 14,
+  "baselineCallbackEntries": 21,
+  "distinctPingRegistrationsReplaceOneSharedEntry": true,
+  "callbackEntriesAfterSplit": 30,
+  "nestedEnqueueCallbacksHaveNoSampler": true
+}

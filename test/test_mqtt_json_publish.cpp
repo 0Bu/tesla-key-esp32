@@ -149,11 +149,38 @@ std::string discovery_without_url(const std::string& wire,const char* expected_u
     return normalized.get();
 }
 
+// Independent expanded-row input path versus the actual extracted packed-row publisher.
+// The fixed catalog fingerprint and original source-row equality remain separate oracles.
+std::string expanded_discovery_wire(const tk::mqtt::DiscoveryEntry& entry, const char* cfgurl) {
+    const auto uid = tk::mqtt::discovery_unique_id(discovery_runtime::s_node, entry);
+    const auto value_template = tk::mqtt::discovery_value_template(entry);
+    const tk::mqtt::DiscoveryPayload payload{
+        entry.name.data(), uid.c_str(), discovery_runtime::state_topic(entry.domain).c_str(),
+        discovery_runtime::s_avail.c_str(), value_template.c_str(),
+        entry.device_class.empty() ? nullptr : entry.device_class.data(),
+        entry.unit.empty() ? nullptr : entry.unit.data(),
+        entry.state_class.empty() ? nullptr : entry.state_class.data(),
+        entry.entity_category.empty() ? nullptr : entry.entity_category.data(),
+        tk::mqtt::discovery_is_binary(entry), discovery_runtime::s_node.c_str(),
+        discovery_runtime::s_devname.c_str(), discovery_runtime::TK_PLATFORM,
+        discovery_runtime::esp_app_get_description()->version, cfgurl,
+    };
+    auto root = tk::mqtt::build_discovery_payload(payload); CHECK(root);
+    tk::MqttJsonStringOwner text(cJSON_PrintUnformatted(root.get())); CHECK(text);
+    return text.get();
+}
+
 void test_current_discovery_address() {
     reset_discovery(); CHECK(discovery_runtime::publish_discovery());
     CHECK(discovery_runtime::sent.size()==tk::mqtt::kDiscoveryEntries.size());
     CHECK(discovery_io::active_reads==2 && discovery_io::ip_reads==1 && discovery_io::conversions==1);
     const auto first=discovery_runtime::sent;
+    for (size_t i = 0; i < first.size(); ++i) {
+        const auto expanded = tk::mqtt::kDiscoveryEntries[i];
+        CHECK(first[i].topic == tk::mqtt::discovery_config_topic(
+            discovery_runtime::s_prefix, discovery_runtime::s_node, expanded));
+        CHECK(first[i].payload == expanded_discovery_wire(expanded, "http://192.0.2.1"));
+    }
     for(const auto& item:first) CHECK(item.retained);
     reset_discovery(); discovery_io::text="198.51.100.25";
     CHECK(discovery_runtime::publish_discovery());
@@ -184,7 +211,13 @@ void test_current_discovery_address() {
     CHECK(live_allocations==0);
 }
 
-const tk::mqtt::DiscoveryEntry& discovery_entry(std::string_view object_id) {
+std::array<tk::mqtt::DiscoveryEntry, tk::mqtt::kDiscoveryEntryCount> discovery_registry_copy() {
+    std::array<tk::mqtt::DiscoveryEntry, tk::mqtt::kDiscoveryEntryCount> copy{};
+    for (size_t i = 0; i < copy.size(); ++i) copy[i] = tk::mqtt::kDiscoveryEntries[i];
+    return copy;
+}
+
+tk::mqtt::DiscoveryEntry discovery_entry(std::string_view object_id) {
     for (const auto& entry : tk::mqtt::kDiscoveryEntries) {
         if (entry.object_id == object_id) return entry;
     }
@@ -324,16 +357,45 @@ tk::mqtt::DevicePayload device_full_input() {
     in.safe_mode = false;
     in.wifi_reconnects = 2;
     in.mqtt_reconnects = 3;
-    in.has_httpd_stack = true; in.httpd_stack = 4000;
-    in.has_vehicle_stack = true; in.vehicle_stack = 5000;
-    in.has_auto_pair_stack = true; in.auto_pair_stack = 6000;
-    in.has_mqtt_stack = true; in.mqtt_stack = 7000;
+    in.stack_context_samples[0] = tk::stack_sample::merge(in.stack_context_samples[0], 0, 4000);
+    in.stack_context_samples[0] = tk::stack_sample::merge(in.stack_context_samples[0], 1, 5000);
+    in.stack_context_samples[0] = tk::stack_sample::merge(in.stack_context_samples[0], 2, 6000);
+    in.stack_context_samples[0] = tk::stack_sample::merge(in.stack_context_samples[0], 3, 7000);
     return in;
 }
 
 tk::JsonOwner build_device_full() {
     return tk::mqtt::build_device_payload(device_full_input());
 }
+tk::JsonOwner build_device_recovery() {
+    auto input = device_full_input();
+    input.runtime = tk::RuntimeAdmissionSnapshot{tk::RuntimeAdmissionState::Fatal,
+                                                tk::RuntimeFatalComponent::Network};
+    input.pairing_block_reason = "key_reload_required";
+    return tk::mqtt::build_device_payload(input);
+}
+void test_device_recovery_fields() {
+    reset_allocator(0);
+    for (auto state : {tk::RuntimeAdmissionState::Booting, tk::RuntimeAdmissionState::Ready,
+                       tk::RuntimeAdmissionState::SafeMode, tk::RuntimeAdmissionState::Fatal}) {
+        auto input = device_full_input();
+        input.runtime = tk::RuntimeAdmissionSnapshot{state, tk::RuntimeFatalComponent::Network};
+        input.pairing_block_reason = "key_reload_required";
+        auto payload = tk::mqtt::build_device_payload(input);
+        CHECK(payload != nullptr);
+        const auto string_is = [&](const char* key, const char* expected) {
+            const auto* value = cJSON_GetObjectItemCaseSensitive(payload.get(), key);
+            return cJSON_IsString(value) && value->valuestring &&
+                   std::strcmp(value->valuestring, expected) == 0;
+        };
+        CHECK(string_is("runtime_state", tk::runtime_admission_state_name(state)));
+        CHECK(string_is("identity_state", "reboot_required"));
+        if (state == tk::RuntimeAdmissionState::Fatal) CHECK(string_is("fatal_component", "network"));
+        else CHECK(cJSON_GetObjectItemCaseSensitive(payload.get(), "fatal_component") == nullptr);
+    }
+    CHECK(live_allocations == 0);
+}
+
 tk::JsonOwner build_device_minimal() {
     tk::mqtt::DevicePayload in;
     in.ble_connected = false;
@@ -382,9 +444,9 @@ bool json_kind_matches(const cJSON* value, tk::mqtt::JsonValueKind kind) {
     return false;
 }
 
-template <size_t N>
+template <class Registry>
 bool registry_matches_full_payloads(
-    const std::array<tk::mqtt::DiscoveryEntry, N>& entries,
+    const Registry& entries,
     const std::array<tk::JsonOwner, tk::mqtt::kStateDomainCount>& payloads) {
     if (!tk::mqtt::discovery_registry_shape_valid(entries)) return false;
     for (const auto& entry : entries) {
@@ -406,9 +468,9 @@ uint64_t hash_registry_string(uint64_t hash, std::string_view value) {
     return hash * UINT64_C(1099511628211);
 }
 
-template <size_t N>
+template <class Registry>
 uint64_t discovery_registry_fingerprint(
-    const std::array<tk::mqtt::DiscoveryEntry, N>& entries) {
+    const Registry& entries) {
     uint64_t hash = UINT64_C(14695981039346656037);
     for (const auto& entry : entries) {
         for (const uint8_t value : {
@@ -455,6 +517,34 @@ void test_discovery_registry() {
     for (const auto& payload : payloads) CHECK(payload != nullptr);
 
     CHECK(tk::mqtt::kDiscoveryEntries.size() == 55);
+    CHECK(tk::mqtt::discovery_detail::kPackedCatalog.valid());
+    for (size_t i = 0; i < tk::mqtt::kDiscoveryEntryCount; ++i) {
+        const auto decoded = tk::mqtt::kDiscoveryEntries[i];
+        const auto& original = tk::mqtt::discovery_detail::kSourceEntries[i];
+        CHECK(decoded.domain == original.domain && decoded.component == original.component);
+        CHECK(decoded.value_kind == original.value_kind && decoded.invert == original.invert);
+        const auto actual = tk::mqtt::discovery_detail::string_fields(decoded);
+        const auto expected = tk::mqtt::discovery_detail::string_fields(original);
+        const auto& packed = tk::mqtt::kDiscoveryEntries.packed_rows()[i];
+        CHECK(tk::mqtt::discovery_domain(packed) == original.domain);
+        CHECK(tk::mqtt::discovery_component(packed) == original.component);
+        CHECK(tk::mqtt::discovery_inverted(packed) == original.invert);
+        for (unsigned field = 0; field < actual.size(); ++field) {
+            CHECK(actual[field] == expected[field]);
+            CHECK(tk::mqtt::discovery_text(packed,
+                static_cast<tk::mqtt::DiscoveryTextField>(field)) == expected[field]);
+            CHECK(actual[field].data()[actual[field].size()] == '\0');
+        }
+    }
+    CHECK(tk::mqtt::kDiscoveryEntries[55].object_id.empty());
+    CHECK(tk::mqtt::kDiscoveryEntries[SIZE_MAX].object_id.empty());
+    CHECK(tk::mqtt::discovery_detail::kPackedCatalog.string(256).empty());
+    const auto invalid = static_cast<tk::mqtt::DiscoveryTextField>(255);
+    const auto& first_packed = tk::mqtt::kDiscoveryEntries.packed_rows().front();
+    CHECK(tk::mqtt::discovery_text(first_packed, invalid).empty());
+    CHECK(tk::mqtt::discovery_text(tk::mqtt::kDiscoveryEntries.front(), invalid).empty());
+    CHECK(tk::mqtt::discovery_optional_text(first_packed, invalid) == nullptr);
+
     const auto& reconnects = discovery_entry("wifi_reconn");
     CHECK(reconnects.name == "Network reconnects");
     CHECK(reconnects.field == "wifi_reconnects");
@@ -599,15 +689,15 @@ void test_discovery_registry() {
     added.back().object_id = "fixture_added";
     CHECK(!tk::mqtt::discovery_registry_shape_valid(added));
 
-    auto duplicate = tk::mqtt::kDiscoveryEntries;
+    auto duplicate = discovery_registry_copy();
     duplicate[1].object_id = duplicate[0].object_id;
     CHECK(!tk::mqtt::discovery_registry_shape_valid(duplicate));
 
-    auto miswired = tk::mqtt::kDiscoveryEntries;
+    auto miswired = discovery_registry_copy();
     miswired[0].domain = StateDomain::Climate;
     CHECK(!registry_matches_full_payloads(miswired, payloads));
 
-    auto field_drift = tk::mqtt::kDiscoveryEntries;
+    auto field_drift = discovery_registry_copy();
     field_drift[0].field = "soc_drift";
     CHECK(!registry_matches_full_payloads(field_drift, payloads));
 
@@ -615,14 +705,14 @@ void test_discovery_registry() {
     std::swap(topic_drift[0], topic_drift[1]);
     CHECK(topic_drift != expected_topic_suffixes);
 
-    auto boolean_drift = tk::mqtt::kDiscoveryEntries;
+    auto boolean_drift = discovery_registry_copy();
     const size_t safe_mode = discovery_entry_index("safe_mode");
     CHECK(safe_mode < boolean_drift.size());
     boolean_drift[safe_mode].value_kind = JsonValueKind::String;
     CHECK(!tk::mqtt::discovery_registry_shape_valid(boolean_drift));
     CHECK(!registry_matches_full_payloads(boolean_drift, payloads));
 
-    auto metadata_drift = tk::mqtt::kDiscoveryEntries;
+    auto metadata_drift = discovery_registry_copy();
     metadata_drift[0].unit = "kWh";
     CHECK(discovery_registry_fingerprint(metadata_drift) != fingerprint);
 
@@ -753,14 +843,13 @@ void test_exact_payload_branches() {
         "\"version\":\"0.0.0-test\",\"largest_block\":50000,\"min_free_heap\":40000,"
         "\"reset_reason\":\"power_on\",\"reset_reason_code\":1,\"crash_dump\":true,"
         "\"safe_mode\":false,\"wifi_reconnects\":2,\"mqtt_reconnects\":3,"
-        "\"httpd_stack_min_free_bytes\":4000,\"vehicle_stack_min_free_bytes\":5000,"
-        "\"auto_pair_stack_min_free_bytes\":6000,\"mqtt_stack_min_free_bytes\":7000}");
+        "\"stack_min_free_quantum_bytes\":256,\"httpd_stack_min_free_bytes\":3840,\"vehicle_stack_min_free_bytes\":4864,\"auto_pair_stack_min_free_bytes\":5888,\"mqtt_stack_min_free_bytes\":6912,\"main_stack_min_free_bytes\":null,\"heap_supervisor_stack_min_free_bytes\":null,\"display_stack_min_free_bytes\":null,\"led_stack_min_free_bytes\":null,\"ota_check_stack_min_free_bytes\":null,\"ota_writer_stack_min_free_bytes\":null,\"ota_gate_stack_min_free_bytes\":null,\"net_watchdog_stack_min_free_bytes\":null,\"syslog_stack_min_free_bytes\":null,\"captive_dns_stack_min_free_bytes\":null,\"captive_http_stack_min_free_bytes\":null,\"wifi_event_stack_min_free_bytes\":null,\"eth_event_stack_min_free_bytes\":null,\"mqtt_event_stack_min_free_bytes\":null,\"mqtt_probe_event_stack_min_free_bytes\":null,\"nimble_host_stack_min_free_bytes\":null,\"ble_scan_timer_stack_min_free_bytes\":null,\"diag_log_callback_stack_min_free_bytes\":null,\"sntp_sync_stack_min_free_bytes\":null,\"ping_net_stack_min_free_bytes\":null,\"ping_syslog_stack_min_free_bytes\":null,\"ota_network_stack_min_free_bytes\":null,\"ota_parser_stack_min_free_bytes\":null}");
     check_exact_retained(
         build_device_minimal,
         "{\"ble_connected\":false,\"paired\":false,\"session_available\":false,\"free_heap\":1,\"version\":\"v\","
         "\"largest_block\":2,\"min_free_heap\":3,\"reset_reason\":\"unknown\","
         "\"reset_reason_code\":0,\"crash_dump\":false,\"safe_mode\":true,"
-        "\"wifi_reconnects\":4,\"mqtt_reconnects\":5}");
+        "\"wifi_reconnects\":4,\"mqtt_reconnects\":5,\"stack_min_free_quantum_bytes\":256,\"httpd_stack_min_free_bytes\":null,\"vehicle_stack_min_free_bytes\":null,\"auto_pair_stack_min_free_bytes\":null,\"mqtt_stack_min_free_bytes\":null,\"main_stack_min_free_bytes\":null,\"heap_supervisor_stack_min_free_bytes\":null,\"display_stack_min_free_bytes\":null,\"led_stack_min_free_bytes\":null,\"ota_check_stack_min_free_bytes\":null,\"ota_writer_stack_min_free_bytes\":null,\"ota_gate_stack_min_free_bytes\":null,\"net_watchdog_stack_min_free_bytes\":null,\"syslog_stack_min_free_bytes\":null,\"captive_dns_stack_min_free_bytes\":null,\"captive_http_stack_min_free_bytes\":null,\"wifi_event_stack_min_free_bytes\":null,\"eth_event_stack_min_free_bytes\":null,\"mqtt_event_stack_min_free_bytes\":null,\"mqtt_probe_event_stack_min_free_bytes\":null,\"nimble_host_stack_min_free_bytes\":null,\"ble_scan_timer_stack_min_free_bytes\":null,\"diag_log_callback_stack_min_free_bytes\":null,\"sntp_sync_stack_min_free_bytes\":null,\"ping_net_stack_min_free_bytes\":null,\"ping_syslog_stack_min_free_bytes\":null,\"ota_network_stack_min_free_bytes\":null,\"ota_parser_stack_min_free_bytes\":null}");
 
     reset_allocator(0);
     CHECK(tk::mqtt::build_vehicle_payload(nullptr) == nullptr);
@@ -899,6 +988,8 @@ int main() {
     exhaust_build_and_print_allocations("tires/minimal", build_tires_minimal);
     exhaust_build_and_print_allocations("closures/minimal", build_closures_minimal);
     exhaust_build_and_print_allocations("device/minimal", build_device_minimal);
+    exhaust_build_and_print_allocations("device/recovery", build_device_recovery);
+    test_device_recovery_fields();
     test_discovery_registry();
     test_exact_payload_branches();
     test_transport_failures();

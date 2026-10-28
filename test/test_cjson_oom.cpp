@@ -19,6 +19,18 @@
 #include <string>
 #include <utility>
 
+// Passive provider only: the actual production emitter helper below is included unchanged.
+namespace status_snapshot_fixture {
+tk::stack_sample::Snapshot next{};
+size_t calls{0};
+}
+namespace tk {
+stack_sample::Snapshot stack_watch_snapshot() noexcept {
+    ++status_snapshot_fixture::calls;
+    return status_snapshot_fixture::next;
+}
+}
+
 namespace {
 
 size_t checks = 0;
@@ -198,10 +210,11 @@ tk::JsonOwner build_status_fixture() {
     inputs.uptime_s = 123456;
     inputs.wifi_reconnects = 4;
     inputs.reset_reason = "power_on";
-    inputs.httpd_stack_min_free_bytes = 4096;
-    inputs.vehicle_stack_min_free_bytes = 3072;
-    inputs.auto_pair_stack_min_free_bytes = 2048;
-    inputs.mqtt_stack_min_free_bytes = 1024;
+    status_snapshot_fixture::next = {};
+    status_snapshot_fixture::next[0] = tk::stack_sample::merge(status_snapshot_fixture::next[0], 0, 4096);
+    status_snapshot_fixture::next[0] = tk::stack_sample::merge(status_snapshot_fixture::next[0], 1, 3072);
+    status_snapshot_fixture::next[0] = tk::stack_sample::merge(status_snapshot_fixture::next[0], 2, 2048);
+    status_snapshot_fixture::next[0] = tk::stack_sample::merge(status_snapshot_fixture::next[0], 3, 1024);
     inputs.have_crash = true;
     inputs.crash_reason = "panic";
     inputs.crash_reason_code = 3;
@@ -219,10 +232,10 @@ tk::JsonOwner build_status_fixture() {
     inputs.crash_elf_sha256 =
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
-    tk::JsonBuilder json;
-    tk::StatusJsonEmitter emitter(json);
-    tk::status::emit_status(inputs, emitter);
-    return emitter.finish();
+    const size_t before = status_snapshot_fixture::calls;
+    tk::JsonOwner result(tk::emit_status_object(inputs));
+    CHECK(status_snapshot_fixture::calls == before + 1);
+    return result;
 }
 
 void test_status_emitter_structure_guards() {
@@ -1601,6 +1614,41 @@ int main() {
         CHECK(cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(vehicle, "power")));
         const auto* age = cJSON_GetObjectItemCaseSensitive(status.get(), "charge_age_s");
         CHECK(cJSON_IsNumber(age) && age->valuedouble == 0);
+        const auto* sys = cJSON_GetObjectItemCaseSensitive(status.get(), "sys");
+        CHECK(cJSON_IsObject(sys));
+        const auto* quantum = cJSON_GetObjectItemCaseSensitive(sys, "stack_min_free_quantum_bytes");
+        CHECK(cJSON_IsNumber(quantum) && quantum->valuedouble == 256);
+        const auto* samples = cJSON_GetObjectItemCaseSensitive(sys, "stack_min_free_bytes");
+        CHECK(cJSON_IsObject(samples) && cJSON_GetArraySize(samples) == 27);
+        for (unsigned slot = 0; slot < tk::kStackContextCount; ++slot) {
+            const char* key = tk::stack_context_name(static_cast<tk::StackContext>(slot));
+            const auto* sample = cJSON_GetObjectItemCaseSensitive(samples, key);
+            if (slot < 4) CHECK(cJSON_IsNumber(sample) && sample->valuedouble == 4096 - slot * 1024);
+            else CHECK(cJSON_IsNull(sample));
+        }
+    }
+    CHECK(live_allocations == 0);
+    reset_allocator(0);
+    {
+        tk::status::Inputs inputs;
+        status_snapshot_fixture::next = {};
+        // Literal codec values independently distinguish measured zero, unknown and saturation.
+        status_snapshot_fixture::next[0] = 1;
+        status_snapshot_fixture::next[5] = 63u << 6;
+        const size_t before = status_snapshot_fixture::calls;
+        tk::JsonOwner status(tk::emit_status_object(inputs));
+        CHECK(status_snapshot_fixture::calls == before + 1);
+        CHECK(status != nullptr);
+        const auto* sys = cJSON_GetObjectItemCaseSensitive(status.get(), "sys");
+        CHECK(cJSON_IsObject(sys));
+        const auto* samples = cJSON_GetObjectItemCaseSensitive(sys, "stack_min_free_bytes");
+        CHECK(cJSON_IsObject(samples) && cJSON_GetArraySize(samples) == 27);
+        const auto* zero = cJSON_GetObjectItemCaseSensitive(samples, "httpd");
+        const auto* unknown = cJSON_GetObjectItemCaseSensitive(samples, "vehicle");
+        const auto* saturated = cJSON_GetObjectItemCaseSensitive(samples, "ota_parser");
+        CHECK(cJSON_IsNumber(zero) && zero->valuedouble == 0);
+        CHECK(cJSON_IsNull(unknown));
+        CHECK(cJSON_IsNumber(saturated) && saturated->valuedouble == 15872);
     }
     CHECK(live_allocations == 0);
     exhaust_build_and_print("full /status production emitter", build_status_fixture, rest_oom);

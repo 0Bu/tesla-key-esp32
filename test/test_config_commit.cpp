@@ -1,7 +1,9 @@
 // Actual shipped configuration owner/query/confirmation and portal shells, with passive host I/O.
 // The linked C fixture contains pinned SDK CRC/query bodies; no board/flash/vehicle is contacted.
+#include "stack_watch.hpp"
 #include "config_commit_sdk_bridge.h"
 #include "logic/health_gate.hpp"
+#include "ota_recovery_memory.hpp"
 #include "logic/config_commit.hpp"
 #include "logic/effect_reply.hpp"
 #include "logic/heap_watchdog.hpp"
@@ -25,15 +27,59 @@
 
 static int checks, timed_fixture_runs, config_fixture_runs;
 #define CHECK(x) do { ++checks; if (!(x)) { std::cerr << "FAIL " << __LINE__ << ": " << #x << '\n'; std::exit(1); } } while (0)
+// Passive own-task SDK I/O only: the real stack_watch.cpp owns encoding/CAS/minimum logic.
+// The host stub ABI is UBaseType_t=unsigned, TaskHandle_t=void*; no SDK/target ABI is claimed.
+static unsigned f135_hwm_queries = 0;
+extern "C" unsigned uxTaskGetStackHighWaterMark(void* task) {
+    CHECK(task == nullptr); ++f135_hwm_queries; return 4096;
+}
 using Image = tk::ConfigImageResult;
 using Owner = tk::OtaIdentityGateState;
 #include "config_commit_owner.generated.hpp"
 static tk::OtaIdentityOperationGate s_operation_gate;
+// Passive old-operation cleanup inputs; the entire production query body is generated below.
+// The separate OTA application family executes it against real OtaOperation/Coordinator/Slot.
+static bool reference_present=false,reference_done=true,reference_reclaimable=true,reference_slot=true;
+static unsigned reference_loads=0,reference_done_reads=0,reference_cleanup_reads=0,reference_slot_reads=0;
+static bool reference_owner(){
+ const auto o=s_operation_gate.state();
+ return o==Owner::HealthCommit||o==Owner::ConfigRestart||o==Owner::Ota;
+}
+struct ReferenceJob {};
+struct ReferenceDone {
+ bool load(std::memory_order order)const noexcept {
+  CHECK(reference_owner()&&order==std::memory_order_acquire);++reference_done_reads;return reference_done;
+ }
+};
+struct ReferenceCoordinator {
+ bool can_reclaim()const noexcept {
+  ++reference_cleanup_reads;CHECK(reference_owner()&&reference_done);return reference_reclaimable;
+ }
+};
+struct ReferenceOperation {ReferenceDone coordinator_done;ReferenceCoordinator coordinator;ReferenceJob job;};
+static ReferenceOperation reference_operation;
+struct ReferencePointer {
+ ReferenceOperation* load(std::memory_order order)const noexcept {
+  ++reference_loads;CHECK(reference_owner()&&order==std::memory_order_acquire);
+  return reference_present?&reference_operation:nullptr;
+ }
+};
+static ReferencePointer s_operation;
+struct ReferenceSlot {
+ bool owns(const ReferenceJob&)const noexcept {++reference_slot_reads;CHECK(reference_owner());return reference_slot;}
+};
+static ReferenceSlot s_network_slot;
 static esp_ota_select_entry_t headers[2];
 static esp_partition_t running{ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_MIN};
 static bool partition_missing, read_failure, ready, synced, throw_log;
 static unsigned resets;
 static size_t largest;
+static size_t recovery_required=tk::kOtaRecoveryEntryRequiredB, post_owner_largest=tk::kOtaRecoveryEntryRequiredB-1;
+namespace tk {
+std::size_t ota_recovery_required_bytes(OtaRecoveryUse use) noexcept {
+    return ota_recovery_required_bytes_for(use,{recovery_required,kOtaTlsRecordCapacityB});
+}
+}
 static int app_count, reads, marks, logs, mark_failure;
 static bool mark_throw, throw_after_mark;
 static Owner expected_mark_owner = Owner::ConfigRestart;
@@ -81,7 +127,7 @@ static unsigned ble_host_reset_count() {
 constexpr int MALLOC_CAP_8BIT=1, MALLOC_CAP_INTERNAL=2;
 static size_t heap_caps_get_largest_free_block(int caps) {
     CHECK(caps==(MALLOC_CAP_8BIT|MALLOC_CAP_INTERNAL));
-    health_reads.emplace_back('H', s_operation_gate.state()); return post_fault(3) ? 4095 : largest;
+    health_reads.emplace_back('H', s_operation_gate.state()); return post_fault(3) ? post_owner_largest : largest;
 }
 static int esp_ota_mark_app_valid_cancel_rollback() {
     ++marks; CHECK(s_operation_gate.state()==expected_mark_owner);
@@ -131,7 +177,10 @@ static void reset_state(uint32_t state=ESP_OTA_IMG_PENDING_VERIFY) {
     headers[0].crc=bootloader_common_ota_select_crc(&headers[0]);
     running={ESP_PARTITION_TYPE_APP,ESP_PARTITION_SUBTYPE_APP_OTA_MIN};
     partition_missing=false; read_failure=false; ready=true; synced=true; throw_log=false;
-    resets=0; largest=4096; app_count=2; reads=marks=logs=mark_failure=0; mark_throw=false;
+    recovery_required=tk::kOtaRecoveryEntryRequiredB; post_owner_largest=recovery_required-1;
+    reference_present=false;reference_done=reference_reclaimable=reference_slot=true;
+    reference_loads=reference_done_reads=reference_cleanup_reads=reference_slot_reads=0;
+    resets=0; largest=recovery_required; app_count=2; reads=marks=logs=mark_failure=0; mark_throw=false;
     expected_mark_owner=Owner::ConfigRestart; refreshes=polls=0; max_polls=121; post_refusal=-1;
     throw_after_mark=false; network_up=true; wait_polls=0; throw_health_field=-1; refreshed_raw_state=99;
     ticks=0; timed_fixture=false; admission_action=tk::RuntimeAdmissionAction::Run;
@@ -220,6 +269,72 @@ static void timed_health_tests() {
         try { ota_health_gate_task(nullptr); } catch (const TaskEnd&) {}
         CHECK(marks==0 && refreshes==0 && polls==18 && s_operation_gate.state()==Owner::Idle);
     }
+}
+
+static void recovery_policy_tests() {
+    // Literal12345 is a host-only oracle between both historical hardcodings.
+    for (size_t observed : {size_t(12344), size_t(12345), size_t(12346)}) {
+        const bool affordable=observed==12345 || observed==12346;
+        reset_state(); recovery_required=12345; largest=observed;
+        { OtaConfigRestartGuard guard; CHECK(guard.try_begin());
+          CHECK(confirm(guard)==(affordable ? Image::Confirmed : Image::CriticalHeap));
+          CHECK(marks==int(affordable) && guard.owns_gate()); }
+        CHECK(s_operation_gate.state()==Owner::Idle);
+        reset_state(); recovery_required=12345; largest=observed;
+        timed_fixture=true; expected_mark_owner=Owner::HealthCommit;
+        try { ota_health_gate_task(nullptr); } catch (const TaskEnd&) {}
+        CHECK(marks==int(affordable) && refreshes==int(affordable));
+        CHECK(polls==(affordable ? 18 : 120) && s_operation_gate.state()==Owner::Idle);
+    }
+    reset_state(); recovery_required=12345; largest=12345; post_owner_largest=12344;
+    timed_fixture=true; expected_mark_owner=Owner::HealthCommit; max_polls=18; post_refusal=3;
+    try { ota_health_gate_task(nullptr); } catch (const TaskEnd&) {}
+    CHECK(marks==0 && refreshes==0 && polls==19 && s_operation_gate.state()==Owner::Idle);
+    std::string owned;
+    for (auto read:health_reads) if (read.second==Owner::HealthCommit) owned+=read.first;
+    CHECK(owned=="RSCH"); // Fresh lower block only after actual owner acquisition.
+    for (Owner winner : {Owner::Ota,Owner::IdentityMutation,Owner::FaultRestart,Owner::HealthCommit}) {
+        reset_state(); recovery_required=12345; largest=12346;
+        CHECK(s_operation_gate.try_begin(winner)); OtaConfigRestartGuard denied;
+        CHECK(!denied.try_begin() && confirm(denied)==Image::WrongOwner);
+        CHECK(marks==0 && reads==0 && health_reads.empty()); CHECK(s_operation_gate.finish(winner));
+    }
+    reset_state(); recovery_required=0; largest=SIZE_MAX;
+    { OtaConfigRestartGuard guard; CHECK(guard.try_begin()); CHECK(confirm(guard)==Image::CriticalHeap && marks==0); }
+    reset_state(); // Leave every pre-existing default regression unchanged.
+}
+
+static void reference_policy_tests(){
+ // The unowned advisory sampler must never borrow the old Operation, even when present.
+ reset_state();reference_present=true;reference_done=false;
+ CHECK(ota_runtime_health().healthy()&&reference_loads==0);
+ {OtaHealthCommitGuard denied;CHECK(denied);CHECK(s_operation_gate.state()==Owner::HealthCommit);}
+ CHECK(reference_loads==0);
+ for(int refusal:{0,1,2}){
+  reset_state();reference_present=true;
+  reference_done=refusal!=0;reference_reclaimable=refusal!=1;reference_slot=refusal!=2;
+  {OtaConfigRestartGuard guard;CHECK(guard.try_begin());CHECK(confirm(guard)==Image::Pending);
+   CHECK(marks==0&&reads==1&&health_reads.empty());}
+  CHECK(reference_loads==1&&reference_done_reads==1);
+  CHECK(reference_cleanup_reads==unsigned(refusal!=0));
+  CHECK(reference_slot_reads==unsigned(refusal==2));
+ }
+ reset_state();reference_present=true;
+ {OtaConfigRestartGuard guard;CHECK(guard.try_begin());CHECK(confirm(guard)==Image::Confirmed&&marks==1);}
+ CHECK(reference_loads==1&&reference_cleanup_reads==1&&reference_slot_reads==1);
+ reset_state();reference_present=true;reference_done=false;
+ timed_fixture=true;expected_mark_owner=Owner::HealthCommit;max_polls=18;
+ try{ota_health_gate_task(nullptr);}catch(const TaskEnd&){}
+ CHECK(marks==0&&refreshes==0&&reference_loads==1&&reference_cleanup_reads==0);
+ reset_state();
+ {OtaHealthCommitGuard guard;CHECK(guard);
+  {OtaHealthCommitGuard denied;CHECK(!denied);
+   CHECK(!ota_recovery_reference_ready(denied)&&reference_loads==0);}
+  CHECK(ota_recovery_reference_ready(guard));}
+ CHECK(reference_loads==1&&reference_done_reads==0);
+ reset_state();CHECK(s_operation_gate.try_begin(Owner::FaultRestart));
+ CHECK(!ordinary_recovery_reference_ready_owned(Owner::HealthCommit)&&reference_loads==0);
+ CHECK(s_operation_gate.finish(Owner::FaultRestart));reset_state();
 }
 
 static void sdk_and_owner_tests() {
@@ -427,9 +542,16 @@ static void portal_tests() {
 }
 
 int main() {
+    CHECK(!tk::stack_watch_min_free_bytes(tk::StackWatch::OtaGate).has_value());
+    CHECK(!tk::stack_watch_min_free_bytes(tk::StackWatch::CaptiveHttp).has_value());
     sdk_and_owner_tests();
     timed_health_tests();
     CHECK(config_fixture_runs==1 && timed_fixture_runs==1);
     portal_tests();
+    CHECK(f135_hwm_queries > 0);
+    CHECK(tk::stack_watch_min_free_bytes(tk::StackWatch::OtaGate) == 4096u);
+    CHECK(tk::stack_watch_min_free_bytes(tk::StackWatch::CaptiveHttp) == 4096u);
+    recovery_policy_tests();
+    reference_policy_tests();
     std::cout << "OK " << checks << " actual config/timed-health owner/SDK-query/confirmation/portal checks\n";
 }

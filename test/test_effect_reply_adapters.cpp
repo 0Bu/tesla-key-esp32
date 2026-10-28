@@ -1,5 +1,6 @@
 // Compiles the actual extracted handlers and outer catch boundary against locked cJSON.
 // Device, vehicle, storage, RTOS and transport doubles are counters/faults, never live I/O.
+#include "stack_watch.hpp"
 #include "http_effect_reply.hpp"
 #include "time_sync.hpp"
 #include "logic/command_result.hpp"
@@ -21,8 +22,10 @@
 #include "logic/nvs_contract.hpp"
 #include "logic/config_store.hpp"
 #include "logic/health_gate.hpp"
+#include "ota_recovery_memory.hpp"
 #include "logic/heap_watchdog.hpp"
 #include <cJSON.h>
+#include <atomic>
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
@@ -30,6 +33,7 @@
 #include <string>
 #include <stdexcept>
 #include <iostream>
+#include <utility>
 
 static int checks;
 static bool runner_reply_enabled, runner_success;
@@ -38,6 +42,12 @@ static bool throw_confirmation;
 static bool allocation_fault_armed;
 static int allocation_fault_index, effect_allocations;
 #define CHECK(x) do { ++checks; if (!(x)) { std::cerr << "FAIL " << __LINE__ << ": " << #x << '\n'; std::exit(1); } } while (0)
+// Passive own-task SDK I/O only: the real stack_watch.cpp owns encoding/CAS/minimum logic.
+// The host stub ABI is UBaseType_t=unsigned, TaskHandle_t=void*; no SDK/target ABI is claimed.
+static unsigned f135_hwm_queries = 0;
+extern "C" unsigned uxTaskGetStackHighWaterMark(void* task) {
+    CHECK(task == nullptr); ++f135_hwm_queries; return 4096;
+}
 using esp_err_t = int;
 constexpr int ESP_OK=0, ESP_FAIL=-1, ESP_ERR_NOT_FOUND=-2, HTTPD_400_BAD_REQUEST=400;
 static constexpr char TAG[]="offline-effect-adapter";
@@ -52,7 +62,8 @@ static int effects, saves, removes, restarts, confirms, clock_calls, vin_transac
 static int transport_calls, fail_transport, response_attempts, response_status, response_ends;
 static BrowserClockStatus clock_status;
 static bool updating;
-static int check_starts, query_read_error;
+static int check_starts, update_starts, query_read_error;
+static unsigned last_ota_pr;
 static tk::OtaStartResult ota_result;
 static std::string query;
 static char wire[4096]; static size_t wire_size;
@@ -80,11 +91,23 @@ static void vTaskDelay(int) noexcept {}
 static void esp_restart();
 static int httpd_req_to_sockfd(httpd_req_t*) noexcept { return 0; }
 static int shutdown(int,int) noexcept { return 0; }
-namespace tk {
-enum class StackWatch { Httpd };
-static void stack_watch_sample(StackWatch) noexcept {}
-}
 static tk::OtaIdentityOperationGate s_operation_gate;
+// This reply-effect fixture has no previous OTA operation. Keep the complete generated
+// production query; config spies and the OTA application family cover non-null traversal.
+struct EffectReferenceJob {};
+struct EffectReferenceCoordinator {
+    bool can_reclaim() const noexcept { return false; }
+};
+struct EffectReferenceOperation {
+    std::atomic<bool> coordinator_done{false};
+    EffectReferenceCoordinator coordinator;
+    EffectReferenceJob job;
+};
+static const std::atomic<EffectReferenceOperation*> s_operation{nullptr};
+struct EffectReferenceSlot {
+    bool owns(const EffectReferenceJob&) const noexcept { return false; }
+};
+static EffectReferenceSlot s_network_slot;
 enum esp_ota_img_states_t : uint32_t { ESP_OTA_IMG_NEW, ESP_OTA_IMG_PENDING_VERIFY,
     ESP_OTA_IMG_VALID, ESP_OTA_IMG_INVALID, ESP_OTA_IMG_ABORTED, ESP_OTA_IMG_UNDEFINED=UINT32_MAX };
 struct esp_partition_t {};
@@ -133,7 +156,12 @@ static bool image_query_failure;
 static int image_queries;
 static bool runtime_ready=true, host_synced=true;
 static unsigned host_resets;
-static size_t commit_heap=4096;
+static size_t commit_heap=4096, recovery_required=4096;
+namespace tk {
+std::size_t ota_recovery_required_bytes(OtaRecoveryUse use) noexcept {
+    return use==OtaRecoveryUse::ImageConfirmation ? recovery_required : 0;
+}
+}
 constexpr int MALLOC_CAP_8BIT=1, MALLOC_CAP_INTERNAL=2;
 static const esp_partition_t* esp_ota_get_running_partition() { static esp_partition_t p; return &p; }
 static int esp_ota_get_state_partition(const esp_partition_t*,esp_ota_img_states_t* out) { ++image_queries; if (image_query_failure) return ESP_FAIL; *out=image_state; return ESP_OK; }
@@ -193,25 +221,9 @@ static int httpd_req_get_url_query_str(httpd_req_t*,char* out,size_t size) {
     if (query.size()>=size) return -3;
     std::snprintf(out,size,"%s",query.c_str()); return 0;
 }
-static int httpd_query_key_value(const char* raw,const char* key,char* out,size_t size) {
-    const std::string text(raw), prefix=std::string(key)+"=";
-    size_t start=0;
-    while (start<text.size()) {
-        const size_t end=text.find('&',start);
-        const auto part=text.substr(start,end==std::string::npos?end:end-start);
-        if (part.compare(0,prefix.size(),prefix)==0) {
-            const auto value=part.substr(prefix.size());
-            if (value.size()>=size) return -3;
-            std::snprintf(out,size,"%s",value.c_str()); return 0;
-        }
-        if (end==std::string::npos) break;
-        start=end+1;
-    }
-    return ESP_ERR_NOT_FOUND;
-}
 static bool ota_is_updating() { return updating; }
-static tk::OtaStartResult ota_check_start(unsigned) { ++check_starts; if (ota_result==tk::OtaStartResult::Started) effect_done(); return ota_result; }
-static tk::OtaStartResult ota_start(unsigned) { if (ota_result==tk::OtaStartResult::Started) effect_done(); return ota_result; }
+static tk::OtaStartResult ota_check_start(unsigned pr) { ++check_starts; last_ota_pr=pr; if (ota_result==tk::OtaStartResult::Started) effect_done(); return ota_result; }
+static tk::OtaStartResult ota_start(unsigned pr) { ++update_starts; last_ota_pr=pr; if (ota_result==tk::OtaStartResult::Started) effect_done(); return ota_result; }
 static void ota_set_channel(tk::OtaChannel) { effect_done(); }
 struct OtaIdentityMutationGuard {
     explicit OtaIdentityMutationGuard(tk::IdentityMutationEntry) {}
@@ -303,9 +315,9 @@ static void reset(Handler handler) {
     crash_owned=false; crash_dismissed=false; crash_erase_calls=0; crash_read_calls=0;
     fail_crash_read=0; throw_crash_read=0;
     require_config_owner=handler==handle_set_wifi||handler==handle_set_mqtt||handler==handle_set_syslog;
-    image_state=ESP_OTA_IMG_VALID; image_query_failure=false; image_queries=0; runtime_ready=true; host_synced=true; host_resets=0; commit_heap=4096;
+    image_state=ESP_OTA_IMG_VALID; image_query_failure=false; image_queries=0; runtime_ready=true; host_synced=true; host_resets=0; commit_heap=4096; recovery_required=4096;
     throw_confirmation=false; allocation_fault_armed=false; allocation_fault_index=0; effect_allocations=0;
-    clock_status=BrowserClockStatus::Applied; updating=false; check_starts=0;
+    clock_status=BrowserClockStatus::Applied; updating=false; check_starts=0; update_starts=0; last_ota_pr=0;
     ota_result=tk::OtaStartResult::Started;
     query="ms=1800000000000"; query_read_error=0;
     api_command_name="charge_start"; api_body=nullptr; api_path_vin="TESTVIN0000000001";
@@ -415,6 +427,7 @@ static void test_nominal_charge_reply_adapters() {
 }
 
 int main() {
+    CHECK(!tk::stack_watch_min_free_bytes(tk::StackWatch::Httpd).has_value());
     cJSON_Hooks hooks{gate_malloc,gate_free}; cJSON_InitHooks(&hooks);
     test_nominal_charge_reply_adapters();
     httpd_req_t req;
@@ -494,6 +507,21 @@ int main() {
             if (first.empty()) first=wire; else CHECK(first==wire);
         }
     }
+    // Actual successful-save replies consume the injected policy without undoing storage.
+    for (auto handler : {handle_set_mqtt,handle_set_syslog}) {
+        for (size_t observed : {size_t(12344),size_t(12345),size_t(12346)}) {
+            reset(handler); image_state=ESP_OTA_IMG_PENDING_VERIFY;
+            recovery_required=12345; commit_heap=observed;
+            req.input=handler==handle_set_mqtt ? "{\"broker\":\"example.test:1883\"}" : "{\"server\":\"example.test:514\"}";
+            const bool affordable=observed==12345 || observed==12346;
+            CHECK(handle_all(&req)==ESP_OK && saves==1 && restarts==1 && confirms==int(affordable));
+            const auto json=reply_json(); CHECK(json); const auto* value=payload(json);
+            CHECK(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(value,"result")));
+            const auto* image=cJSON_GetObjectItemCaseSensitive(value,"firmware_verification");
+            CHECK(cJSON_IsString(image) && std::strcmp(image->valuestring,affordable?"confirmed":"critical_heap")==0);
+            CHECK(s_operation_gate.state()==tk::OtaIdentityGateState::Idle);
+        }
+    }
     for (auto handler : {handle_set_mqtt,handle_set_syslog}) for (bool degraded : {false,true}) {
         for (int health=0;health<6;++health) {
             reset(handler); image_state=ESP_OTA_IMG_PENDING_VERIFY; fail_json_after_effect=degraded;
@@ -555,23 +583,27 @@ int main() {
         CHECK((mqtt?captured_cfg.mqtt_uri:captured_cfg.syslog_uri)==(mqtt?"example.test:1883":"example.test:514"));
         CHECK(effects==1 && restarts==1 && confirms==0 && mqtt_probes==int(mqtt));
     }
-    std::string legacy_wifi_refusal;
+    std::string legacy_wifi_reply;
     for (bool mqtt : {false,true}) for (size_t size : {64u,65u,120u})
     for (bool changed : {false,true}) {
         reset(observe_wifi_reply); observed_effect_bits=-1;
         stored.wifi_ssid="offline"; stored.wifi_pass="";
         (mqtt?stored.mqtt_uri:stored.syslog_uri).assign(size,'h');
+        (mqtt?stored.syslog_uri:stored.mqtt_uri).assign(120,'o');
         req.input=changed?"{\"ssid\":\"new-offline\",\"pass\":\"\"}":"{\"ssid\":\"offline\",\"pass\":\"\"}";
         CHECK(handle_all(&req)==0);
-        const bool save=changed && size<=64;
-        const int expected=size>64?409:200;
-        CHECK((response_status?response_status:200)==expected);
+        const bool save=changed;
+        CHECK((response_status?response_status:200)==200);
         CHECK(saves==int(save) && effects==int(save) && restarts==int(save) && confirms==0);
         CHECK(observed_effect_bits==(save?int(tk::RequestEffect::Configuration):0));
-        if (size>64) {
-            if (legacy_wifi_refusal.empty()) legacy_wifi_refusal=wire;
-            else CHECK(legacy_wifi_refusal==wire); // match/other credentials, either target: byte equal
+        if (save) {
+            CHECK(captured_cfg.mqtt_uri==stored.mqtt_uri && captured_cfg.syslog_uri==stored.syslog_uri);
+            CHECK(captured_cfg.wifi_ssid=="new-offline" && captured_cfg.wifi_pass.empty());
+            CHECK(captured_cfg.wifi_ssid_backup=="offline" && captured_cfg.wifi_pass_backup.empty());
+            CHECK(captured_cfg.wifi_rollback_active);
         }
+        if (legacy_wifi_reply.empty()) legacy_wifi_reply=wire;
+        else CHECK(legacy_wifi_reply==wire); // unchanged and changed credentials get the same reply
     }
     for (auto handler : {handle_set_time,handle_ota_check}) {
         for (auto status : {BrowserClockStatus::Applied, BrowserClockStatus::AlreadyNtpSynced,
@@ -612,12 +644,29 @@ int main() {
             CHECK(response_attempts==1 && transport_calls==failure); // terminal; never retry
         }
     }
-    for (const char* invalid : {"ms=", "ms=-1800000000000", "ms=01800000000000", "ms=1800000000000x",
+    for (const char* invalid : {"ms", "ms=", "ms=-1800000000000", "ms=01800000000000", "ms=1800000000000x",
                                 "ms=1800000000000.0", "ms=18446744073709551616", "ms=2082758400000"}) {
         reset(handle_ota_check); ntp_synced=false; query=invalid;
         CHECK(handle_all(&req)==0 && response_status==400 && effects==0 && clock_calls==0 && check_starts==0);
         reset(handle_ota_check); ntp_synced=true; query=invalid;
-        CHECK(handle_all(&req)==0 && response_status==200 && effects==1 && clock_calls==0 && check_starts==1);
+        CHECK(handle_all(&req)==0 && response_status==400 && effects==0 && clock_calls==0 && check_starts==0);
+    }
+    for (auto handler : {handle_ota_check,handle_ota_update}) {
+        for (const char* invalid : {"pr", "pr=", "pr=0", "pr=001", "pr=-1", "pr=abc", "pr=7x",
+                                   "pr=10000000", "pr=99999999999999999999", "PR=abc"}) {
+            reset(handler); ntp_synced=false; query=std::string(invalid)+"&ms=1800000000000";
+            CHECK(handle_all(&req)==0 && response_status==400);
+            CHECK(effects==0 && clock_calls==0 && check_starts==0 && update_starts==0);
+            const auto json=reply_json(); CHECK(json);
+            CHECK(cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(payload(json),handler==handle_ota_check?"started":"result")));
+        }
+        for (const auto& valid : {std::pair<const char*,unsigned>{"",0}, {"other=1",0}, {"pr=1",1},
+                                 {"PR=326",326}, {"pr=9999999",9999999}}) {
+            reset(handler); query=valid.first;
+            CHECK(handle_all(&req)==0 && response_status==200);
+            CHECK(check_starts==int(handler==handle_ota_check) && update_starts==int(handler==handle_ota_update));
+            CHECK(last_ota_pr==valid.second && clock_calls==0 && effects==1);
+        }
     }
     for (int error : {ESP_FAIL,-3}) {
         reset(handle_ota_check); ntp_synced=false; query_read_error=error;
@@ -705,9 +754,12 @@ int main() {
     for (auto handler : {handle_ota_check,handle_ota_update}) {
         for (auto result : {tk::OtaStartResult::Started,tk::OtaStartResult::Busy,
                             tk::OtaStartResult::PendingVerification,tk::OtaStartResult::Unavailable,
-                            tk::OtaStartResult::InternalError}) {
+                            tk::OtaStartResult::InternalError,tk::OtaStartResult::NoMemory}) {
             reset(handler); ota_result=result;
             CHECK(handle_all(&req)==0); CHECK(response_status==tk::ota_start_http_status(result));
+            if(result==tk::OtaStartResult::NoMemory){
+                CHECK(response_status==503&&std::strstr(wire,"not enough memory for update"));
+            }
             CHECK(response_attempts==1); CHECK(effects==int(result==tk::OtaStartResult::Started));
             const auto json=reply_json(); CHECK(json);
             const auto* value=cJSON_GetObjectItemCaseSensitive(json.get(),handler==handle_ota_check?"started":"result");
@@ -836,5 +888,7 @@ int main() {
         }
     }
     cJSON_InitHooks(nullptr);
+    CHECK(f135_hwm_queries > 0);
+    CHECK(tk::stack_watch_min_free_bytes(tk::StackWatch::Httpd) == 4096u);
     std::cout << "OK " << checks << " actual effect-adapter checks passed\n";
 }

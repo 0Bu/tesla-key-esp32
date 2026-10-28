@@ -20,7 +20,7 @@ inline constexpr bool ota_https_url(std::string_view url) {
     return url.size() > 8 && url.substr(0, 8) == "https://";
 }
 
-enum class OtaStartResult : uint8_t { Started, Busy, PendingVerification, Unavailable, InternalError };
+enum class OtaStartResult : uint8_t { Started, Busy, PendingVerification, Unavailable, InternalError, NoMemory };
 
 inline constexpr int ota_start_http_status(OtaStartResult result) {
     switch (result) {
@@ -28,6 +28,7 @@ inline constexpr int ota_start_http_status(OtaStartResult result) {
         case OtaStartResult::Busy:
         case OtaStartResult::PendingVerification: return 409;
         case OtaStartResult::InternalError: return 500;
+        case OtaStartResult::NoMemory: return 503;
         default: return 503;
     }
 }
@@ -38,6 +39,7 @@ inline constexpr const char* ota_start_reason(OtaStartResult result, bool check)
         case OtaStartResult::Busy: return "another device operation is already in progress";
         case OtaStartResult::PendingVerification: return "running firmware is still pending verification";
         case OtaStartResult::InternalError: return check ? "could not start update check" : "could not start OTA task";
+        case OtaStartResult::NoMemory: return "not enough memory for update";
         default: return "OTA service or firmware verification state is unavailable";
     }
 }
@@ -128,6 +130,36 @@ inline unsigned parse_pr_query(std::string_view query_val) {
         val = val * 10 + static_cast<unsigned>(c - '0');
     }
     return val;
+}
+
+struct OtaQueryParameter {
+    bool present = false;
+    bool valid = true;
+    std::string_view value{};
+};
+
+// Match IDF's first case-insensitive key without decoding values. A supplied key without '='
+// is malformed rather than absent; unrelated query parameters keep their existing behavior.
+inline OtaQueryParameter ota_query_parameter(std::string_view query, std::string_view key) {
+    while (!query.empty()) {
+        const std::size_t amp = query.find('&');
+        const auto item = query.substr(0, amp);
+        const std::size_t equals = item.find('=');
+        const auto name = item.substr(0, equals);
+        bool matches = name.size() == key.size();
+        for (std::size_t i = 0; matches && i < name.size(); ++i) {
+            const char lower = name[i] >= 'A' && name[i] <= 'Z'
+                ? static_cast<char>(name[i] + ('a' - 'A')) : name[i];
+            matches = lower == key[i];
+        }
+        if (matches) {
+            return {true, equals != std::string_view::npos,
+                    equals == std::string_view::npos ? std::string_view{} : item.substr(equals + 1)};
+        }
+        if (amp == std::string_view::npos) break;
+        query.remove_prefix(amp + 1);
+    }
+    return {};
 }
 
 // Format the official GitHub Pages PR manifest URL safely without heap allocation.

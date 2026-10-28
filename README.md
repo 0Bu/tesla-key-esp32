@@ -42,22 +42,17 @@ three simultaneous BLE connections are shared with phone keys and fobs.
 
 ## 3. Connect evcc
 
-In evcc, open **Settings → Vehicles → Add → Custom device** and enter this flat configuration:
+In evcc, open **Settings → Vehicles → Add → Custom device** and paste the
+[custom vehicle example](docs/examples/evcc-custom-vehicle.yaml). Replace `DEVICE_HOST` and
+`REPLACE_WITH_VIN` in every URI; the device uses HTTP port 80. Adjust the battery capacity.
+The Settings editor takes the example as-is, without `name`, `type` or a `vehicles` wrapper.
 
-```yaml
-name: tesla
-type: template
-template: tesla-ble
-title: Tesla Key ESP32
-vin: YOUR-17-CHAR-VIN
-capacity: 60                       # optional battery capacity in kWh
-url: http://tesla-key-esp32.local
-port: 80
-```
-
-For a hand-edited `evcc.yaml`, put the fields under `vehicles:` as a list item and restart evcc.
-Set `port: 80` explicitly. Reads use cached telemetry; the first command after idle can need a
-Bluetooth reconnect, and a failed charge-current change requires the controller's next retry.
+For a hand-edited `evcc.yaml`, create one item under `vehicles:` with `name: tesla` and
+`type: custom`, then indent the example's entire mapping beneath that item and restart evcc.
+The example sets 30 s on reads and writes to cover the firmware's 20 s command budget with
+reserve; queued requests can still exceed it. Reads use cached telemetry. A timeout does not
+prove that a command failed: check vehicle state before repeating an uncertain action.
+See the [command contract](docs/API.md#commands).
 
 ## Further use
 

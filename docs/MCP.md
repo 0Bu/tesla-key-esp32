@@ -93,10 +93,10 @@ Notes that matter to a calling agent:
   bounds — both are generated from one spec table, so they cannot drift).
 - **Failures are tool results, not protocol errors:** a refused or undeliverable command
   comes back as a normal `tools/call` result with `isError: true` and the reason as text —
-  the real Tesla refusal (e.g. `complete` when the battery is already at its limit) when
-  the car answered, or `vehicle not reachable` when it didn't. JSON-RPC errors are
+  the car's refusal reason when it answered, or `vehicle not reachable` when it didn't. JSON-RPC errors are
   reserved for malformed requests (unknown tool/method, missing required args, parse
-  errors).
+  errors). Already-satisfied charging requests follow the [shared command policy](API.md)
+  and return successful tool results.
 - **`get_vehicle_state` is cache-fed.** Fields appear only when known: after a reboot
   with the car asleep, expect `vin`, `paired`, `session_available`, `charge_available:false` and `link`.
   `paired` means a stored VCSEC session; `session_available` means a usable VCSEC session in RAM
@@ -297,7 +297,7 @@ configuration belongs to that client's documentation; do not expose the board pu
 | Client reports "connection refused / timeout" | Wrong IP, or mDNS not resolving — use the device IP from your router; device and client must be on the same LAN. |
 | Client complains about SSE / `405` on GET | Expected — this server is stateless JSON-only. Configure the client for plain Streamable HTTP (`--transport http-only` for `mcp-remote`). |
 | `tools/call` returns `isError: true`, `"vehicle not reachable"` | Car out of BLE range or link cold — check range and pairing; an intentional wake may be needed before retrying. |
-| `tools/call` returns the car's own refusal text (e.g. `complete`) | Not an error in the chain — the car declined (battery already at limit, etc.). |
+| `tools/call` returns `isError: true` with the car's refusal text | The vehicle rejected the request; inspect its reason before retrying. |
 | `get_vehicle_state` has only `vin`/`paired`/`session_available`/`link` | Fresh boot with the car asleep: telemetry caches are empty until the first contact. |
 | Commands fail although the car is nearby | Check BLE availability and the hero's pairing status. `paired` reports a stored VCSEC session, not fresh vehicle acceptance. Reconnection and same-key enrollment run automatically; approve any enrollment prompt with the NFC card on the reader. Do not regenerate the key from an error hint. |
 | HTTPS / auth errors from a strict client | The endpoint is plain HTTP without credentials by design — see [`SECURITY.md`](SECURITY.md#http-api-exposure). Use a client/bridge that permits HTTP on a trusted LAN. |

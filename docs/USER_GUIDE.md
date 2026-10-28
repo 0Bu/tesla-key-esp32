@@ -11,6 +11,12 @@ flashing; if the revision cannot be read, it continues and the bootloader remain
 An unreadable revision is not evidence of compatibility. esp32c3 builds keep ESP-IDF's default minimum of revision v0.3; esp32s3 and esp32c6
 have no revision floor. ESP32-S2 lacks BLE; H2/P4 lack WiFi.
 
+The esp32c3 image limits WiFi transmit power to **10 dBm**, including the setup AP and station
+startup. This is intended to mitigate the reported Super Mini startup failures in
+[#415](https://github.com/0Bu/tesla-key-esp32/issues/415), but can reduce WiFi range. The report has
+no serial reset log, so a brownout is not confirmed. If startup still fails, retain a serial boot
+log and check the USB cable, power supply and board antenna before erasing configuration.
+
 The pinned library also declares C5, but this firmware does not support it: restoring C5 requires
 separate firmware, signing-size and hardware acceptance. Undeclared chips such as esp32c61 need
 upstream support first. [Target decision](adr/0004-drop-esp32c5-target.md).
@@ -149,12 +155,15 @@ The web page labels a failed or timed-out device connection and retains the last
 A successful status refresh clears the notice. Vehicle actions use the named button inside the gauge;
 tapping the surrounding status card does not send a command.
 
-If the hero reports **Pairing paused**, normal automatic enrolment is blocked by a local storage or
-identity recovery condition. Storage checks and saved-key cleanup retry automatically. An ambiguous
-key commit or runtime/key mismatch requires a restart to reload the saved identity; inspect diagnostics
-if it returns. Do not regenerate the key as a recovery step. **Device recovery required** means a fatal
-runtime failure stopped vehicle services for this process. HTTP diagnostics are available only when
-HTTP startup succeeded; early boot failures can require serial diagnostics.
+If the hero reports **Pairing paused**, a local storage or identity recovery condition blocks
+normal automatic enrolment. The recovery notice describes it; storage checks and saved-key cleanup
+retry automatically. An ambiguous automatic first-key commit can request one guarded restart to
+reload the saved identity. Other mismatches remain paused; inspect diagnostics if the notice remains.
+Do not regenerate the key as a recovery step. Normal pairing has no extra key-send notice or button.
+**Device recovery required** names the first fatal component category and means vehicle services
+stopped for this process. HTTP diagnostics exist only when HTTP startup succeeded; early boot
+failures can require serial diagnostics. Keep the device powered and retain diagnostic evidence
+before following a recovery procedure.
 
 ## Troubleshooting
 

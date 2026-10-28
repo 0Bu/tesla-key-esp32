@@ -1,3 +1,4 @@
+#include "stack_watch.hpp"
 // Setup / pairing / persisted-config endpoints:
 //   POST /gen_keys[?force=1]  (generate key — refuses overwrite w/o force)
 //   POST /set_time            (browser wall clock — NTP fallback)
@@ -430,6 +431,8 @@ struct MqttProbeResources {
 };
 
 static void on_mqtt_probe(void* handler_args, esp_event_base_t, int32_t id, void* event_data) {
+    tk::StackWatchScope f135_callback_exit(tk::StackWatch::MqttProbeEvent);
+
     auto* ctx = static_cast<MqttProbeCtx*>(handler_args);
     switch (static_cast<esp_mqtt_event_id_t>(id)) {
     case MQTT_EVENT_CONNECTED:
@@ -672,12 +675,6 @@ esp_err_t handle_set_syslog(GuardedReq rq) {
     httpd_req_t* req = rq.req();
     tk::ConfigBlob cfg;
     if (!tk::cfg_load_for_update(*g_config, cfg)) return send_config_unreadable_(req, "set_wifi");
-
-    // Refuse uniformly before comparing credentials: the refusal must not reveal equality.
-    if (!tk::config_service_targets_fit_old_writer(cfg)) {
-        return send_json(req, 409, make_response(false, "set_wifi", "",
-            "shorten existing service addresses to 64 bytes before changing WiFi"));
-    }
 
     if (!rq.context->config_restart.try_begin())
         return send_json(req, 409, make_response(false, "set_wifi", "", tk::kConfigRestartBusyReason));

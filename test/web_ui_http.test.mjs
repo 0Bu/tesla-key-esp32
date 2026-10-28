@@ -2759,3 +2759,31 @@ test("both hero failure branches consume the parity-checked warning threshold", 
     }
   }
 });
+
+
+// Recovery faults reuse the existing recovery region; normal enrolment stays automatic.
+test("F142 recovery banner distinguishes fatal and cached identity states", () => {
+  const {context, element} = loadUi();
+  const base = {paired: true, key_present: true, vin: "5YJ3E1EA7KF000316", link: "idle"};
+  context.render({...base, identity_state: "ok", sys: {runtime_state: "fatal", fatal_component: "<script>"}});
+  const banner = element("safeModeBanner");
+  assert.equal(banner.classList.contains("show"), true);
+  assert.match(banner.querySelector(".bt").innerHTML, /Device recovery required/);
+  assert.match(banner.querySelector(".bt").innerHTML, /&lt;script&gt;/);
+  assert.doesNotMatch(banner.querySelector(".bt").innerHTML, /<script>/);
+  assert.equal(banner.querySelector("button").hidden, false);
+  assert.equal(context.heroActFn, null);
+  for (const identity of ["reboot_required", "cleanup_pending", "vin_transition", "storage_unavailable"]) {
+    context.render({...base, identity_state: identity, sys: {runtime_state: "ready"}});
+    assert.equal(banner.classList.contains("show"), true, identity);
+    assert.match(banner.querySelector(".bt").innerHTML, /Identity recovery/);
+    assert.equal(banner.querySelector("button").hidden, true);
+    assert.equal(context.heroActFn, null);
+  }
+  for (const identity of ["ok", "unknown", undefined]) {
+    context.render({...base, paired: false, identity_state: identity, ble: {connected: true},
+                    sys: {runtime_state: "ready"}});
+    assert.equal(banner.classList.contains("show"), false);
+    assert.match(element("hsub").textContent, /key is sent automatically/);
+  }
+});
