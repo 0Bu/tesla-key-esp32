@@ -479,6 +479,9 @@ def validate(root: Path) -> None:
             if key in {("build.yml", "logic-test"), ("build.yml", "logic-harness")}:
                 require(not ({"if", "continue-on-error"} & set(structured_job)),
                         f"{name}:{job_name}: required host gate must not be conditional or tolerate job failure")
+            if key == ("build.yml", "build"):
+                require("continue-on-error" not in structured_job,
+                        "build.yml:build must not be continue-on-error")
             if key == ("build.yml", "logic-test"):
                 vendor_steps = [step for step in steps if step.get("run") == "./scripts/verify-vendored-esptool-js.sh --source"]
                 require(len(vendor_steps) == 1 and set(vendor_steps[0]) == {"name", "run"},
@@ -586,8 +589,6 @@ def validate(root: Path) -> None:
     # `failed=1`, an early `exit 0`, an extra command). A non-fatal job would hide the verdict.
     require(gate_step.rstrip("\n") == BUILD_NEEDS_GATE.rstrip("\n"),
             "build.yml:build need-result check must equal the reviewed gate exactly")
-    require(re.search(r"^    continue-on-error:", build["build"], re.MULTILINE) is None,
-            "build.yml:build must not be continue-on-error")
     # The four independent legs only need the run mode/version (prepare), so they run concurrently
     # with the producer builds; the join needs both the producer's display version and every leg.
     require(job_has_need(build["independent-rebuild-target"], "prepare"),
@@ -1511,6 +1512,26 @@ def self_test(root: Path) -> None:
         ("build-job-nonfatal", "build.yml",
          "    if: ${{ always() }}\n    needs: [prepare, logic-test, logic-harness, build-target]\n",
          "    if: ${{ always() }}\n    continue-on-error: true\n"
+         "    needs: [prepare, logic-test, logic-harness, build-target]\n",
+         "build must not be continue-on-error"),
+        ("build-job-nonfatal-double-quoted", "build.yml",
+         "    if: ${{ always() }}\n    needs: [prepare, logic-test, logic-harness, build-target]\n",
+         '    if: ${{ always() }}\n    "continue-on-error": true\n'
+         "    needs: [prepare, logic-test, logic-harness, build-target]\n",
+         "build must not be continue-on-error"),
+        ("build-job-nonfatal-single-quoted", "build.yml",
+         "    if: ${{ always() }}\n    needs: [prepare, logic-test, logic-harness, build-target]\n",
+         "    if: ${{ always() }}\n    'continue-on-error': true\n"
+         "    needs: [prepare, logic-test, logic-harness, build-target]\n",
+         "build must not be continue-on-error"),
+        ("build-job-nonfatal-spaced-key", "build.yml",
+         "    if: ${{ always() }}\n    needs: [prepare, logic-test, logic-harness, build-target]\n",
+         "    if: ${{ always() }}\n    continue-on-error : true\n"
+         "    needs: [prepare, logic-test, logic-harness, build-target]\n",
+         "build must not be continue-on-error"),
+        ("build-job-nonfatal-escaped-key", "build.yml",
+         "    if: ${{ always() }}\n    needs: [prepare, logic-test, logic-harness, build-target]\n",
+         '    if: ${{ always() }}\n    "\\u0063ontinue-on-error": true\n'
          "    needs: [prepare, logic-test, logic-harness, build-target]\n",
          "build must not be continue-on-error"),
         ("repro-leg-dropped", "build.yml", "|| '[\"primary\",\"reproduction\"]'", "|| '[\"primary\"]'",
