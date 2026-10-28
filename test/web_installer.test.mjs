@@ -2075,6 +2075,29 @@ test("a quick manual replug waits for Connect; one after the grace reconnects by
   assert.equal(a.opens, opens + 1);
 });
 
+test("a USB connect during a running check adds no reconnect line", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const a = lifecyclePort("A");
+  const reads = [];
+  a.flash = (offset) => { reads.push(offset); return new Promise(() => {}); };
+  const { controller, serial, dom } = await attachedLifecycle(t, [a]);
+  const connecting = controller.connect();
+  await until(() => reads.length === 1);
+  await serial.listeners.get("connect")[0]();
+  assert.doesNotMatch(logLines(dom, "status").join("\n"), /USB device reconnected/, "the running check already owns the board");
+  t.mock.timers.tick(2500);
+  await connecting;
+});
+
+test("an unknown-firmware reason without a full stop still reads as a sentence", async (t) => {
+  const a = lifecyclePort("A");
+  a.flash = () => Promise.reject(new Error("USB transfer failed"));
+  const { controller, dom } = await attachedLifecycle(t, [a]);
+  await controller.connect();
+  assert.match(logLines(dom, "warning").join("\n"),
+    /\] Installed firmware unknown: .*USB transfer failed\. Use Flash only if the board already runs tesla-key-esp32$/m);
+});
+
 test("a busy paired port is retried quietly by the check itself and gets one line", async (t) => {
   const a = lifecyclePort("A");
   // Like Chrome: a port that failed to open reports "already closed" on close.
