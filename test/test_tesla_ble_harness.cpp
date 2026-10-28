@@ -2436,6 +2436,139 @@ int main() {
                "Peer::encrypt diverges from reference AES-GCM");
     }
     {
+        // The real peer window admits zero and reordered counters once, retains exactly 64
+        // counters, and starts afresh when Client signs the next request. Authentication is a
+        // separate prerequisite covered by the native response-adapter tests; counter zero
+        // alone does not identify a plaintext reply (ADR-0005).
+        Client scoped;
+        scoped.set_vin(tc::TEST_VIN);
+        bool ready = scoped.load_private_key(reinterpret_cast<const uint8_t*>(tc::CLIENT_PRIVATE_KEY_PEM),
+                                             std::strlen(tc::CLIENT_PRIVATE_KEY_PEM) + 1) == 0;
+        Signatures_SessionInfo info = Signatures_SessionInfo_init_zero;
+        std::memcpy(info.epoch, tc::TEST_EPOCH, sizeof info.epoch);
+        std::memcpy(info.publicKey.bytes, tc::EXPECTED_VEHICLE_PUBLIC_KEY, 65);
+        info.publicKey.size = 65;
+        info.clock_time = 1234;
+        info.counter = 7;
+        auto* peer = scoped.get_peer(UniversalMessage_Domain_DOMAIN_INFOTAINMENT);
+        ready = ready && peer && peer->update_session(&info) == 0 && peer->is_initialized();
+        const bool window = ready &&
+                            peer->validate_response_counter(0) && !peer->validate_response_counter(0) &&
+                            peer->validate_response_counter(5) && peer->validate_response_counter(3) &&
+                            !peer->validate_response_counter(3) && !peer->validate_response_counter(5) &&
+                            peer->validate_response_counter(100) && peer->validate_response_counter(37) &&
+                            !peer->validate_response_counter(37) && !peer->validate_response_counter(36);
+        expect(window,
+               "response window: zero, repeats, reordering, 63-behind admission and 64-behind expiry",
+               "response replay window accepts a repeat or refuses a valid reordered response");
+        uint8_t payload[] = {0x08, 0x01};
+        uint8_t wire[2048];
+        size_t wire_size = 0;
+        const bool fresh = window &&
+                           scoped.build_universal_message_with_payload(
+                               payload, sizeof payload, UniversalMessage_Domain_DOMAIN_INFOTAINMENT, wire,
+                               &wire_size, true) == 0 &&
+                           peer->validate_response_counter(37) && !peer->validate_response_counter(37);
+        expect(fresh, "the next request starts a fresh response window",
+               "a response counter seen for the previous request stays refused for the next one");
+    }
+    {
+        // The known answer above pins Peer's metadata assembly; this pins what Client feeds it. A real
+        // encrypted Infotainment request is decoded the way the vehicle decodes it, protocol.md
+        // metadata is serialized from the message's OWN epoch, expiry, counter and flags, and the
+        // reference AES-GCM with that metadata must reproduce the message's ciphertext and tag.
+        Client scoped;
+        scoped.set_vin(tc::TEST_VIN);
+        bool ready = scoped.load_private_key(reinterpret_cast<const uint8_t*>(tc::CLIENT_PRIVATE_KEY_PEM),
+                                             std::strlen(tc::CLIENT_PRIVATE_KEY_PEM) + 1) == 0;
+        Signatures_SessionInfo info = Signatures_SessionInfo_init_zero;
+        std::memcpy(info.epoch, tc::TEST_EPOCH, sizeof info.epoch);
+        std::memcpy(info.publicKey.bytes, tc::EXPECTED_VEHICLE_PUBLIC_KEY, 65);
+        info.publicKey.size = 65;
+        info.clock_time = 1234;
+        info.counter = 7;
+        auto* peer = scoped.get_peer(UniversalMessage_Domain_DOMAIN_INFOTAINMENT);
+        ready = ready && peer && peer->update_session(&info) == 0 && peer->is_initialized();
+        uint8_t payload[] = {0x08, 0x01};
+        uint8_t wire[2048];
+        size_t wire_size = 0;
+        UniversalMessage_RoutableMessage msg = UniversalMessage_RoutableMessage_init_default;
+        pb_istream_t in = pb_istream_from_buffer(wire, 0);
+        bool decoded = ready && scoped.build_universal_message_with_payload(
+                                    payload, sizeof payload,
+                                    UniversalMessage_Domain_DOMAIN_INFOTAINMENT, wire, &wire_size, true) == 0;
+        if (decoded) {
+            in = pb_istream_from_buffer(wire, wire_size);
+            decoded = pb_decode(&in, UniversalMessage_RoutableMessage_fields, &msg) &&
+                      msg.which_payload == UniversalMessage_RoutableMessage_protobuf_message_as_bytes_tag &&
+                      msg.which_sub_sigData == UniversalMessage_RoutableMessage_signature_data_tag &&
+                      msg.sub_sigData.signature_data.which_sig_type ==
+                          Signatures_SignatureData_AES_GCM_Personalized_data_tag;
+        }
+        auto sealed_from_wire = [&](const UniversalMessage_RoutableMessage& candidate) {
+            const auto& gcm = candidate.sub_sigData.signature_data.sig_type.AES_GCM_Personalized_data;
+            std::vector<uint8_t> metadata_from_wire;
+            auto tlv = [&](uint8_t tag, const uint8_t* value, size_t size) {
+                metadata_from_wire.push_back(tag);
+                metadata_from_wire.push_back(static_cast<uint8_t>(size));
+                metadata_from_wire.insert(metadata_from_wire.end(), value, value + size);
+            };
+            auto be32 = [&](uint8_t tag, uint32_t value) {
+                const uint8_t bytes[4] = {static_cast<uint8_t>(value >> 24), static_cast<uint8_t>(value >> 16),
+                                          static_cast<uint8_t>(value >> 8), static_cast<uint8_t>(value)};
+                tlv(tag, bytes, sizeof bytes);
+            };
+            const uint8_t type = Signatures_SignatureType_SIGNATURE_TYPE_AES_GCM_PERSONALIZED;
+            const uint8_t domain = UniversalMessage_Domain_DOMAIN_INFOTAINMENT;
+            tlv(Signatures_Tag_TAG_SIGNATURE_TYPE, &type, 1);
+            tlv(Signatures_Tag_TAG_DOMAIN, &domain, 1);
+            tlv(Signatures_Tag_TAG_PERSONALIZATION, reinterpret_cast<const uint8_t*>(tc::TEST_VIN),
+                std::strlen(tc::TEST_VIN));
+            tlv(Signatures_Tag_TAG_EPOCH, gcm.epoch, sizeof gcm.epoch);
+            be32(Signatures_Tag_TAG_EXPIRES_AT, gcm.expires_at);
+            be32(Signatures_Tag_TAG_COUNTER, gcm.counter);
+            if (candidate.flags != 0) be32(Signatures_Tag_TAG_FLAGS, candidate.flags);
+            metadata_from_wire.push_back(Signatures_Tag_TAG_END);
+            const auto& body = candidate.payload.protobuf_message_as_bytes;
+            const auto reference = kat::gcm_encrypt(tc::EXPECTED_SESSION_KEY,
+                                                    std::vector<uint8_t>(gcm.nonce, gcm.nonce + sizeof gcm.nonce),
+                                                    kat::sha256(metadata_from_wire),
+                                                    std::vector<uint8_t>(payload, payload + sizeof payload));
+            return body.size == sizeof payload && reference.size() == sizeof payload + 16 &&
+                   std::memcmp(body.bytes, reference.data(), sizeof payload) == 0 &&
+                   std::memcmp(gcm.tag, reference.data() + sizeof payload, 16) == 0;
+        };
+        expect(decoded && msg.sub_sigData.signature_data.sig_type.AES_GCM_Personalized_data.counter == 8 &&
+                   msg.flags != 0,
+               "Client advances the session counter for the request and sends nonzero flags",
+               "Client request did not exercise the next counter and flags");
+        expect(decoded && sealed_from_wire(msg),
+               "Client seals each request with metadata built from the counter, expiry and flags it sends",
+               "Client's request AAD does not match the counter, expiry or flags on the wire");
+        // These controls must fail through the independent AEAD comparison, not the counter/flags
+        // assertions above. Change one wire field while retaining the real ciphertext and tag.
+        auto altered = msg;
+        altered.sub_sigData.signature_data.sig_type.AES_GCM_Personalized_data.counter ^= 1;
+        expect(decoded && !sealed_from_wire(altered), "request AAD control rejects a changed counter",
+               "request AAD comparison ignored the wire counter");
+        altered = msg;
+        altered.sub_sigData.signature_data.sig_type.AES_GCM_Personalized_data.expires_at ^= 1;
+        expect(decoded && !sealed_from_wire(altered), "request AAD control rejects a changed expiry",
+               "request AAD comparison ignored the wire expiry");
+        altered = msg;
+        altered.sub_sigData.signature_data.sig_type.AES_GCM_Personalized_data.epoch[0] ^= 1;
+        expect(decoded && !sealed_from_wire(altered), "request AAD control rejects a changed epoch",
+               "request AAD comparison ignored the wire epoch");
+        altered = msg;
+        altered.flags = 0;
+        expect(decoded && !sealed_from_wire(altered), "request AAD control rejects removed flags",
+               "request AAD comparison ignored the wire flags");
+        altered = msg;
+        altered.sub_sigData.signature_data.sig_type.AES_GCM_Personalized_data.tag[0] ^= 1;
+        expect(decoded && !sealed_from_wire(altered), "request AAD control rejects a changed tag",
+               "request AAD comparison ignored the wire tag");
+    }
+    {
         // A response sealed the way the vehicle seals it: the metadata of protocol.md "Response
         // metadata", serialized here independently of the library, carries the RESPONSE's counter.
         // The vehicle counts responses per request (VCSEC sends up to three), so that counter need not
