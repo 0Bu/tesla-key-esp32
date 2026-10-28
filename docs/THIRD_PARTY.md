@@ -1,10 +1,10 @@
 # Installer third-party notices
 
-The locally served `esptool-js` 0.6.1 bundle includes these components:
+The locally served `esptool-js` 0.7.0 bundle includes these components:
 
 | Component | License and copyright notices | Upstream source |
 | --- | --- | --- |
-| esptool-js 0.6.1 | [Apache-2.0](vendor/esptool-js-0.6.1.LICENSE) | [Release package](https://www.npmjs.com/package/esptool-js/v/0.6.1) |
+| esptool-js 0.7.0 | [Apache-2.0](vendor/esptool-js-0.7.0.LICENSE) | [Release package](https://www.npmjs.com/package/esptool-js/v/0.7.0) |
 | pako 2.1.0 | [MIT](vendor/pako-2.1.0.LICENSE) and [zlib](vendor/pako-2.1.0.zlib.README) | [Release source](https://github.com/nodeca/pako/tree/2.1.0) |
 
 These notices accompany the unchanged JavaScript bundle in the assembled installer site.
