@@ -495,9 +495,13 @@ each transport keeps its own gateway-reachability baseline.
 
 ESP32-S3 probes W5500 candidates in configured order. Cache T-Dongle detection before any
 W5500 pin drive: its display shares GPIO5 with the first W5500 candidate. Every candidate must audit
-all SPI and auxiliary INT/RST pins it touches against **every later board**, not only earlier mappings. After a positive probe, resources remain in one startup record until activation;
-failures unwind in reverse order. If uninstall fails, retain resources the driver may still call and
-fail boot closed. Active fallback retains the driver for later cable takeover.
+all SPI and auxiliary INT/RST pins it touches against **every later board**, not only earlier mappings. After a positive probe, resources remain in one startup record until activation.
+Before the first start attempt, cleanup releases resources only after each prerequisite succeeds;
+an unconfirmed step retains the remaining resources and fails boot closed. Once start has been
+attempted, cleanup requests a best-effort stop and retains the entire graph for the existing fatal
+boot path. A successful stop does not prove that every pending RX callback has exited, so handlers,
+driver, MAC/PHY, netif, event group and SPI ownership remain intact until reset. This path neither retries
+startup nor falls back to WiFi. Normal active fallback retains the driver for later cable takeover.
 
 No PHY link falls back after 4 s; link-without-lease waits up to three 20 s intervals. A wired
 boot that obtains DHCP before fallback never initializes WiFi or consumes a trial-credential backup. W5500 polling

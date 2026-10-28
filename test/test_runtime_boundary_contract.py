@@ -3510,24 +3510,31 @@ def require_ethernet_start_cleanup_contract(net_source: str, runtime_tests: str)
         "esp_eth_stop(r.handle)", "esp_event_handler_unregister(",
         "IP_EVENT, IP_EVENT_ETH_GOT_IP, eth_event_handler",
         "ETH_EVENT, ESP_EVENT_ANY_ID, eth_event_handler", "if (r.published)",
-        "esp_eth_del_netif_glue(r.glue)", "esp_netif_destroy(r.netif)",
-        "esp_eth_driver_uninstall(r.handle)", "r.phy->del(r.phy)",
-        "r.mac->del(r.mac)", "vEventGroupDelete(r.events)", "eth_release_spi_bus()",
+        "esp_eth_del_netif_glue(r.glue)", "esp_eth_driver_uninstall(r.handle)",
+        "r.mac->del(r.mac)", "r.phy->del(r.phy)", "esp_netif_destroy(r.netif)",
+        "vEventGroupDelete(r.events)", "eth_release_spi_bus()",
     ):
         if token not in cleanup:
             raise AssertionError(f"Ethernet reverse cleanup missing {token!r}")
     ordered = (
         "esp_eth_stop(r.handle)", "IP_EVENT, IP_EVENT_ETH_GOT_IP, eth_event_handler",
         "ETH_EVENT, ESP_EVENT_ANY_ID, eth_event_handler", "if (r.published)",
-        "esp_eth_del_netif_glue(r.glue)", "esp_netif_destroy(r.netif)",
-        "esp_eth_driver_uninstall(r.handle)", "r.phy->del(r.phy)",
-        "r.mac->del(r.mac)", "vEventGroupDelete(r.events)", "eth_release_spi_bus()",
+        "esp_eth_del_netif_glue(r.glue)", "esp_eth_driver_uninstall(r.handle)",
+        "r.mac->del(r.mac)", "r.phy->del(r.phy)", "esp_netif_destroy(r.netif)",
+        "vEventGroupDelete(r.events)", "eth_release_spi_bus()",
     )
     positions = [cleanup.find(token) for token in ordered]
     if min(positions) < 0 or positions != sorted(positions):
         raise AssertionError("Ethernet startup cleanup is not in reverse ownership order")
-    require_before("Ethernet uninstall failure retains MAC/PHY/SPI", cleanup,
-                   "driver_released = false", "if (driver_released)")
+    retention = re.search(r"if \(r\.start_attempted\) \{(.*?)^    \}", cleanup, re.M | re.S)
+    if retention is None or "return false;" not in retention.group(1):
+        raise AssertionError("Ethernet activated graph must be retained before passive cleanup")
+    if any(token in retention.group(1) for token in (
+        "esp_event_handler_unregister", "esp_eth_del_netif_glue", "esp_netif_destroy",
+        "esp_eth_driver_uninstall", "r.mac->del", "r.phy->del", "vEventGroupDelete",
+        "eth_release_spi_bus", "= nullptr", "= false",
+    )):
+        raise AssertionError("Ethernet activated graph retention releases or retracts owned state")
 
     start = function_body_in(net_source, "net_start_eth")
     for token in (
@@ -3548,19 +3555,8 @@ def require_ethernet_start_cleanup_contract(net_source: str, runtime_tests: str)
     if "eth_startup_fallback(r)" in post_start:
         raise AssertionError("Ethernet no-link/DHCP fallback tears down the live driver")
 
-    runtime_matrix = function_body_in(runtime_tests, "test_ethernet_partial_start_cleanup")
-    for token in (
-        "event_group_failure", "netif_failure",
-        "missing_phy", "missing_mac", "driver_install_failure", "glue_allocation_failure",
-        "attach_failure", "ip_handler_failure", "start_failure", "uninstall_failure",
-        "no_link_fallback", '"stop", "ip_unregister", "eth_unregister", "withdraw_globals"',
-        '"destroy_netif", "uninstall_driver", "delete_phy", "delete_mac"',
-        "!uninstall_failure.cleanup()",
-    ):
-        if token not in runtime_matrix:
-            raise AssertionError(f"Ethernet executable partial-acquire matrix missing {token!r}")
-    if "test_ethernet_partial_start_cleanup();" not in function_body_in(runtime_tests, "main"):
-        raise AssertionError("Ethernet executable partial-acquire matrix is not invoked")
+    if "EthernetStartupFixture" in runtime_tests or "test_ethernet_partial_start_cleanup" in runtime_tests:
+        raise AssertionError("Ethernet cleanup must execute actual bodies instead of the retired mirrored fixture")
 
 
 def require_explicit_idf_boot_error_contract(main_source: str, net_source: str,
@@ -6788,8 +6784,8 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
             runtime_tests,
         ),
         (
-            "Ethernet uninstall failure frees owned tail",
-            net_source.replace("if (driver_released) {", "if (true) {", 1),
+            "Ethernet activated graph quarantine bypass",
+            net_source.replace("if (r.start_attempted) {", "if (false && r.start_attempted) {", 1),
             runtime_tests,
         ),
         (
@@ -6803,13 +6799,9 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
             runtime_tests,
         ),
         (
-            "Ethernet executable partial-acquire matrix removal",
+            "Ethernet retired mirrored fixture restored",
             net_source,
-            runtime_tests.replace(
-                "test_ethernet_partial_start_cleanup",
-                "fixture_ethernet_partial_start_cleanup",
-                1,
-            ),
+            runtime_tests + "\nstruct EthernetStartupFixture {};\n",
         ),
     ):
         require_mutation_rejected(
