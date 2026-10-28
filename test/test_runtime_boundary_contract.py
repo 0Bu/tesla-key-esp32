@@ -4660,7 +4660,291 @@ def require_provisioning_body_contract(
             raise AssertionError(f"provisioning URL decoder missing {token!r}")
 
 
+# Review-bounded source checks complement the compiled native response adapters. The allowlist
+# includes local diagnostics (paired_at may persist a guarded timestamp); it is a BLE-effect
+# boundary for these named consumers, not a C++ dataflow or general no-wake proof.
+CACHE_READERS = {
+    'ble_connect_fail',
+    'ble_connected',
+    'ble_nearby',
+    'ble_peer',
+    'ble_phase',
+    'ble_rssi',
+    'ble_scanning',
+    'ble_seen_rssi',
+    'ble_target_connectable',
+    'get_cached_charge',
+    'get_cached_charge_with_age',
+    'get_cached_climate',
+    'get_cached_closures',
+    'get_cached_drive',
+    'get_cached_tires',
+    'get_charge_state',
+    'has_key',
+    'has_session',
+    'key_created_at',
+    'key_fingerprint',
+    'link_state',
+    'paired_at',
+    'pairing_block_reason',
+    'reauth_required',
+    'seconds_since_contact',
+    'session_availability',
+    'session_available',
+    'ui_snapshot',
+    'vcsec_sleep_raw',
+    'vin',
+}
+VEHICLE_CALL = re.compile(r"\b(?:v|vehicle|s_vehicle|g_vehicle)\s*(?:\.|->)\s*(\w+)\s*\(")
+
+
+
+def require_enrolment_role_pin(pairing: str, all_code: str) -> None:
+    """F-017: the firmware enrols a Charging Manager key and never names another key role."""
+    clean = scrub_cpp(pairing)
+    if clean.count("const Keys_Role role = Keys_Role_ROLE_CHARGING_MANAGER;") != 1:
+        raise AssertionError("enrolment must pin exactly one Charging Manager role")
+    roles = set(re.findall(r"\bKeys_Role_ROLE_\w+", scrub_cpp(all_code)))
+    if roles != {"Keys_Role_ROLE_CHARGING_MANAGER"}:
+        raise AssertionError(f"firmware must name only the Charging Manager key role, found {sorted(roles)}")
+    whitelist = call_arguments(clean, "c->build_white_list_message")
+    if len(whitelist) != 1 or whitelist[0][0] != "role":
+        raise AssertionError("whitelist enrolment must use the pinned Charging Manager role")
+    if len(call_arguments(scrub_cpp(all_code), "build_white_list_message")) != 1:
+        raise AssertionError("the firmware must build exactly one whitelist enrolment")
+
+
+def require_background_wake_policies(telemetry: str, pairing: str, commands: str) -> None:
+    """F-109: background telemetry and pairing traffic never asks for a wake."""
+    for name, source, allowed in (
+        ("vehicle_telemetry.cpp", telemetry, {"NoWakeSkip"}),
+        ("vehicle_pairing.cpp", pairing, {"NoWakeFail"}),
+    ):
+        policies = set(re.findall(r"\bWakePolicy::(\w+)", scrub_cpp(source)))
+        if not policies or not policies <= allowed:
+            raise AssertionError(f"{name} background traffic may use only {sorted(allowed)}, found {sorted(policies)}")
+        # send_infotainment_ defaults to WakeIfNeeded; a background caller must not rely on it.
+        if call_arguments(scrub_cpp(source), "send_infotainment_"):
+            raise AssertionError(f"{name} must not call the foreground send_infotainment_ helper")
+        # Every background request names its no-wake policy literally; a variable could carry a wake.
+        for helper in ("command_runner_.enqueue", "send_vcsec_", "send_vcsec_locked_"):
+            for args in call_arguments(scrub_cpp(source), helper):
+                if not any(re.fullmatch(r"(?:tk::)?WakePolicy::NoWake(?:Skip|Fail)", arg) for arg in args):
+                    raise AssertionError(f"{name} {helper} call lacks a literal no-wake policy")
+    # The command name is a string literal, so this one check reads the unscrubbed function.
+    status = " ".join(function_body_in(telemetry, "get_vehicle_status").split())
+    if '"VCSEC Status Poll", tk::BleDomain::VehicleSecurity, tk::WakePolicy::NoWakeSkip,' not in status:
+        raise AssertionError("the VCSEC status poll must stay NO_WAKE_SKIP")
+    foreground = set(re.findall(r"\bWakePolicy::(\w+)", scrub_cpp(commands)))
+    if not foreground <= {"WakeIfNeeded", "NoWakeFail"}:
+        raise AssertionError(f"foreground commands use an unreviewed wake policy: {sorted(foreground)}")
+
+
+def require_cache_only_consumers(sources: dict[str, str]) -> None:
+    """F-109: status, MQTT, display, LEDs and MCP get_vehicle_state read caches only."""
+    scopes = (
+        ("display.cpp", scrub_cpp(sources["display.cpp"])),
+        ("led_status.cpp", scrub_cpp(sources["led_status.cpp"])),
+        ("mqtt_ha.cpp", scrub_cpp(sources["mqtt_ha.cpp"])),
+        ("/status", scrub_cpp(function_body_in(sources["http_status.cpp"], "build_status_object"))),
+        ("MCP get_vehicle_state", scrub_cpp(function_body_in(sources["mcp_server.cpp"], "vehicle_state_result_"))),
+    )
+    for label, code in scopes:
+        calls = set(VEHICLE_CALL.findall(code))
+        if not calls:
+            raise AssertionError(f"{label} no longer reads the vehicle caches (pin is stale)")
+        unknown = calls - CACHE_READERS
+        if unknown:
+            raise AssertionError(f"{label} calls non-cache VehicleController methods: {sorted(unknown)}")
+        if re.search(r"\bexecute_vehicle_command\s*\(", code):
+            raise AssertionError(f"{label} reaches the command executor")
+        receivers = {"v", "vehicle", "s_vehicle", "g_vehicle"}
+        for alias, _ in re.findall(r"(\w+)\s*=\s*[&*]?\s*(v|vehicle|s_vehicle|g_vehicle)\s*;", code):
+            if alias not in receivers:
+                raise AssertionError(f"{label} aliases the vehicle controller as {alias!r}")
+
+
+def require_command_path_seams(telemetry: str, commands: str, ctrl: str) -> None:
+    """F-113: command-path decisions whose pure halves are host-tested but whose shells were not."""
+    # A completion clears the builder slot and pops the queue only for its own command ID.
+    slot = (r"if \(cmd && cmd->id == ({id})\) \{{\s*command_builders_\[\1 % tk::CommandRunner::kMaxQueueSize\] = nullptr;"
+            r"\s*command_runner_\.pop_current\(\);\s*\}}")
+    for label, source, function, ident in (
+        ("send_vcsec_locked_", commands, "send_vcsec_locked_", r"cmd_id"),
+        ("send_infotainment_locked_", commands, "send_infotainment_locked_", r"cmd_id"),
+        ("get_vehicle_status", telemetry, "get_vehicle_status", r"completion->cmd_id"),
+    ):
+        body = scrub_cpp(function_body_in(source, function))
+        if not re.search(r"tk::SemGuard g\(vehicle_mutex_\);[^{}]*?auto\* cmd = command_runner_\.current_command\(\);\s*"
+                         + slot.format(id=ident), body):
+            raise AssertionError(f"{label} must clear only its own command slot under vehicle_mutex_")
+    # VCSEC sleep stays three-valued: UNKNOWN neither proves sleep nor confirms a wake.
+    vcsec = scrub_cpp(function_body_in(telemetry, "handle_vcsec_frame_"))
+    for token in (
+        "tk::sleep_state_from_vcsec( status.vehicleSleepStatus == VCSEC_VehicleSleepStatus_E_VEHICLE_SLEEP_STATUS_AWAKE, "
+        "status.vehicleSleepStatus == VCSEC_VehicleSleepStatus_E_VEHICLE_SLEEP_STATUS_ASLEEP);",
+        "vcsec_sleep_state_.store(static_cast<int>(reported));",
+        "note_vcsec_sleep_(reported);",
+        "if (tk::vcsec_status_confirms_wake(reported, status.has_closureStatuses)) {",
+    ):
+        if token not in " ".join(vcsec.split()):
+            raise AssertionError(f"VCSEC sleep handling lost {token!r}")
+    runner = " ".join(scrub_cpp(function_body_in(telemetry, "drive_command_runner_")).split())
+    for token in (
+        "const bool awake = (sleep_state == tk::SleepState::Awake);",
+        "const bool asleep = (sleep_state == tk::SleepState::Asleep);",
+        "command_runner_.tick(now_ms, connected, awake, asleep);",
+    ):
+        if token not in runner:
+            raise AssertionError(f"command runner input lost {token!r}")
+    if len(call_arguments(runner, "command_runner_.tick")) != 1:
+        raise AssertionError("the command runner must be ticked exactly once, with the pinned inputs")
+    # The loop and the cached getters ask the same member whether the active window is open.
+    loop = scrub_cpp(function_body_in(telemetry, "loop_task_fn_"))
+    if not re.search(r"bool window = self->active_window_now_\(now_ticks, charging_state\);", loop):
+        raise AssertionError("vehicle loop must take its active window from active_window_now_")
+    if len(re.findall(r"\bwindow\s*=(?!=)", loop)) != 1:
+        raise AssertionError("vehicle loop must not overwrite its active window after deciding it")
+    # Boot seeds activity only for the reviewed reset/reboot-evidence decision.
+    init = scrub_cpp(function_body_in(ctrl, "init"))
+    seeds = [match.start() for match in re.finditer(
+        r"\blast_cmd_ticks_\s*(?:\.\s*(?:store|exchange|fetch_add)\s*\(|=(?!=))", init)]
+    gate = re.search(r"\bif\s*\(\s*tk::boot_activity_seed_allowed\(\s*tk::diag_crash_reset_info\(\).code,\s*boot_reason_slot\(\).state\)\s*\)\s*\{", init)
+    if len(seeds) != 1 or not gate:
+        raise AssertionError("boot must seed the active window exactly once, behind the boot-activity gate")
+    gate_close = balanced_end(init, gate.end() - 1, "{", "}", "boot seed gate")
+    if not gate.end() <= seeds[0] < gate_close:
+        raise AssertionError("boot seeds the active window outside the boot-activity gate")
+
+
+def self_test_ble_safety_contract() -> None:
+    # PKG-18 (#391) canaries: each mutation breaks one vehicle-safety rule the pins must catch.
+    pairing_src = SOURCES["vehicle_pairing.cpp"]
+    telemetry_src = SOURCES["vehicle_telemetry.cpp"]
+    commands_src = SOURCES["vehicle_commands.cpp"]
+    ctrl_src = SOURCES["vehicle_ctrl.cpp"]
+
+    def mutate(label: str, text: str, old: str, new: str) -> str:
+        mutated = text.replace(old, new, 1)
+        if mutated == text:
+            raise AssertionError(f"PKG-18 canary did not apply: {label}")
+        return mutated
+
+    for label, old, new in (
+        ("owner role enrolled (A04 C-G1)", "Keys_Role_ROLE_CHARGING_MANAGER;", "Keys_Role_ROLE_OWNER;"),
+        ("whitelist built with a literal owner role", "build_white_list_message(\n                role,",
+         "build_white_list_message(\n                Keys_Role_ROLE_OWNER,"),
+        ("role constant made reassignable", "const Keys_Role role = Keys_Role_ROLE_CHARGING_MANAGER;",
+         "Keys_Role role = Keys_Role_ROLE_CHARGING_MANAGER;"),
+    ):
+        mutated = mutate(label, pairing_src, old, new)
+        require_mutation_rejected(
+            f"PKG-18 {label}",
+            lambda mutated=mutated: require_enrolment_role_pin(mutated, ALL_CODE.replace(pairing_src, mutated, 1)))
+    for label, telemetry, pairing, commands in (
+        ("VCSEC status poll may wake (A07-G2)",
+         mutate("A07-G2", telemetry_src, '"VCSEC Status Poll", tk::BleDomain::VehicleSecurity, tk::WakePolicy::NoWakeSkip,',
+                '"VCSEC Status Poll", tk::BleDomain::VehicleSecurity, tk::WakePolicy::WakeIfNeeded,'),
+         pairing_src, commands_src),
+        ("background poll may wake (A07-G1)",
+         mutate("A07-G1", telemetry_src, "tk::WakePolicy::NoWakeSkip, 10000", "tk::WakePolicy::WakeIfNeeded, 10000"),
+         pairing_src, commands_src),
+        ("pairing traffic may wake",
+         telemetry_src, mutate("pairing wake", pairing_src, "WakePolicy::NoWakeFail, deadline, tk::ConnectOrigin::Background,",
+                               "WakePolicy::WakeIfNeeded, deadline, tk::ConnectOrigin::Background,"), commands_src),
+        ("waking policy named outside a helper call",
+         mutate("policy const", telemetry_src, "void VehicleController::drive_command_runner_() {",
+                "static constexpr tk::WakePolicy kBackground = tk::WakePolicy::WakeIfNeeded;\n"
+                "void VehicleController::drive_command_runner_() {"),
+         pairing_src, commands_src),
+        ("background poll with a non-literal policy",
+         mutate("policy var", telemetry_src, "name, domain, tk::WakePolicy::NoWakeSkip, 10000,", "name, domain, policy_, 10000,"),
+         pairing_src, commands_src),
+    ):
+        require_mutation_rejected(
+            f"PKG-18 {label}",
+            lambda t=telemetry, p=pairing, c=commands: require_background_wake_policies(t, p, c))
+    for label, name, old, new in (
+        ("MQTT wakes the car", "mqtt_ha.cpp", "ChargeStateResult cs = s_vehicle->get_cached_charge();",
+         "s_vehicle->wake_up(); ChargeStateResult cs = s_vehicle->get_cached_charge();"),
+        ("display wakes the car", "display.cpp", "tk::UiSnapshot s = safe_mode ? tk::UiSnapshot{} : v.ui_snapshot();",
+         "v.wake_up(); tk::UiSnapshot s = safe_mode ? tk::UiSnapshot{} : v.ui_snapshot();"),
+        ("LEDs wake the car", "led_status.cpp", "snap = v.ui_snapshot();", "v.wake_up(); snap = v.ui_snapshot();"),
+        ("/status polls the car", "http_status.cpp", "in.vin             = g_vehicle->vin();",
+         "g_vehicle->charge_state_poll();\n    in.vin             = g_vehicle->vin();"),
+        ("MCP get_vehicle_state polls the car", "mcp_server.cpp",
+         "const bool charge_available = g_vehicle->get_charge_state(cs);",
+         "g_vehicle->charge_state_poll(); const bool charge_available = g_vehicle->get_charge_state(cs);"),
+    ):
+        consumers = dict(SOURCES)
+        consumers[name] = mutate(label, SOURCES[name], old, new)
+        require_mutation_rejected(f"PKG-18 {label}", lambda consumers=consumers: require_cache_only_consumers(consumers))
+    for label, name, old, new in (
+        ("MCP get_vehicle_state runs a command", "mcp_server.cpp",
+         "const bool charge_available = g_vehicle->get_charge_state(cs);",
+         "execute_vehicle_command(*g_vehicle, tk::CmdKind::WakeUp); const bool charge_available = g_vehicle->get_charge_state(cs);"),
+        ("display aliases the controller", "display.cpp", "tk::UiSnapshot s = safe_mode ? tk::UiSnapshot{} : v.ui_snapshot();",
+         "auto& car = v; car.wake_up(); tk::UiSnapshot s = safe_mode ? tk::UiSnapshot{} : v.ui_snapshot();"),
+    ):
+        consumers = dict(SOURCES)
+        consumers[name] = mutate(label, SOURCES[name], old, new)
+        require_mutation_rejected(f"PKG-18 {label}", lambda consumers=consumers: require_cache_only_consumers(consumers))
+    for label, telemetry, commands, ctrl in (
+        ("status poll clears any command slot",
+         mutate("slot", telemetry_src, "if (cmd && cmd->id == completion->cmd_id) {", "if (cmd) {"),
+         commands_src, ctrl_src),
+        ("VCSEC runner clears any command slot",
+         telemetry_src, mutate("vcsec slot", commands_src, "if (cmd && cmd->id == cmd_id) {", "if (cmd) {"), ctrl_src),
+        ("UNKNOWN sleep treated as awake",
+         mutate("awake", telemetry_src, "const bool awake = (sleep_state == tk::SleepState::Awake);",
+                "const bool awake = (sleep_state != tk::SleepState::Asleep);"), commands_src, ctrl_src),
+        ("any VCSEC status confirms a wake",
+         mutate("confirm", telemetry_src, "if (tk::vcsec_status_confirms_wake(reported, status.has_closureStatuses)) {",
+                "if (true) {"), commands_src, ctrl_src),
+        ("vehicle loop window forced open",
+         mutate("window", telemetry_src, "bool window = self->active_window_now_(now_ticks, charging_state);",
+                "bool window = true;"), commands_src, ctrl_src),
+        ("raw VCSEC sleep state not handed to the runner",
+         mutate("raw store", telemetry_src, "vcsec_sleep_state_.store(static_cast<int>(reported));",
+                "vcsec_sleep_state_.store(static_cast<int>(tk::SleepState::Awake));"), commands_src, ctrl_src),
+        ("vehicle loop window overwritten after the decision",
+         mutate("window overwrite", telemetry_src, "bool window = self->active_window_now_(now_ticks, charging_state);",
+                "bool window = self->active_window_now_(now_ticks, charging_state);\n        window = true;"),
+         commands_src, ctrl_src),
+        ("boot seeds the window by plain assignment",
+         telemetry_src, commands_src,
+         mutate("seed assign", ctrl_src, "    if (tk::boot_activity_seed_allowed(tk::diag_crash_reset_info().code, boot_reason_slot().state)) {\n        last_cmd_ticks_.store(xTaskGetTickCount());",
+                "    last_cmd_ticks_ = xTaskGetTickCount();\n    if (tk::boot_activity_seed_allowed(tk::diag_crash_reset_info().code, boot_reason_slot().state)) {\n        last_cmd_ticks_.store(xTaskGetTickCount());")),
+        ("boot seeds the window outside the reset/evidence gate",
+         telemetry_src, commands_src,
+         mutate("seed", ctrl_src, "    if (tk::boot_activity_seed_allowed(tk::diag_crash_reset_info().code, boot_reason_slot().state)) {\n        last_cmd_ticks_.store(xTaskGetTickCount());",
+                "    last_cmd_ticks_.store(xTaskGetTickCount());\n    if (tk::boot_activity_seed_allowed(tk::diag_crash_reset_info().code, boot_reason_slot().state)) {")),
+    ):
+        require_mutation_rejected(
+            f"PKG-18 {label}", lambda t=telemetry, c=commands, x=ctrl: require_command_path_seams(t, c, x))
+
+    infotainment = function_body_in(commands_src, "send_infotainment_locked_")
+    wrong_owner = mutate("Infotainment slot owner", infotainment,
+                         "if (cmd && cmd->id == cmd_id) {", "if (cmd) {")
+    changed = commands_src.replace(infotainment, wrong_owner, 1)
+    require_mutation_rejected("PKG-18 Infotainment runner clears any command slot",
+        lambda: require_command_path_seams(telemetry_src, changed, ctrl_src))
+    extra_tick = mutate("duplicate runner tick", telemetry_src,
+                        "tk::TxAction action = command_runner_.tick(now_ms, connected, awake, asleep);",
+                        "tk::TxAction action = command_runner_.tick(now_ms, connected, awake, asleep);\n"
+                        "    (void)command_runner_.tick(now_ms, connected, awake, asleep);")
+    require_mutation_rejected("PKG-18 command runner ticked twice",
+        lambda: require_command_path_seams(extra_tick, commands_src, ctrl_src))
+
+
+
 def require_runtime_source_contracts() -> None:
+    require_enrolment_role_pin(SOURCES["vehicle_pairing.cpp"], ALL_CODE)
+    require_background_wake_policies(SOURCES["vehicle_telemetry.cpp"], SOURCES["vehicle_pairing.cpp"],
+                                     SOURCES["vehicle_commands.cpp"])
+    require_cache_only_consumers(SOURCES)
+    require_command_path_seams(SOURCES["vehicle_telemetry.cpp"], SOURCES["vehicle_commands.cpp"],
+                               SOURCES["vehicle_ctrl.cpp"])
     # Response construction is centralized. Every cJSON operation is an exact, file-scoped
     # inventory item: a new Create/Add/mutator/print API or a relocated parser/read operation is a
     # review event rather than an untested way around sticky ownership and the shared reply seam.
@@ -4961,6 +5245,7 @@ def check_contract(tasks: set[str], callbacks: set[str]) -> None:
 
 
 def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
+    self_test_ble_safety_contract()
     attributed = "[[gnu::noinline]] void Fixture::round() { if (true) { return; } }\n"
     if function_body_in(attributed, "round") != "{ if (true) { return; } }":
         raise AssertionError("noinline function body discovery is ineffective")
