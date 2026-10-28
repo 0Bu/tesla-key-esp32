@@ -1151,6 +1151,33 @@ self_test() {
   grep -Fq -- "--head $SHA_B" "$LOG_STAMPS" || { echo "self-test: push_attested: pre-push stamp not bound to the pushed head" >&2; fail=1; }
   expect_out push_attested "no attestation for: project-review"; expect_no_out push_attested "READY FOR MERGE"
 
+  # GitHub never reports the pushed commit as the PR head: stop instead of monitoring a stale head.
+  sc_push_head_not_reported() {
+    STUB_SEQ="red"; STUB_FAILED="build | COMPLETED | FAILURE | u"; STUB_LOCAL="$SHA_B"; STUB_ANCESTOR=1
+    attest_names=(skill-audit pr-hygiene); attest_evidence=("audit-a" "hygiene-c")
+    git_push_branch() { echo "push $1" >> "$LOG_PUSH"; }
+  }
+  run_case sc_push_head_not_reported 1
+  expect_out push_head_not_reported "did not report $SHA_B as the PR head"
+  expect_lines push_head_not_reported "$LOG_PUSH" 1; expect_lines push_head_not_reported "$LOG_MERGE" 0
+
+  # The iteration guard ends a run whose pushed fix exhausted the limit without green CI.
+  sc_retry_limit() {
+    STUB_SEQ="red"; STUB_FAILED="build | COMPLETED | FAILURE | u"; STUB_LOCAL="$SHA_B"; STUB_ANCESTOR=1
+    attest_names=(skill-audit pr-hygiene); attest_evidence=("audit-a" "hygiene-c"); max_retries=1
+  }
+  run_case sc_retry_limit 1
+  expect_out retry_limit "reached maximum retry limit (1)"; expect_lines retry_limit "$LOG_PUSH" 1
+
+  # One push per run: after it the local HEAD is the PR head, so a red re-check has nothing to push.
+  sc_red_after_push() {
+    STUB_SEQ="red red"; STUB_FAILED="build | COMPLETED | FAILURE | u"; STUB_LOCAL="$SHA_B"; STUB_ANCESTOR=1
+    attest_names=(skill-audit pr-hygiene); attest_evidence=("audit-a" "hygiene-c")
+  }
+  run_case sc_red_after_push 1
+  expect_out red_after_push "nothing to push"; expect_no_out red_after_push "maximum retry limit"
+  expect_lines red_after_push "$LOG_PUSH" 1
+
   # F02: readiness needs green CI on the SAME head, local == PR head, MERGEABLE and attestations
   sc_green_unattested() { :; }
   run_case sc_green_unattested 3

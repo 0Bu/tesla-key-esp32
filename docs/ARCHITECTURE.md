@@ -255,7 +255,9 @@ Signed previews and the browser installer share the [publication trust boundary]
 
 Normal OTA writes the installed inactive slot and otadata; verified app-only USB writes the signed
 app at `0x20000`, then erases otadata last. Both preserve bootloader, partitions and secret NVS
-`0x9000/0x6000`; neither migrates the layout.
+`0x9000/0x6000`; neither migrates the layout. The browser installer's **Flash** also keeps NVS but
+rewrites the bootloader, partition table, app and otadata; [NVS retention](SECURITY.md#nvs-retention)
+owns when it is offered.
 
 Whole-chip erase destroys all of them. Recovery needs an explicitly authorized complete verified
 write set, network setup and new key enrollment:

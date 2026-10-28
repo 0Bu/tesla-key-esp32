@@ -167,9 +167,11 @@ Verify every dimension against the reviewed revisions; previous audit results ar
    `Charging/Disconnected/Complete/Stopped/NoPower/Starting`. Verify selectors, cache freshness,
    energy/preconditioning/odometer presence and intentional proxy departures in
    [API](../../../docs/API.md#vehicle-data) against all emitters and consumers. Verify the command
-   outcome status too: REST status/`result` and MCP `isError` for success, `already_set`, car
-   refusals, transport failures and the degraded reply (`main/http_api.cpp` `send_command_result`,
-   `main/mcp_server.cpp`, `main/logic/command_result.hpp`, [API](../../../docs/API.md#commands)). vehicle-command's proxy answers CarServer refusals and
+   outcome status too: REST status/`result` and MCP `isError` for success, `already_set`, the
+   contextual charge start/stop no-ops, car refusals, transport failures and the degraded reply
+   (`main/http_api.cpp` `send_command_result`, `main/mcp_server.cpp`, `main/logic/command_result.hpp`,
+   `main/logic/command_runner.hpp`, [API](../../../docs/API.md#commands)).
+   vehicle-command's proxy answers CarServer refusals and
    VCSEC nominal errors with HTTP 200 and `result:false`, maps other execution errors through
    `httpStatusCode` with an error-only body, and passes a Fleet server error's own status through;
    every departure must be recorded in ADR-0005.

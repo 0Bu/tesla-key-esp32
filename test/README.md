@@ -305,7 +305,8 @@ WiFi-driver callback framing, a physical exported log or complete sanitation.
 | `test_pages_changelog.py` and Pages checker/relevance self-tests | Actual assembler delegation and metadata admission; exact root/Dev served bytes, complete fresh retries, immutable same-commit baseline files, and shipped Markdown add/edit/rename/delete through all three relevance decisions. Synthetic firmware and owned offline Git fixtures prove no delivery or live CDN behavior. |
 | `test_inline_assets.py` | Bounded CSS/JavaScript byte fixtures, legal/annotation/HTML-context preservation, rejected unsupported multiline JS, actual Node ASI/regex controls, exact CMake output and unchanged code lines, raw-marker rejection, stale-output cleanup and real incremental helper dependency. The Linux browser fixture reuses the helper API but independently compares the ordered raw CSSOM with its actual DOM stylesheet; host CMake tests and target build semantics cover the production generator. |
 | `web_ui_browser_gate.py` / `browser_cdp.py` and their policy/transport tests | Linux-only assembled page in Chrome/Chromium: console/request failures, degraded poller, escaping, computed contrast, OTA notes and uncertainty; populated 390/light, 768/light and 1200/dark layouts; real trusted CDP Tab navigation, focus-visible ring and exactly one action each for Enter and Space. Controlled Python peers test pipe framing/limits/FD ownership and cleanup separately from DOM behavior; the host contract executes the actual strict shell with passive tools on Linux/Darwin branches and rejects commented, disabled or early-exit test invocations |
-| `web_installer.test.mjs` | Actual installer with passive serial/flasher adapters: phase ordering, abort/release, explicit erase confirmation, and `eraseAll:false` on every Keep write. No physical flash or NVS-preservation proof. |
+| `web_installer.test.mjs` | Actual installer with passive serial/flasher adapters: installed-firmware check and when Flash is offered, phase ordering with the OTA selector last, abort/release including esptool's reset lines and buffered reads, one serial open per connection, explicit Clean flash confirmation, the boot-version check, and `eraseAll:false` on every write. No physical flash or NVS-preservation proof. |
+| `serial_port_release.test.mjs` | Port leases, quarantine and permission removal of the installer. |
 
 Automatic browser processes run only on Linux. macOS is refused before binary lookup or process
 creation, including an explicit `BROWSER_BIN`. Optional local mode reports a skip; `--require-all`
@@ -430,7 +431,7 @@ against passive esptool metadata/write adapters for all four targets. Older, unk
 or wrong-chip metadata must stop before a stubbed write. Consumer-omission controls pin the local,
 preview, ship and recovery paths. These tests do not inspect a board, validate a signature or prove
 that a collected bootloader belongs to the chosen port; the delivery plan owns that binding.
-Descriptorless-reference cases copy the actual checker and use explicitly synthetic catalog
+Reference-catalog cases (no ESP-IDF version reported) copy the actual checker and use explicitly synthetic catalog
 digests. Exact image/full-region positives and byte, padding, provenance-shape and downgrade
 negatives exercise CLI admission. Real catalog bytes require separate provenance verification;
 fixture success does not establish it. See [reference maintenance](../docs/DEVELOPMENT.md#retained-bootloader-references).

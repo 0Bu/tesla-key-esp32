@@ -145,7 +145,9 @@ treated as fixable; the script stops and points at `gh pr checks`.
    ci-heal stamps both records for the local `HEAD`, pushes the branch, waits until GitHub reports
    that commit as the PR head, and resumes monitoring; after a review fix it stops there instead. A
    later commit stales every record and needs fresh attestations.
-4. **Iteration Guard.** Iterations beyond the limit (default 3, maximum 5) stop the run.
+4. **Iteration Guard.** Iterations beyond the limit (default 3, maximum 5) stop the run. A run
+   pushes at most one fix: after it the local `HEAD` is the PR head, so a red re-check stops with
+   "nothing to push" until you commit the next fix and re-run.
 
 ---
 
