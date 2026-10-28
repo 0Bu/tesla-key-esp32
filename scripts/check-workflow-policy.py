@@ -215,6 +215,26 @@ EXPECTED_TRIGGER_SHA256 = {
 }
 EXPECTED_BUILD_MATRICES = {'build-target': {'target': ['esp32', 'esp32s3', 'esp32c3', 'esp32c6'], 'leg': '${{ fromJSON(github.ref == \'refs/heads/main\' && \'["primary"]\' || \'["primary","reproduction"]\') }}'}, 'independent-rebuild-target': {'target': ['esp32', 'esp32s3', 'esp32c3', 'esp32c6']}}
 YAML_MODELS = {}
+# The reviewed body of build.yml's first `build` step (after its name line): the required check's
+# verdict on every need.
+BUILD_NEEDS_GATE = (
+    "        env:\n"
+    "          NEEDS_PREPARE: ${{ needs.prepare.result }}\n"
+    "          NEEDS_LOGIC_TEST: ${{ needs.logic-test.result }}\n"
+    "          NEEDS_LOGIC_HARNESS: ${{ needs.logic-harness.result }}\n"
+    "          NEEDS_BUILD_TARGET: ${{ needs.build-target.result }}\n"
+    "        run: |\n"
+    "          set -euo pipefail\n"
+    "          failed=0\n"
+    '          for pair in "prepare=$NEEDS_PREPARE" "logic-test=$NEEDS_LOGIC_TEST" \\\n'
+    '                      "logic-harness=$NEEDS_LOGIC_HARNESS" "build-target=$NEEDS_BUILD_TARGET"; do\n'
+    '            if [ "${pair#*=}" != success ]; then\n'
+    "              echo \"::error::needed job ${pair%%=*} ended '${pair#*=}', not success\"\n"
+    "              failed=1\n"
+    "            fi\n"
+    "          done\n"
+    '          [ "$failed" -eq 0 ]\n'
+)
 
 TRUSTED_DEFAULT_ENV = "TRUSTED_DEFAULT_SHA: ${{ github.sha }}"
 TRUSTED_DEFAULT_FETCH = "git fetch --no-tags origin"
@@ -562,6 +582,12 @@ def validate(root: Path) -> None:
             and gate_step.count("failed=0") == 1
             and gate_step.rstrip().endswith('[ "$failed" -eq 0 ]'),
             "build.yml:build must fail unless every need succeeded")
+    # The rules above name the usual edits; the exact reviewed body also rejects the rest (a dropped
+    # `failed=1`, an early `exit 0`, an extra command). A non-fatal job would hide the verdict.
+    require(gate_step.rstrip("\n") == BUILD_NEEDS_GATE.rstrip("\n"),
+            "build.yml:build need-result check must equal the reviewed gate exactly")
+    require(re.search(r"^    continue-on-error:", build["build"], re.MULTILINE) is None,
+            "build.yml:build must not be continue-on-error")
     # The four independent legs only need the run mode/version (prepare), so they run concurrently
     # with the producer builds; the join needs both the producer's display version and every leg.
     require(job_has_need(build["independent-rebuild-target"], "prepare"),
@@ -1476,6 +1502,17 @@ def self_test(root: Path) -> None:
          "      - name: Require every needed job to succeed\n        env:\n",
          "      - name: Require every needed job to succeed\n        if: ${{ false }}\n        env:\n",
          "need-result check must be unconditional and fatal"),
+        ("build-needs-gate-flag-dropped", "build.yml",
+         "              failed=1\n", "", "need-result check must equal the reviewed gate exactly"),
+        ("build-needs-gate-early-exit", "build.yml",
+         "          failed=0\n          for pair in",
+         "          failed=0\n          exit 0\n          for pair in",
+         "need-result check must equal the reviewed gate exactly"),
+        ("build-job-nonfatal", "build.yml",
+         "    if: ${{ always() }}\n    needs: [prepare, logic-test, logic-harness, build-target]\n",
+         "    if: ${{ always() }}\n    continue-on-error: true\n"
+         "    needs: [prepare, logic-test, logic-harness, build-target]\n",
+         "build must not be continue-on-error"),
         ("repro-leg-dropped", "build.yml", "|| '[\"primary\",\"reproduction\"]'", "|| '[\"primary\"]'",
          "exact four-target matrix"),
         ("repro-skip-dropped", "build.yml", "            --skip-repro\n", "",

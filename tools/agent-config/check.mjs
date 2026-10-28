@@ -117,10 +117,10 @@ const usbOtaNotStateChanging = /(?:GET|POST) \/ota\/check[^.!?]*(?:is not|isn't|
 const usbAbsentApprovalProceeds = /(?:(?:approval|authorization)[^.!?]*(?:absent|missing|not obtained)|without (?:separate )?(?:approval|authorization))[^.!?]*(?:continue|proceed|run|contact|send|request)/i;
 const reviewedSkillSha256 = new Map([
   ["add-logic-test", "564c0e171f99e6cb55117c55dcb272f9c07ac0342315b48199274c6c7f347b0a"],
-  ["ci-heal", "321db23cebca9a9f7bbf8de6718a9540810c60d610d01bb3ae7502d8550b6639"],
+  ["ci-heal", "4f72f8cab951514f1ae0acd5a59507c504020804f1213ba02d7c40caf2ed3981"],
   ["deploy", "169d30f409d6a447752b5fc7f3b7579ee6e714df9ce33ecd51cb344dd0d877f0"],
   ["deploy-bench", "15d3f62be54f14e1f560ab8d711f0d2915d3e1ec20a0cf3f0f962d52a689e30e"],
-  ["device-diag", "a3060597dc0f3223a5d82161cdca891b3c4c752b0b4c446b0c3b2056d4b44dab"],
+  ["device-diag", "fd7f03a299c00bff1cc9038c2a23f0ce313551117cfe1e59e16c39348087525b"],
   ["display-preview", "1b886d24a8d17c1f0c1fbdbd4302dee0fe44688dbba081c1de50a9d844b3979b"],
   ["feature-docs", "ec0d24372fb754fde7c91e9d6917b78a348e06addb93299ceb5412fca758dcdb"],
   ["flash-esp32", "dd7b0d326866faa82bc23d3fa5fa175626edd415d02e7fbc4a08495b7c6be0e5"],
@@ -130,7 +130,7 @@ const reviewedSkillSha256 = new Map([
   ["project-review", "b888badbf89d878af2083f80cd883ca2a2b63e64e0e01615677c4bae1fcbc266"],
   ["ship", "94d5833e8f95404f487d4b4d1eadafa3e14335cf301837e486e692b8da36981f"],
   ["skill-audit", "fe72139f6b0bf28bf97270b3003ee0cf554f13e8a35c2639660e6d4b227b1410"],
-  ["usb-recovery", "98a8f493377c564d07cd9f5a2819f228f2b2714d01a383ad2b3f47646f0b13af"],
+  ["usb-recovery", "e80f75cc446da9728c24feefc69898b0572abdb0fd0bf98d55252d7c033dd366"],
   ["vehicle-command-audit", "af91c397017abfb0bb76f10cef2bf91ed5b580a07752ca1f140d75a4b6d38ec8"],
 ]);
 const featureDocsScopeTokens = [
