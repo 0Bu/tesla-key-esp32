@@ -303,7 +303,7 @@ command shown with `<placeholders>` runs inline once each holds its literal valu
 blocks this way:
 
 1. Write the blocks approved for this call, unchanged and in document order, to one script in the
-   session's scratch directory with the file-writing tool, not a shell redirect.
+   runner's scratch directory (or `$TMPDIR`) with the file-writing tool, not a shell redirect.
 2. Run it with one static command, `bash <script-path>`. Put inputs the blocks require (`PR`,
    `TARGET`, `PORT`, `RUNID`, `DEVICE_IP`, …) in front as literal `NAME=value` assignments
    so the hooks still see them.
@@ -313,7 +313,9 @@ blocks this way:
 
 Never put `git push`, `gh pr create`, `gh pr merge`, or a key, NVS or credential path into such a
 script: those stay standalone, statically bound commands that the hooks inspect, or the operator's
-step. A script grants no authorization; every approval boundary of the workflow still applies.
+step. The hooks see only `bash <script-path>`, not the script's contents, so they cannot enforce
+this rule; the agent writing the script does. A script grants no authorization; every approval
+boundary of the workflow still applies.
 
 ## Reviews and documentation
 
