@@ -16,7 +16,9 @@ VIN as "example" values, and a run of early PR bodies written entirely in German
 is the dedicated, unconditional gate for exactly those two concerns, checked at PR creation,
 every push, and merge (automated PRs limited exclusively to `.github/workflows/renovate.yaml` or
 `.github/renovate.json` are exempt at merge/check via `gate_is_renovate_maintenance`) — never assume a clean `$skill-audit` or `$project-review` also covers it;
-their scope is coherence, not confidentiality or language.
+their scope is coherence. `$project-review` does check that repository documentation is in
+English, but neither screens the PR title, body or commit messages for language, and neither
+screens any content for private data.
 
 ## What counts as a finding
 

@@ -53,8 +53,8 @@ that separate authority through the appropriate workflow.
    - turns a stub into something real (or the reverse)
 
    It did **not** if the change is a bug fix inside an existing mechanism, a doc edit, a test-only
-   change, or a refactor with no behavioural surface. Say so and stop — an entry per commit is how a
-   catalog becomes unreadable.
+   change, or a refactor with no behavioural surface. Say so and skip to step 7 — a confirmed
+   no-change result is a successful sync; an entry per commit is how a catalog becomes unreadable.
 
 3. **Write or update the entry.** Each row of the tables in `docs/FEATURES.md` is
    `Feature | Where | Prevents`. All three columns are load-bearing:
@@ -83,7 +83,8 @@ that separate authority through the appropriate workflow.
    [Development](../../../docs/DEVELOPMENT.md#static-analysis-decision). If a change affects the
    recorded result, rerun it; preserve dates and evidence limits rather than inventing current numbers.
 
-7. **Report gate readiness; do not mutate the PR by default.** After a successful sync, provide the
+7. **Report gate readiness; do not mutate the PR by default.** After a successful sync, including a
+   confirmed no-change result from step 2, provide the
    exact top-level CommonMark record for a separately authorized PR-body update:
    ```
    - [x] `$feature-docs` synced — merge gate @ <full-40-hex-sha>

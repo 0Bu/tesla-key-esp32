@@ -93,16 +93,17 @@ scripts/check-display-sim-parity.sh
 A red parity result means the sim and the firmware presenter have drifted — fix that before
 trusting the PNGs, because they're then rendering a decision the device won't make.
 
-## Two modes that are NOT preview — don't run them for a look
+## Modes that are NOT preview — don't run them for a look
 
 > ⚠️ **`cheader` rewrites a source file.** `python3 tools/display_sim.py cheader main/display_font.h`
 > regenerates [`main/display_font.h`](../../../main/display_font.h) (the packed 5x7 font + the
 > Bluetooth/bolt bitmaps). Run it **only when you intentionally changed a glyph** in the `G`/`BT_ROWS`/
 > `BOLT_ROWS` tables and mean to regenerate the font — never as part of a preview. Review the diff.
 
-> ⚠️ **`parity <golden.tsv>` is the gate's re-decide step, not a rendering mode.** It's invoked by
-> [`check-display-sim-parity.sh`](../../../scripts/check-display-sim-parity.sh) against the golden
-> TSV the C++ dumper emits. Use the wrapper script above; don't call `parity` by hand to "preview".
+> ⚠️ **`parity <golden.tsv>` and `font-parity <golden.tsv>` are the gate's comparison steps, not
+> rendering modes.** [`check-display-sim-parity.sh`](../../../scripts/check-display-sim-parity.sh)
+> invokes them against the golden TSVs the C++ dumper emits (presenter decisions and font glyphs).
+> Use the wrapper script above; don't call either by hand to "preview".
 
 ## Notes
 

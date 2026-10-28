@@ -48,8 +48,11 @@ curl -s "http://${DEVICE_IP:?set DEVICE_IP to the approved board address}/status
 ```
 
 Read INTERNAL largest block, reset reason, safe mode, pairing/reauth, link, transport and integration
-errors before proposing a cause. Stack minima are per-boot historical bytes; missing means unsampled,
-zero is real. Board MAC identifies hardware and remains visible in redacted exports.
+errors before proposing a cause. Stack minima are per-boot conservative lower bounds, rounded down
+to `sys.stack_min_free_quantum_bytes` (256) and saturating at 15872; `null` means unsampled, and 0 is
+a real 0–255-byte observation, not proof of an overflow. Context names are entry contexts, not
+always one task ([API](../../../docs/API.md#management)). Board MAC identifies hardware and remains
+visible in redacted exports.
 
 If approved, `/api/proxy/1/version` confirms identity: its fixed `-esp32` version suffix applies on
 all four chips; separate platform names the actual target. Strip the suffix when comparing to status.

@@ -877,7 +877,8 @@ cp "$gate" "$create_lib_canary/require-pr-gates.sh"
 lib_src="$root/tools/agent-hooks/pr-gate-lib.sh"
 expect_create_lib_block() {  # <expected message fragment> <label>
   local out rc
-  out="$(payload Bash command 'gh pr create --body-file body.md' "$root" \
+  # The blocked hook exits before reading stdin; silence the producer's broken-pipe traceback.
+  out="$(payload Bash command 'gh pr create --body-file body.md' "$root" 2>/dev/null \
     | bash "$create_lib_canary/require-pr-gates.sh" 2>&1)"; rc=$?
   if [ "$rc" = 2 ] && printf '%s' "$out" | grep -Fq -- "$1"; then pass_case "$2"
   else fail_case "$2 (rc=$rc: $(printf '%s' "$out" | tail -c 200))"; fi

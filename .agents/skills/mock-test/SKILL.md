@@ -36,9 +36,9 @@ a real Linux browser: on macOS it delegates that gate to Docker, never native Ch
      controlled launch-policy tests and optional skips do not establish browser coverage.
 
 3. **Linux Address / Undefined-Behavior / Leak Sanitizers (`scripts/run-sanitizer-tests.sh`)**:
-   - On a Linux host, the default run executes the logic, NVS and runtime-boundary host tests and
-     the fixed-seed fuzz corpus under ASan + UBSan + LSan; `--self-test` runs the deliberate
-     detector tripwires instead. CI runs both:
+   - On a Linux host, the default run executes every host test target, the fixed-seed fuzz corpus
+     and every sanitized contract probe that the script declares, under ASan + UBSan + LSan;
+     `--self-test` runs the deliberate detector tripwires instead. CI runs both:
      ```bash
      scripts/run-sanitizer-tests.sh --self-test
      scripts/run-sanitizer-tests.sh
