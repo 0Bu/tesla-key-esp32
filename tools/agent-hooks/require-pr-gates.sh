@@ -7,7 +7,8 @@
 #                                                    plus the conditional $feature-docs and
 #                                                    $vehicle-command-audit records
 #   * --check (the CI current-head-records job)  -> the merge records plus $skill-audit
-#   Strict Renovate maintenance needs no $project-review, $pr-hygiene or $feature-docs record.
+#   Strict Renovate maintenance needs none of these merge or --check records except a relevant
+#   $vehicle-command-audit.
 # MCP merges, auto-merge/queue activation, direct REST/GraphQL merges, ambiguous payloads, and
 # unverifiable network state fail closed. This lexical hook is defense in depth; branch protection
 # and human review remain authoritative.

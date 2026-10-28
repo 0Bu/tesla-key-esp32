@@ -53,8 +53,9 @@ the self-test exercises them on an isolated copy of the script and through its `
   fix that descends from the PR head, ci-heal pushes it through Phase 3 and stops with exit code 3:
   merge records for the new head need fresh reviews and a new run. After stamping, `READY FOR MERGE` and
   `--auto-merge` also require a new run of that check to pass and every check to be green on the
-  unchanged head. A stamp that leaves the body unchanged (the records were already current) starts
-  no run; its latest run must have passed instead. A failed stamp, push or merge stops the run. Phase 3 pre-push records instead
+  unchanged head. A stamp that leaves the body unchanged (the records were already current)
+  starts no new run of that check, so the latest existing run of it must have passed instead.
+  A failed stamp, push or merge stops the run. Phase 3 pre-push records instead
   attest the independently reviewed local fix commit before it has green remote CI.
 - **Relevance matches the merge hook.** The gates a PR needs come from the same GitHub-side
   changed-file list and the same shared predicates (`gate_feature_docs_relevant`,
@@ -175,9 +176,9 @@ scripts/ci-heal.sh --pr <numeric-pr> \
 ```
 
 With every other check green, `MERGEABLE`, local `HEAD` equal to the PR head and every needed gate
-attested, ci-heal stamps the records, waits until a new `current-head-records` run passes and
-every check is green on the same head, and only then prints the exact, single canonical squash
-merge command:
+attested, ci-heal stamps the records, waits until a new `current-head-records` run passes (or,
+when the body did not change, checks that the latest run passed) and every check is green on the
+same head, and only then prints the exact, single canonical squash merge command:
 
 ```bash
 gh --repo github.com/0Bu/tesla-key-esp32 pr merge <PR> --match-head-commit <FULL_40_HEX_HEAD_SHA> --squash
