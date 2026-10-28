@@ -11,8 +11,16 @@ Read task-specific contracts through the [documentation index](docs/README.md).
   publication, signing, flash, OTA, NVS operations or live device/vehicle contact.
 - An implementation request permits scoped repository edits and proportionate local tests; it does
   not authorize commit, push, PR/stamp, merge, release, Pages, real-key signing or physical/live
-  mutation. Obtain explicit authorization for each phase; one approval does not grant another.
-  One standing exception: the user's own invocation of `$ci-heal` (not an agent's or another
+  mutation. An explicit user invocation of `$deploy` authorizes the current task's commit, push,
+  PR creation/updates, canonical squash merge of the verified head and resulting protected Dev
+  signing/publication. An explicit user invocation of `$deploy-bench` authorizes identifying the
+  bench, its scoped USB preflight/reset/reads, verified signed app-only flash, final otadata activation
+  and same-board passive acceptance. These approvals persist through delegated steps; do not ask
+  again after resolving the PR/head, board, port, target or eligible artifact. Ask only for missing
+  information or actions outside the invoked workflow. Automatic skill selection grants no authority.
+  Stable Releases, production delivery, OTA, NVS/identity changes and vehicle/cluster actions remain
+  outside these two invocations.
+  The user's own invocation of `$ci-heal` (not an agent's or another
   workflow's decision to run it) is the explicit authorization for its attested
   PR-body record edits and its pushes of an already-committed fix to the active PR branch, up to
   its iteration limit. It never authorizes a commit or a review; a merge still needs the user's

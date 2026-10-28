@@ -112,6 +112,7 @@ expect_guard deny "$(payload Bash command 'espsecure.py sign_data --keyfile ota_
 expect_guard deny "$(payload Bash command 'espsecure.py sign_data --keyfile ota_signing_key.pem ota_signing_key.pem' "$root")" 'key-as-datafile denied'
 expect_guard deny "$(payload Bash command 'bash -c \"espsecure.py sign_data --keyfile ota_signing_key.pem firmware.bin\"' "$root")" 'wrapped sign_data denied'
 expect_guard allow "$(payload Read file_path partitions.csv "$root")" 'partition table readable'
+expect_rc 0 'narrow literal-data and partition reader regression controls' python3 "$root/test/test_hook_read_contract.py"
 expect_guard deny "$(payload Edit file_path partitions.csv "$root")" 'partition edit denied'
 expect_guard deny "$(payload Write file_path partitions.csv "$root")" 'Write partition write denied'
 multi_edit_payload="$(python3 - "$root" <<'PY'

@@ -3,8 +3,9 @@ name: deploy
 description: Publish a tesla-key-esp32 change through local checks, commit, push, PR creation, independent reviews, CI and canonical squash merge. Observe the resulting main build; USB bench testing belongs to deploy-bench and device delivery is a separate workflow.
 ---
 
-Invoke `$deploy`. Read [AGENTS.md](../../../AGENTS.md) first; this workflow grants no
-additional authorization. Canonical skills live under `.agents/skills/`.
+Invoke `$deploy`. Read [AGENTS.md](../../../AGENTS.md) first. The user's explicit invocation
+authorizes the workflow below; automatic selection by an agent does not. Canonical skills live
+under `.agents/skills/`.
 
 # deploy — commit, push, PR and merge
 
@@ -16,10 +17,13 @@ This workflow ends without board, vehicle, cluster, USB or OTA operations.
 
 ## Authorization and baseline
 
-Require explicit user authorization for commit, push, PR creation/updates, merge and the protected
-Dev signing/publication side effect of a firmware-relevant main push. Reuse authorization already
-provided for these phases; resolve only missing scope. A stable Release requires separate manual
-release authorization and is not started here.
+The user's own `$deploy` invocation is explicit user authorization for the current task's local
+checks, commit, push, PR creation/updates and earned gate records, independent reviews, canonical squash
+merge of the verified head, and protected Dev signing/publication from the resulting main push.
+Continue through those phases without asking for approval again. Resolve the concrete PR/head
+from the task and verify it before merging; discovering its number or a new verified fix commit
+does not expire the workflow authorization. Ask only for missing information or additional scope.
+A stable Release and device delivery are outside this workflow.
 
 Inspect status, branch, `origin/main`, merge-base and intervening changes. Preserve user changes and
 other tasks' worktrees. Stage only this change; do not reset, stash or rewrite history. If the user
@@ -64,7 +68,8 @@ Resolve material findings and update only earned records under the existing PR-u
 
 Re-read the numeric PR, full head, base, mergeability, CI and required bench evidence. Verify the
 current records with `tools/agent-hooks/require-pr-gates.sh --pr <numeric-pr> --check`.
-Bind the merge authorization to that concrete PR/head, using existing scope when it already does.
+Bind the user's workflow authorization to that concrete PR/head after the required verification;
+do not ask for another merge approval when the user already instructed `$deploy` for this task.
 Execute only the canonical command with literal values:
 
 ```text

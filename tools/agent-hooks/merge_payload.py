@@ -11,6 +11,8 @@ import shlex
 import sys
 from typing import Any
 
+from shell_read import is_literal_read
+
 
 ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=(.*)$", re.DOTALL)
 SHELLS = {"bash", "dash", "sh", "zsh"}
@@ -386,6 +388,8 @@ def shell_executes_stdin(source: str) -> bool:
 def find_merge(source: str, depth: int = 0) -> dict[str, str] | None:
     if depth > 5:
         return {"action": "shell merge", "selector": "", "repo": "", "host": "", "error": "shell nesting exceeds parser limit"}
+    if is_literal_read(source):
+        return None
     source = normalize_shell_source(source)
     graphql_action = next(
         (

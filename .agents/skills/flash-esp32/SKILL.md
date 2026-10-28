@@ -26,7 +26,9 @@ app binary. A successful local compile is not a flashable artifact:
 > **Authorization boundary.** A build request authorizes no signing-key use or USB write. A review,
 > merge, release, or prior flash authorizes no new flash. Before `write-flash`/`write_flash` or
 > `erase-region`/`erase_region`, identify the exact port, detected chip, image provenance, target,
-> app offset `0x20000`, and activation erase `otadata@0xf000/0x2000`, then obtain explicit approval.
+> app offset `0x20000`, and activation erase `otadata@0xf000/0x2000`, then verify the explicit approval.
+> The user's `$deploy-bench` invocation supplies that approval for its selected bench, including
+> the bounded preflight reads and USB resets; do not request another approval when delegated here.
 > Never touch `nvs@0x9000/0x6000`, never use a merged full-flash image, and never read or search for
 > the real OTA signing key.
 
@@ -279,7 +281,8 @@ fi
   a local build reports only the `version.txt` **floor** (`cat version.txt`).
 - **Never flash `tesla-key-esp32<sfx>-<ver>-merged.bin`** to preserve NVS — the merged image is a
   single full-flash blob spanning `0x0` and **wipes `nvs@0x9000`** (forces a full re-pair).
-- After flashing, confirm the live device with the global `$tesla-key-e2e-evcc` skill.
+- Optional integration verification uses the global `$tesla-key-e2e-evcc` skill only with its
+  separate live-device, cluster and vehicle scope. It is not required for USB bench acceptance.
 
 ## Picking the right serial port
 

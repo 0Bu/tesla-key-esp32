@@ -25,6 +25,10 @@ Run the multi-line blocks below through a scratch script as
 [Development](../../../docs/DEVELOPMENT.md#running-workflow-shell-blocks) describes. The canonical
 merge command in step 1 is never part of such a script; it runs alone.
 
+When `$deploy` uses steps 0–2, the user's explicit deploy invocation supplies the task's merge and
+protected Dev-publication approval. Bind it to the verified PR/head without asking again. That
+delegation ends after observing the main build and grants no USB, OTA or live-device scope.
+
 ## 0. Preconditions (check, don't assume)
 
 ```bash

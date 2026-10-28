@@ -71,6 +71,8 @@ if [ "$REQUIRE_ALL" = 1 ]; then
         test/test_log_origin_contract.py \
         test/test_diagnostic_export_guidance.py \
         test/test_runtime_boundary_contract.py \
+        test/test_hook_read_contract.py \
+        tools/agent-hooks/shell_read.py \
         test/generate_eth_startup_adapter.py \
         test/test_eth_startup_cleanup.cpp \
         test/test_eth_startup_cleanup.py \
@@ -296,6 +298,7 @@ if command -v python3 >/dev/null 2>&1; then
     run_gate "maintenance actual backend source contract" 120 python3 scripts/check-config-repair-backend-contract.py
     run_gate "maintenance actual backend and console" 120 bash test/run-config-repair-backend.sh
     run_gate "native Codex hook payload contract" 120 python3 test/test_codex_setup.py
+    run_gate "bounded hook read exceptions" 120 python3 test/test_hook_read_contract.py
     run_gate "release relevance and publication selectors" 120 scripts/release-relevance.sh --self-test
     run_gate "build and manifest contract tests" 120 scripts/test-build-contracts.sh --build-and-manifest
     run_gate "retained bootloader compatibility and USB consumers" 120 python3 test/test_bootloader_preflight.py
