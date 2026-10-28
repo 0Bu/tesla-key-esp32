@@ -101,6 +101,16 @@ classification, default-argument behavior, live dismissal, no replay retry after
 exception, bounded packet formatting and socket/send errors. It opens no socket and does not
 establish UDP delivery or live-device behavior. The fast boundary selector also runs this adapter.
 
+`eth_startup_cleanup_tests` compiles the complete production Ethernet resource owner, cleanup and
+fatal/fallback callers. Passive SDK doubles retain pending RX even after a successful stop; every
+post-activation result must retain the whole graph. Pre-activation acquisition prefixes, failed
+unregister/glue/uninstall/MAC/PHY/SPI steps and exact release order run through the actual body.
+The controls runner rejects four compiled unsafe variants and restores the passing source.
+The model admits only the reviewed IDF toolchain and W5500 git/path/version. CMake, direct fallback,
+fast boundary and Linux sanitizer paths execute the native matrix; wiring controls reject omissions
+and propagate failures. These are modeled ownership/order checks, not real SDK ABI, cross-core task
+quiescence, physical RX, reboot, heap/stack margin or hardware proof.
+
 `crash_runtime_xtensa_tests` and `crash_runtime_riscv_tests` compile actual `diag_crash.cpp`
 against passive SDK/partition/PSA facades. They cover each boot read failure/exception, hash API
 failure, foreign/short identity, absent/error partition lookup, wrong installed extent, allocation
@@ -156,7 +166,10 @@ behavior claims. Mirrored C++/Python/JS presenters need parity checks, not merel
 The v6.3.0 real-library harness also checks fresh/forced/established/cleared-secret peer admission,
 monotonic session counters, domain request-hash isolation and invalid-domain lookup.
 The crypto harness checks official client/session derivation, HMAC/tag, the library-built request
-metadata against the official TLV vector, AES-GCM, response-counter
+metadata against the official TLV vector, and a real Client request against independently rebuilt
+wire metadata and AES-GCM ciphertext/tag. Changed counter, expiry, epoch, flags and tag controls
+exercise that comparison. The real peer replay window checks zero, duplicates, reordering, the
+63/64-counter boundary and a fresh window after the next request. It also checks response-counter
 AAD (different from request counter), tampered-tag refusal, PEM compatibility and invalid keys.
 Disabling the real PSA RNG must refuse handshake and payload construction without emitting a frame.
 Fingerprint derivation remains covered by a host mirror; the IDF crypto shell is not compiled on
@@ -166,6 +179,11 @@ The native NVS suite exercises actual config-save ordering, blob/mirror set/comm
 real vector-allocation failure after the length probe. Source pins cover every configuration
 read-modify-save refusal and fatal boot configuration validation. These do not simulate NVS durability.
 Presenter parity likewise proves decisions, not physical pixels.
+
+The runtime source gate also pins Charging Manager enrollment, explicit background no-wake
+policies, the cache/local accessor allowlist for status/MQTT/display/LED/MCP consumers, command-owned
+slot cleanup, three-valued sleep inputs and reset/evidence-gated boot activity. Its source mutation
+controls are lexical checks, not a general C++ dataflow proof or physical no-wake acceptance.
 
 SessionInfo continuity checks use the existing published V1 vector for initial and established
 refreshes in both domains. Ordinary direct-API cases reject missing, malformed or different keys
