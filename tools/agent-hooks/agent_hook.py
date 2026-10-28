@@ -21,7 +21,7 @@ import subprocess
 import sys
 from typing import Any
 
-from shell_syntax import active_substitution, literal_segments, shell_stdin_execution
+from shell_read import is_literal_read
 
 
 FILE_READ_TOOLS = {"read", "view_file"}
@@ -485,6 +485,7 @@ def shell_dumps_environment(command: str) -> bool:
 
 
 def shell_dumps_credentials(command: str) -> bool:
+    shell = r"(?:bash|dash|sh|zsh)"
     if any(
         re.search(pattern, command, flags=re.IGNORECASE)
         for pattern in (
@@ -495,7 +496,11 @@ def shell_dumps_credentials(command: str) -> bool:
         )
     ):
         return True
-    if shell_stdin_execution(normalize_ansi_c_quotes(command)):
+    if not is_literal_read(command) and (
+        re.search(rf"\|[^|;\n]*\b{shell}\b", command)
+        or re.search(rf"\b{shell}\b[^;&|\n]*(?:<<<|(?<!<)<(?!<))", command)
+        or re.search(rf"\b{shell}\b(?:\s+-[^;&|\n]*)*\s+-s(?:\s|$)", command)
+    ):
         return True
     for tokens, _ in shell_token_sets(command):
         if not tokens:
@@ -854,53 +859,45 @@ def partition_segment_is_read_only(tokens: list[str]) -> bool:
     return False
 
 
-# The exception is tied to the reviewed, read-only implementation, not just its filename.
-# Review this digest with any validator change before admitting the new implementation.
-PARTITION_VALIDATOR_SHA256 = "b55ad2a0c29d113c68b92512aeb73d5a4cf941dfa75bc182ed1be26a0c78a67c"
+PARTITION_READER_SHA256 = "b55ad2a0c29d113c68b92512aeb73d5a4cf941dfa75bc182ed1be26a0c78a67c"
 
 
-def trusted_partition_validation(command: str, payload: dict[str, Any]) -> bool:
-    ti = tool_input(payload)
-    directories = [value for value in (payload.get("cwd"), ti.get("workdir"), ti.get("cwd"), ti.get("Cwd"))
-                   if value is not None]
-    if not directories:
-        directories = [str(payload_cwd(payload))]
-    if any(not isinstance(value, str) or not value or not Path(value).is_absolute()
-           or Path(value).resolve(strict=False) != HOOK_ROOT for value in directories):
+def canonical_partition_read(command: str, root: Path, cwd: Path) -> bool:
+    """Only the reviewed validator's fixed input-only CLI is a Python read exception."""
+    if cwd != root or any(char in command for char in ";&|<>(){}\n\r$`\\*?[~#"):
         return False
     try:
-        parts, operators = literal_segments(command)
-        if operators or len(parts) != 1 or active_substitution(command):
+        argv = shlex.split(command)
+    except ValueError:
+        return False
+    if len(argv) not in (6, 8) or argv[:6] != [
+        "python3", "-I", "-S", "scripts/check-partition-contract.py", "--csv", "partitions.csv",
+    ]:
+        return False
+    script = root / "scripts/check-partition-contract.py"
+    csv = root / "partitions.csv"
+    try:
+        if script.is_symlink() or script.resolve() != script or csv.is_symlink():
             return False
-        tokens = shlex.split(command, posix=True)
-        if tokens[:2] != ["python3", "scripts/check-partition-contract.py"]:
+        if hashlib.sha256(script.read_bytes()).hexdigest() != PARTITION_READER_SHA256:
             return False
-        options: dict[str, str] = {}
-        args = tokens[2:]
-        if not args or len(args) % 2:
-            return False
-        for index in range(0, len(args), 2):
-            key, value = args[index:index + 2]
-            if key not in {"--csv", "--binary"} or key in options:
+        if len(argv) == 8:
+            if argv[6] != "--binary":
                 return False
-            if not re.fullmatch(r"[A-Za-z0-9_./-]+", value) or value.startswith("-"):
+            binary = root / argv[7]
+            if binary.is_symlink() or not binary.is_file():
                 return False
-            options[key] = value
-        if options.get("--csv") != "partitions.csv":
-            return False
-        script = HOOK_ROOT / "scripts/check-partition-contract.py"
-        csv = HOOK_ROOT / "partitions.csv"
-        if script.is_symlink() or script.resolve() != script or not script.is_file():
-            return False
-        if csv.is_symlink() or not csv.is_file():
-            return False
-        return hashlib.sha256(script.read_bytes()).hexdigest() == PARTITION_VALIDATOR_SHA256
+            resolved = binary.resolve(strict=True)
+            if resolved != binary:
+                return False
+            resolved.relative_to(root)
     except (OSError, ValueError):
         return False
+    return True
 
 
-def shell_writes_partitions(command: str, payload: dict[str, Any] | None = None) -> bool:
-    if payload is not None and trusted_partition_validation(command, payload):
+def shell_writes_partitions(command: str, *, root: Path | None = None, cwd: Path | None = None) -> bool:
+    if root is not None and cwd is not None and canonical_partition_read(command, root, cwd):
         return False
     if any(is_partitions_path(target) for target in patch_targets(command)):
         return True
@@ -936,7 +933,23 @@ def shell_writes_partitions(command: str, payload: dict[str, Any] | None = None)
 def partition_violation(payload: dict[str, Any], *, shell_only: bool = False) -> bool:
     tool = normalized_tool(extract_raw_tool(payload))
     if tool in SHELL_TOOLS:
-        return shell_writes_partitions(command_from(payload), payload)
+        command = command_from(payload)
+        if "scripts/check-partition-contract.py" not in command:
+            return shell_writes_partitions(command)
+        inputs = tool_input(payload)
+        workdirs = [inputs[key] for key in ("workdir", "cwd", "Cwd") if inputs.get(key) not in (None, "")]
+        if any(not isinstance(value, str) for value in workdirs) or len(set(workdirs)) > 1:
+            return shell_writes_partitions(command)
+        cwd = payload_cwd(payload)
+        if workdirs:
+            base = payload.get("cwd")
+            if not isinstance(base, str) or not base:
+                # Without a base, only an absolute tool workdir has unambiguous meaning.
+                if not Path(workdirs[0]).is_absolute():
+                    return shell_writes_partitions(command)
+                base = workdirs[0]
+            cwd = (Path(base) / workdirs[0]).resolve(strict=False)
+        return shell_writes_partitions(command, root=project_root(payload), cwd=cwd)
     if shell_only:
         return False
     if tool in FILE_TOOLS:

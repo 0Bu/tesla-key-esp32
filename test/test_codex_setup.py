@@ -41,18 +41,22 @@ assert run('PreToolUse', tool('Bash', {'command': 'git status --short'})) == {}
 # payloads are inspected only; no GitHub, device, partition or shell command runs.
 literal_reads = [
     "gh run view 40698697009 --json status,conclusion,jobs --jq '{status,conclusion,jobs:[.jobs[]|{name,status,conclusion,startedAt,completedAt}]}'",
-    r"rg -n 'otaCheck|ota/check|set_time|vehicle_data|setInterval|fetch\(|query.*pr|URLSearchParams|ota-channel' main/www/app.js",
-    "rg -n 'check-partition-contract|partition.*protected|PR policy could|require-pr' tools/agent-hooks/codex_hook.py",
-    "rg -n 'partition|def .*table|md5|argparse' scripts/check-firmware-artifacts.py scripts/check-bootloader-compat.py scripts/ci-build-verify.sh",
-    "rg -n 'first\nquery.*pr|sh < input' docs/DEVELOPMENT.md",
-    r'rg -n "literal\|text\{x\}" main/www/app.js',
-    "rg -n '$RG_ARGS|sh < input' scripts/ci-build-verify.sh",
+    r"rg --no-config -n 'otaCheck|ota/check|set_time|vehicle_data|setInterval|fetch\(|query.*pr|URLSearchParams|ota-channel' main/www/app.js",
+    "rg --no-config -n 'check-partition-contract|partition.*protected|PR policy could|require-pr' tools/agent-config/codex_hook.py",
+    "rg --no-config -n 'partition|def .*table|md5|argparse' scripts/check-firmware-artifacts.py scripts/check-bootloader-compat.py scripts/ci-build-verify.sh",
+    "rg --no-config -n 'first\nquery.*pr|sh < input' docs/DEVELOPMENT.md",
+    r'rg --no-config -n "literal\|text\{x\}" main/www/app.js',
+    "rg --no-config -n '$RG_ARGS|sh < input' scripts/ci-build-verify.sh",
 ]
-validator = 'python3 scripts/check-partition-contract.py --csv partitions.csv'
-for command in [*literal_reads, validator, validator + ' --binary .tmp/table.bin']:
+validator = 'python3 -I -S scripts/check-partition-contract.py --csv partitions.csv'
+# The hook checks file ownership; the validator separately checks table bytes.
+for command in [*literal_reads, validator, validator + ' --binary partitions.csv']:
     assert run('PreToolUse', tool('exec_command', {'cmd': command, 'workdir': str(ROOT)})) == {}, command
 
 for command in [
+    validator.replace(' -I -S', ''),
+    "rg -n 'partition|def .*table|md5|argparse' scripts/ci-build-verify.sh",
+    "rg --no-config --hostname-bin sh 'sh < input' file",
     validator + ' --self-test',
     validator + ' --csv partitions.csv',
     validator + ' --binary a.bin --binary b.bin',
@@ -79,10 +83,10 @@ for command in [
     'printf harmless | { sh; }',
     'cat input | stdbuf -oL sh',
     'unknown-wrapper sh -s',
-    "rg ${RG_ARGS} 'sh < input' file",
-    'rg "$RG_ARGS" \'sh < input\' file',
-    "rg --pre* 'sh < input' file",
-    "rg --pre=sh 'sh < input' file",
+    "rg --no-config ${RG_ARGS} 'sh < input' file",
+    'rg --no-config "$RG_ARGS" \'sh < input\' file',
+    "rg --no-config --pre* 'sh < input' file",
+    "rg --no-config --pre=sh 'sh < input' file",
     "bash -c 'cat input | sh'",
     'gh pr create --body-file "${BODY_FILE}"',
     'git push origin "${BRANCH}"',
@@ -103,7 +107,6 @@ for args in [
 # repository's validator or executing any copy of it.
 sys.path.insert(0, str(ROOT / 'tools/agent-hooks'))
 import agent_hook as safety_core
-import shell_syntax
 with tempfile.TemporaryDirectory(prefix='partition-validator-canary-') as directory:
     fixture_root = Path(directory).resolve()
     fixture_script = fixture_root / 'scripts/check-partition-contract.py'
@@ -111,24 +114,15 @@ with tempfile.TemporaryDirectory(prefix='partition-validator-canary-') as direct
     fixture_csv = fixture_root / 'partitions.csv'
     fixture_csv.write_bytes((ROOT / 'partitions.csv').read_bytes())
     fixture_script.write_bytes((ROOT / 'scripts/check-partition-contract.py').read_bytes())
-    payload = {'cwd': str(fixture_root), 'tool_input': {'cmd': validator, 'workdir': str(fixture_root)}}
-    with patch.object(safety_core, 'HOOK_ROOT', fixture_root):
-        assert safety_core.trusted_partition_validation(validator, payload)
-        fixture_script.write_text('print("replacement")\n')
-        assert not safety_core.trusted_partition_validation(validator, payload)
-        fixture_script.unlink()
-        fixture_script.symlink_to(ROOT / 'scripts/check-partition-contract.py')
-        assert not safety_core.trusted_partition_validation(validator, payload)
-        fixture_script.unlink()
-        assert not safety_core.trusted_partition_validation(validator, payload)
-        checks += 4
-
-# Downstream target/body validators must receive the original expansion quotes.
-for source in ['gh pr create --body-file "${BODY_FILE}"', 'git push origin "${BRANCH}"',
-               "gh pr create --body 'line one\nline two | {}'", "rg 'x|query.*pr' file"]:
-    parts, count = shell_syntax.gate_segments(source)
-    assert parts == [source] and count == 1, (source, parts, count)
-    checks += 1
+    assert safety_core.canonical_partition_read(validator, fixture_root, fixture_root)
+    fixture_script.write_text('print("replacement")\n')
+    assert not safety_core.canonical_partition_read(validator, fixture_root, fixture_root)
+    fixture_script.unlink()
+    fixture_script.symlink_to(ROOT / 'scripts/check-partition-contract.py')
+    assert not safety_core.canonical_partition_read(validator, fixture_root, fixture_root)
+    fixture_script.unlink()
+    assert not safety_core.canonical_partition_read(validator, fixture_root, fixture_root)
+    checks += 4
 
 assert denied(run('PreToolUse', tool('Bash', {'command': 'printenv'})))
 assert denied(run('PreToolUse', tool('apply_patch', {'command': '*** Begin Patch\n*** Update File: partitions.csv\n@@\n-old\n+new\n*** End Patch'})))

@@ -261,10 +261,28 @@ gate_sha_matches() {
 #   stripped per segment so the real command starts the line. `cd` is deliberately retained:
 #   gate_bash_actions counts it as another segment and therefore refuses a later guarded action.
 #
-#   Emit NUL-delimited segments with their original quoting intact. Literal quoted punctuation
-#   is data; execution wrappers and active substitutions retain conservative scanning.
+#   Deliberately textual: it can over-split inside quotes (`git commit -m "a && b"`) and therefore
+#   conservatively classify guarded-looking quoted data. Keep publish/merge actions in separate
+#   tool calls when a command has unusual quoted shell syntax.
 gate_bash_segments() {
-  python3 "$(dirname "${BASH_SOURCE[0]}")/shell_syntax.py" segments "$1"
+  printf '%s' "$1" \
+    | tr ';|&(){}' '\n\n\n\n\n\n\n' \
+    | sed -E '
+        s/^[[:space:]]+//
+        :again
+        s/^(then|do|else)[[:space:]]+//
+        t again
+        s/^!+[[:space:]]*//
+        t again
+        s/^command([[:space:]]+--)?[[:space:]]+//
+        t again
+        /^env[[:space:]]+([^[:space:]]+[[:space:]]+)*(-S|--split-string)(=|[[:space:]]|$)/b keep_env
+        s/^env([[:space:]]+(-[i0]|--ignore-environment|--null|--|(-u|-C|-P|--unset|--chdir)[[:space:]]+[^[:space:]]+|--(unset|chdir)=[^[:space:]]+|[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*))*[[:space:]]+//
+        t again
+        :keep_env
+        s/^([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)+//
+        t again
+      '
 }
 
 # gate_action_env_name_is_unsafe <name>
@@ -667,21 +685,22 @@ gate_bash_actions() {
   local raw="$1" normalized_raw segments segment payload git_rest segment_count shell_unsafe=0
   local action_env_unsafe=0 emitted_create emitted_merge emitted_push lex_kind raw_lex_kind scan_raw
   local dynamic_scan git_command alias_kind gh_rest gh_command line_continuation
+  # Only proven literal read argv may contain inert action names. Unknown forms continue through
+  # every conservative wrapper, substitution and publication check below.
+  if printf '%s' "$raw" | python3 "$(dirname "${BASH_SOURCE[0]}")/shell_read.py" 2>/dev/null; then
+    return 0
+  fi
   # Remove shell line continuations before classifying the command. Bash 3.2 and Bash 5.x assign
   # opposite meanings to the one- vs two-backslash inline patterns here. Holding the exact bytes
   # in a quoted variable avoids that pattern-parser drift without broadening newline handling.
   line_continuation=$'\\\n'
   normalized_raw="${raw//"$line_continuation"/}"
   [ "$normalized_raw" = "$raw" ] || shell_unsafe=1
-  local syntax="$(dirname "${BASH_SOURCE[0]}")/shell_syntax.py"
-  if ! segments="$(python3 "$syntax" first "$normalized_raw")" \
-      || ! segment_count="$(python3 "$syntax" count "$normalized_raw")"; then
-    printf 'push\t%s\ncreate\t%s\nmerge\t%s\n' \
-      '__GATE_UNSAFE_SHELL_CONTEXT__' '__GATE_UNSAFE_SHELL_CONTEXT__' '__GATE_UNSAFE_SHELL_CONTEXT__'
-    return 0
-  fi
+  segments="$(gate_bash_segments "$normalized_raw")"
   # Count raw segments before wrapper/assignment normalisation. A standalone `FOO=x; git push`
   # is still two commands even though the first segment normalises to an empty string.
+  segment_count="$(printf '%s' "$normalized_raw" | tr ';|&(){}' '\n\n\n\n\n\n\n' \
+    | awk 'NF { n++ } END { print n+0 }')"
   [ "$segment_count" -eq 1 ] || shell_unsafe=1
   gate_action_env_context_is_unsafe "$normalized_raw" && action_env_unsafe=1
   case "$normalized_raw" in *'>'*|*'<'*) shell_unsafe=1 ;; esac
@@ -800,7 +819,7 @@ gate_bash_actions() {
     return 0
   fi
 
-  while IFS= read -r -d '' segment; do
+  while IFS= read -r segment || [ -n "$segment" ]; do
     emitted_create=0; emitted_merge=0; emitted_push=0
     # A path-qualified executable may be a different binary/wrapper from the `git`/`gh` whose
     # repository and credentials the hook validates. Recognise the guarded intent, but never treat
@@ -1001,7 +1020,7 @@ gate_bash_actions() {
         | grep -Eq 'git[[:space:]]+([^[:space:]]+[[:space:]]+)*push([[:space:]]|$)'; then
       printf 'push\t%s\n' '__GATE_UNSAFE_SHELL_CONTEXT__'
     fi
-  done < <(gate_bash_segments "$normalized_raw")
+  done <<< "$segments"
 }
 
 # gate_pr_create_body <arguments-after-gh-pr-create> <execution-cwd>

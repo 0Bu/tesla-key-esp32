@@ -11,7 +11,7 @@ import shlex
 import sys
 from typing import Any
 
-from shell_syntax import shell_stdin_execution
+from shell_read import is_literal_read
 
 
 ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=(.*)$", re.DOTALL)
@@ -377,12 +377,19 @@ def parse_gh(tokens: list[str], index: int, inherited: dict[str, str]) -> dict[s
 
 
 def shell_executes_stdin(source: str) -> bool:
-    return shell_stdin_execution(source)
+    shell = r"(?:bash|dash|sh|zsh)"
+    if re.search(rf"\|[^|;\n]*\b{shell}\b", source):
+        return True
+    if re.search(rf"\b{shell}\b[^;&|\n]*(?:<<<|(?<!<)<(?!<))", source):
+        return True
+    return re.search(rf"\b{shell}\b(?:\s+-[^;&|\n]*)*\s+-s(?:\s|$)", source) is not None
 
 
 def find_merge(source: str, depth: int = 0) -> dict[str, str] | None:
     if depth > 5:
         return {"action": "shell merge", "selector": "", "repo": "", "host": "", "error": "shell nesting exceeds parser limit"}
+    if is_literal_read(source):
+        return None
     source = normalize_shell_source(source)
     graphql_action = next(
         (
