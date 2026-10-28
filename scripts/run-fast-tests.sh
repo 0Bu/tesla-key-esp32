@@ -79,6 +79,11 @@ run_boundary() {
   "$CXX" -std=c++17 -Wall -Wextra -Werror -Imain -I"$BUILD_DIR" \
     -o "$BUILD_DIR/syslog_runtime_tests" test/test_syslog_runtime.cpp
   "$BUILD_DIR/syslog_runtime_tests"
+  python3 test/generate_eth_startup_adapter.py "$BUILD_DIR/eth_startup_adapter.generated.hpp"
+  "$CXX" -std=c++17 -Wall -Wextra -Werror -I"$BUILD_DIR" \
+    -o "$BUILD_DIR/eth_startup_cleanup_tests" test/test_eth_startup_cleanup.cpp
+  "$BUILD_DIR/eth_startup_cleanup_tests"
+  python3 test/test_eth_startup_cleanup.py
   for crash_arch in xtensa riscv; do
     crash_flags=()
     if [ "$crash_arch" = riscv ]; then crash_flags=(-DHOST_CRASH_RISCV=1); fi

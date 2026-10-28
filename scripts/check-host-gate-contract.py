@@ -125,7 +125,7 @@ esac
 @lru_cache(maxsize=8)
 def probe_sanitizer_invocations(source: str, watched_target: str = "heap_supervisor_tests") -> None:
     """Execute shell control flow with passive tools, not a second sanitizer run."""
-    require(watched_target in ("heap_supervisor_tests", "stack_sample_tests"), "unknown sanitizer flow target")
+    require(watched_target in ("heap_supervisor_tests", "stack_sample_tests", "eth_startup_cleanup_tests"), "unknown sanitizer flow target")
     with tempfile.TemporaryDirectory(prefix="sanitizer-flow-") as directory:
         work = Path(directory)
         scripts, binaries, scratch = work / "scripts", work / "bin", work / "tmp"
@@ -154,7 +154,7 @@ if name == "python3":
 elif name == "cmake" and "-B" in args:
     build = Path(args[args.index("-B") + 1]); build.mkdir(parents=True, exist_ok=True)
     for target in ("logic_tests", "nvs_storage_tests", "runtime_boundary_tests", "clock_runtime_tests",
-                   "config_commit_tests", "syslog_runtime_tests", "crash_runtime_xtensa_tests", "crash_runtime_riscv_tests", "heap_supervisor_tests", "stack_sample_tests"):
+                   "config_commit_tests", "syslog_runtime_tests", "eth_startup_cleanup_tests", "crash_runtime_xtensa_tests", "crash_runtime_riscv_tests", "heap_supervisor_tests", "stack_sample_tests"):
         output = build / target
         if target == os.environ["TESLA_FLOW_WATCHED_TARGET"]:
             output.write_text(HEAP_EXECUTABLE_PROGRAM)
@@ -223,7 +223,8 @@ def probe_heap_suite_invocations(run_mock: str, fast: str, watched_target: str =
 
 @lru_cache(maxsize=8)
 def probe_heap_suite_shells(fallback: str, fast: str, watched_target: str = "heap_supervisor_tests") -> None:
-    require(watched_target in ("heap_supervisor_tests", "stack_sample_tests"), "unknown native flow target")
+    require(watched_target in ("heap_supervisor_tests", "stack_sample_tests", "eth_startup_cleanup_tests"), "unknown native flow target")
+    family = "Ethernet" if watched_target == "eth_startup_cleanup_tests" else "Heap"
     # Cache only the complete executed texts. Later unrelated mock gates cannot change an
     # earlier fallback effect; every change to that prefix or the full fast script reruns it.
     for label, source, arguments in (("fallback", fallback, []), ("fast", fast, ["--boundary"])):
@@ -239,12 +240,13 @@ def note(value):
     with open(os.environ['TESLA_HEAP_FLOW_TRACE'],'a') as out: out.write(json.dumps(value)+'\\n')
 args=sys.argv[1:]
 if Path(sys.argv[0]).name == 'python3':
-    if args and args[0] == 'test/generate_heap_supervisor_adapter.py' and os.environ['TESLA_FLOW_WATCHED_TARGET']=='heap_supervisor_tests': note(['generate'])
+    generators={'heap_supervisor_tests':'test/generate_heap_supervisor_adapter.py','eth_startup_cleanup_tests':'test/generate_eth_startup_adapter.py'}
+    if args and args[0] == generators.get(os.environ['TESLA_FLOW_WATCHED_TARGET']): note(['generate'])
     if args == ['__heap_flow_after__']: note(['after'])
 elif '-o' in args:
     output=Path(args[args.index('-o')+1]); output.parent.mkdir(parents=True,exist_ok=True)
     if output.name == os.environ['TESLA_FLOW_WATCHED_TARGET']:
-        required=({'test/test_heap_supervisor.cpp','main/safe_mode.cpp','main/heap_trend.cpp','main/stack_watch.cpp'} if os.environ['TESLA_FLOW_WATCHED_TARGET']=='heap_supervisor_tests' else {'test/test_stack_sample.cpp','-pthread'})
+        required={'heap_supervisor_tests':{'test/test_heap_supervisor.cpp','main/safe_mode.cpp','main/heap_trend.cpp','main/stack_watch.cpp'},'stack_sample_tests':{'test/test_stack_sample.cpp','-pthread'},'eth_startup_cleanup_tests':{'test/test_eth_startup_cleanup.cpp'}}[os.environ['TESLA_FLOW_WATCHED_TARGET']]
         if not required <= set(args): raise SystemExit(38)
         note(['compile'])
         program="#!"+sys.executable+"\\nimport json,os\\nwith open(os.environ['TESLA_HEAP_FLOW_TRACE'],'a') as out: out.write(json.dumps(['run'])+'\\\\n')\\nraise SystemExit(37 if os.environ['TESLA_HEAP_FLOW_FAIL']=='1' else 0)\\n"
@@ -266,11 +268,11 @@ elif '-o' in args:
                                             env={**env, "TESLA_HEAP_FLOW_FAIL": str(int(fail))},
                                             capture_output=True, timeout=10)
                 except subprocess.TimeoutExpired as exc:
-                    raise ContractError("Heap " + label + " invocation flow timed out") from exc
+                    raise ContractError(family + " " + label + " invocation flow timed out") from exc
                 calls = [json.loads(line) for line in trace.read_text().splitlines()] if trace.exists() else []
-                expected = ([["generate"]] if watched_target == "heap_supervisor_tests" else []) + [["compile"], ["run"]] + ([] if fail else [["after"]])
+                expected = ([["generate"]] if watched_target != "stack_sample_tests" else []) + [["compile"], ["run"]] + ([] if fail else [["after"]])
                 require(result.returncode == (37 if fail else 0) and calls == expected,
-                        "Heap " + label + " invocation flow must generate, compile and execute once and propagate failure")
+                        family + " " + label + " invocation flow must generate, compile and execute once and propagate failure")
 
 
 # These isolated passive fixtures depend only on the complete shell text. Reuse a successful
@@ -322,6 +324,7 @@ if sys.argv[1:2] != ['-c']:
                        TESLA_BROWSER_FLOW_TRACE=str(trace))
             prefix = ["tools/agent-hooks/run_with_timeout.py", "120"]
             expected = [prefix + ["python3", "test/test_f137_host.py", "--source", ".", "--controls", "--execute-controlled-host-only"],
+                        prefix + ["python3", "test/test_eth_startup_cleanup.py"],
                         prefix + ["scripts/release-relevance.sh", "--self-test"],
                         prefix + ["scripts/test-build-contracts.sh", "--build-and-manifest"],
                         prefix + ["python3", "test/test_dependency_sources.py"],
@@ -554,6 +557,9 @@ def validate(root: Path) -> None:
     for path in (
         "test/tesla_protocol_vectors.test.mjs",
         "test/test_runtime_boundary_contract.py",
+        "test/generate_eth_startup_adapter.py",
+        "test/test_eth_startup_cleanup.cpp",
+        "test/test_eth_startup_cleanup.py",
         "test/test_stack_context_hooks.py",
         "test/stack_context_hook_owners.json",
         "test/generate_identity_recovery_adapter.py",
@@ -799,8 +805,8 @@ add_test(NAME stack_sample_tests COMMAND stack_sample_tests)"""
                                                '-DCMAKE_C_COMPILER="$CC"',
                                                '-DCMAKE_CXX_COMPILER="$CXX"'))
                 for block in configure_blocks) and
-            '--target logic_tests nvs_storage_tests runtime_boundary_tests clock_runtime_tests config_commit_tests syslog_runtime_tests crash_runtime_xtensa_tests crash_runtime_riscv_tests heap_supervisor_tests stack_sample_tests' in sanitizers and
-            'for target in logic_tests nvs_storage_tests runtime_boundary_tests clock_runtime_tests config_commit_tests syslog_runtime_tests crash_runtime_xtensa_tests crash_runtime_riscv_tests heap_supervisor_tests stack_sample_tests; do' in sanitizers,
+            '--target logic_tests nvs_storage_tests runtime_boundary_tests clock_runtime_tests config_commit_tests syslog_runtime_tests eth_startup_cleanup_tests crash_runtime_xtensa_tests crash_runtime_riscv_tests heap_supervisor_tests stack_sample_tests' in sanitizers and
+            'for target in logic_tests nvs_storage_tests runtime_boundary_tests clock_runtime_tests config_commit_tests syslog_runtime_tests eth_startup_cleanup_tests crash_runtime_xtensa_tests crash_runtime_riscv_tests heap_supervisor_tests stack_sample_tests; do' in sanitizers,
             "config/SDK shell C and C++ sanitizer instrumentation/execution is incomplete")
     require("add_executable(syslog_runtime_tests test_syslog_runtime.cpp" in cmake and
             "COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/generate_syslog_adapters.py" in cmake and
@@ -815,6 +821,47 @@ add_test(NAME stack_sample_tests COMMAND stack_sample_tests)"""
             'python3 test/generate_syslog_adapters.py' in fast and
             'test/test_syslog_runtime.cpp' in fast and '"$BUILD_DIR/syslog_runtime_tests"' in fast,
             "fast boundary checksum/syslog adapter wiring is incomplete")
+    require("add_executable(eth_startup_cleanup_tests test_eth_startup_cleanup.cpp" in cmake and
+            "COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/generate_eth_startup_adapter.py" in cmake and
+            "test_runtime_boundary_contract.py ../main/net.cpp" in cmake and
+            "add_test(NAME eth_startup_cleanup_tests COMMAND eth_startup_cleanup_tests)" in cmake and
+            "add_test(NAME eth_startup_cleanup_controls" in cmake and
+            "${CMAKE_CURRENT_SOURCE_DIR}/test_eth_startup_cleanup.py)" in cmake,
+            "actual Ethernet cleanup target/generator/CTest controls are incomplete")
+    eth_output = "OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/eth_startup_adapter.generated.hpp"
+    eth_at = cmake_code.find(eth_output)
+    eth_begin = cmake_code.rfind("if(Python3_Interpreter_FOUND)", 0, eth_at)
+    eth_end = cmake_code.find("endif()", eth_at)
+    require(eth_at >= 0 and eth_begin >= 0 and eth_end > eth_at and cmake_code.count(eth_output) == 1,
+            "actual Ethernet cleanup adapter must have one generated producer")
+    eth_group = cmake_code[eth_begin:eth_end]
+    require(re.findall(r"\b(?:if|elseif|else|function|macro|return|foreach|while)\s*\(", eth_group) == ["if("]
+            and "DISABLED" not in eth_group,
+            "actual Ethernet cleanup CTest group must remain enabled under only Python availability")
+    eth_generator = (root / "test/generate_eth_startup_adapter.py").read_text()
+    eth_test = (root / "test/test_eth_startup_cleanup.cpp").read_text()
+    eth_controls = (root / "test/test_eth_startup_cleanup.py").read_text()
+    require('("eth_cleanup_startup", "eth_startup_fallback", "eth_startup_fatal")' in eth_generator and
+            'body_in(lookup, name)' in eth_generator and 'parts.append(prefix + body)' in eth_generator and
+            'ROOT / "main/net.cpp"' in eth_generator and 'verify_model_pins()' in eth_generator and
+            '#include "eth_startup_adapter.generated.hpp"' in eth_test and
+            all("    " + name + "();" in eth_test for name in (
+                "activated_graph_is_retained", "passive_acquisition_prefixes_unwind",
+                "passive_failures_retain_the_dependent_tail", "actual_callers_park_on_retention")),
+            "actual Ethernet cleanup body extraction or native matrix is missing")
+    require(all(label in eth_controls for label in (
+                "activated-quarantine-omitted", "old-netif-before-driver-order",
+                "uninstall-failure-continues", "mac-failure-continues", "restored-positive")) and
+            "result.returncode != 42" in eth_controls and "compiled.returncode != 0" in eth_controls,
+            "actual Ethernet cleanup executable safety controls are incomplete")
+    for entry, label in ((run_mock, "cmake-less fallback"), (fast, "fast boundary")):
+        require("python3 test/generate_eth_startup_adapter.py" in entry and
+                "test/test_eth_startup_cleanup.cpp" in entry and
+                '"$BUILD_DIR/eth_startup_cleanup_tests"' in entry,
+                label + " omits the actual Ethernet cleanup shell")
+    require('run_gate "Ethernet actual cleanup safety controls" 120 python3 test/test_eth_startup_cleanup.py' in run_mock and
+            "python3 test/test_eth_startup_cleanup.py" in fast,
+            "actual Ethernet cleanup executable safety controls are missing")
     require('foreach(crash_arch IN ITEMS xtensa riscv)' in cmake and
             'add_executable(${crash_target} test_crash_runtime.cpp)' in cmake and
             'add_test(NAME ${crash_target} COMMAND ${crash_target})' in cmake and
@@ -898,6 +945,8 @@ add_test(NAME stack_sample_tests COMMAND stack_sample_tests)"""
     probe_heap_suite_invocations(run_mock, fast)
     probe_heap_suite_invocations(run_mock, fast, "stack_sample_tests")
     probe_sanitizer_invocations(sanitizers, "stack_sample_tests")
+    probe_heap_suite_invocations(run_mock, fast, "eth_startup_cleanup_tests")
+    probe_sanitizer_invocations(sanitizers, "eth_startup_cleanup_tests")
     f137_helper = root / "test/test_f137_host_wiring.py"
     require(f137_helper.is_file(), "F137 host wiring helper missing")
     f137_text = f137_helper.read_text()
@@ -1002,15 +1051,36 @@ def self_test(root: Path) -> None:
          "cmake-less fallback omits the actual crash"),
         ("scripts/run-fast-tests.sh", "test/test_crash_runtime.cpp", "missing_crash.cpp",
          "fast boundary omits the actual crash"),
-        ("scripts/run-sanitizer-tests.sh", "syslog_runtime_tests crash_runtime_xtensa_tests crash_runtime_riscv_tests heap_supervisor_tests stack_sample_tests; do",
+        ("scripts/run-sanitizer-tests.sh", "syslog_runtime_tests eth_startup_cleanup_tests crash_runtime_xtensa_tests crash_runtime_riscv_tests heap_supervisor_tests stack_sample_tests; do",
          "syslog_runtime_tests heap_supervisor_tests; do", "config/SDK shell C and C++ sanitizer"),
         ("test/CMakeLists.txt", "add_test(NAME syslog_runtime_tests COMMAND syslog_runtime_tests)",
          "# removed syslog CTest", "syslog runtime target/source"),
+        ("test/CMakeLists.txt", "add_test(NAME eth_startup_cleanup_tests COMMAND eth_startup_cleanup_tests)",
+         "# removed Ethernet CTest", "actual Ethernet cleanup target/generator/CTest"),
+        ("test/CMakeLists.txt", "COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/generate_eth_startup_adapter.py",
+         "COMMAND missing_eth_generator", "actual Ethernet cleanup target/generator/CTest"),
+        ("test/CMakeLists.txt", "set_tests_properties(eth_startup_cleanup_controls PROPERTIES TIMEOUT 120)",
+         "set_tests_properties(eth_startup_cleanup_controls PROPERTIES TIMEOUT 120 DISABLED TRUE)",
+         "actual Ethernet cleanup CTest group"),
+        ("test/test_eth_startup_cleanup.cpp", "    activated_graph_is_retained();",
+         "    // omitted activated matrix", "actual Ethernet cleanup body extraction"),
+        ("test/generate_eth_startup_adapter.py", "parts.append(prefix + body)",
+         "parts.append(prefix + '{}')", "actual Ethernet cleanup body extraction"),
+        ("test/test_eth_startup_cleanup.py", '"old-netif-before-driver-order"',
+         '"missing-order-control"', "actual Ethernet cleanup executable safety controls"),
+        ("scripts/run-mock-tests.sh", 'run_gate "execute Ethernet cleanup tests" 120 "$BUILD_DIR/eth_startup_cleanup_tests"',
+         "# omitted Ethernet fallback", "Ethernet fallback invocation flow"),
+        ("scripts/run-fast-tests.sh", '  "$BUILD_DIR/eth_startup_cleanup_tests"\n',
+         "  : # omitted Ethernet fast binary\n", "Ethernet fast invocation flow"),
+        ("scripts/run-sanitizer-tests.sh", "syslog_runtime_tests eth_startup_cleanup_tests crash_runtime_xtensa_tests",
+         "syslog_runtime_tests crash_runtime_xtensa_tests", "config/SDK shell C and C++ sanitizer"),
+        ("scripts/run-mock-tests.sh", '        test/test_eth_startup_cleanup.cpp \\\n',
+         "", "strict inventory omits test/test_eth_startup_cleanup.cpp"),
         ("test/CMakeLists.txt", "COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/generate_syslog_adapters.py",
          "COMMAND missing_syslog_generator", "syslog runtime target/source"),
         ("scripts/run-mock-tests.sh", 'run_gate "execute syslog shell tests" 120 "$BUILD_DIR/syslog_runtime_tests"',
          "# removed syslog fallback", "cmake-less fallback omits the actual syslog"),
-        ("scripts/run-sanitizer-tests.sh", "config_commit_tests syslog_runtime_tests crash_runtime_xtensa_tests crash_runtime_riscv_tests heap_supervisor_tests stack_sample_tests; do",
+        ("scripts/run-sanitizer-tests.sh", "config_commit_tests syslog_runtime_tests eth_startup_cleanup_tests crash_runtime_xtensa_tests crash_runtime_riscv_tests heap_supervisor_tests stack_sample_tests; do",
          "config_commit_tests heap_supervisor_tests; do", "config/SDK shell C and C++ sanitizer"),
         ("scripts/run-fast-tests.sh", "test/test_coredump_hash.cpp", "missing_hash.cpp",
          "fast boundary checksum/syslog"),
@@ -1350,6 +1420,9 @@ def self_test(root: Path) -> None:
                 "test/test_mqtt_json_publish.cpp",
                 "test/run-cjson-oom-tests.sh",
                 "test/test_runtime_boundary_contract.py",
+                "test/generate_eth_startup_adapter.py",
+                "test/test_eth_startup_cleanup.cpp",
+                "test/test_eth_startup_cleanup.py",
             ):
                 destination = fixture / path
                 destination.parent.mkdir(parents=True, exist_ok=True)

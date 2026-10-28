@@ -167,6 +167,25 @@ if(Python3_Interpreter_FOUND)
     add_test(NAME syslog_runtime_tests COMMAND syslog_runtime_tests)
 endif()
 
+# Actual Ethernet startup ownership with passive SDK operations, plus executable safety controls.
+if(Python3_Interpreter_FOUND)
+    # One generated header, one native consumer: parallel builds cannot rerun its producer.
+    add_custom_command(
+        OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/eth_startup_adapter.generated.hpp
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/generate_eth_startup_adapter.py
+                ${CMAKE_CURRENT_BINARY_DIR}/eth_startup_adapter.generated.hpp
+        DEPENDS generate_eth_startup_adapter.py test_runtime_boundary_contract.py ../main/net.cpp
+                ../esp-idf-toolchain.txt ../main/idf_component.yml
+        VERBATIM)
+    add_executable(eth_startup_cleanup_tests test_eth_startup_cleanup.cpp
+                   ${CMAKE_CURRENT_BINARY_DIR}/eth_startup_adapter.generated.hpp)
+    target_include_directories(eth_startup_cleanup_tests PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+    add_test(NAME eth_startup_cleanup_tests COMMAND eth_startup_cleanup_tests)
+    add_test(NAME eth_startup_cleanup_controls
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_eth_startup_cleanup.py)
+    set_tests_properties(eth_startup_cleanup_controls PROPERTIES TIMEOUT 120)
+endif()
+
 # Whole actual task bodies compile in private temporary fixtures at test execution time.
 # Every run regenerates from current source; this is not an SDK/registration/resource test.
 if(Python3_Interpreter_FOUND)

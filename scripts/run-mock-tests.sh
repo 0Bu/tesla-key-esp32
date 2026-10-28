@@ -71,6 +71,9 @@ if [ "$REQUIRE_ALL" = 1 ]; then
         test/test_log_origin_contract.py \
         test/test_diagnostic_export_guidance.py \
         test/test_runtime_boundary_contract.py \
+        test/generate_eth_startup_adapter.py \
+        test/test_eth_startup_cleanup.cpp \
+        test/test_eth_startup_cleanup.py \
         test/test_stack_context_hooks.py \
         test/stack_context_hook_owners.json \
         test/test_f137_host.py \
@@ -256,6 +259,11 @@ else
     run_gate "compile syslog shell tests" 120 "$CXX" -std=c++17 -Wall -Wextra -Werror \
         -Imain -I"$BUILD_DIR" -o "$BUILD_DIR/syslog_runtime_tests" test/test_syslog_runtime.cpp
     run_gate "execute syslog shell tests" 120 "$BUILD_DIR/syslog_runtime_tests"
+    run_gate "generate Ethernet cleanup adapter" 120 python3 test/generate_eth_startup_adapter.py \
+        "$BUILD_DIR/eth_startup_adapter.generated.hpp"
+    run_gate "compile Ethernet cleanup tests" 120 "$CXX" -std=c++17 -Wall -Wextra -Werror \
+        -I"$BUILD_DIR" -o "$BUILD_DIR/eth_startup_cleanup_tests" test/test_eth_startup_cleanup.cpp
+    run_gate "execute Ethernet cleanup tests" 120 "$BUILD_DIR/eth_startup_cleanup_tests"
     for crash_arch in xtensa riscv; do
         crash_flags=()
         if [ "$crash_arch" = riscv ]; then crash_flags=(-DHOST_CRASH_RISCV=1); fi
@@ -277,6 +285,7 @@ if command -v python3 >/dev/null 2>&1; then
     run_gate "diagnostic export guidance" 120 python3 test/test_diagnostic_export_guidance.py
     run_gate "stack context owner hooks" 120 python3 test/test_stack_context_hooks.py . --self-test
     run_gate "runtime C-boundary inventory" 120 python3 test/test_runtime_boundary_contract.py
+    run_gate "Ethernet actual cleanup safety controls" 120 python3 test/test_eth_startup_cleanup.py
     run_gate "MQTT/WDT and network iteration bodies" 120 python3 test/test_f137_host.py --source . --controls --execute-controlled-host-only
     run_gate "coherent charge presentation snapshot" 120 python3 test/test_charge_presentation.py
     run_gate "contextual charging command outcomes" 120 python3 test/test_command_outcomes.py
