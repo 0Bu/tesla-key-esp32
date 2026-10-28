@@ -14,7 +14,8 @@
 #     was actually completed for the exact head being stamped.
 #   * Stamping, READY and --auto-merge require: local HEAD == PR head, a successful `build` check
 #     and every other check green on that head (a lone failing current-head-records counts as
-#     records pending; after stamping a new run of it must pass), the PR reporting MERGEABLE, and an
+#     records pending; after stamping a new run of it must pass, or its latest run when the body
+#     did not change), the PR reporting MERGEABLE, and an
 #     attestation for every gate the PR needs (relevance comes from the same GitHub-side
 #     changed-file list the merge hook uses).
 #
@@ -152,6 +153,11 @@ get_pr_head_sha() {
 get_pr_head_ref() {
   local pr="$1"
   gh pr view "$pr" --json headRefName -q .headRefName
+}
+
+get_pr_body() {
+  local pr="$1"
+  gh pr view "$pr" --json body -q .body
 }
 
 watch_pr_checks() {
@@ -539,6 +545,27 @@ wait_for_records_check() {
   return 2
 }
 
+# A stamp that leaves the PR body unchanged fires no `edited` event, so no new records-check run
+# starts. The latest run (an unfinished one first, as check_rollup picks it) belongs to the last
+# body edit, which already held these records; it must have passed. Polls while it has not
+# completed and fails closed when no run appears. A third-party edit whose run is not listed yet
+# can slip past this local view; the required server-side check still validates the final body.
+wait_for_latest_records_check() {
+  local pr="$1" tries=0 rows name status conclusion
+  while [ "$tries" -lt 36 ]; do
+    rows="$(check_rollup "$pr" 2>/dev/null || true)"
+    while IFS='|' read -r name status conclusion; do
+      [ "$name" = "$RECORDS_CHECK" ] || continue
+      [ "$status" = COMPLETED ] || break
+      [ "$conclusion" = SUCCESS ]
+      return
+    done <<< "$rows"
+    sleep_seconds 10
+    tries=$((tries + 1))
+  done
+  return 2
+}
+
 # ─── main flow ────────────────────────────────────────────────────────────────────────────────
 run_heal() {
   local iteration=1 head_sha local_sha branch pr_ref failed_info duration start_time
@@ -744,19 +771,33 @@ run_heal() {
       echo "ci-heal: PR head moved before stamping; nothing was stamped. Re-run." >&2
       return 1
     fi
-    local records_rows records_before
+    local records_rows records_before body_before body_after
     if ! records_rows="$(records_check_runs "$target_pr")"; then
       echo "ci-heal: cannot read $RECORDS_CHECK runs before stamping; nothing was stamped." >&2
       return 1
     fi
     records_before="$(printf '%s\n' "$records_rows" | cut -d'|' -f1)"
+    if ! body_before="$(get_pr_body "$target_pr")"; then
+      echo "ci-heal: cannot read the PR body before stamping; nothing was stamped." >&2
+      return 1
+    fi
     if ! stamp_attested_gates "$target_pr" "$final_head" "${gate_list[@]}"; then
       echo "ci-heal: stamping the merge gate records failed; not ready." >&2
       return 1
     fi
-    # The body edit re-runs pr-policy. Readiness needs that new records-check run to pass.
+    if ! body_after="$(get_pr_body "$target_pr")"; then
+      echo "ci-heal: cannot read the PR body after stamping; not ready." >&2
+      return 1
+    fi
+    # A changed body re-runs pr-policy, and readiness needs that new records-check run to pass. An
+    # unchanged body (the records were already current) starts no run; its latest run must pass.
     rc=0
-    wait_for_records_check "$target_pr" "$records_before" || rc=$?
+    if [ "$body_after" = "$body_before" ]; then
+      echo "ci-heal: the records were already current; checking the latest $RECORDS_CHECK run."
+      wait_for_latest_records_check "$target_pr" || rc=$?
+    else
+      wait_for_records_check "$target_pr" "$records_before" || rc=$?
+    fi
     if [ "$rc" -ne 0 ]; then
       echo "ci-heal: $RECORDS_CHECK did not pass for $final_head after stamping; not ready." >&2
       echo "ci-heal: inspect 'gh pr checks $target_pr'." >&2
@@ -951,6 +992,9 @@ self_test() {
     STUB_RECORDS_AFTER=SUCCESS; STUB_RECORDS_READ_FAIL=0
     STUB_BUILD=SUCCESS; STUB_ROLLUP_EXTRA=""; STUB_ROLLUP_AFTER_EXTRA=""; STUB_LAST_WATCH=""
     STUB_STAMP_FAIL=0; STUB_MERGE_FAIL=0; STUB_PUSH_FAIL=0
+    STUB_BODY_UNCHANGED=0; STUB_BODY_READ_FAIL=0; STUB_BODY_READ_FAIL_AFTER=0
+    STUB_RECORDS_ABSENT=0; STUB_RECORDS_PENDING_POLLS=0
+    STUB_POLL_COUNTER="$T/poll-counter"; echo 0 > "$STUB_POLL_COUNTER"
     git_local_head()     { printf '%s' "$STUB_LOCAL"; }
     git_current_branch() { printf '%s' "$STUB_BRANCH"; }
     git_tree_dirty()     { [ "$STUB_DIRTY" = 1 ]; }
@@ -981,12 +1025,20 @@ self_test() {
     fetch_failed_runs()       { printf '%s' "$STUB_FAILED"; }
     run_local_verifications() { echo "verify $1" >> "$LOG_VERIFY"; [ "$STUB_REPRO" != fail ]; }
     gate_pr_changed_files()   { [ "$STUB_FILES_FAIL" != 1 ] && printf '%s' "$STUB_FILES"; }
-    # The pre-existing records-check run failed; every stamp (PR-body edit) adds one new run.
+    # Every stamp changes the PR body unless STUB_BODY_UNCHANGED is set (the records were already
+    # current); only a changed body fires `edited`.
+    get_pr_body() {
+      [ "$STUB_BODY_READ_FAIL" != 1 ] || return 1
+      if [ "$STUB_BODY_READ_FAIL_AFTER" = 1 ] && [ -s "$LOG_STAMPS" ]; then return 1; fi
+      if [ "$STUB_BODY_UNCHANGED" = 1 ]; then printf 'body'; else printf 'body-%s' "$(grep -c . "$LOG_STAMPS" || true)"; fi
+    }
+    # The pre-existing records-check run failed; every body-changing stamp adds one new run.
     records_check_runs() {
       local n i=1
       if [ "$STUB_RECORDS_READ_FAIL" = 1 ]; then return 1; fi
       printf 'old|COMPLETED|FAILURE\n'
       n="$(grep -c . "$LOG_STAMPS" || true)"
+      if [ "$STUB_BODY_UNCHANGED" = 1 ]; then n=0; fi
       while [ "$i" -le "${n:-0}" ]; do
         printf 'run-%s|COMPLETED|%s\n' "$i" "$STUB_RECORDS_AFTER"
         i=$((i + 1))
@@ -1012,6 +1064,14 @@ self_test() {
       if [ -n "$STUB_ROLLUP_EXTRA" ]; then printf '%s\n' "$STUB_ROLLUP_EXTRA"; fi
       if [ -s "$LOG_STAMPS" ] && [ -n "$STUB_ROLLUP_AFTER_EXTRA" ]; then
         printf '%s\n' "$STUB_ROLLUP_AFTER_EXTRA"
+      fi
+      # After a stamp the records check can be missing, or still running for the first N reads
+      if [ -s "$LOG_STAMPS" ] && [ "$STUB_RECORDS_ABSENT" = 1 ]; then return 0; fi
+      if [ -s "$LOG_STAMPS" ] && [ "$STUB_RECORDS_PENDING_POLLS" -gt 0 ]; then
+        local polls; polls="$(cat "$STUB_POLL_COUNTER")"; echo $((polls + 1)) > "$STUB_POLL_COUNTER"
+        if [ "$polls" -lt "$STUB_RECORDS_PENDING_POLLS" ]; then
+          printf '%s|IN_PROGRESS|\n' "$RECORDS_CHECK"; return 0
+        fi
       fi
       printf '%s|COMPLETED|%s\n' "$RECORDS_CHECK" "$records"
     }
@@ -1255,6 +1315,45 @@ self_test() {
   run_case sc_records_snapshot_unreadable 1
   expect_out records_snapshot_unreadable "nothing was stamped"
   expect_lines records_snapshot_unreadable "$LOG_STAMPS" 0
+
+  # Re-stamping records that are already current leaves the body unchanged and starts no new
+  # records run; the latest run decides instead of a wait for a run that never comes
+  sc_records_already_current() { base_attest; auto_merge=1; STUB_BODY_UNCHANGED=1; }
+  run_case sc_records_already_current 0
+  expect_out records_already_current "already current"; expect_out records_already_current "READY FOR MERGE"
+  expect_lines records_already_current "$LOG_MERGE" 1
+
+  sc_records_already_current_red() {
+    base_attest; auto_merge=1; STUB_BODY_UNCHANGED=1; STUB_RECORDS_AFTER=FAILURE
+  }
+  run_case sc_records_already_current_red 1
+  expect_out records_already_current_red "did not pass"; expect_no_out records_already_current_red "READY FOR MERGE"
+  expect_lines records_already_current_red "$LOG_MERGE" 0
+
+  sc_body_unreadable() { base_attest; STUB_BODY_READ_FAIL=1; }
+  run_case sc_body_unreadable 1
+  expect_out body_unreadable "cannot read the PR body before stamping"
+  expect_lines body_unreadable "$LOG_STAMPS" 0
+
+  sc_body_unreadable_after_stamp() { base_attest; auto_merge=1; STUB_BODY_READ_FAIL_AFTER=1; }
+  run_case sc_body_unreadable_after_stamp 1
+  expect_out body_unreadable_after_stamp "cannot read the PR body after stamping"
+  expect_no_out body_unreadable_after_stamp "READY FOR MERGE"; expect_lines body_unreadable_after_stamp "$LOG_MERGE" 0
+
+  # The latest records run may still be running: poll until it completes, then decide
+  sc_records_already_current_pending() {
+    base_attest; STUB_BODY_UNCHANGED=1; STUB_RECORDS_PENDING_POLLS=2
+  }
+  run_case sc_records_already_current_pending 0
+  expect_out records_already_current_pending "READY FOR MERGE"
+
+  # No records run at all on an unchanged body fails closed instead of counting as passed
+  sc_records_already_current_absent() {
+    base_attest; auto_merge=1; STUB_BODY_UNCHANGED=1; STUB_RECORDS_ABSENT=1
+  }
+  run_case sc_records_already_current_absent 1
+  expect_out records_already_current_absent "did not pass"
+  expect_no_out records_already_current_absent "READY FOR MERGE"; expect_lines records_already_current_absent "$LOG_MERGE" 0
 
   # A green watch passes skipped checks and may end before `build` exists: still no stamping
   sc_green_build_missing() { base_attest; STUB_BUILD=""; }

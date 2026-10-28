@@ -306,6 +306,19 @@ path.write_text(json.dumps(value, indent=2) + "\n")
 PY
 expect_failure "missing safety invariant" "$fixture" "missing-canary"
 
+# Each bound of the AGENTS.md $ci-heal exception is load-bearing: dropping one broadens it.
+fixture="$WORK/ci-heal-exception-any-caller"; make_fixture "$fixture"
+perl -0pi -e "s/\\(not an agent's or another/(an agent's or another/" "$fixture/AGENTS.md"
+expect_failure "ci-heal exception without the own-invocation bound" "$fixture" "ci-heal-exception-bounded"
+
+fixture="$WORK/ci-heal-exception-review"; make_fixture "$fixture"
+perl -0pi -e 's/never authorizes a commit or a review;/never authorizes a commit;/' "$fixture/AGENTS.md"
+expect_failure "ci-heal exception without the review bound" "$fixture" "ci-heal-exception-bounded"
+
+fixture="$WORK/ci-heal-exception-merge"; make_fixture "$fixture"
+perl -0pi -e 's/a merge still needs the user/a merge needs the user/' "$fixture/AGENTS.md"
+expect_failure "ci-heal exception without the merge bound" "$fixture" "ci-heal-exception-bounded"
+
 fixture="$WORK/multi-target-publication-dag"; make_fixture "$fixture"
 perl -0pi -e 's/build -> independent-rebuild -> publish ->/build -> publish ->/' \
   "$fixture/.agents/subagents.json"
