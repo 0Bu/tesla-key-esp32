@@ -267,7 +267,10 @@ uses GitHub's `releases/latest` entry, requiring a canonical immutable stable ta
 uniquely named digest/size-bearing merged assets; it does not scan for a newer eligible Release or
 byte-validate that numeric base's assets. Refetch default-branch head before key,
 upload and Pages boundaries; main advancement retires stale runs. Per-PR concurrency couples publisher
-and trusted-base cleanup on close/force-push/unlabel; daily reconciliation removes stale manifests.
+and trusted default-branch cleanup on close/force-push/unlabel; daily reconciliation removes stale manifests.
+Event cleanup checks out the repository's current default branch, as reconciliation does. A PR's
+historical base SHA can lack the validators required by the current workflow; neither that stale
+snapshot nor a PR-selected head/base ref supplies cleanup code.
 Key-free [served preview acceptance](DEVELOPMENT.md#served-pr-preview-acceptance) compares all 16
 published parts and checks bounded URL absence after removal; a branch write alone is not acceptance.
 

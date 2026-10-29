@@ -199,7 +199,7 @@ EXPECTED_PRIVILEGED_JOB_SHA256 = {
     ('build.yml', 'deploy'): "415caf4c6a5be8ac9f31711193bd0a47b13b4e47562ecf67b95bf779022b7bad",
     ('signed-pr-preview.yml', 'sign-preview'): "e44a21370d774b00b10dafcd11ff44a1d590485aeb8e03f62d600c3829f90925",
     ('signed-pr-preview.yml', 'validate'): "44f1065eb3e479f4363e2fba6c10b29ae814cb01fe4ea4f0482f6b548f63511b",
-    ('pr-preview-cleanup.yml', 'cleanup-event'): "444dac196ca71ad9b7875975bceae73b8a4fc6acf36325da7766d0ef8a66467f",
+    ('pr-preview-cleanup.yml', 'cleanup-event'): "c36a5602067c24346a24d2c431e4bec2860de35cc0101ee0d11113b30367890b",
     ('pr-preview-cleanup.yml', 'discover-stale'): "8669d8d2c7f0d295d9291e4b54dd19126ed549e9b82862d4747972bf64ab2b7e",
     ('pr-preview-cleanup.yml', 'reconcile-stale'): "9869eb7b4c3405527941a3c6120e1792701bffc571564ed4fc2092d54064d91d",
 }
@@ -1227,8 +1227,12 @@ def validate(root: Path) -> None:
         and re.search(r"^  pull_request:\s*$", cleanup_text, re.MULTILINE) is None
         and "github.event_name == 'pull_request_target'" in cleanup["cleanup-event"]
         and "github.event_name == 'pull_request'" not in cleanup["cleanup-event"]
-        and "ref: ${{ github.event.pull_request.base.sha }}" in cleanup["cleanup-event"],
-        "pr-preview-cleanup.yml must execute trusted base workflow/code for PR mutations",
+        and "ref: ${{ github.event.repository.default_branch }}" in cleanup["cleanup-event"]
+        and "github.event.pull_request.base.sha" not in cleanup["cleanup-event"]
+        and "github.event.pull_request.base.ref" not in cleanup["cleanup-event"]
+        and "ref: ${{ github.event.pull_request.head" not in cleanup["cleanup-event"]
+        and "github.head_ref" not in cleanup["cleanup-event"],
+        "pr-preview-cleanup.yml must execute current trusted default-branch workflow/code for PR mutations",
     )
     cleanup_source = "python3 scripts/check-pages-source.py"
     require(
@@ -1402,6 +1406,34 @@ def replace_once(path: Path, old: str, new: str) -> None:
 
 def self_test(root: Path) -> None:
     validate(root)
+    # Replay checkout selection for an old PR whose historical base lacks the current
+    # producer/checker pair. This is an offline source-selection fixture, not an Actions run.
+    cleanup_path = root / ".github/workflows/pr-preview-cleanup.yml"
+    cleanup_model = workflow_model(cleanup_path, cleanup_path.read_text(encoding="utf-8"))
+    checkout_ref = cleanup_model["jobs"]["cleanup-event"]["steps"][0]["with"]["ref"]
+    context_refs = {
+        "${{ github.event.repository.default_branch }}": "maintained-default",
+        "${{ github.event.pull_request.base.sha }}": "historical-base",
+    }
+    with tempfile.TemporaryDirectory(prefix="workflow-policy-old-pr-cleanup-") as directory:
+        fixture = Path(directory)
+        current = fixture / "maintained-default/scripts"
+        old = fixture / "historical-base/scripts"
+        current.mkdir(parents=True)
+        old.mkdir(parents=True)
+        helpers = ("reconcile-pr-previews.sh", "check-pages-source.py", "check-pr-preview-served.py")
+        for helper in helpers:
+            shutil.copyfile(root / "scripts" / helper, current / helper)
+        (old / "reconcile-pr-previews.sh").write_text("printf 'preview absent\\n'\n", encoding="utf-8")
+        require(not (old / "check-pr-preview-served.py").exists(), "old-base fixture unexpectedly has the checker")
+        selected_ref = context_refs.get(checkout_ref)
+        require(selected_ref is not None, "cleanup checkout has no supported trusted source selection")
+        selected = fixture / selected_ref / "scripts"
+        require(all((selected / helper).is_file() for helper in helpers),
+                "old PR cleanup selected a historical base without the current helpers")
+        require((selected / "reconcile-pr-previews.sh").read_bytes()
+                == (current / "reconcile-pr-previews.sh").read_bytes(),
+                "old PR cleanup selected an incompatible decision producer")
     renovate_workflow = (root / ".github/workflows/renovate.yaml").read_text(encoding="utf-8")
     renovate_actions = ACTION.findall(renovate_workflow)
     require(
@@ -1828,7 +1860,22 @@ def self_test(root: Path) -> None:
          "  pull_request:\n", "trigger schema drift"),
         ("cleanup-event-name", "pr-preview-cleanup.yml",
          "github.event_name == 'pull_request_target'",
-         "github.event_name == 'pull_request'", "trusted base workflow/code"),
+         "github.event_name == 'pull_request'", "current trusted default-branch workflow/code"),
+        ("cleanup-stale-base-sha", "pr-preview-cleanup.yml",
+         "ref: ${{ github.event.repository.default_branch }}",
+         "ref: ${{ github.event.pull_request.base.sha }}", "current trusted default-branch workflow/code"),
+        ("cleanup-missing-default-ref", "pr-preview-cleanup.yml",
+         "          ref: ${{ github.event.repository.default_branch }}\n",
+         "", "current trusted default-branch workflow/code"),
+        ("cleanup-pr-base-ref", "pr-preview-cleanup.yml",
+         "ref: ${{ github.event.repository.default_branch }}",
+         "ref: ${{ github.event.pull_request.base.ref }}", "current trusted default-branch workflow/code"),
+        ("cleanup-untrusted-head-sha", "pr-preview-cleanup.yml",
+         "ref: ${{ github.event.repository.default_branch }}",
+         "ref: ${{ github.event.pull_request.head.sha }}", "current trusted default-branch workflow/code"),
+        ("cleanup-untrusted-head-ref", "pr-preview-cleanup.yml",
+         "ref: ${{ github.event.repository.default_branch }}",
+         "ref: ${{ github.head_ref }}", "current trusted default-branch workflow/code"),
         ("preview-workflow-attestation", "signed-pr-preview.yml",
          "--accept-workflow-attested-source",
          "--accept-unbound-workflow-source", "workflow-attested bytes"),
