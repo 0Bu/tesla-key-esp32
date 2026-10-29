@@ -951,7 +951,7 @@ with open(p, "r+", encoding="utf-8") as f:
   fixture_site="$builder_repo/_site"
   (
     cd "$builder_repo"
-    [[ "$PWD" == "$builder_repo" ]] || exit 1
+    [[ "$PWD" -ef "$builder_repo" ]] || exit 1
     FIRMWARE_STAGE_DIR="$fixture_stage" ./scripts/build-pages.sh "$fixture_site" "1.0.1-dev.1" "$sha_c" >/dev/null
   )
   cp "$fixture_site/manifest.json" "$fake_live_dev"
