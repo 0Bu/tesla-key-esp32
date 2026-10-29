@@ -674,44 +674,46 @@ static OtaCheckResult perform_check(OtaOperation& operation, unsigned pr_number)
         return res;
     }
 
-    const char* parse_end = nullptr;
-    const auto materialized = tk::json_materialize<cJSON>(
-        body.data(), body.size(), [&](const char* text) {
-            return cJSON_ParseWithLengthOpts(
-                text, body.size() + 1, &parse_end, true);
-        });
-    if (materialized.status != tk::JsonMaterializeStatus::Ok) {
-        res.ok     = false;
-        res.reason = materialized.status == tk::JsonMaterializeStatus::NoMemory
-                         ? "update manifest ran out of resources"
-                         : "invalid update manifest";
-        return res;
-    }
-    std::unique_ptr<cJSON, decltype(&cJSON_Delete)> j(materialized.root, cJSON_Delete);
-    const tk::OtaManifestVersion manifest = tk::inspect_ota_manifest(j.get());
-    if (parse_end != body.c_str() + body.size() ||
-        manifest.status != tk::OtaManifestInspectStatus::Valid || !manifest.value) {
-        res.ok     = false;
-        res.reason = "invalid update manifest";
-        return res;
-    }
-    // cJSON owns decoded strings. Release the bounded transport body before any result-string
-    // allocation so the largest-block peak is body+cJSON, never body+cJSON+another body-sized copy.
-    std::string{}.swap(body);
-    const std::string_view available(manifest.value);
-    // Validate the cJSON-owned view before copying: an attacker-controlled ~8 KiB version must
-    // not trigger another large contiguous std::string allocation while TLS/body/cJSON coexist.
-    if (!tk::canonical_ota_version(available)) {
-        res.ok     = false;
-        res.reason = "invalid version in manifest";
-        return res;
-    }
-    if (!tk::canonical_ota_version(res.current)) {
-        res.ok     = false;
-        res.reason = "invalid running firmware version";
-        return res;
-    }
-    res.available.assign(available.data(), available.size());
+    {
+        const char* parse_end = nullptr;
+        const auto materialized = tk::json_materialize<cJSON>(
+            body.data(), body.size(), [&](const char* text) {
+                return cJSON_ParseWithLengthOpts(
+                    text, body.size() + 1, &parse_end, true);
+            });
+        if (materialized.status != tk::JsonMaterializeStatus::Ok) {
+            res.ok     = false;
+            res.reason = materialized.status == tk::JsonMaterializeStatus::NoMemory
+                             ? "update manifest ran out of resources"
+                             : "invalid update manifest";
+            return res;
+        }
+        std::unique_ptr<cJSON, decltype(&cJSON_Delete)> j(materialized.root, cJSON_Delete);
+        const tk::OtaManifestVersion manifest = tk::inspect_ota_manifest(j.get());
+        if (parse_end != body.c_str() + body.size() ||
+            manifest.status != tk::OtaManifestInspectStatus::Valid || !manifest.value) {
+            res.ok     = false;
+            res.reason = "invalid update manifest";
+            return res;
+        }
+        // cJSON owns decoded strings. Release the bounded transport body before any result-string
+        // allocation so the largest-block peak is body+cJSON, never body+cJSON+another body-sized copy.
+        std::string{}.swap(body);
+        const std::string_view available(manifest.value);
+        // Validate the cJSON-owned view before copying: an attacker-controlled ~8 KiB version must
+        // not trigger another large contiguous std::string allocation while TLS/body/cJSON coexist.
+        if (!tk::canonical_ota_version(available)) {
+            res.ok     = false;
+            res.reason = "invalid version in manifest";
+            return res;
+        }
+        if (!tk::canonical_ota_version(res.current)) {
+            res.ok     = false;
+            res.reason = "invalid running firmware version";
+            return res;
+        }
+        res.available.assign(available.data(), available.size());
+    } // Notes need only the copied version; free the tree before their body/TLS allocations.
 
     res.ok               = true;
     res.update_available = tk::is_ota_update_available(res.available, res.current, pr_number, channel);

@@ -96,6 +96,15 @@ pinned ESP-TLS and `http_parser` components provide transport and incremental HT
 `esp_http_client` and `esp_https_ota` are not used by this OTA path. Authentication/publication
 remain in [Security](SECURITY.md#signed-ota-images).
 
+The browser waits for an in-flight general `/status` request to finish or time out, including
+body handling, before starting a check or install. It pauses new general polls through the OTA
+flow and its installation dialog. Small
+`/ota/status` progress polls and the separate post-reboot verification remain active. Waiting
+does not renew the original UI deadline; cancelled or replaced flows cannot launch a delayed
+request. Normal polling resumes when the flow ends. After manifest validation, the coordinator
+copies the version and frees the parsed manifest before reserving the notes body or opening its
+TLS connection, so the manifest tree does not coexist with notes buffering and TLS.
+
 Capture the operation origin before lock/job/task/URL/body allocation. Manifest, optional changelog,
 image, redirects, TLS retry conditions and trickled bytes share a single nonrenewable budget:
 15 s setup + ceil(maximum bytes / 16 KiB/s) + 10 s finalization. Metadata permits two bodies of

@@ -36,8 +36,10 @@
 #include <type_traits>
 #include <vector>
 
+namespace fixture { void observe_body_allocation(std::size_t); }
 static std::atomic<bool> fail_body_reserve{false};
 void* operator new(std::size_t n) {
+    fixture::observe_body_allocation(n);
     if (n>=8192 && n<16384 && fail_body_reserve.exchange(false)) throw std::bad_alloc();
     if (void* p=std::malloc(n?n:1)) return p;
     throw std::bad_alloc();
@@ -58,6 +60,21 @@ std::atomic<int> checks{0};
  std::cerr<<"OTA application "<<line<<": "<<expression<<'\n'<<std::flush;std::_Exit(1);
 }
 #define CHECK(x) do { ++fixture::checks; if(!(x))fixture::failed(__LINE__,#x); } while(false)
+std::atomic<bool> track_manifest_lifetime{false};
+std::atomic<size_t> live_manifest_allocations{0},manifest_allocations{0},body_allocations{0};
+void observe_body_allocation(std::size_t n){
+ if(track_manifest_lifetime&&n>=8192&&n<16384){
+  if(body_allocations.fetch_add(1)>0)CHECK(live_manifest_allocations==0);
+ }
+}
+void* tracked_json_allocate(size_t n){
+ void* p=std::malloc(n);
+ if(p){++live_manifest_allocations;++manifest_allocations;}
+ return p;
+}
+void tracked_json_release(void* p){
+ if(p){CHECK(live_manifest_allocations.fetch_sub(1)>0);std::free(p);}
+}
 std::atomic<uint64_t> now{0};
 thread_local bool network_thread=false;
 std::thread worker;
@@ -375,6 +392,25 @@ void memory_checks(){
  reset();changelog_status=404;r=ota_check(0);join_worker();CHECK(r.ok&&r.update_available&&connects==2);
  reset();r=ota_check(0);join_worker();CHECK(r.ok&&r.current=="1.6.2"&&r.available=="1.6.3"&&r.update_available);
 }
+void manifest_lifetime_checks(){
+ reset();
+ manifest="{\"version\":\"1.6.3\",\"parts\":[";
+ for(unsigned i=0;i<16;++i){
+  if(i)manifest+=',';
+  manifest+="{\"path\":\"part-"+std::to_string(i)+".bin\",\"size\":1024,\"sha256\":\""+std::string(64,'a')+"\"}";
+ }
+ manifest+="]}";
+ live_manifest_allocations=manifest_allocations=body_allocations=0;
+ cJSON_Hooks hooks{tracked_json_allocate,tracked_json_release};
+ cJSON_InitHooks(&hooks);
+ track_manifest_lifetime=true;
+ const auto result=ota_check(0);join_worker();
+ track_manifest_lifetime=false;
+ CHECK(result.ok&&result.update_available&&result.available=="1.6.3");
+ CHECK(manifest_allocations>=64&&live_manifest_allocations==0&&body_allocations==2);
+ CHECK(connects==2&&begins==0&&writes==0&&selectors==0);
+ cJSON_InitHooks(nullptr);
+}
 void recovery_policy_checks(){
  for(size_t observed:{size_t(12344),size_t(12345),size_t(12346)}){
   reset({observed});recovery_required=12345;const auto result=ota_check(0);join_worker();
@@ -653,7 +689,7 @@ int main(int argc,char** argv){
  else if(terminal_case=="cleanup-cas")cleanup_cas_checks();
  else {
   CHECK(terminal_case=="normal");
-  memory_checks();recovery_policy_checks();entry_recovery_checks();parser_checks();admission_checks();quarantine_checks();image_checks();raw_memory_checks();
+  memory_checks();manifest_lifetime_checks();recovery_policy_checks();entry_recovery_checks();parser_checks();admission_checks();quarantine_checks();image_checks();raw_memory_checks();
   checkpoint_semantics_checks();
   control_rmw_concurrency_checks();
  }
