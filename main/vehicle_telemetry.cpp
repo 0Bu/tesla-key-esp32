@@ -1780,10 +1780,10 @@ void VehicleController::loop_task_fn_(void* arg) {
         //     but a pending one-shot can still fire between two cadence ticks; the drive
         //     companion poll is then enqueued too (a harmless duplicate of the rotation's
         //     drive slot: NO_WAKE_SKIP, and background items expire after 10 s).
-        // Both use the same NO_WAKE_SKIP poll: a car already back asleep is skipped, so we only
-        // ride a wake the car performed itself, and an idle car is still left to sleep. The
-        // one-shot also refreshes the drive cache so evcc's odometer is current after a drive;
-        // it is NO_WAKE_SKIP as well, so a sleeping car is skipped.
+        // Both use NO_WAKE_SKIP: a car reported ASLEEP is skipped and no explicit wake command is
+        // requested. UNKNOWN/AWAKE can still permit Infotainment/SessionInfo traffic; its physical
+        // wake effect requires measurement. The one-shot also refreshes the drive cache so evcc's
+        // odometer is current after a drive; it uses the same NO_WAKE_SKIP policy.
         const bool poll_cadence = window && (now_ticks - last_poll_ticks > pdMS_TO_TICKS(10000));
         if (tk::charge_poll_should_fire({paired, poll_cadence, self->ble_connected(), self->cmd_in_flight_.load(), now_s}, wake_poll)) {
             if (poll_cadence) last_poll_ticks = now_ticks;
