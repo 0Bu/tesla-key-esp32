@@ -318,7 +318,7 @@ private:
     bool enqueue_ble_rx_event_(const uint8_t* data, size_t size,
                                uint32_t generation) noexcept;
     bool ble_host_events_ready_() noexcept;
-    bool pop_ble_host_event_(BleHostEvent& event) noexcept;
+    bool pop_ble_host_event_(BleHostEvent& event, uint32_t* empty_ms = nullptr) noexcept;
     void clear_ble_host_events_() noexcept;
     void process_ble_host_events_();
     bool apply_ble_link_state_(bool connected);

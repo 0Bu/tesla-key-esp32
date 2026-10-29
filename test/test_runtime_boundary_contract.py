@@ -387,7 +387,7 @@ REVIEWED_DELEGATED_HELPERS = {
         "enqueue_ble_link_event_": {"store", "portENTER_CRITICAL", "push_link", "portEXIT_CRITICAL"},
     },
     "ble_rx_event_cb_": {
-        "enqueue_ble_rx_event_": {"store", "portENTER_CRITICAL", "push_rx", "portEXIT_CRITICAL"},
+        "enqueue_ble_rx_event_": {"store", "portENTER_CRITICAL", "esp_timer_get_time", "push_rx", "portEXIT_CRITICAL"},
     },
 }
 
@@ -8860,8 +8860,8 @@ def self_test_ota_download_chain(source: str) -> None:
 
 # F116 closed source programs: fixed POD/critical-section helpers only. Update after an
 # independent source review; the extractor never writes these expected identities at runtime.
-BLE_DEFERRED_PROGRAMS = {'ble_link_event_cb_': {'owner': 'ctrl', 'sha256': 'edc6860b2cb2e65cc7e642533be606d1a1a48d47395505d6ce94ee189d284733'}, 'ble_rx_event_cb_': {'owner': 'ctrl', 'sha256': '9f8462cd54ef462d6454ba9ca02cdd4a1997bcb3211de9bb32c67d0648cae6ac'}, 'enqueue_ble_link_event_': {'owner': 'ctrl', 'sha256': 'fa4976fc3cfc73f7915314e67ca7b2c85f8bf9e244d71e77b0ea0ed887f1e056'}, 'enqueue_ble_rx_event_': {'owner': 'ctrl', 'sha256': 'c2a87ba13d18edb3e33c1a7c0677a8bd629fcfae7e837fd47609096d1ca6bc28'}, 'ble_host_events_ready_': {'owner': 'ctrl', 'sha256': 'e8289f7fa61e7f2c9003f368d8d7537a8d5f5fdc59be566c18a2e4bbcda29183'}, 'pop_ble_host_event_': {'owner': 'ctrl', 'sha256': '613fcb3b828394228e19abc762a136a9bd90739774eb11ad34b1f5f8dafac169'}, 'clear_ble_host_events_': {'owner': 'ctrl', 'sha256': 'b9d23918bd68e77d85c448c6fea5a69527c6d6a8ea31a1d57fa1cff228bb1d90'}, 'process_ble_host_events_': {'owner': 'telemetry', 'sha256': '22c2e83a704780398e5bb828cdbe3fb9fcab4a6597732c11e4ca82dfeb30d807'}}
-BLE_DEFERRED_QUEUE_SHA256 = "39019bdb2394dd81491d6b95d3ae2ab94cd6127fd329d69664781bb77ae0044b"
+BLE_DEFERRED_PROGRAMS = {'ble_link_event_cb_': {'owner': 'ctrl', 'sha256': 'edc6860b2cb2e65cc7e642533be606d1a1a48d47395505d6ce94ee189d284733'}, 'ble_rx_event_cb_': {'owner': 'ctrl', 'sha256': '9f8462cd54ef462d6454ba9ca02cdd4a1997bcb3211de9bb32c67d0648cae6ac'}, 'enqueue_ble_link_event_': {'owner': 'ctrl', 'sha256': 'fa4976fc3cfc73f7915314e67ca7b2c85f8bf9e244d71e77b0ea0ed887f1e056'}, 'enqueue_ble_rx_event_': {'owner': 'ctrl', 'sha256': 'e7e705125cab17d42e83546a1d46915a961c3300097f7b2b6ee5459cc1e45af6'}, 'ble_host_events_ready_': {'owner': 'ctrl', 'sha256': 'e8289f7fa61e7f2c9003f368d8d7537a8d5f5fdc59be566c18a2e4bbcda29183'}, 'pop_ble_host_event_': {'owner': 'ctrl', 'sha256': 'f7807f5ba8cee806ba6739e78040f403481ca5561dd1c048ced2cada2360cb6a'}, 'clear_ble_host_events_': {'owner': 'ctrl', 'sha256': 'b9d23918bd68e77d85c448c6fea5a69527c6d6a8ea31a1d57fa1cff228bb1d90'}, 'process_ble_host_events_': {'owner': 'telemetry', 'sha256': '9371140efaaa009bd9f6e740c186dc3c444a3e60b25446ed21260ba2f678286f'}}
+BLE_DEFERRED_QUEUE_SHA256 = "3513279776711593ae9eeee7bc672e38f380c0440e0ee2165ce5876aceefc7c2"
 
 
 def require_ble_deferred_program_contract(parts: dict[str, str], queue: str) -> None:
@@ -8930,7 +8930,8 @@ def require_concurrency_regression_contract(parts: dict[str, str]) -> None:
             raise AssertionError(f"{name} bypasses reviewed Vehicle RAII ownership")
 
     events = scrub_cpp_preserving_layout(function_body_in(parts["telemetry"], "process_ble_host_events_"))
-    prefix = (r"while\s*\(\s*pop_ble_host_event_\(event\)\s*\)\s*\{\s*"
+    prefix = (r"for\s*\(\s*;\s*;\s*\)\s*\{\s*"
+              r"if\s*\(\s*!pop_ble_host_event_\(event,\s*&empty_ms\)\s*\)\s*break\s*;\s*"
               r"const\s+uint32_t\s+current_generation\s*=\s*ble_->lifecycle_generation\(\)\s*;\s*"
               r"if\s*\(\s*!tk::ble_deferred_event_may_apply\(event.kind,\s*event.generation,\s*current_generation\)\s*\)\s*\{\s*continue\s*;\s*\}")
     if not re.search(prefix, events):
@@ -8958,6 +8959,8 @@ def self_test_concurrency_regression_contract(parts: dict[str, str]) -> None:
          "    tk::SemGuard regression(vehicle_mutex_);\n    const bool signalled ="),
         ("stale BLE event applied", "telemetry", "if (!tk::ble_deferred_event_may_apply(event.kind, event.generation,",
          "if (false && !tk::ble_deferred_event_may_apply(event.kind, event.generation,"),
+        ("idle expiry loses its empty-queue clock", "telemetry", "if (!pop_ble_host_event_(event, &empty_ms)) break;",
+         "if (!pop_ble_host_event_(event)) break;"),
         ("status pops unrelated command", "telemetry", "if (cmd && cmd->id == completion->cmd_id)", "if (cmd)"),
         ("late result mutates newer request", "commands", "      if (command_generation_.load() != generation) return;",
          "      if (false && command_generation_.load() != generation) return;"),

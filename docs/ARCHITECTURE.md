@@ -816,7 +816,7 @@ runtime call depth.
 | `result_mutex_` | mutex, RAII, leaf | the externally visible `last_error_` snapshot HTTP/MCP read after a foreground command |
 | `CommandCompletion::sem` | per-request binary semaphore, shared ownership | fixed callback result/error record and generation-checked completion, signalled even after its catch-all |
 | `StatusCompletion::sem` | per-request binary semaphore, shared ownership | fixed status-success fields; the C++ runner failure callback may allocate its request-owned `std::string error` before signalling |
-| `ble_events_.mux` | dedicated `portMUX`, bounded POD only | every ready/queue push, pop and clear; same-generation adjacent RX bytes pack into16 static244-byte cells, with ordered whole link barriers; unlock before generation/Client/runner/storage/link work |
+| `ble_events_.mux` | dedicated `portMUX`, bounded POD and lock-free timer read | every ready/queue push, pop and clear; same-generation/window RX bytes pack into16 static244-byte cells; arrival and empty-queue timestamps are linearized here; ordered link barriers; unlock before generation/Client/runner/storage/link work |
 | `telemetry_pending_mux_` | `portMUX`, innermost, POD only | the fixed latest-value nanopb mailboxes, pending mask and charging-amps feedback generation written synchronously by tesla-ble callbacks |
 
 Order for identity/OTA-coordinated transactions: shared operation-gate admission →
@@ -829,12 +829,19 @@ controller-owned runtime Client/runner access requires Vehicle ownership.
 The deferred mailbox owns its bytes; no callback-local buffer or mbuf pointer survives return.
 A callback of1..244 bytes is accepted completely or refused before mutation. The Vehicle consumer
 copies at most20 RX bytes per pop into an independent result, retaining the head offset until the
-cell is exhausted. One fresh2050-byte framed response occupies nine cells even with one-byte
+cell is exhausted. RX arrival time is sampled with the allocation-free, RTOS-lock-free
+`esp_timer_get_time()` under the mailbox mux. Coalescing retains first/last arrival times within
+one3s window; a later arrival starts a new cell. The framer checks the first arrival against the
+previous batch and renews partial-frame expiry from the last, including when a cell fits one pop.
+Empty-queue observation and the periodic expiry clock share the same mux, so drain latency cannot
+erase a queued timely continuation or hide a real gap. The256-byte cell,32-byte pop and4100-byte
+queue limits remain fixed. One fresh2050-byte framed response within that window occupies nine cells even with one-byte
 notifications. This is not an unlimited-burst, scheduling or allocator-capacity guarantee. Old
 LinkDown remains a barrier; LinkUp/RX require the current stable generation. An observed overflow
 clears/reset/disconnects fail-closed; flag publication, queue clear and the entire drain are not one
 atomic transaction. Continuous producer traffic is not a new total-drain time bound.
-The pending mux is innermost and permits bounded POD copies only: no semaphore, allocation, logging,
+The BLE mailbox mux permits bounded POD copies and the above timer read; the telemetry pending mux
+permits only bounded POD copies. Neither permits semaphore waits, allocation, logging,
 parsing or callbacks. Use `tk::SemGuard`/`MutexGuard` and `InFlightGuard` for unwind-safe ownership.
 
 - Hold Vehicle lock only for Client/runner access, never across completion-semaphore wait.

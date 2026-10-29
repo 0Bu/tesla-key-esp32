@@ -83,11 +83,22 @@ public:
     // Returns the number of frames successfully extracted.
     template <typename FrameCb, typename DropCb>
     size_t push_chunk(const uint8_t* data, size_t len, uint32_t now_ms,
-                      FrameCb&& frame_cb, DropCb&& drop_cb) {
+                      FrameCb&& frame_cb, DropCb&& drop_cb, uint16_t arrival_span_ms = 0) {
         // 1. Inter-chunk timeout: drop stale bytes before evaluating new input
         check_timeout(now_ms, drop_cb);
 
         if (!data || len == 0) {
+            return 0;
+        }
+
+        // A deferred batch may compress arrivals only inside one timeout window.
+        // Its first arrival tests the preceding gap; its last renews partial-frame expiry.
+        if (arrival_span_ms > timeout_ms_) {
+            const size_t dropped = buffer_.size() + len;
+            buffer_.clear();
+            has_chunk_time_ = false;
+            stats_.timeout_drops++;
+            drop_cb(RxFramerDropReason::InterChunkTimeout, dropped);
             return 0;
         }
 
@@ -104,7 +115,7 @@ public:
 
         // 3. Append incoming data to reassembly buffer
         buffer_.insert(buffer_.end(), data, data + len);
-        last_chunk_time_ms_ = now_ms;
+        last_chunk_time_ms_ = now_ms + arrival_span_ms;
         has_chunk_time_ = true;
 
         // 4. Extract complete frames in order

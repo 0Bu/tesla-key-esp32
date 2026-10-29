@@ -6463,17 +6463,17 @@ static void test_ble_deferred_queue() {
     event.generation = 77;
     CHECK(!queue.pop(event));
     CHECK(event.generation == 77);
-    CHECK(!queue.push_rx(nullptr, 1, 8));
+    CHECK(!queue.push_rx(nullptr, 1, 8, 0));
     uint8_t sample[245]{};
-    CHECK(!queue.push_rx(sample, 0, 8));
-    CHECK(!queue.push_rx(sample, 245, 8));
+    CHECK(!queue.push_rx(sample, 0, 8, 0));
+    CHECK(!queue.push_rx(sample, 245, 8, 0));
     for (size_t total : {size_t{743}, size_t{2050}}) {
         for (size_t chunk : {size_t{1}, size_t{20}, size_t{244}}) {
             queue.clear();
             for (size_t position = 0; position < total;) {
                 const size_t size = std::min(chunk, total - position);
                 for (size_t i = 0; i < size; ++i) sample[i] = static_cast<uint8_t>(position + i);
-                CHECK(queue.push_rx(sample, size, 8));
+                CHECK(queue.push_rx(sample, size, 8, 0));
                 std::memset(sample, 0xa5, sizeof sample);
                 position += size;
             }
@@ -6491,7 +6491,7 @@ static void test_ble_deferred_queue() {
     for (unsigned round = 0; round != 64; ++round) {
         CHECK(queue.push_link(false, 3, 8));
         CHECK(queue.push_link(true, 4, 10));
-        CHECK(queue.push_rx(sample, 1, 10));
+        CHECK(queue.push_rx(sample, 1, 10, 0));
         CHECK(queue.pop(event) && event.kind == K::LinkDown && event.generation == 8 && event.conn_handle == 3);
         CHECK(queue.pop(event) && event.kind == K::LinkUp && event.generation == 10 && event.conn_handle == 4);
         CHECK(queue.pop(event) && event.kind == K::Rx && event.generation == 10 && event.size == 1);
@@ -6499,9 +6499,9 @@ static void test_ble_deferred_queue() {
     }
     for (unsigned i = 0; i != 15; ++i) CHECK(queue.push_link(true, 3, 8));
     std::memset(sample, 0x31, sizeof sample);
-    CHECK(queue.push_rx(sample, 243, 8));
+    CHECK(queue.push_rx(sample, 243, 8, 0));
     std::memset(sample, 0x72, sizeof sample);
-    CHECK(!queue.push_rx(sample, 2, 8));
+    CHECK(!queue.push_rx(sample, 2, 8, 3000));
     CHECK(queue.cells_used() == 16);
     unsigned links = 0;
     size_t bytes = 0;
@@ -6512,11 +6512,122 @@ static void test_ble_deferred_queue() {
         } else ++links;
     }
     CHECK(links == 15 && bytes == 243);
-    CHECK(queue.push_rx(sample, 1, 8));
-    CHECK(queue.push_rx(sample, 1, 10));
+    CHECK(queue.push_rx(sample, 1, 8, 0));
+    CHECK(queue.push_rx(sample, 1, 10, 0));
     CHECK(queue.pop(event) && event.generation == 8 && event.size == 1);
     CHECK(queue.pop(event) && event.generation == 10 && event.size == 1);
     CHECK(queue.empty());
+
+    auto wire = [](uint8_t value) {
+        std::vector<uint8_t> result(182, value);
+        result[0] = 0; result[1] = 180;
+        return result;
+    };
+    auto drain = [&](tk::RxFramer& framer, std::vector<std::vector<uint8_t>>& frames) {
+        while (queue.pop(event)) {
+            CHECK(event.kind == K::Rx);
+            framer.push_chunk(event.data.data(), event.size, event.received_ms,
+                [&](const uint8_t* bytes, size_t size) { frames.emplace_back(bytes, bytes + size); },
+                [](tk::RxFramerDropReason, size_t) {}, event.span_ms);
+        }
+    };
+    const auto a = wire(0x11), b = wire(0x22);
+    // A delayed drain must retain a real >3s arrival gap, including timer wrap.
+    for (uint32_t origin : {uint32_t{0}, UINT32_MAX - 2000}) {
+        queue.clear();
+        tk::RxFramer framer(Q::kRxWindowMs);
+        std::vector<std::vector<uint8_t>> frames;
+        CHECK(queue.push_rx(a.data(), 20, 8, origin));
+        CHECK(queue.push_rx(b.data(), b.size(), 8, origin + 4001));
+        CHECK(queue.cells_used() == 2);
+        drain(framer, frames);
+        CHECK(frames.size() == 1 && frames[0] == std::vector<uint8_t>(180, 0x22));
+        CHECK(framer.stats().timeout_drops == 1 && framer.stats().corrupt_length_drops == 0);
+    }
+    // Timely queued continuation survives arbitrarily late processing.
+    {
+        queue.clear();
+        tk::RxFramer framer(Q::kRxWindowMs);
+        std::vector<std::vector<uint8_t>> frames;
+        CHECK(queue.push_rx(a.data(), 20, 8, 0)); drain(framer, frames);
+        CHECK(queue.push_rx(a.data() + 20, a.size() - 20, 8, 10));
+        drain(framer, frames); // No processing-time clock is substituted here.
+        CHECK(frames.size() == 1 && frames[0] == std::vector<uint8_t>(180, 0x11));
+        CHECK(framer.stats().timeout_drops == 0);
+    }
+    // A batch that fits one pop still preserves FIRST and LAST arrival. Using only
+    // its last timestamp would falsely expire the old partial frame at4000ms.
+    {
+        queue.clear();
+        tk::RxFramer framer(Q::kRxWindowMs);
+        std::vector<std::vector<uint8_t>> frames;
+        CHECK(queue.push_rx(a.data(), 20, 8, 0)); drain(framer, frames);
+        CHECK(queue.push_rx(a.data() + 20, 1, 8, 2000));
+        CHECK(queue.push_rx(a.data() + 21, 1, 8, 4000));
+        CHECK(queue.cells_used() == 1);
+        drain(framer, frames);
+        CHECK(framer.buffered_bytes() == 22 && framer.stats().timeout_drops == 0);
+        CHECK(!framer.check_timeout(7000));
+        CHECK(framer.check_timeout(7001));
+    }
+    // Slow but continuous arrivals span multiple cells without false expiry.
+    for (uint32_t origin : {uint32_t{0}, UINT32_MAX - 2000}) {
+        queue.clear();
+        tk::RxFramer framer(Q::kRxWindowMs);
+        std::vector<std::vector<uint8_t>> frames;
+        for (size_t offset = 0; offset < a.size(); offset += 20) {
+            CHECK(queue.push_rx(a.data() + offset, std::min(size_t{20}, a.size() - offset),
+                                8, origin + static_cast<uint32_t>(offset / 20) * 2000));
+        }
+        drain(framer, frames);
+        CHECK(frames.size() == 1 && frames[0] == std::vector<uint8_t>(180, 0x11));
+        CHECK(framer.stats().timeout_drops == 0);
+    }
+    for (uint32_t delta : {uint32_t{3000}, uint32_t{3001}}) {
+        queue.clear();
+        CHECK(queue.push_rx(sample, 1, 8, UINT32_MAX - 1000));
+        CHECK(queue.push_rx(sample, 1, 8, UINT32_MAX - 1000 + delta));
+        CHECK(queue.cells_used() == (delta == 3000 ? 1 : 2));
+    }
+    // A failed append does not renew the old cell's reception span.
+    queue.clear();
+    for (unsigned i = 0; i != 15; ++i) CHECK(queue.push_link(true, 3, 8));
+    CHECK(queue.push_rx(sample, 243, 8, 10));
+    CHECK(!queue.push_rx(sample, 2, 8, 3010));
+    while (queue.pop(event)) if (event.kind == K::Rx) CHECK(event.span_ms == 0);
+    // Append after partial pop and a callback straddling a cell preserve both endpoints.
+    CHECK(queue.push_rx(sample, 40, 8, 100));
+    CHECK(queue.pop(event) && event.size == 20 && event.span_ms == 0);
+    CHECK(queue.push_rx(sample, 1, 8, 200));
+    CHECK(queue.pop(event) && event.size == 20 && event.span_ms == 0);
+    CHECK(queue.pop(event) && event.size == 1 && event.received_ms == 100 && event.span_ms == 100);
+    CHECK(queue.push_rx(sample, 1, 8, 100));
+    CHECK(queue.push_rx(sample, 244, 8, 200));
+    CHECK(queue.cells_used() == 2);
+    for (unsigned slice = 0; slice != 13; ++slice) {
+        CHECK(queue.pop(event) && event.received_ms == 100);
+        CHECK(event.span_ms == (slice == 12 ? 100 : 0));
+    }
+    CHECK(queue.pop(event) && event.size == 1 && event.received_ms == 200 && event.span_ms == 0);
+    CHECK(queue.empty());
+
+    // Complete-frame control: random notification partitions remain byte-identical.
+    uint32_t random = 0x426u, arrival = UINT32_MAX - 10000;
+    tk::RxFramer control(Q::kRxWindowMs);
+    std::vector<std::vector<uint8_t>> frames;
+    for (unsigned frame = 0; frame != 1000; ++frame) {
+        const auto data = wire(static_cast<uint8_t>(frame));
+        for (size_t offset = 0; offset < data.size();) {
+            random = random * 1664525u + 1013904223u;
+            const size_t size = std::min(size_t{1} + random % 244, data.size() - offset);
+            arrival += (random >> 16) % 20;
+            CHECK(queue.push_rx(data.data() + offset, size, 8, arrival));
+            offset += size;
+        }
+        drain(control, frames);
+        CHECK(frames.size() == frame + 1 && frames.back() == std::vector<uint8_t>(180, static_cast<uint8_t>(frame)));
+    }
+    CHECK(control.stats().timeout_drops == 0 && control.stats().corrupt_length_drops == 0);
 }
 
 static void test_ble_deferred_event() {
@@ -7941,6 +8052,24 @@ static void test_rx_framing() {
         CHECK(framer.buffered_bytes() == 0);
         CHECK(reason == tk::RxFramerDropReason::InterChunkTimeout);
         CHECK(dropped == 4);
+        CHECK(framer.stats().timeout_drops == 1);
+    }
+
+    // Deferred spans renew at last arrival, and an oversized span cannot append or emit.
+    {
+        tk::RxFramer framer;
+        const uint8_t partial[] = {0x00, 0x0A, 1, 2};
+        unsigned frames = 0;
+        size_t dropped = 0;
+        auto frame = [&](const uint8_t*, size_t) { ++frames; };
+        auto drop = [&](tk::RxFramerDropReason reason, size_t size) {
+            CHECK(reason == tk::RxFramerDropReason::InterChunkTimeout);
+            dropped += size;
+        };
+        framer.push_chunk(partial, sizeof partial, UINT32_MAX - 500, frame, drop, 1000);
+        CHECK(!framer.check_timeout(1499));
+        framer.push_chunk(partial, sizeof partial, 1499, frame, drop, 1001);
+        CHECK(frames == 0 && dropped == 8 && framer.buffered_bytes() == 0);
         CHECK(framer.stats().timeout_drops == 1);
     }
 
