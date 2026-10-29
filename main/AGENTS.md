@@ -14,7 +14,8 @@ Apply [repository policy](../AGENTS.md) and the normative
   RAII against allocation failure. Release them before logging, network/flash I/O, unbounded
   allocation or calls out. Serialize library access through the documented Vehicle lock,
   with RAII unwind; never wait for command completion while holding it. `portMUX` critical sections copy
-  bounded POD only.
+  bounded POD; the allocation-free, RTOS-lock-free `esp_timer_get_time()` read is also permitted to
+  linearize RX arrival and empty-mailbox expiry.
 - Contain exceptions/OOM at HTTP/MCP, task and C callback boundaries, including catch-all exits.
   Rejected input cannot dispatch, persist or restart.
 - Extract pure bounded decisions into `main/logic/`; IDF handles, tasks and mutable state belong

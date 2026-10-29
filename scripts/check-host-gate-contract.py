@@ -308,7 +308,7 @@ if sys.argv[1:2] != ['-c']:
         raise SystemExit(37)
 ''')
             python.chmod(0o700)
-            for name in ("cmake", "node"):
+            for name in ("cmake", "node", "ruby", "jq"):
                 file = binaries / name
                 file.write_text("#!/bin/sh\nexit 0\n")
                 file.chmod(0o700)
@@ -324,6 +324,7 @@ if sys.argv[1:2] != ['-c']:
                        TESLA_BROWSER_FLOW_TRACE=str(trace))
             prefix = ["tools/agent-hooks/run_with_timeout.py", "120"]
             expected = [prefix + ["python3", "test/test_f137_host.py", "--source", ".", "--controls", "--execute-controlled-host-only"],
+                        prefix + ["ruby", "test/test_evcc_vehicle.rb"],
                         prefix + ["python3", "test/test_eth_startup_cleanup.py"],
                         prefix + ["scripts/release-relevance.sh", "--self-test"],
                         prefix + ["scripts/test-build-contracts.sh", "--build-and-manifest"],
@@ -371,12 +372,14 @@ def probe_stack_hook_invocations(source: str) -> None:
     program = (mode[0] + "\n" + timeout[0] + "\n" + gate[0] + "\n" + branch +
                "    python3 __stack_hook_flow_after__\nfi\n")
     probe_stack_hook_program(program)
+    probe_stack_hook_program(program, "test/test_evcc_vehicle.rb", "ruby", (), "evcc YAML invocation flow")
 
 
 @lru_cache(maxsize=8)
-def probe_stack_hook_program(program: str) -> None:
+def probe_stack_hook_program(program: str, watched: str = "test/test_stack_context_hooks.py",
+                             interpreter: str = "python3", extra: tuple[str, ...] = (".", "--self-test"),
+                             label: str = "stack hook invocation flow") -> None:
     """Cache only an already successful identical complete extracted shell program."""
-    label = "stack hook invocation flow"
     with tempfile.TemporaryDirectory(prefix="stack-hook-host-flow-") as directory:
         work = Path(directory); tools = work / "bin"; scripts = work / "scripts"
         tools.mkdir(); scripts.mkdir(); trace = work / "trace.jsonl"
@@ -387,28 +390,31 @@ def probe_stack_hook_program(program: str) -> None:
         stub = '''#!PYTHON
 import json, os, sys
 args = sys.argv[1:]
-watched = "test/test_stack_context_hooks.py"
+watched = os.environ["TESLA_STACK_HOOK_WATCHED"]
 def note(value):
     with open(os.environ["TESLA_STACK_HOOK_TRACE"], "a") as out:
         out.write(json.dumps(value) + "\\n")
 if watched in args:
     note(["gate", args])
-    expected = (["tools/agent-hooks/run_with_timeout.py", "120", "python3", watched, ".", "--self-test"]
-                if os.environ["REQUIRE_ALL"] == "1" else [watched, ".", "--self-test"])
+    normal = json.loads(os.environ["TESLA_STACK_HOOK_ARGS"])
+    expected = (["tools/agent-hooks/run_with_timeout.py", "120", os.environ["TESLA_STACK_HOOK_INTERPRETER"], *normal]
+                if os.environ["REQUIRE_ALL"] == "1" else normal)
     if args != expected: raise SystemExit(38)
     raise SystemExit(37 if os.environ["TESLA_STACK_HOOK_FAIL"] == "1" else 0)
 if args == ["__stack_hook_flow_after__"]: note(["after"])
 '''.replace("#!PYTHON", "#!" + sys.executable)
-        python = tools / "python3"; python.write_text(stub); python.chmod(0o700)
+        for name in ("python3", "ruby"):
+            executable = tools / name; executable.write_text(stub); executable.chmod(0o700)
         script = scripts / "stack-hook-flow.sh"; script.write_text(program)
         env = {k: v for k, v in os.environ.items() if k not in
                ("ENV", "BASH_ENV", "OTA_SIGNING_KEY", "OTA_SIGNING_KEY_FILE", "GH_TOKEN", "GITHUB_TOKEN")
                and not k.startswith(("BASH_FUNC_", "PYTHON", "LD_", "DYLD_"))}
-        env.update(PATH=str(tools) + os.pathsep + os.defpath, TESLA_STACK_HOOK_TRACE=str(trace))
+        env.update(PATH=str(tools) + os.pathsep + os.defpath, TESLA_STACK_HOOK_TRACE=str(trace),
+                   TESLA_STACK_HOOK_WATCHED=watched, TESLA_STACK_HOOK_INTERPRETER=interpreter,
+                   TESLA_STACK_HOOK_ARGS=json.dumps([watched, *extra]))
         for strict in (False, True):
-            args = (["tools/agent-hooks/run_with_timeout.py", "120", "python3",
-                     "test/test_stack_context_hooks.py", ".", "--self-test"] if strict else
-                    ["test/test_stack_context_hooks.py", ".", "--self-test"])
+            args = (["tools/agent-hooks/run_with_timeout.py", "120", interpreter, watched, *extra]
+                    if strict else [watched, *extra])
             for fail in (False, True):
                 trace.unlink(missing_ok=True)
                 try:
@@ -546,7 +552,7 @@ def validate(root: Path) -> None:
             "actual web presenter native/glyph parity is missing from the strict host gate")
     require("--require-all" in run_mock and 'REQUIRE_ALL=1' in run_mock,
             "run-mock-tests.sh has no strict mode")
-    for tool in ("python3", "node", "cmake"):
+    for tool in ("python3", "node", "cmake", "ruby", "jq"):
         require(f"need_tool {tool}" in run_mock,
                 f"run-mock-tests.sh strict mode does not require {tool}")
     require("tools/agent-hooks/run_with_timeout.py" in run_mock and "run_gate" in run_mock,
@@ -557,6 +563,7 @@ def validate(root: Path) -> None:
     for path in (
         "test/tesla_protocol_vectors.test.mjs",
         "test/test_runtime_boundary_contract.py",
+        "test/test_evcc_vehicle.rb",
         "test/generate_eth_startup_adapter.py",
         "test/test_eth_startup_cleanup.cpp",
         "test/test_eth_startup_cleanup.py",
@@ -1303,6 +1310,18 @@ def self_test(root: Path) -> None:
     ):
         mutations.append(("scripts/run-mock-tests.sh", stack_call, replacement,
                           "stack hook invocation flow"))
+    evcc_call = 'run_gate "evcc vehicle YAML and actual jq state mapping" 120 ruby test/test_evcc_vehicle.rb'
+    for replacement in (
+        'true # omitted evcc YAML gate',
+        '# ' + evcc_call,
+        'if false; then ' + evcc_call + '; fi',
+        'exit 0\n' + evcc_call,
+        evcc_call + ' || true',
+        evcc_call.replace('120 ruby', '119 ruby'),
+    ):
+        mutations.append(("scripts/run-mock-tests.sh", evcc_call, replacement,
+                          "stack hook invocation flow" if replacement.startswith('exit 0\n')
+                          else "evcc YAML invocation flow"))
     for path in ("test/test_heap_supervisor.cpp", "test/test_clock_runtime.cpp",
                  "test/test_config_commit.cpp", "test/test_effect_reply_adapters.cpp"):
         mutations.append((path, '#include "stack_watch.hpp"', '// removed actual stack header',

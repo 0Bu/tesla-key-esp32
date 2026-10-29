@@ -88,6 +88,8 @@ dispatch; the same rule applies to vehicle-data routes.
   `timeout` applies only to reads; setters retain the [10 s client default](https://github.com/evcc-io/evcc/blob/bf5c276cdb395443fda4601b99151c0a962d0db4/util/request/helper.go#L16)
   and can time out before wake confirmation. The [custom vehicle example](examples/evcc-custom-vehicle.yaml)
   sets each HTTP plugin's timeout to 30 s, including charge enable, current and wake setters.
+  Its status expression maps `Starting` to connected/not charging (`B`), so evcc can still send
+  a stop while charging is starting; mapping it to disconnected (`A`) suppresses that setter.
   Waiting at the [single HTTP worker](ARCHITECTURE.md#http-request-serialization) can still
   exceed this timeout. Check state before repeating an uncertain action, as described above.
 

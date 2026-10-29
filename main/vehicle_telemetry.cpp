@@ -562,7 +562,12 @@ void VehicleController::process_ble_host_events_() {
     }
 
     BleHostEvent event{};
-    while (pop_ble_host_event_(event)) {
+    static_assert(tk::BleDeferredQueue::kRxWindowMs == tk::CommandRunner::kDefaultRxInterChunkTimeoutMs);
+    uint32_t empty_ms = 0;
+    for (;;) {
+        // Empty observation and its clock sample share the producer's short mux.
+        // Anything enqueued later has an arrival time no earlier than this sample.
+        if (!pop_ble_host_event_(event, &empty_ms)) break;
         const uint32_t current_generation = ble_->lifecycle_generation();
         if (!tk::ble_deferred_event_may_apply(event.kind, event.generation,
                                                current_generation)) {
@@ -589,10 +594,9 @@ void VehicleController::process_ble_host_events_() {
             continue;
         }
 
-        const uint32_t now_ms = static_cast<uint32_t>(pdTICKS_TO_MS(xTaskGetTickCount()));
         try {
             command_runner_.rx_framer().push_chunk(
-                event.data.data(), event.size, now_ms,
+                event.data.data(), event.size, event.received_ms,
                 [&](const uint8_t* payload, size_t len) {
                     tk::SemGuard g(vehicle_mutex_);
                     if (!g) {
@@ -626,7 +630,7 @@ void VehicleController::process_ble_host_events_() {
                         default:
                             break;
                     }
-                });
+                }, event.span_ms);
         } catch (const std::exception& e) {
             ESP_LOGE(TAG, "RX framer push_chunk threw (%s) — dropping link", e.what());
             command_runner_.rx_framer().reset();
@@ -645,8 +649,7 @@ void VehicleController::process_ble_host_events_() {
     }
     if (!ble_fault_.load()) {
         try {
-            const uint32_t now_ms = static_cast<uint32_t>(pdTICKS_TO_MS(xTaskGetTickCount()));
-            command_runner_.rx_framer().check_timeout(now_ms, [&](tk::RxFramerDropReason reason, size_t dropped) {
+            command_runner_.rx_framer().check_timeout(empty_ms, [&](tk::RxFramerDropReason reason, size_t dropped) {
                 if (reason == tk::RxFramerDropReason::InterChunkTimeout) {
                     ESP_LOGW(TAG, "RX framer: periodic timeout check dropped %zu stale bytes", dropped);
                 }

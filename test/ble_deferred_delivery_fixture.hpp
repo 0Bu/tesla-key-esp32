@@ -93,6 +93,42 @@ static void shift_head(VehicleController& controller, unsigned count) {
                "actual producer/pop advances the private ring head", "ring head setup failed");
     }
 }
+static void arrival_timing() {
+    for (unsigned delayed = 0; delayed != 2; ++delayed) {
+        vcsec_native::Fixture fixture;
+        auto& c = fixture.controller;
+        initialize_mailbox(c);
+        fixture.enqueue(); c.drive_command_runner_();
+        const auto wire = encode_wire(fixture.seal(vcsec_native::command_status(
+            vcsec_native::envelope(fixture.request(), true), VCSEC_OperationStatus_E_OPERATIONSTATUS_OK), 11), 743);
+        const std::vector<uint8_t> first(wire.begin(), wire.begin() + 20);
+        const bool first_queued = publish(c, first, 0, 8);
+        if (delayed == 0) {
+            // Timely RX, late consumer: the old drain-time substitution discarded this reply.
+            c.process_ble_host_events_();
+            native_ticks += 10;
+            const std::vector<uint8_t> rest(wire.begin() + 20, wire.end());
+            const bool rest_queued = publish(c, rest, 0, 8);
+            native_ticks += 4000;
+            c.process_ble_host_events_();
+            expect(first_queued && rest_queued && fixture.completions == 1 && fixture.success &&
+                   c.command_runner_.rx_framer().stats().timeout_drops == 0,
+                   "actual consumer preserves timely queued continuation despite delayed drain",
+                   "processing latency became a false RX gap");
+        } else {
+            // Actual >3s gap, one delayed drain: old coalescing hid it and mixed two replies.
+            native_ticks += 4001;
+            const bool complete_queued = publish(c, wire, 0, 8);
+            native_ticks += 1000;
+            c.process_ble_host_events_();
+            expect(first_queued && complete_queued && fixture.completions == 1 && fixture.success &&
+                   c.command_runner_.rx_framer().stats().timeout_drops == 1 &&
+                   c.command_runner_.rx_framer().stats().corrupt_length_drops == 0,
+                   "actual callback/queue/consumer retains a real gap before an authenticated reply",
+                   "coalescing hid the gap or lost the complete response");
+        }
+    }
+}
 static void assert_unlocked() {
     expect(native_mailbox_depth == 0 && native_mailbox_lock_violations == 0 &&
            native_external_lock_violations == 0,
@@ -470,6 +506,7 @@ static void lifecycle_and_faults() {
 static void check_native_ble_deferred_delivery() {
     std::printf("\n--- F116 actual callback/mailbox/whole-consumer delivery ---\n");
     deferred_native::queue_edges();
+    deferred_native::arrival_timing();
     deferred_native::max_frame_delivery();
     deferred_native::lifecycle_and_faults();
     deferred_native::assert_unlocked();

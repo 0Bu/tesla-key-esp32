@@ -83,6 +83,7 @@ using namespace TeslaBLE;
 #include "ble_deferred_test_hooks.hpp"
 
 static uint32_t native_ticks = 0;
+static int64_t esp_timer_get_time() { return static_cast<int64_t>(native_ticks) * 1000; }
 static unsigned native_errors = 0, native_warnings = 0;
 struct NativeClientRef {
     Client* value;

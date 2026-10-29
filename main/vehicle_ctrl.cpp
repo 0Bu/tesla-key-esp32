@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstring>
 #include <esp_log.h>
+#include <esp_timer.h>
 
 // No protobuf includes needed here: the only generated types this TU touches are the
 // UniversalMessage_* ones, which vehicle_ctrl.hpp provides via universal_message.pb.h.
@@ -73,7 +74,8 @@ bool VehicleController::enqueue_ble_link_event_(bool connected, uint16_t conn_ha
 bool VehicleController::enqueue_ble_rx_event_(const uint8_t* data, size_t size,
                                               uint32_t generation) noexcept {
     portENTER_CRITICAL(&ble_events_.mux);
-    const bool queued = ble_events_.ready && ble_events_.queue.push_rx(data, size, generation);
+    const uint32_t received_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+    const bool queued = ble_events_.ready && ble_events_.queue.push_rx(data, size, generation, received_ms);
     portEXIT_CRITICAL(&ble_events_.mux);
     if (!queued) ble_events_.overflow.store(true, std::memory_order_release);
     return queued;
@@ -86,9 +88,10 @@ bool VehicleController::ble_host_events_ready_() noexcept {
     return ready;
 }
 
-bool VehicleController::pop_ble_host_event_(BleHostEvent& event) noexcept {
+bool VehicleController::pop_ble_host_event_(BleHostEvent& event, uint32_t* empty_ms) noexcept {
     portENTER_CRITICAL(&ble_events_.mux);
     const bool present = ble_events_.ready && ble_events_.queue.pop(event);
+    if (!present && empty_ms) *empty_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
     portEXIT_CRITICAL(&ble_events_.mux);
     return present;
 }
