@@ -21,6 +21,8 @@ import subprocess
 import sys
 from typing import Any
 
+from shell_read import is_literal_read
+
 
 FILE_READ_TOOLS = {"read", "view_file"}
 FILE_MUTATING_TOOLS = {
@@ -494,7 +496,7 @@ def shell_dumps_credentials(command: str) -> bool:
         )
     ):
         return True
-    if (
+    if not is_literal_read(command) and (
         re.search(rf"\|[^|;\n]*\b{shell}\b", command)
         or re.search(rf"\b{shell}\b[^;&|\n]*(?:<<<|(?<!<)<(?!<))", command)
         or re.search(rf"\b{shell}\b(?:\s+-[^;&|\n]*)*\s+-s(?:\s|$)", command)

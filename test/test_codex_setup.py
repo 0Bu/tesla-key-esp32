@@ -36,6 +36,94 @@ def denied(value):
 
 
 assert run('PreToolUse', tool('Bash', {'command': 'git status --short'})) == {}
+
+# Literal jq/search syntax must remain data through both independent guards. These
+# payloads are inspected only; no GitHub, device, partition or shell command runs.
+literal_reads = [
+    "gh run view 40698697009 --json status,conclusion,jobs --jq '{status,conclusion,jobs:[.jobs[]|{name,status,conclusion,startedAt,completedAt}]}'",
+    r"rg --no-config -n 'otaCheck|ota/check|set_time|vehicle_data|setInterval|fetch\(|query.*pr|URLSearchParams|ota-channel' main/www/app.js",
+    "rg --no-config -n 'check-partition-contract|partition.*protected|PR policy could|require-pr' tools/agent-config/codex_hook.py",
+    "rg --no-config -n 'partition|def .*table|md5|argparse' scripts/check-firmware-artifacts.py scripts/check-bootloader-compat.py scripts/ci-build-verify.sh",
+    "rg --no-config -n 'first\nquery.*pr|sh < input' docs/DEVELOPMENT.md",
+    r'rg --no-config -n "literal\|text\{x\}" main/www/app.js',
+    "rg --no-config -n '$RG_ARGS|sh < input' scripts/ci-build-verify.sh",
+]
+validator = 'python3 -I -S scripts/check-partition-contract.py --csv partitions.csv'
+# The hook checks file ownership; the validator separately checks table bytes.
+for command in [*literal_reads, validator, validator + ' --binary partitions.csv']:
+    assert run('PreToolUse', tool('exec_command', {'cmd': command, 'workdir': str(ROOT)})) == {}, command
+
+for command in [
+    validator.replace(' -I -S', ''),
+    "rg -n 'partition|def .*table|md5|argparse' scripts/ci-build-verify.sh",
+    "rg --no-config --hostname-bin sh 'sh < input' file",
+    validator + ' --self-test',
+    validator + ' --csv partitions.csv',
+    validator + ' --binary a.bin --binary b.bin',
+    validator + ' --unknown value',
+    validator.replace('--csv partitions.csv', '--csv other.csv --binary partitions.csv'),
+    validator.replace('scripts/check-', './scripts/check-'),
+    validator.replace('python3 ', 'python3 -c '),
+    validator.replace('python3 ', 'env python3 '),
+    validator + ' > output.txt',
+    validator + ' && true',
+    validator + ' | cat',
+    validator + ' --binary "${TABLE}"',
+    validator + ' --binary "$(echo table.bin)"',
+    validator + ' --binary ota_signing_key.pem',
+    literal_reads[0] + '; git push origin main',
+    literal_reads[1] + ' && gh pr merge 1 --admin',
+    "printf 'harmless' | sh",
+    'sh < input.sh',
+    'sh -s',
+    'command -p sh -s',
+    'builtin command -p sh -s',
+    'env -S "sh -s"',
+    'printf harmless | (sh)',
+    'printf harmless | { sh; }',
+    'cat input | stdbuf -oL sh',
+    'unknown-wrapper sh -s',
+    "rg --no-config ${RG_ARGS} 'sh < input' file",
+    'rg --no-config "$RG_ARGS" \'sh < input\' file',
+    "rg --no-config --pre* 'sh < input' file",
+    "rg --no-config --pre=sh 'sh < input' file",
+    "bash -c 'cat input | sh'",
+    'gh pr create --body-file "${BODY_FILE}"',
+    'git push origin "${BRANCH}"',
+    'bash -c \'echo x; g"h" pr merge 1 --admin\'',
+    'rg -n "$(gh pr merge 1 --admin)" main/www/app.js',
+]:
+    value = run('PreToolUse', tool('exec_command', {'cmd': command, 'workdir': str(ROOT)}))
+    assert value and denied(value), command
+
+for args in [
+    {'cmd': validator, 'workdir': '/tmp'},
+    {'cmd': validator, 'workdir': str(ROOT), 'cwd': '/tmp'},
+    {'cmd': validator, 'workdir': 7},
+]:
+    assert denied(run('PreToolUse', tool('exec_command', args))), args
+
+# Exercise validator identity independently of filename, without modifying the
+# repository's validator or executing any copy of it.
+sys.path.insert(0, str(ROOT / 'tools/agent-hooks'))
+import agent_hook as safety_core
+with tempfile.TemporaryDirectory(prefix='partition-validator-canary-') as directory:
+    fixture_root = Path(directory).resolve()
+    fixture_script = fixture_root / 'scripts/check-partition-contract.py'
+    fixture_script.parent.mkdir()
+    fixture_csv = fixture_root / 'partitions.csv'
+    fixture_csv.write_bytes((ROOT / 'partitions.csv').read_bytes())
+    fixture_script.write_bytes((ROOT / 'scripts/check-partition-contract.py').read_bytes())
+    assert safety_core.canonical_partition_read(validator, fixture_root, fixture_root)
+    fixture_script.write_text('print("replacement")\n')
+    assert not safety_core.canonical_partition_read(validator, fixture_root, fixture_root)
+    fixture_script.unlink()
+    fixture_script.symlink_to(ROOT / 'scripts/check-partition-contract.py')
+    assert not safety_core.canonical_partition_read(validator, fixture_root, fixture_root)
+    fixture_script.unlink()
+    assert not safety_core.canonical_partition_read(validator, fixture_root, fixture_root)
+    checks += 4
+
 assert denied(run('PreToolUse', tool('Bash', {'command': 'printenv'})))
 assert denied(run('PreToolUse', tool('apply_patch', {'command': '*** Begin Patch\n*** Update File: partitions.csv\n@@\n-old\n+new\n*** End Patch'})))
 assert denied(run('PreToolUse', tool('Bash', {'command': 'gh --repo github.com/0Bu/tesla-key-esp32 pr merge 1 --admin'})))

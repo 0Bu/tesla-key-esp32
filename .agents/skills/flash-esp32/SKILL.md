@@ -115,16 +115,6 @@ printf '%s\n' "$SIGNED_INFO" | grep -qx "Detected image type: $FAMILY" || {
 
 # Flash from the HOST (Docker cannot reach USB). App-only write + otadata erase preserves the
 # existing bootloader, partition table and nvs@0x9000; otadata is changed LAST as activation.
-if [ -z "${PORT:-}" ]; then
-  PORTS=$(ioreg -l -w 0 2>/dev/null | grep -iE '"USB Product Name"|"IOCalloutDevice"' \
-         | grep -iA1 '"USB Single Serial"' | grep -o '/dev/cu\.usbmodem[^"]*' \
-         | LC_ALL=C sort -u || true)
-  [ "$(printf '%s\n' "$PORTS" | awk 'NF {n++} END {print n+0}')" -eq 1 ] || {
-    echo "REFUSING: expected exactly one USB Single Serial port; set PORT explicitly after inspection" >&2
-    printf '%s\n' "$PORTS" >&2; exit 1;
-  }
-  PORT=$(printf '%s\n' "$PORTS" | awk 'NF {print}')
-fi
 : "${PORT:?set PORT to the explicitly identified serial device}"
 # Detect the chip on the chosen port and refuse a target mismatch before writing.
 esptool chip-id --help >/dev/null 2>&1 && CHIP_CMD=chip-id || CHIP_CMD=chip_id
@@ -148,10 +138,9 @@ if ! esptool --chip "$TARGET" -p "$PORT" --before no-reset --after hard-reset \
 fi
 ```
 
-> **Port detection above targets S3/C3/C6 boards** (native USB = `/dev/cu.usbmodem*`).
-> The **classic esp32** has no native USB — it appears
-> as a USB-UART bridge `/dev/cu.usbserial-*` (CP210x/CH340). List the candidates, identify the
-> intended board and set its exact path (`PORT=/dev/cu.usbserial-...`); never pick the first entry.
+> On macOS, native S3/C3/C6 USB commonly appears as `/dev/cu.usbmodem*`; classic ESP32
+> boards use a USB-UART bridge, often `/dev/cu.usbserial-*`. Bind `PORT` to the identified
+> physical board before this block; a node name or bridge label does not establish identity.
 
 > **Linux host** (e.g. Raspberry Pi): `ioreg` and `/dev/cu.*` are macOS-only. Ports appear as
 > `/dev/ttyACM*` (native USB / WCH bridge) or `/dev/ttyUSB*` (CP210x/CH340). Inspect them and set
@@ -286,27 +275,20 @@ fi
 
 ## Picking the right serial port
 
-This board exposes **two** USB serial interfaces — confirm before flashing:
+Boards may expose native USB, a UART bridge, or both. Examples are interface descriptions,
+not a board-selection rule:
 
 | `/dev` node (example)        | USB product name              | What it is                     |
 |------------------------------|-------------------------------|--------------------------------|
-| `/dev/cu.usbmodem<SERIAL>`   | **USB Single Serial** (WCH)   | UART bridge — **use this one** |
-| `/dev/cu.usbmodem<NNNN>`     | USB JTAG/serial debug unit    | S3/C3/C6 native USB (also works) |
+| `/dev/cu.usbmodem<SERIAL>`   | USB Single Serial (WCH)       | UART bridge |
+| `/dev/cu.usbmodem<NNNN>`     | USB JTAG/serial debug unit    | S3/C3/C6 native USB |
 
-The exact node name is device/cable-specific — **never hardcode it**; detect at runtime.
-List both with their product names:
+The exact node name is device/cable-specific. Collect the passive USB parent/interface mapping
+using [$deploy-bench](../deploy-bench/SKILL.md#2-find-the-physical-bench-without-probing-every-board),
+bind the intended board's physical identity, and set its explicit `PORT` before any serial probe.
 
-```bash
-ioreg -l -w 0 2>/dev/null | grep -iE '"USB Product Name"|"IOCalloutDevice"' \
-  | grep -iB1 usbmodem | sed -E 's/^[ |]+//'
-```
-
-Both interfaces can flash an S3. The local signed-flash command above targets the **WCH UART
-bridge** ("USB Single Serial"), which is the conventional choice. If only the native
-JTAG unit is present, target that node instead. If the listing finds no unambiguous intended
-board, stop and identify its explicit port (check the cable/wake the board, then rerun the
-listing). **Never drop `-p "$PORT"` or accept esptool's first auto-detected responder**: with
-multiple compatible boards attached that can flash the wrong device.
+Either interface can be valid. Stop if the intended board remains ambiguous; never select by
+bridge preference, drop `-p "$PORT"`, or accept esptool's first auto-detected responder.
 
 ## Notes & gotchas
 

@@ -329,7 +329,8 @@ literal arguments and the supported ordinary search options; preprocessors, host
 unquoted globs, expansions, wrappers and pipelines retain conservative classification. GitHub CLI
 exceptions require a supported `pr`/`run` read command with active `--json` and `--jq`/`-q` options.
 For example, run `rg --no-config -n 'git push|gh pr merge' AGENTS.md` as a separate shell call.
-Secret and partition guards still apply to these reads.
+The credential guard uses the same literal-read classification only for its stdin-shell check;
+all secret-path, credential-output and partition checks still apply.
 
 The partition guard permits only the reviewed validator's isolated, input-only invocation from the
 repository root: `python3 -I -S scripts/check-partition-contract.py --csv partitions.csv`.

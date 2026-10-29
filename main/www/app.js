@@ -1168,39 +1168,19 @@ function genKey(){
 }
 
 /* ---------- OTA ---------- */
-// Status shows inline in the header (progress ring + text) and mirrors into the Firmware pane's
-// bar — no bottom popup. A tiny ring sized for the header's status line.
+// Action feedback uses the shared bottom popup; the Firmware row keeps its progress bar.
 var OTA_CHECK_TIMEOUT_MS=60000, OTA_UPDATE_TIMEOUT_MS=480000, OTA_HTTP_TIMEOUT_MS=5000;
-var otaClearTimer=null;
 var otaLastToastMilestone=null;
-// var(--ok) so it matches the green signal bars while keeping the exact OTA ring geometry.
-function otaMiniRing(pct,indet,col){
-  var sz=16,c=sz/2,r=6,sw=2.6,circ=2*Math.PI*r; col=col||'var(--accent)';
-  if(indet){
-    return '<svg class="otaspin" width="'+sz+'" height="'+sz+'" viewBox="0 0 '+sz+' '+sz+'">'+
-      '<circle cx="'+c+'" cy="'+c+'" r="'+r+'" fill="none" stroke="var(--border)" stroke-width="'+sw+'"/>'+
-      '<circle cx="'+c+'" cy="'+c+'" r="'+r+'" fill="none" stroke="'+col+'" stroke-width="'+sw+'" stroke-linecap="round" stroke-dasharray="'+(circ*0.3).toFixed(1)+' '+circ.toFixed(1)+'"/>'+
-      '</svg>';
-  }
-  var off=circ*(1-Math.max(0,Math.min(100,pct))/100);
-  return '<svg width="'+sz+'" height="'+sz+'" viewBox="0 0 '+sz+' '+sz+'" style="transform:rotate(-90deg)">'+
-    '<circle cx="'+c+'" cy="'+c+'" r="'+r+'" fill="none" stroke="var(--border)" stroke-width="'+sw+'"/>'+
-    '<circle cx="'+c+'" cy="'+c+'" r="'+r+'" fill="none" stroke="'+col+'" stroke-width="'+sw+'" stroke-linecap="round" stroke-dasharray="'+circ.toFixed(1)+'" stroke-dashoffset="'+off.toFixed(1)+'" style="transition:stroke-dashoffset .5s ease"/>'+
-    '</svg>';
-}
-// pct drives the Firmware pane's progress bar: a number (0–100), 'indet' for a phase with no
+// pct drives the Firmware row's progress bar: a number (0–100), 'indet' for a phase with no
 // measurable progress, or omitted to hide the bar.
-function otaInline(html,cls,pct){
-  var el=$("otaStat"); if(!el)return;
-  el.innerHTML=html||''; el.className='otastat'+(cls?' '+cls:'');
+function otaBarProgress(pct){
   var bar=$("otaBar"), fill=$("otaFill");
   if(bar&&bar.classList){ bar.classList.toggle('hide',pct==null); bar.classList.toggle('indet',pct==='indet'); }
   if(fill&&fill.style&&pct!=null&&pct!=='indet') fill.style.width=Math.max(0,Math.min(100,pct))+'%';
 }
-function otaInlineClear(delay){ clearTimeout(otaClearTimer); otaClearTimer=setTimeout(function(){ otaClearTimer=null; otaInline(''); }, delay||3000); }
-function otaBegin(phase,timeout){ clearTimeout(otaClearTimer); otaClearTimer=null; otaPhase=phase; otaDeadline=Date.now()+timeout; otaLastToastMilestone=null; renderVerLink(); }
-function otaReset(){ clearTimeout(otaTimer); clearTimeout(otaClearTimer); otaClearTimer=null; otaBusy=false; otaPrompting=false; otaPhase=null; otaPollState=null; otaDeadline=0; otaExpectedVersion=null; otaLastToastMilestone=null; renderVerLink(); if(typeof syncOtaUi === 'function') syncOtaUi(); fwRefocus(); }
-function otaFail(message){ otaReset(); if(typeof closeOtaModal === 'function') closeOtaModal(false); toast(message, 'err', 'ota'); otaInline('<span>'+esc(message)+'</span>','err'); otaInlineClear(6000); if(typeof syncOtaUi === 'function') syncOtaUi(); }
+function otaBegin(phase,timeout){ otaPhase=phase; otaDeadline=Date.now()+timeout; otaLastToastMilestone=null; renderVerLink(); }
+function otaReset(){ clearTimeout(otaTimer); otaBarProgress(); otaBusy=false; otaPrompting=false; otaPhase=null; otaPollState=null; otaDeadline=0; otaExpectedVersion=null; otaLastToastMilestone=null; renderVerLink(); if(typeof syncOtaUi === 'function') syncOtaUi(); fwRefocus(); }
+function otaFail(message){ otaReset(); if(typeof closeOtaModal === 'function') closeOtaModal(false); toast(message, 'err', 'ota'); if(typeof syncOtaUi === 'function') syncOtaUi(); }
 function otaSchedule(fn,delay){
   if(!otaDeadline||Date.now()<otaDeadline){ otaTimer=setTimeout(fn,delay); return; }
   otaFail(otaPhase==='check'?'check timed out':'update timed out');
@@ -1376,7 +1356,7 @@ function startOtaUpdate(availVer){
   otaBusy = true;
   otaBegin('update', OTA_UPDATE_TIMEOUT_MS);
   toast('Starting update…', 'load', 'ota');
-  otaInline(otaMiniRing(0, true, 'currentColor') + '<span>starting…</span>', '', 'indet');
+  otaBarProgress('indet');
   if(typeof syncOtaUi === 'function') syncOtaUi();
   var updatePr=otaPrSelection();
   return requestOtaStart('/ota/update'+(updatePr?'?pr='+updatePr:''), { method: 'POST' }).then(function(j){
@@ -1526,7 +1506,7 @@ function otaCheck(){
   otaBegin('check',OTA_CHECK_TIMEOUT_MS);
   if(typeof syncOtaUi === 'function') syncOtaUi();
   toast('Checking for updates…', 'load', 'ota');
-  otaInline(otaMiniRing(0,true,'currentColor'),'','indet');   // checking — spinning ring only, no label
+  otaBarProgress('indet');
   var prSel=otaPrSelection();
   var checkUrl='/ota/check?'+(prSel?'pr='+prSel+'&':'')+'ms='+Date.now();
   return requestOtaStart(checkUrl,{}).then(function(j){
@@ -1548,7 +1528,7 @@ function otaCheckPoll(){
       otaPhase=null;
       otaPrompting=true;          // stay locked while the changelog loads and the dialog is open
       if(typeof syncOtaUi === 'function') syncOtaUi();
-      otaAvail=o.available||''; if(state)render(state); otaInline('');         // clear while the dialog is up
+      otaAvail=o.available||''; if(state)render(state); otaBarProgress();
       toast('Update available: v' + o.available, 'ok', 'ota');
       return loadOtaChangelog().then(function(notes){
         return askOtaInstall(o, notes);
@@ -1564,7 +1544,6 @@ function otaCheckPoll(){
       otaAvail=null; if(state)render(state); otaReset();
       if(typeof closeOtaModal === 'function') closeOtaModal(false);
       toast('Firmware is up to date', 'ok', 'ota');
-      otaInline('<span>up to date</span>'); otaInlineClear(3500);
     }
   }).catch(function(err){ otaFail((err && err.message) || 'check failed'); });
 }
@@ -1584,14 +1563,14 @@ function otaProgress(o){
       otaLastToastMilestone=milestone;
       toast('Downloading update… ' + milestone + '%', 'load', 'ota');
     }
-    otaInline(otaMiniRing(p,false,'currentColor')+'<span>'+p+'%</span>','',p);
+    otaBarProgress(p);
     otaSchedule(otaPoll,800);
   }
   else if(o.state==='done'){
     if(!otaVersion(otaExpectedVersion)){ otaFail('update target version is missing'); return; }
     clearTimeout(otaTimer); otaPhase='reboot';
     toast('Verifying & rebooting…', 'load', 'ota');
-    otaInline(otaMiniRing(100,false,'currentColor')+'<span>verifying…</span>','',100);
+    otaBarProgress(100);
     setTimeout(function(){waitReboot(otaExpectedVersion)},1200);
   }
   else if(o.state==='error'){
@@ -1604,7 +1583,7 @@ function otaProgress(o){
     if(!otaVersion(otaExpectedVersion)){ otaFail('update target version is missing'); return; }
     otaPhase='reboot';
     toast('Verifying & rebooting…', 'load', 'ota');
-    otaInline(otaMiniRing(100,false,'currentColor')+'<span>verifying…</span>','',100);
+    otaBarProgress(100);
     waitReboot(otaExpectedVersion);
   }
   else if(o.state==='checking'){ otaSchedule(otaPoll,1000); }

@@ -152,9 +152,7 @@ console.error = function() {
     const liveRegion = document.getElementById("toasts");
     check(liveRegion && liveRegion.getAttribute("role") === "status", "toasts status role");
     check(liveRegion && liveRegion.getAttribute("aria-live") === "polite", "toasts polite live region");
-    const otaStat = document.getElementById("otaStat");
-    check(otaStat && !otaStat.hasAttribute("aria-live") && otaStat.getAttribute("aria-hidden") === "true",
-          "otaStat is not a second live region");
+    check(!document.getElementById("otaStat"), "no duplicate OTA feedback in the header");
 
     check(typeof requestJson === "function" && typeof toast === "function" && typeof render === "function",
           "assembled application functions");
