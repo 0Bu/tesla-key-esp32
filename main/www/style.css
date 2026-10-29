@@ -50,11 +50,7 @@ svg{display:block}
 .logo.big{width:48px; height:48px; border-radius:14px}
 .rail-logo{display:none}
 
-/* OTA status in the header (ring + short text) */
-.otastat{display:flex; align-items:center; gap:6px; font-size:13px; font-weight:600; white-space:nowrap;
-  font-variant-numeric:tabular-nums; color:var(--accent-text)}
-.otastat:empty{display:none}
-.otastat.err{color:var(--accent-text)}
+/* Loading icon in action popups. */
 .otaspin{animation:spin 1s linear infinite}
 
 /* panes: all cards stream vertically on one single page, 1 card per row, equal width */

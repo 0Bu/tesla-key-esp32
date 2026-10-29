@@ -69,6 +69,33 @@ def check(health: str, e2e: str) -> None:
         "diagnostic transport failure must not be accepted as a healthy bench", status, calls)
 
 
+def check_local_port(block: str) -> None:
+    """Run the published port gate before chip probing with a passive USB double."""
+    for have_port in (False, True):
+        with tempfile.TemporaryDirectory() as directory:
+            calls, selected = Path(directory) / "calls", Path(directory) / "selected"
+            prefix = "set -e\nunset PORT\n"
+            prefix += f"calls={shlex.quote(str(calls))}\n"
+            prefix += r'''
+ioreg() {
+  printf 'ioreg\n' >> "$calls"
+  printf '"USB Product Name" = "USB Single Serial"\n'
+  printf '"IOCalloutDevice" = "/dev/cu.usbmodemUNRELATED"\n'
+}
+'''
+            if have_port:
+                prefix += "PORT=/dev/cu.EXPLICIT_TEST\n"
+            completed = subprocess.run(
+                ["bash", "-c", prefix + block + '\nprintf "%s" "${PORT-}" > '
+                 + shlex.quote(str(selected))], capture_output=True, text=True, timeout=10,
+            )
+            assert not calls.exists(), "port gate must not select a USB bridge"
+            if have_port:
+                assert completed.returncode == 0 and selected.read_text() == "/dev/cu.EXPLICIT_TEST"
+            else:
+                assert completed.returncode != 0 and not selected.exists(), "absent PORT must stop"
+
+
 def main() -> None:
     source = (ROOT / ".agents/skills/deploy-bench/SKILL.md").read_text()
     health, e2e = recipe(source, "5b"), recipe(source, "5c")
@@ -90,7 +117,23 @@ def main() -> None:
         except AssertionError:
             continue
         raise AssertionError("unsafe target-binding mutation accepted")
-    print(f"deploy-target: PASS (selected/missing target, read-only modes, {len(controls)} negative controls; no live calls)")
+    flash = (ROOT / ".agents/skills/flash-esp32/SKILL.md").read_text()
+    port_gate = flash.split("# Flash from the HOST", 1)[1].split("# Detect the chip", 1)[0]
+    port_gate = "# Flash from the HOST" + port_gate
+    check_local_port(port_gate)
+    port_controls = (
+        re.sub(r'^: .*\n', '', port_gate, count=1, flags=re.M),
+        'if [ -z "${PORT:-}" ]; then PORT=/dev/cu.AUTO_SELECTED; fi\n' + port_gate,
+    )
+    for control in port_controls:
+        assert control != port_gate, "port control did not apply"
+        try:
+            check_local_port(control)
+        except AssertionError:
+            continue
+        raise AssertionError("unsafe local port selection accepted")
+    print(f"deploy-target: PASS (selected/missing target and port, read-only modes, "
+          f"{len(controls) + len(port_controls)} negative controls; no live calls)")
 
 
 if __name__ == "__main__":
