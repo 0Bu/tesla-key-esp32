@@ -32,14 +32,15 @@
 //      it fires once to refresh the cache and break the deadlock. If a poll fails/times out,
 //      exponential backoff retries without hammering an unresponsive MCU (issue #301).
 //   3. Awake-episode quiescence latch: once a fresh charge cache is acquired or held during an
-//      awake episode, the episode latch (episode_fresh) engages and prevents subsequent periodic
-//      re-arming while the car remains continuously connected and awake (issue #308). The system
-//      remains completely quiescent so an idle parked car can reach sleep undisturbed.
+//      awake episode, the episode latch (episode_fresh) prevents further bootstrap re-arming
+//      while the car remains continuously connected and awake (issue #308). Active-window polling
+//      and other BLE traffic remain possible.
 //
-// Both use the same NO_WAKE_SKIP poll: a car already back asleep is skipped, so the device still
-// never causes a wake: we only ever piggyback on one the car did on its own. One poll refreshes the
-// SOC cache; if it reports Charging/Starting the existing charging arm opens the window and normal
-// session polling takes over, otherwise the car re-sleeps undisturbed.
+// Both use the same NO_WAKE_SKIP poll: a car reported ASLEEP is skipped, and the device never
+// asks for a wake. UNKNOWN/AWAKE can still produce Infotainment or SessionInfo traffic; its physical
+// wake effect requires measurement and is not proven by NO_WAKE_SKIP. A successful poll refreshes
+// the SOC cache. Charging/Starting opens the existing charging window for session polling;
+// otherwise the poll does not open that window.
 //
 // Why arming requires a *debounced* asleep run for the wake-edge trigger:
 // A single ASLEEP reading is not proof of sleep: the VCSEC flag flaps AWAKE↔ASLEEP (~60 s) while
