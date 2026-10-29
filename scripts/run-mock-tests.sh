@@ -63,6 +63,8 @@ if [ "$REQUIRE_ALL" = 1 ]; then
     need_tool python3
     need_tool node
     need_tool cmake
+    need_tool ruby
+    need_tool jq
     gate_file "$TIMEOUT_RUNNER"
     for required in \
         scripts/check-display-sim-parity.sh \
@@ -72,6 +74,7 @@ if [ "$REQUIRE_ALL" = 1 ]; then
         test/test_diagnostic_export_guidance.py \
         test/test_runtime_boundary_contract.py \
         test/test_hook_read_contract.py \
+        test/test_evcc_vehicle.rb \
         tools/agent-hooks/shell_read.py \
         test/generate_eth_startup_adapter.py \
         test/test_eth_startup_cleanup.cpp \
@@ -283,6 +286,7 @@ if command -v python3 >/dev/null 2>&1; then
     run_gate "display simulator parity" 120 scripts/check-display-sim-parity.sh
     run_gate "provisioning tests" 120 python3 test/test_provision.py
     run_gate "capture wake tests" 120 python3 test/test_capture_wake.py
+    run_gate "evcc vehicle YAML and actual jq state mapping" 120 ruby test/test_evcc_vehicle.rb
     run_gate "log origin contract" 120 python3 test/test_log_origin_contract.py
     run_gate "diagnostic export guidance" 120 python3 test/test_diagnostic_export_guidance.py
     run_gate "stack context owner hooks" 120 python3 test/test_stack_context_hooks.py . --self-test
