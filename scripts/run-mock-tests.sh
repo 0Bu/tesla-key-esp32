@@ -63,6 +63,8 @@ if [ "$REQUIRE_ALL" = 1 ]; then
     need_tool python3
     need_tool node
     need_tool cmake
+    need_tool ruby
+    need_tool jq
     gate_file "$TIMEOUT_RUNNER"
     for required in \
         scripts/check-display-sim-parity.sh \
@@ -100,6 +102,8 @@ if [ "$REQUIRE_ALL" = 1 ]; then
         main/logic/stack_sample_codec.hpp \
         test/stubs/esp_attr.h \
         test/test_charge_presentation.py \
+        test/test_evcc_example.py \
+        docs/examples/evcc-custom-vehicle.yaml \
         test/test_command_outcomes.py \
         test/test_inline_assets.py \
         main/www/prune_css_comments.py \
@@ -290,6 +294,11 @@ if command -v python3 >/dev/null 2>&1; then
     run_gate "Ethernet actual cleanup safety controls" 120 python3 test/test_eth_startup_cleanup.py
     run_gate "MQTT/WDT and network iteration bodies" 120 python3 test/test_f137_host.py --source . --controls --execute-controlled-host-only
     run_gate "coherent charge presentation snapshot" 120 python3 test/test_charge_presentation.py
+    if command -v ruby >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+        run_gate "actual evcc example configuration" 120 python3 test/test_evcc_example.py
+    else
+        echo "run-mock-tests: ruby or jq not found — skipping evcc example checks" >&2
+    fi
     run_gate "contextual charging command outcomes" 120 python3 test/test_command_outcomes.py
     run_gate "CSS bytes and actual inline generation" 120 python3 test/test_inline_assets.py
     run_gate "optional LED driver decisions and GPIO" 120 python3 test/test_led_driver_contract.py

@@ -6458,22 +6458,23 @@ static void test_ble_chunk() {
 static void test_ble_deferred_queue() {
     using Q = tk::BleDeferredQueue;
     using K = tk::BleDeferredEventKind;
+    constexpr uint32_t timeout = tk::CommandRunner::kDefaultRxInterChunkTimeoutMs;
     Q queue;
     Q::Event event;
     event.generation = 77;
     CHECK(!queue.pop(event));
     CHECK(event.generation == 77);
-    CHECK(!queue.push_rx(nullptr, 1, 8));
+    CHECK(!queue.push_rx(nullptr, 1, 8, 0, timeout));
     uint8_t sample[245]{};
-    CHECK(!queue.push_rx(sample, 0, 8));
-    CHECK(!queue.push_rx(sample, 245, 8));
+    CHECK(!queue.push_rx(sample, 0, 8, 0, timeout));
+    CHECK(!queue.push_rx(sample, 245, 8, 0, timeout));
     for (size_t total : {size_t{743}, size_t{2050}}) {
         for (size_t chunk : {size_t{1}, size_t{20}, size_t{244}}) {
             queue.clear();
             for (size_t position = 0; position < total;) {
                 const size_t size = std::min(chunk, total - position);
                 for (size_t i = 0; i < size; ++i) sample[i] = static_cast<uint8_t>(position + i);
-                CHECK(queue.push_rx(sample, size, 8));
+                CHECK(queue.push_rx(sample, size, 8, 0, timeout));
                 std::memset(sample, 0xa5, sizeof sample);
                 position += size;
             }
@@ -6491,7 +6492,7 @@ static void test_ble_deferred_queue() {
     for (unsigned round = 0; round != 64; ++round) {
         CHECK(queue.push_link(false, 3, 8));
         CHECK(queue.push_link(true, 4, 10));
-        CHECK(queue.push_rx(sample, 1, 10));
+        CHECK(queue.push_rx(sample, 1, 10, 0, timeout));
         CHECK(queue.pop(event) && event.kind == K::LinkDown && event.generation == 8 && event.conn_handle == 3);
         CHECK(queue.pop(event) && event.kind == K::LinkUp && event.generation == 10 && event.conn_handle == 4);
         CHECK(queue.pop(event) && event.kind == K::Rx && event.generation == 10 && event.size == 1);
@@ -6499,9 +6500,9 @@ static void test_ble_deferred_queue() {
     }
     for (unsigned i = 0; i != 15; ++i) CHECK(queue.push_link(true, 3, 8));
     std::memset(sample, 0x31, sizeof sample);
-    CHECK(queue.push_rx(sample, 243, 8));
+    CHECK(queue.push_rx(sample, 243, 8, 0, timeout));
     std::memset(sample, 0x72, sizeof sample);
-    CHECK(!queue.push_rx(sample, 2, 8));
+    CHECK(!queue.push_rx(sample, 2, 8, 0, timeout));
     CHECK(queue.cells_used() == 16);
     unsigned links = 0;
     size_t bytes = 0;
@@ -6512,19 +6513,117 @@ static void test_ble_deferred_queue() {
         } else ++links;
     }
     CHECK(links == 15 && bytes == 243);
-    CHECK(queue.push_rx(sample, 1, 8));
-    CHECK(queue.push_rx(sample, 1, 10));
+    CHECK(queue.push_rx(sample, 1, 8, 0, timeout));
+    CHECK(queue.push_rx(sample, 1, 10, 0, timeout));
     CHECK(queue.pop(event) && event.generation == 8 && event.size == 1);
     CHECK(queue.pop(event) && event.generation == 10 && event.size == 1);
     CHECK(queue.empty());
+
+    CHECK(sizeof(Q) <= 4100 && sizeof(Q::Event) <= 32);
+    const auto frame = [](size_t payload, uint8_t fill) {
+        std::vector<uint8_t> wire(payload + 2, fill);
+        wire[0] = static_cast<uint8_t>(payload >> 8);
+        wire[1] = static_cast<uint8_t>(payload);
+        return wire;
+    };
+    const auto drain = [](Q& ingress, tk::RxFramer& framer,
+                          std::vector<std::vector<uint8_t>>& frames) {
+        Q::Event queued;
+        const auto drop = [](tk::RxFramerDropReason, size_t) {};
+        while (ingress.pop(queued)) {
+            if (queued.kind == K::RxAfterGap) framer.expire_incomplete(drop);
+            framer.push_deferred_chunk(queued.data.data(), queued.size,
+                [&](const uint8_t* bytes, size_t size) { frames.emplace_back(bytes, bytes + size); }, drop);
+        }
+    };
+    const auto old = frame(180, 0x44);
+    const auto fresh = frame(180, 0x55);
+    queue.clear();
+    CHECK(queue.push_rx(old.data(), 20, 8, 0, timeout));
+    CHECK(queue.push_rx(fresh.data(), fresh.size(), 8, 4001, timeout));
+    CHECK(queue.cells_used() == 2); // The arrival gap cannot disappear into tail coalescing.
+    CHECK(!queue.rx_idle_expired(5000, timeout)); // Still queued, not consumer-owned idle bytes.
+    tk::RxFramer delayed(timeout);
+    std::vector<std::vector<uint8_t>> frames;
+    drain(queue, delayed, frames);
+    CHECK(frames.size() == 1 && frames.front() == std::vector<uint8_t>(fresh.begin() + 2, fresh.end()));
+    CHECK(delayed.stats().timeout_drops == 1 && delayed.stats().corrupt_length_drops == 0);
+    CHECK(!queue.rx_idle_expired(7001, timeout));
+    CHECK(queue.rx_idle_expired(7002, timeout));
+
+    // Exactly the boundary remains continuous, including over the uint32 clock rollover.
+    for (const uint32_t start : {uint32_t{0}, UINT32_MAX - uint32_t{1000}}) {
+        for (const uint32_t gap : {timeout, timeout + 1}) {
+            queue.clear();
+            const auto complete = frame(40, 0x5a);
+            CHECK(queue.push_rx(complete.data(), 20, 8, start, timeout));
+            CHECK(queue.push_rx(complete.data() + 20, complete.size() - 20, 8, start + gap, timeout));
+            tk::RxFramer boundary(timeout);
+            frames.clear();
+            drain(queue, boundary, frames);
+            CHECK(frames.size() == (gap == timeout ? 1u : 0u));
+            CHECK(boundary.stats().timeout_drops == (gap == timeout ? 0u : 1u));
+        }
+    }
+
+    // A gap marker survives a partially drained predecessor and applies once, on its first slice.
+    queue.clear();
+    CHECK(queue.push_rx(sample, 244, 8, 100, timeout));
+    CHECK(queue.pop(event) && event.kind == K::Rx && event.size == 20);
+    CHECK(queue.push_rx(fresh.data(), fresh.size(), 8, 4101, timeout));
+    unsigned gaps = 0;
+    while (queue.pop(event)) if (event.kind == K::RxAfterGap) ++gaps;
+    CHECK(gaps == 1);
+
+    // Healthy arrivals may occupy a cell for much longer than the inter-notification deadline.
+    queue.clear();
+    const auto maximum = frame(tk::RxFramer::kMaxFrameLength, 0x72);
+    uint32_t arrived = 0;
+    for (size_t offset = 0; offset < maximum.size(); offset += 20, arrived += 1000) {
+        const size_t size = std::min(size_t{20}, maximum.size() - offset);
+        CHECK(queue.push_rx(maximum.data() + offset, size, 8, arrived, timeout));
+    }
+    tk::RxFramer continuous(timeout);
+    frames.clear();
+    drain(queue, continuous, frames);
+    CHECK(frames.size() == 1 && frames.front() == std::vector<uint8_t>(maximum.begin() + 2, maximum.end()));
+    CHECK(continuous.stats().timeout_drops == 0 && continuous.stats().corrupt_length_drops == 0);
+
+    tk::RxFramer reentrant(timeout);
+    unsigned callbacks = 0;
+    reentrant.push_chunk(fresh.data(), fresh.size(), 0,
+        [&](const uint8_t*, size_t) {
+            ++callbacks;
+            CHECK(reentrant.expire_incomplete([](tk::RxFramerDropReason, size_t) {}));
+        });
+    CHECK(callbacks == 1 && reentrant.buffered_bytes() == 0 && reentrant.stats().timeout_drops == 1);
+
+    // A refused gap must neither append bytes nor refresh the last accepted arrival time.
+    queue.clear();
+    for (unsigned i = 0; i != 15; ++i) CHECK(queue.push_link(true, 3, 8));
+    CHECK(queue.push_rx(sample, 243, 8, 0, timeout));
+    CHECK(!queue.push_rx(sample, 1, 8, 4001, timeout));
+    while (queue.pop(event)) {}
+    CHECK(queue.rx_idle_expired(4001, timeout));
+    queue.clear();
+    CHECK(!queue.rx_idle_expired(4001, timeout));
+    CHECK(queue.push_rx(sample, 1, 8, 5000, timeout));
+    CHECK(queue.pop(event) && event.kind == K::Rx);
+    CHECK(queue.push_link(false, 3, 8));
+    CHECK(queue.pop(event) && event.kind == K::LinkDown);
+    CHECK(!queue.rx_idle_expired(9000, timeout));
+    CHECK(queue.push_rx(sample, 1, 10, 9000, timeout));
+    CHECK(queue.pop(event) && event.kind == K::Rx);
 }
 
 static void test_ble_deferred_event() {
     using K = tk::BleDeferredEventKind;
     CHECK(tk::ble_deferred_event_may_apply(K::LinkUp, 8, 8));
     CHECK(tk::ble_deferred_event_may_apply(K::Rx, 8, 8));
+    CHECK(tk::ble_deferred_event_may_apply(K::RxAfterGap, 8, 8));
     CHECK(!tk::ble_deferred_event_may_apply(K::LinkUp, 7, 7));  // unstable generation
     CHECK(!tk::ble_deferred_event_may_apply(K::Rx, 8, 10));    // stale old-link bytes
+    CHECK(!tk::ble_deferred_event_may_apply(K::RxAfterGap, 8, 10));
     CHECK(!tk::ble_deferred_event_may_apply(K::LinkUp, 10, 8));
     // A queued disconnect is an ordering barrier even if the host has already advanced to the
     // following link. The FIFO applies Down first, then the current LinkUp.

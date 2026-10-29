@@ -308,7 +308,7 @@ if sys.argv[1:2] != ['-c']:
         raise SystemExit(37)
 ''')
             python.chmod(0o700)
-            for name in ("cmake", "node"):
+            for name in ("cmake", "node", "ruby", "jq"):
                 file = binaries / name
                 file.write_text("#!/bin/sh\nexit 0\n")
                 file.chmod(0o700)
@@ -332,6 +332,7 @@ if sys.argv[1:2] != ['-c']:
                         prefix + ["python3", "test/test_dependency_harness.py"],
                         prefix + ["python3", "test/test_dependency_process.py"],
                         prefix + ["python3", "test/test_identity_recovery_contract.py"],
+                        prefix + ["python3", "test/test_evcc_example.py"],
                         prefix + ["python3", "test/test_inline_assets.py"],
                         prefix + ["python3", "test/test_web_ui_browser_gate.py"],
                         prefix + ["python3", "test/test_browser_cdp.py"],
@@ -546,7 +547,7 @@ def validate(root: Path) -> None:
             "actual web presenter native/glyph parity is missing from the strict host gate")
     require("--require-all" in run_mock and 'REQUIRE_ALL=1' in run_mock,
             "run-mock-tests.sh has no strict mode")
-    for tool in ("python3", "node", "cmake"):
+    for tool in ("python3", "node", "cmake", "ruby", "jq"):
         require(f"need_tool {tool}" in run_mock,
                 f"run-mock-tests.sh strict mode does not require {tool}")
     require("tools/agent-hooks/run_with_timeout.py" in run_mock and "run_gate" in run_mock,
@@ -622,6 +623,8 @@ def validate(root: Path) -> None:
             "run-mock-tests.sh does not execute the host wiring contract")
     require('run_gate "coherent charge presentation snapshot" 120 python3 test/test_charge_presentation.py' in run_mock,
             "strict host gate must execute the coherent charge presentation snapshot")
+    require('run_gate "actual evcc example configuration" 120 python3 test/test_evcc_example.py' in run_mock,
+            "strict host gate must execute the actual evcc example configuration")
     require('run_gate "contextual charging command outcomes" 120 python3 test/test_command_outcomes.py' in run_mock,
             "strict host gate must execute contextual charging command outcomes")
     require('run_gate "CSS bytes and actual inline generation" 120 python3 test/test_inline_assets.py' in run_mock,
@@ -1141,6 +1144,12 @@ def self_test(root: Path) -> None:
         ("scripts/run-mock-tests.sh", 'run_gate "locked cJSON intake and OOM" 120 bash test/run-cjson-oom-tests.sh',
          '# removed real cJSON intake tests', "locked cJSON intake/OOM"),
         ("scripts/run-mock-tests.sh", "need_tool cmake", "# removed", "cmake"),
+        ("scripts/run-mock-tests.sh", "need_tool ruby", "# removed", "ruby"),
+        ("scripts/run-mock-tests.sh", "need_tool jq", "# removed", "jq"),
+        ("scripts/run-mock-tests.sh", 'run_gate "actual evcc example configuration" 120 python3 test/test_evcc_example.py',
+         '# run_gate "actual evcc example configuration" 120 python3 test/test_evcc_example.py', "strict browser invocation flow"),
+        ("scripts/run-mock-tests.sh", 'run_gate "actual evcc example configuration" 120 python3 test/test_evcc_example.py',
+         'if false; then\nrun_gate "actual evcc example configuration" 120 python3 test/test_evcc_example.py\nfi', "strict browser invocation flow"),
         ("scripts/run-mock-tests.sh", "tools/agent-hooks/run_with_timeout.py", "missing.py", "bounded"),
         ("tools/agent-hooks/agent_hook.py", '[str(script), "--require-all"]', "[str(script)]", "strict"),
         ("test/CMakeLists.txt", "add_test(NAME stack_sample_tests COMMAND stack_sample_tests)",

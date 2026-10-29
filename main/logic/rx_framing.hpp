@@ -55,6 +55,19 @@ public:
     const RxFramerStats& stats() const noexcept { return stats_; }
     uint32_t timeout_ms() const noexcept { return timeout_ms_; }
 
+    // Deferred ingress checks the real arrival deadline outside this buffer owner.
+    template <typename DropCb>
+    bool expire_incomplete(DropCb&& drop_cb) {
+        if (buffer_.empty()) return false;
+        const size_t dropped = buffer_.size();
+        buffer_.clear();
+        has_chunk_time_ = false;
+        ++reset_generation_;
+        stats_.timeout_drops++;
+        drop_cb(RxFramerDropReason::InterChunkTimeout, dropped);
+        return true;
+    }
+
     // Standalone timeout check. Drops stale incomplete buffer if elapsed time exceeds timeout_ms_.
     // Useful for periodic task ticks without requiring incoming data.
     template <typename DropCb>
@@ -62,12 +75,7 @@ public:
         if (!buffer_.empty() && has_chunk_time_) {
             const uint32_t elapsed = now_ms - last_chunk_time_ms_;
             if (elapsed > timeout_ms_) {
-                const size_t dropped = buffer_.size();
-                buffer_.clear();
-                has_chunk_time_ = false;
-                stats_.timeout_drops++;
-                drop_cb(RxFramerDropReason::InterChunkTimeout, dropped);
-                return true;
+                return expire_incomplete(std::forward<DropCb>(drop_cb));
             }
         }
         return false;
@@ -84,8 +92,31 @@ public:
     template <typename FrameCb, typename DropCb>
     size_t push_chunk(const uint8_t* data, size_t len, uint32_t now_ms,
                       FrameCb&& frame_cb, DropCb&& drop_cb) {
-        // 1. Inter-chunk timeout: drop stale bytes before evaluating new input
-        check_timeout(now_ms, drop_cb);
+        return push_chunk_impl(data, len, now_ms, true,
+                               std::forward<FrameCb>(frame_cb), std::forward<DropCb>(drop_cb));
+    }
+
+    // Arrival gaps and idle expiry are supplied by the deferred FIFO, never by
+    // time spent queued or parsing earlier frames on the consumer task.
+    template <typename FrameCb, typename DropCb>
+    size_t push_deferred_chunk(const uint8_t* data, size_t len,
+                               FrameCb&& frame_cb, DropCb&& drop_cb) {
+        return push_chunk_impl(data, len, 0, false,
+                               std::forward<FrameCb>(frame_cb), std::forward<DropCb>(drop_cb));
+    }
+
+    // Convenience overload without drop callback
+    template <typename FrameCb>
+    size_t push_chunk(const uint8_t* data, size_t len, uint32_t now_ms, FrameCb&& frame_cb) {
+        return push_chunk(data, len, now_ms, std::forward<FrameCb>(frame_cb),
+                          [](RxFramerDropReason, size_t) {});
+    }
+
+private:
+    template <typename FrameCb, typename DropCb>
+    size_t push_chunk_impl(const uint8_t* data, size_t len, uint32_t now_ms,
+                          bool owns_arrival_clock, FrameCb&& frame_cb, DropCb&& drop_cb) {
+        if (owns_arrival_clock) check_timeout(now_ms, drop_cb);
 
         if (!data || len == 0) {
             return 0;
@@ -105,7 +136,7 @@ public:
         // 3. Append incoming data to reassembly buffer
         buffer_.insert(buffer_.end(), data, data + len);
         last_chunk_time_ms_ = now_ms;
-        has_chunk_time_ = true;
+        has_chunk_time_ = owns_arrival_clock;
 
         // 4. Extract complete frames in order
         size_t frames_extracted = 0;
@@ -150,14 +181,6 @@ public:
         return frames_extracted;
     }
 
-    // Convenience overload without drop callback
-    template <typename FrameCb>
-    size_t push_chunk(const uint8_t* data, size_t len, uint32_t now_ms, FrameCb&& frame_cb) {
-        return push_chunk(data, len, now_ms, std::forward<FrameCb>(frame_cb),
-                          [](RxFramerDropReason, size_t) {});
-    }
-
-private:
     uint32_t timeout_ms_;
     size_t max_payload_;
     uint32_t last_chunk_time_ms_{0};

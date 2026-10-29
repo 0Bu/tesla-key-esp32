@@ -387,7 +387,8 @@ REVIEWED_DELEGATED_HELPERS = {
         "enqueue_ble_link_event_": {"store", "portENTER_CRITICAL", "push_link", "portEXIT_CRITICAL"},
     },
     "ble_rx_event_cb_": {
-        "enqueue_ble_rx_event_": {"store", "portENTER_CRITICAL", "push_rx", "portEXIT_CRITICAL"},
+        "enqueue_ble_rx_event_": {"store", "pdTICKS_TO_MS", "xTaskGetTickCount",
+                                  "portENTER_CRITICAL", "push_rx", "portEXIT_CRITICAL"},
     },
 }
 
@@ -8860,8 +8861,43 @@ def self_test_ota_download_chain(source: str) -> None:
 
 # F116 closed source programs: fixed POD/critical-section helpers only. Update after an
 # independent source review; the extractor never writes these expected identities at runtime.
-BLE_DEFERRED_PROGRAMS = {'ble_link_event_cb_': {'owner': 'ctrl', 'sha256': 'edc6860b2cb2e65cc7e642533be606d1a1a48d47395505d6ce94ee189d284733'}, 'ble_rx_event_cb_': {'owner': 'ctrl', 'sha256': '9f8462cd54ef462d6454ba9ca02cdd4a1997bcb3211de9bb32c67d0648cae6ac'}, 'enqueue_ble_link_event_': {'owner': 'ctrl', 'sha256': 'fa4976fc3cfc73f7915314e67ca7b2c85f8bf9e244d71e77b0ea0ed887f1e056'}, 'enqueue_ble_rx_event_': {'owner': 'ctrl', 'sha256': 'c2a87ba13d18edb3e33c1a7c0677a8bd629fcfae7e837fd47609096d1ca6bc28'}, 'ble_host_events_ready_': {'owner': 'ctrl', 'sha256': 'e8289f7fa61e7f2c9003f368d8d7537a8d5f5fdc59be566c18a2e4bbcda29183'}, 'pop_ble_host_event_': {'owner': 'ctrl', 'sha256': '613fcb3b828394228e19abc762a136a9bd90739774eb11ad34b1f5f8dafac169'}, 'clear_ble_host_events_': {'owner': 'ctrl', 'sha256': 'b9d23918bd68e77d85c448c6fea5a69527c6d6a8ea31a1d57fa1cff228bb1d90'}, 'process_ble_host_events_': {'owner': 'telemetry', 'sha256': '22c2e83a704780398e5bb828cdbe3fb9fcab4a6597732c11e4ca82dfeb30d807'}}
-BLE_DEFERRED_QUEUE_SHA256 = "39019bdb2394dd81491d6b95d3ae2ab94cd6127fd329d69664781bb77ae0044b"
+BLE_DEFERRED_PROGRAMS = {'ble_link_event_cb_': {'owner': 'ctrl', 'sha256': 'edc6860b2cb2e65cc7e642533be606d1a1a48d47395505d6ce94ee189d284733'}, 'ble_rx_event_cb_': {'owner': 'ctrl', 'sha256': '9f8462cd54ef462d6454ba9ca02cdd4a1997bcb3211de9bb32c67d0648cae6ac'}, 'enqueue_ble_link_event_': {'owner': 'ctrl', 'sha256': 'fa4976fc3cfc73f7915314e67ca7b2c85f8bf9e244d71e77b0ea0ed887f1e056'}, 'enqueue_ble_rx_event_': {'owner': 'ctrl', 'sha256': '1e1bf6cbeed8671813c006e8efc1458bec6f7326de3ae05b8c87f71a7f7d8b23'}, 'ble_host_events_ready_': {'owner': 'ctrl', 'sha256': 'e8289f7fa61e7f2c9003f368d8d7537a8d5f5fdc59be566c18a2e4bbcda29183'}, 'pop_ble_host_event_': {'owner': 'ctrl', 'sha256': '613fcb3b828394228e19abc762a136a9bd90739774eb11ad34b1f5f8dafac169'}, 'clear_ble_host_events_': {'owner': 'ctrl', 'sha256': 'b9d23918bd68e77d85c448c6fea5a69527c6d6a8ea31a1d57fa1cff228bb1d90'}, 'process_ble_host_events_': {'owner': 'telemetry', 'sha256': '42df8d8f74db461d33e4420e1ab76728d1282c7e75b2cbc8730dc84f10433a9c'}}
+BLE_DEFERRED_QUEUE_SHA256 = "c887333e64e851866060e3658ded4627f72fdce5981df6c65ac36551ea2cd651"
+
+
+def require_ble_arrival_clock_contract(source: str) -> None:
+    body = scrub_cpp(function_body_in(source, "enqueue_ble_rx_event_"))
+    clock = "const uint32_t arrived_ms = static_cast<uint32_t>(pdTICKS_TO_MS(xTaskGetTickCount()));"
+    if body.count(clock) != 1 or body.count("xTaskGetTickCount()") != 1:
+        raise AssertionError("deferred RX requires one bounded monotonic arrival sample")
+    require_before("RX clock outside mailbox critical section", body, clock, "portENTER_CRITICAL")
+    calls = call_arguments(body, "push_rx")
+    expected = ["data", "size", "generation", "arrived_ms",
+                "tk::CommandRunner::kDefaultRxInterChunkTimeoutMs"]
+    if len(calls) != 1 or [item.strip() for item in calls[0]] != expected:
+        raise AssertionError("deferred RX must forward its real arrival and configured timeout")
+    require_before("RX bounded publication", body, "portENTER_CRITICAL", "push_rx")
+    require_before("RX publication unlock", body, "push_rx", "portEXIT_CRITICAL")
+
+
+def self_test_ble_arrival_clock_contract(source: str) -> None:
+    clock = "    const uint32_t arrived_ms = static_cast<uint32_t>(pdTICKS_TO_MS(xTaskGetTickCount()));\n"
+    if source.count(clock) != 1:
+        raise AssertionError("RX clock mutation does not bind once")
+    moved = source.replace(clock, "", 1)
+    marker = "bool VehicleController::enqueue_ble_rx_event_("
+    start = moved.index(marker)
+    entered = moved.index("    portENTER_CRITICAL(&ble_events_.mux);\n", start)
+    entered += len("    portENTER_CRITICAL(&ble_events_.mux);\n")
+    moved = moved[:entered] + clock + moved[entered:]
+    require_mutation_rejected("RX arrival clock under critical section",
+                             lambda: require_ble_arrival_clock_contract(moved))
+    forwarding = "data, size, generation, arrived_ms, tk::CommandRunner::kDefaultRxInterChunkTimeoutMs"
+    if source.count(forwarding) != 1:
+        raise AssertionError("RX arrival forwarding mutation does not bind once")
+    require_mutation_rejected("RX arrival sample discarded",
+        lambda: require_ble_arrival_clock_contract(source.replace(
+            forwarding, "data, size, generation, 0, tk::CommandRunner::kDefaultRxInterChunkTimeoutMs", 1)))
 
 
 def require_ble_deferred_program_contract(parts: dict[str, str], queue: str) -> None:
@@ -8983,6 +9019,8 @@ def main() -> int:
                          "commands": SOURCES["vehicle_commands.cpp"], "telemetry": SOURCES["vehicle_telemetry.cpp"],
                          "header": (MAIN / "vehicle_ctrl.hpp").read_text()}
     deferred_queue_source = (MAIN / "logic/ble_deferred_queue.hpp").read_text(encoding="utf-8")
+    require_ble_arrival_clock_contract(concurrency_parts["ctrl"])
+    self_test_ble_arrival_clock_contract(concurrency_parts["ctrl"])
     require_ble_deferred_program_contract(concurrency_parts, deferred_queue_source)
     self_test_ble_deferred_program_contract(concurrency_parts, deferred_queue_source)
     require_concurrency_regression_contract(concurrency_parts)

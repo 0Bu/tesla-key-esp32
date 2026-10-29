@@ -829,7 +829,14 @@ controller-owned runtime Client/runner access requires Vehicle ownership.
 The deferred mailbox owns its bytes; no callback-local buffer or mbuf pointer survives return.
 A callback of1..244 bytes is accepted completely or refused before mutation. The Vehicle consumer
 copies at most20 RX bytes per pop into an independent result, retaining the head offset until the
-cell is exhausted. One fresh2050-byte framed response occupies nine cells even with one-byte
+cell is exhausted. The producer samples the monotonic arrival clock before entering the mailbox
+critical section. RX bytes coalesce only within one connection generation and without an arrival
+gap over the configured 3-second timeout; a new cell preserves each gap as a first-slice barrier.
+The consumer applies that barrier before framing its bytes, so time spent queued or parsing another
+message cannot erase a real gap or create a false one. Periodic expiry uses the last accepted arrival
+only after the mailbox is empty. Repacked metadata preserves 256-byte cells and pop results below the
+32-byte cap; arrival timestamps stay in the queue rather than in each returned slice.
+One fresh2050-byte framed response occupies nine cells even with one-byte
 notifications. This is not an unlimited-burst, scheduling or allocator-capacity guarantee. Old
 LinkDown remains a barrier; LinkUp/RX require the current stable generation. An observed overflow
 clears/reset/disconnects fail-closed; flag publication, queue clear and the entire drain are not one

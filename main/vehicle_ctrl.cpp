@@ -72,8 +72,10 @@ bool VehicleController::enqueue_ble_link_event_(bool connected, uint16_t conn_ha
 
 bool VehicleController::enqueue_ble_rx_event_(const uint8_t* data, size_t size,
                                               uint32_t generation) noexcept {
+    const uint32_t arrived_ms = static_cast<uint32_t>(pdTICKS_TO_MS(xTaskGetTickCount()));
     portENTER_CRITICAL(&ble_events_.mux);
-    const bool queued = ble_events_.ready && ble_events_.queue.push_rx(data, size, generation);
+    const bool queued = ble_events_.ready && ble_events_.queue.push_rx(
+        data, size, generation, arrived_ms, tk::CommandRunner::kDefaultRxInterChunkTimeoutMs);
     portEXIT_CRITICAL(&ble_events_.mux);
     if (!queued) ble_events_.overflow.store(true, std::memory_order_release);
     return queued;

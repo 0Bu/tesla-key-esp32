@@ -14,10 +14,14 @@ scripts/run-mock-tests.sh --require-all # fail closed: CI/Stop prerequisites are
 
 Normal mode needs C11 and C++17 compilers, using CMake when present or equivalent direct compilation.
 The separate real v6.3.0 tesla-ble/PSA harness requires C++20; pure firmware logic remains C++17.
-Strict mode requires Git, Python, Node, CMake, compiler and every gate file, with bounded subprocesses.
+Strict mode requires Git, Python, Node, CMake, Ruby, jq, compiler and every gate file, with bounded subprocesses.
 Missing tooling is failure, not reduced coverage reported green. A failed check fails its binary:
 the pure-logic suite and the tesla-ble harness report every failed check before exiting 1, while the
 NVS, runtime-boundary, cJSON OOM and MQTT JSON binaries and the fuzz smoke stop at the first failure.
+
+The evcc example check parses the shipped YAML with Ruby/Psych and executes its actual jq status
+expression against synthetic cached responses. It covers `Starting` as connected status B and the
+explicit command timeouts, with omitted-branch and omitted-timeout controls. It contacts no endpoint.
 
 The real NVS/config tests observe a synthetic serialization buffer through the passive save shim:
 maximal 473-byte payloads, complete 512-byte wipe on success/refusal/failure/exception, synchronous

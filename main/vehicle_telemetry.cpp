@@ -561,6 +561,26 @@ void VehicleController::process_ble_host_events_() {
         command_runner_.rx_framer().reset();
     }
 
+    bool periodic_timeout = false;
+    const auto log_rx_drop = [&](tk::RxFramerDropReason reason, size_t dropped) {
+        switch (reason) {
+            case tk::RxFramerDropReason::InterChunkTimeout:
+                if (periodic_timeout) {
+                    ESP_LOGW(TAG, "RX framer: periodic timeout check dropped %zu stale bytes", dropped);
+                } else {
+                    ESP_LOGW(TAG, "RX framer: inter-chunk timeout, dropped %zu stale bytes", dropped);
+                }
+                break;
+            case tk::RxFramerDropReason::CorruptLength:
+                ESP_LOGW(TAG, "RX framer: corrupt length prefix, dropped %zu bytes", dropped);
+                break;
+            case tk::RxFramerDropReason::BufferOverflow:
+                ESP_LOGE(TAG, "RX framer: buffer overflow, dropped %zu bytes", dropped);
+                break;
+            default:
+                break;
+        }
+    };
     BleHostEvent event{};
     while (pop_ble_host_event_(event)) {
         const uint32_t current_generation = ble_->lifecycle_generation();
@@ -589,10 +609,12 @@ void VehicleController::process_ble_host_events_() {
             continue;
         }
 
-        const uint32_t now_ms = static_cast<uint32_t>(pdTICKS_TO_MS(xTaskGetTickCount()));
         try {
-            command_runner_.rx_framer().push_chunk(
-                event.data.data(), event.size, now_ms,
+            if (event.kind == tk::BleDeferredEventKind::RxAfterGap) {
+                command_runner_.rx_framer().expire_incomplete(log_rx_drop);
+            }
+            command_runner_.rx_framer().push_deferred_chunk(
+                event.data.data(), event.size,
                 [&](const uint8_t* payload, size_t len) {
                     tk::SemGuard g(vehicle_mutex_);
                     if (!g) {
@@ -612,21 +634,7 @@ void VehicleController::process_ble_host_events_() {
                         ble_fault_.store(true);
                     }
                 },
-                [&](tk::RxFramerDropReason reason, size_t dropped) {
-                    switch (reason) {
-                        case tk::RxFramerDropReason::InterChunkTimeout:
-                            ESP_LOGW(TAG, "RX framer: inter-chunk timeout, dropped %zu stale bytes", dropped);
-                            break;
-                        case tk::RxFramerDropReason::CorruptLength:
-                            ESP_LOGW(TAG, "RX framer: corrupt length prefix, dropped %zu bytes", dropped);
-                            break;
-                        case tk::RxFramerDropReason::BufferOverflow:
-                            ESP_LOGE(TAG, "RX framer: buffer overflow, dropped %zu bytes", dropped);
-                            break;
-                        default:
-                            break;
-                    }
-                });
+                log_rx_drop);
         } catch (const std::exception& e) {
             ESP_LOGE(TAG, "RX framer push_chunk threw (%s) — dropping link", e.what());
             command_runner_.rx_framer().reset();
@@ -646,11 +654,12 @@ void VehicleController::process_ble_host_events_() {
     if (!ble_fault_.load()) {
         try {
             const uint32_t now_ms = static_cast<uint32_t>(pdTICKS_TO_MS(xTaskGetTickCount()));
-            command_runner_.rx_framer().check_timeout(now_ms, [&](tk::RxFramerDropReason reason, size_t dropped) {
-                if (reason == tk::RxFramerDropReason::InterChunkTimeout) {
-                    ESP_LOGW(TAG, "RX framer: periodic timeout check dropped %zu stale bytes", dropped);
-                }
-            });
+            const uint32_t timeout_ms = command_runner_.rx_framer().timeout_ms();
+            portENTER_CRITICAL(&ble_events_.mux);
+            const bool expired = ble_events_.ready && ble_events_.queue.rx_idle_expired(now_ms, timeout_ms);
+            portEXIT_CRITICAL(&ble_events_.mux);
+            periodic_timeout = true;
+            if (expired) command_runner_.rx_framer().expire_incomplete(log_rx_drop);
         } catch (...) {
             command_runner_.rx_framer().reset();
             ble_fault_.store(true);

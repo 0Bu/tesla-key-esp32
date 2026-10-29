@@ -175,6 +175,48 @@ static void max_frame_delivery() {
     }
 }
 
+static void arrival_gap_recovery() {
+    for (const uint32_t gap : {uint32_t{3000}, uint32_t{3001}, uint32_t{4001}}) {
+        vcsec_native::Fixture fixture;
+        auto& controller = fixture.controller;
+        initialize_mailbox(controller);
+        fixture.enqueue();
+        controller.drive_command_runner_();
+        const auto response = fixture.seal(vcsec_native::command_status(
+            vcsec_native::envelope(fixture.request(), true), VCSEC_OperationStatus_E_OPERATIONSTATUS_OK), 11);
+        const auto wire = encode_wire(response, 182);
+        const uint32_t initial = native_ticks;
+        const std::vector<uint8_t> prefix(wire.begin(), wire.begin() + 20);
+        const bool partial = publish(controller, prefix, 0, 8);
+        native_ticks = initial + gap;
+        const std::vector<uint8_t> remainder = gap == 3000
+            ? std::vector<uint8_t>(wire.begin() + 20, wire.end()) : wire;
+        const bool complete = publish(controller, remainder, 0, 8);
+        native_ticks = initial + 5000;
+        controller.process_ble_host_events_();
+        expect(partial && complete && fixture.completions == 1 && fixture.success &&
+               controller.command_runner_.rx_framer().stats().timeout_drops == (gap == 3000 ? 0u : 1u) &&
+               controller.command_runner_.rx_framer().stats().corrupt_length_drops == 0 &&
+               controller.command_runner_.rx_framer().buffered_bytes() == 0,
+               "actual ingress preserves arrival gap/boundary before delayed authenticated delivery",
+               "consumer lost an arrival gap, manufactured a processing gap or delivered a mixed frame");
+        assert_unlocked();
+    }
+    {
+        vcsec_native::Fixture fixture;
+        auto& controller = fixture.controller;
+        initialize_mailbox(controller);
+        const std::array<uint8_t, 20> partial{0, 180};
+        const bool queued = VehicleController::ble_rx_event_cb_(&controller, partial.data(), partial.size(), 8);
+        native_ticks += controller.command_runner_.rx_framer().timeout_ms() + 1;
+        controller.process_ble_host_events_();
+        expect(queued && controller.command_runner_.rx_framer().buffered_bytes() == 0 &&
+               controller.command_runner_.rx_framer().stats().timeout_drops == 1,
+               "late first drain expires partial bytes from their arrival, not from consumption",
+               "consumer renewed an already expired arrival deadline");
+    }
+}
+
 static void queue_edges() {
     Client client;
     VehicleController controller(client);
@@ -471,6 +513,7 @@ static void check_native_ble_deferred_delivery() {
     std::printf("\n--- F116 actual callback/mailbox/whole-consumer delivery ---\n");
     deferred_native::queue_edges();
     deferred_native::max_frame_delivery();
+    deferred_native::arrival_gap_recovery();
     deferred_native::lifecycle_and_faults();
     deferred_native::assert_unlocked();
 }

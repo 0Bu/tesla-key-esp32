@@ -250,8 +250,7 @@ public:
 #define ESP_LOGW(...) (native_require_unlocked(), ++native_warnings)
 #define ESP_LOGD(...) (native_require_unlocked())
 #define ESP_LOGI(...) (native_require_unlocked())
-#define xTaskGetTickCount() (native_ticks)
-#define pdTICKS_TO_MS(value) (value)
+#define xTaskGetTickCount() (native_require_unlocked(), native_ticks)
 #include "carserver-handler.inc"
 // Only the native routing-address RNG call can be fault-injected. Its normal path delegates
 // to the real public library implementation; this does not simulate a PSA entropy failure.
@@ -274,7 +273,6 @@ struct NativeRoutingRandom {
 #undef portENTER_CRITICAL
 #undef time
 #undef CryptoUtils
-#undef pdTICKS_TO_MS
 #undef xTaskGetTickCount
 #undef ESP_LOGI
 #undef ESP_LOGE
