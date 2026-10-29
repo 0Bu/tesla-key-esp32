@@ -12,7 +12,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 def main():
     with tempfile.TemporaryDirectory(prefix='tesla-idf-wrapper-') as temporary:
-        workspace = pathlib.Path(temporary)
+        workspace = pathlib.Path(temporary).resolve()
         template = workspace / 'git-template'
         template.mkdir()
         archive, primary = workspace / 'archive', workspace / 'primary'

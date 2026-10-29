@@ -263,6 +263,10 @@ all 16 parts and a final manifest from the API-confirmed `PR/<N>/` authority. Ea
 complete fresh snapshot. Redirects, non-200 status, mixed or incomplete bytes and expired deadlines
 fail acceptance. At most 20 attempts share a 180-second network deadline and 10-second request caps.
 
+Event and scheduled cleanup select the repository default branch at checkout, keeping the decision
+producer and served checker together. A historical PR base can predate both their shared contract
+and the checker; it is not a cleanup-code source.
+
 Cleanup emits one JSON decision: `kept-eligible`, `already-absent` or `removed`. Eligible previews
 are retained without an absence claim. The other decisions require 404/410 for the manifest,
 installer entrypoint, all 16 canonical parts and every validated path collected before deletion.
