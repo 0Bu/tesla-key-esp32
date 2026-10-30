@@ -84,6 +84,15 @@ bool hold_connect=false,release_connect=false,connect_entered=false;
 bool hold_image_read=false,image_read_entered=false;
 std::atomic<int> init_calls{0},connects{0},destroys{0},reads{0},deletes{0};
 std::atomic<int> begins{0},writes{0},ends{0},selectors{0},aborts{0},restart_calls{0};
+int http_server_marker;
+void (*queued_http_work)(void*)=nullptr;
+void* queued_http_argument=nullptr;
+unsigned queue_calls=0;
+bool queue_ok=true,queue_throw_before=false,queue_throw_after=false,queue_inline=false;
+bool http_request_live=false;
+bool throw_entry_sample=false;
+bool require_error_owner=false;
+void check_status_owner();
 std::vector<size_t> largest_samples;
 size_t largest_cursor=0;
 size_t recovery_required=tk::kOtaTlsRecordCapacityB;
@@ -149,7 +158,9 @@ void check_effect_admission();
 }
 struct HostSemaphore {std::mutex mutex;};
 extern "C" SemaphoreHandle_t xSemaphoreCreateMutex(){return fixture::lock_ok?new HostSemaphore:nullptr;}
-extern "C" BaseType_t xSemaphoreTake(SemaphoreHandle_t p,TickType_t){p->mutex.lock();return pdTRUE;}
+extern "C" BaseType_t xSemaphoreTake(SemaphoreHandle_t p,TickType_t){
+ fixture::check_status_owner();p->mutex.lock();return pdTRUE;
+}
 extern "C" BaseType_t xSemaphoreGive(SemaphoreHandle_t p){p->mutex.unlock();return pdTRUE;}
 extern "C" void vSemaphoreDelete(SemaphoreHandle_t p){delete p;}
 extern "C" BaseType_t xTaskCreate(TaskFunction_t task,const char* name,uint32_t stack,void* arg,
@@ -301,6 +312,17 @@ static void fixture_log(const char* tag,const char* format,...){
 #define CONFIG_TESLA_OTA_MANIFEST_URL "https://update.example/manifest.json"
 #define CONFIG_TESLA_OTA_FIRMWARE_BASE_URL "https://update.example/"
 #define TESLA_OTA_IMG_SUFFIX ""
+extern "C" esp_err_t httpd_queue_work(void* server,void (*work)(void*),void* argument){
+ CHECK(server==&fixture::http_server_marker&&work);
+ ++fixture::queue_calls;
+ if(fixture::queue_throw_before)throw std::bad_alloc();
+ if(!fixture::queue_ok)return ESP_FAIL;
+ CHECK(!fixture::queued_http_work);
+ fixture::queued_http_work=work;fixture::queued_http_argument=argument;
+ if(fixture::queue_throw_after)throw std::bad_alloc();
+ if(fixture::queue_inline)work(argument); // Deliberately invalid SDK negative control only.
+ return ESP_OK; // Faithful SDK seam: callback executes on the later server-loop turn.
+}
 void esp_restart();
 namespace tk {
 std::size_t ota_recovery_required_bytes(OtaRecoveryUse use) noexcept {
@@ -332,7 +354,12 @@ void host_before_cleanup_publish(Job& job,std::uint32_t observed) noexcept {
 namespace fixture {
 size_t entry_sample(){
  ++entry_heap_reads;CHECK(s_operation_gate.state()==tk::OtaIdentityGateState::Ota);
+ CHECK(!http_request_live); // Parser scratch must be gone at deferred policy sampling.
+ if(throw_entry_sample)throw std::bad_alloc();
  return entry_largest;
+}
+void check_status_owner(){
+ if(require_error_owner)CHECK(s_operation_gate.state()==tk::OtaIdentityGateState::Ota);
 }
 void check_writer_owner(){
  CHECK(ota_is_busy()&&s_operation_gate.state()==tk::OtaIdentityGateState::Ota);
@@ -370,6 +397,8 @@ void reset(std::initializer_list<size_t> samples={65536}){
  changelog_destroy_fails=jump_image_clock=image_clock_jumped=reject_late_effect=raw_handle_live=false;
  raw_write_error_at=0;raw_write_error=ESP_OK;
  sdk_state=ESP_OTA_IMG_VALID;queries=0;selected_task=nullptr;selected_argument=nullptr;
+ queued_http_work=nullptr;queued_http_argument=nullptr;queue_calls=0;
+ queue_ok=true;queue_throw_before=queue_throw_after=queue_inline=http_request_live=throw_entry_sample=require_error_owner=false;
  hold_connect=release_connect=connect_entered=hold_image_read=image_read_entered=false;changelog_status=200;raw_end_error=raw_select_error=ESP_OK;
  image_version="1.6.3";extra_header.clear();inactive={ESP_PARTITION_TYPE_APP,0,0x20000,0x1f0000};
  manifest="{\"version\":\"1.6.3\"}";changelog="{\"version\":\"1.6.3\",\"changelog\":\"A change\"}";
@@ -377,6 +406,99 @@ void reset(std::initializer_list<size_t> samples={65536}){
  ota_set_channel(tk::OtaChannel::Release);
 }
 void run_selected(){CHECK(selected_task);auto task=selected_task;auto* arg=selected_argument;selected_task=nullptr;task(arg);}
+void run_queued_http(){
+ CHECK(queued_http_work);auto work=queued_http_work;void* argument=queued_http_argument;
+ queued_http_work=nullptr;queued_http_argument=nullptr;work(argument);
+}
+void deferred_http_checks(){
+ reset();now=100;http_request_live=true;entry_largest=57344;
+ manifest="{\"version\":\"1.6.3-PR-400\"}";
+ changelog="{\"version\":\"1.6.3-PR-400\",\"changelog\":\"A change\"}";
+ CHECK(ota_check_start_after_http(400,&http_server_marker)==tk::OtaStartResult::Started);
+ CHECK(queue_calls==1&&queued_http_work&&entry_heap_reads==0&&!s_operation.load());
+ CHECK(!selected_task&&init_calls==0&&ota_is_busy()&&!ota_is_updating());
+ CHECK(ota_get_state()==OtaState::Checking&&s_operation_gate.state()==tk::OtaIdentityGateState::Ota);
+ CHECK(ota_check_start(0)==tk::OtaStartResult::Busy&&ota_start(0)==tk::OtaStartResult::Busy);
+ CHECK(queries==0&&entry_heap_reads==0);
+ auto stale_work=queued_http_work;void* stale_argument=queued_http_argument;
+ const auto original_deadline=operation_budget(100,false).deadline();
+ ota_set_channel(tk::OtaChannel::Dev); // A later setting cannot rewrite the captured request.
+ http_request_live=false;entry_largest=61440;now=1234;run_queued_http();
+ CHECK(entry_heap_reads==1&&selected_task&&s_operation.load());
+ CHECK(s_operation.load()->job.started_ms==100&&s_operation.load()->budget.deadline()==original_deadline);
+ CHECK(s_operation.load()->target_pr==400&&s_operation.load()->channel==tk::OtaChannel::Release);
+ auto coordinator=selected_task;stale_work(stale_argument);
+ CHECK(selected_task==coordinator&&entry_heap_reads==1); // Duplicate callback is not a new job.
+ run_selected();join_worker();CHECK(!ota_is_busy()&&connects==2&&begins==0&&writes==0&&selectors==0);
+
+ // A reused static capture does not authorize a callback from the previous ticket.
+ reset();http_request_live=true;entry_largest=57344;
+ CHECK(ota_check_start_after_http(0,&http_server_marker)==tk::OtaStartResult::Started);
+ CHECK(queued_http_argument!=stale_argument&&entry_heap_reads==0);
+ stale_work(stale_argument);stale_work(nullptr);
+ stale_work(reinterpret_cast<void*>(static_cast<std::uintptr_t>(kDeferredTicketLimit)));
+ if constexpr(sizeof(std::uintptr_t)>sizeof(uint32_t))
+  stale_work(reinterpret_cast<void*>(reinterpret_cast<std::uintptr_t>(queued_http_argument)|(std::uintptr_t{1}<<32)));
+ CHECK(queued_http_work&&ota_is_busy()&&!s_operation.load()&&entry_heap_reads==0);
+ http_request_live=false;entry_largest=61440;run_queued_http();run_selected();join_worker();
+ CHECK(!ota_is_busy()&&connects==2&&begins==0&&selectors==0);
+
+ // Moving the reference is not permission to lower the actual post-cleanup screen.
+ reset();http_request_live=true;entry_largest=57344;
+ CHECK(ota_check_start_after_http(0,&http_server_marker)==tk::OtaStartResult::Started);
+ CHECK(entry_heap_reads==0);http_request_live=false;run_queued_http();
+ CHECK(entry_heap_reads==1&&!selected_task&&!s_operation.load()&&init_calls==0&&!ota_is_busy());
+ CHECK(ota_get_status().message==kOtaNoMemory&&!ota_get_status().update_available);
+
+ reset();queue_ok=false;http_request_live=true;
+ CHECK(ota_check_start_after_http(0,&http_server_marker)==tk::OtaStartResult::Unavailable);
+ CHECK(queue_calls==1&&!queued_http_work&&!ota_is_busy()&&entry_heap_reads==0&&!s_operation.load());
+ CHECK(ota_get_state()==OtaState::Error&&s_operation_gate.state()==tk::OtaIdentityGateState::Idle);
+ http_request_live=false;
+ reset();CHECK(ota_check_start_after_http(0,nullptr)==tk::OtaStartResult::Unavailable);
+ CHECK(queue_calls==0&&!ota_is_busy()&&entry_heap_reads==0);
+
+ reset();now=50;http_request_live=true;
+ const auto deadline=operation_budget(50,false).deadline();
+ CHECK(ota_check_start_after_http(0,&http_server_marker)==tk::OtaStartResult::Started);
+ http_request_live=false;now=deadline;run_queued_http();
+ CHECK(entry_heap_reads==0&&!selected_task&&!s_operation.load()&&init_calls==0&&!ota_is_busy());
+ CHECK(ota_get_state()==OtaState::Error&&ota_get_status().message.find("deadline")!=std::string::npos);
+
+ reset();http_request_live=true;
+ CHECK(ota_check_start_after_http(0,&http_server_marker)==tk::OtaStartResult::Started);
+ ota_request_heap_abort();CHECK(ota_check_start(0)==tk::OtaStartResult::Busy);
+ CHECK(s_heap_abort_requested.load());http_request_live=false;run_queued_http();
+ CHECK(entry_heap_reads==0&&!selected_task&&init_calls==0&&!ota_is_busy());
+
+ // Submission may have succeeded before throwing. Revoke its nonreused ticket before release;
+ // the late callback must remain inert even after a successor reserves a different ticket.
+ for(bool submitted:{false,true}){
+  reset();queue_throw_before=!submitted;queue_throw_after=submitted;http_request_live=true;
+  CHECK(ota_check_start_after_http(0,&http_server_marker)==tk::OtaStartResult::InternalError);
+  CHECK(!ota_is_busy()&&entry_heap_reads==0&&!s_operation.load()&&s_deferred_check.ticket==0);
+  CHECK((queued_http_work!=nullptr)==submitted);
+  auto revoked_work=queued_http_work;auto revoked_argument=queued_http_argument;
+  queued_http_work=nullptr;queued_http_argument=nullptr;queue_throw_before=queue_throw_after=false;
+  CHECK(ota_check_start_after_http(0,&http_server_marker)==tk::OtaStartResult::Started);
+  CHECK(queued_http_argument!=revoked_argument);
+  if(revoked_work)revoked_work(revoked_argument);
+  CHECK(ota_is_busy()&&entry_heap_reads==0&&!s_operation.load());
+  http_request_live=false;run_queued_http();run_selected();join_worker();
+  CHECK(!ota_is_busy()&&connects==2&&begins==0&&selectors==0);
+ }
+
+ // A throwing diagnostic/allocator in the actual callback is contained by the shared setup.
+ reset();CHECK(ota_check_start_after_http(0,&http_server_marker)==tk::OtaStartResult::Started);
+ throw_entry_sample=true;require_error_owner=true;run_queued_http();
+ throw_entry_sample=require_error_owner=false;
+ CHECK(!ota_is_busy()&&!selected_task&&init_calls==0&&ota_get_state()==OtaState::Error);
+
+ reset();const auto serial=s_deferred_serial;s_deferred_serial=kDeferredTicketLimit-1;
+ CHECK(ota_check_start_after_http(0,&http_server_marker)==tk::OtaStartResult::Unavailable);
+ CHECK(!queued_http_work&&!ota_is_busy()&&queue_calls==0&&entry_heap_reads==0);
+ s_deferred_serial=serial; // Test-only injection; production never wraps or rewinds a ticket.
+}
 void memory_checks(){
  for(auto samples:{std::vector<size_t>{18444},{65536,18444},{65536,65536,18444},{65536,65536,65536,18444}}){
   reset();largest_samples=samples;const auto r=ota_check(0);join_worker();
@@ -685,11 +807,25 @@ int main(int argc,char** argv){
   reset();raw_select_error=ESP_FAIL;CHECK(ota_start(0)==tk::OtaStartResult::Started);run_selected();CHECK(false);
  }
  if(terminal_case=="cleanup-failed")cleanup_failed_checks();
+ if(terminal_case=="deferred-inline"){
+  reset();queue_inline=true;http_request_live=true;
+  (void)ota_check_start_after_http(0,&http_server_marker);
+  CHECK(false); // Must first fail the actual entry sample's live-request assertion.
+ }
+ if(terminal_case=="deferred-task-uncertain"){
+  reset();CHECK(ota_check_start_after_http(0,&http_server_marker)==tk::OtaStartResult::Started);
+  throw_create=true;run_queued_http();
+  CHECK(ota_is_busy()&&s_operation.load()&&!s_operation.load()->coordinator_done.load());
+  CHECK(s_deferred_check.ticket==0&&ota_get_state()==OtaState::Error);
+  CHECK(init_calls==0&&ota_check_start(0)==tk::OtaStartResult::Busy);
+  std::cout<<"OTA uncertain deferred coordinator retained owner; checks "<<checks<<'\n'<<std::flush;
+  std::_Exit(0); // A possibly created coordinator still owns its Operation.
+ }
  if(terminal_case=="budget")budget_checks();
  else if(terminal_case=="cleanup-cas")cleanup_cas_checks();
  else {
   CHECK(terminal_case=="normal");
-  memory_checks();manifest_lifetime_checks();recovery_policy_checks();entry_recovery_checks();parser_checks();admission_checks();quarantine_checks();image_checks();raw_memory_checks();
+  deferred_http_checks();memory_checks();manifest_lifetime_checks();recovery_policy_checks();entry_recovery_checks();parser_checks();admission_checks();quarantine_checks();image_checks();raw_memory_checks();
   checkpoint_semantics_checks();
   control_rmw_concurrency_checks();
  }

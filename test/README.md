@@ -479,6 +479,15 @@ response after its headers and verify that check/install wait for the complete J
 new general polls, preserve the original deadline and ignore cancelled or replaced delayed starts.
 Polling resumes after the flow ends; reboot verification keeps its separate direct requests.
 
+The actual HTTP adapter must reserve a check on its copied server handle. Native SDK doubles hold
+request scratch until explicit cleanup: no entry sample, Operation/task or TLS may occur before
+that cleanup, while genuinely insufficient memory afterwards still refuses. Deferred cases cover
+queue refusal/uncertainty, original-budget expiry, sticky abort, captured channel/PR, stale and
+duplicate tickets, exhaustion, callback exceptions and uncertain coordinator creation. The source
+contract inventories all local callers, including new untracked C++ files, to preserve the single
+HTTP-task premise; blocking queue configuration must fail compilation. These host models complement
+pinned SDK source review and repeated warm hardware checks; they do not prove universal availability.
+
 The `budget` fixture jumps its SDK-double clock after actual raw begin/prefix beyond the real
 CL-tightened coordinator deadline but below the worker's initial maximum. It requires abort
 before a later raw write/end/selector. Removing only the production Budget bound must trip the

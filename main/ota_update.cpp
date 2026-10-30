@@ -12,6 +12,7 @@
 #include <esp_heap_caps.h>
 #include <esp_ota_ops.h>
 #include <esp_timer.h>
+#include <esp_http_server.h>
 #include "ota_writer.hpp"
 #include "logic/ota_lifetime.hpp"
 #include <cJSON.h>
@@ -484,14 +485,17 @@ public:
     OtaLease() noexcept = default; // The entry point acquired the gate before allocation.
     OtaLease(const OtaLease&) = delete;
     OtaLease& operator=(const OtaLease&) = delete;
-    bool release() noexcept {
-        if (!held_) return true;
+    static bool release_owned() noexcept {
         if (s_operation_gate.state() != tk::OtaIdentityGateState::Ota) return false;
-        // Publish quiescence before releasing authority; no later global flag store can clear
-        // a successor operation's flags. This method is called only after raw writer abort/end.
         s_updating.store(false, std::memory_order_release);
         s_running.store(false, std::memory_order_release);
-        if (!s_operation_gate.finish(tk::OtaIdentityGateState::Ota)) return false;
+        return s_operation_gate.finish(tk::OtaIdentityGateState::Ota);
+    }
+    bool release() noexcept {
+        if (!held_) return true;
+        // Publish quiescence before releasing authority; no later global flag store can clear
+        // a successor operation's flags. This method is called only after raw writer abort/end.
+        if (!release_owned()) return false;
         held_ = false;
         return true;
     }
@@ -936,44 +940,60 @@ static void ota_task(void* argument) {
         vTaskDelete(nullptr); }
 }
 
-static tk::OtaStartResult prepare_operation(uint64_t origin, unsigned pr, bool image,
-                                           OtaOperation*& operation) {
+static void release_unstarted_operation() noexcept {
+    (void)OtaLease::release_owned();
+}
+
+// Lock creation precedes this helper. Every remaining operation is allocation-free/noexcept,
+// so a successful return transfers exactly the gate acquired here to the caller.
+static tk::OtaStartResult reserve_operation(unsigned pr, bool image) noexcept {
     using Result = tk::OtaStartResult;
-    if (!ensure_lock()) return Result::Unavailable;
     if (!try_begin_ota_operation()) return Result::Busy;
     if (!reclaim_finished_operation()) {
-        finish_operation(tk::OtaIdentityGateState::Ota);
+        release_unstarted_operation();
         return Result::Busy; // A cleanup-quarantined Network context remains charged.
     }
     if (image) {
         const auto verification = ota_refresh_verification_cache();
         if (verification != tk::OtaVerificationState::Stable) {
-            finish_operation(tk::OtaIdentityGateState::Ota);
+            release_unstarted_operation();
             return verification == tk::OtaVerificationState::PendingVerify
                 ? Result::PendingVerification : Result::Unavailable;
         }
     }
+    s_target_pr.store(pr, std::memory_order_release);
+    // The old operation is quiescent. A new abort after this point belongs to this reservation
+    // and must remain sticky through a queued HTTP callback and coordinator creation.
+    s_heap_abort_requested.store(false, std::memory_order_release);
+    return Result::Started;
+}
+
+static void publish_operation_start(bool image) {
+    s_running.store(true, std::memory_order_release);
+    s_updating.store(image, std::memory_order_release);
+    set_state(image ? OtaState::Downloading : OtaState::Checking, 0,
+              image ? "starting download" : "checking for updates");
+}
+
+static tk::OtaStartResult prepare_owned_operation(uint64_t origin, unsigned pr,
+        tk::OtaChannel channel, bool image, OtaOperation*& operation) {
+    using Result = tk::OtaStartResult;
     try {
     // No new Operation/task/body/TLS exists at this ordinary reference. The actual Ota owner
     // binds the requested target and fixed refusal publication against a successor.
-    s_target_pr.store(pr, std::memory_order_release);
     const auto entry_largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
     tk::ota::memory_checkpoint("before_operation", 1, origin, entry_largest);
     if (!tk::ota_recovery_memory_affordable(entry_largest,
             tk::ota_recovery_required_bytes(tk::OtaRecoveryUse::OperationEntry))) {
-        set_check_error(kOtaNoMemory); // Fixed POD withdraws any older offer under this owner.
-        finish_operation(tk::OtaIdentityGateState::Ota);
+        set_check_error(kOtaNoMemory); // Withdraw any older offer while this owner is still held.
+        release_unstarted_operation();
         return Result::NoMemory;
     }
-    s_running.store(true, std::memory_order_release);
-    s_updating.store(image, std::memory_order_release);
-    s_heap_abort_requested.store(false, std::memory_order_release);
-    operation = new (std::nothrow) OtaOperation(origin, pr, ota_get_channel(), image);
+    publish_operation_start(image);
+    operation = new (std::nothrow) OtaOperation(origin, pr, channel, image);
     if (!operation) {
         set_check_error(kOtaNoMemory);
-        s_updating.store(false, std::memory_order_release);
-        s_running.store(false, std::memory_order_release);
-        finish_operation(tk::OtaIdentityGateState::Ota);
+        release_unstarted_operation();
         return Result::InternalError;
     }
     if (!s_network_slot.claim(operation->job.generation)) {
@@ -984,28 +1004,29 @@ static tk::OtaStartResult prepare_operation(uint64_t origin, unsigned pr, bool i
     }
     s_operation.store(operation, std::memory_order_release);
     tk::ota::memory_checkpoint("operation_ready", operation->job.generation, operation->job.started_ms);
-    set_state(image ? OtaState::Downloading : OtaState::Checking, 0,
-              image ? "starting download" : pr ? "checking for PR preview" : "checking for updates");
     } catch (...) {
+        set_check_error(kOtaNoMemory); // Publish under this owner, before any lease release.
         if (operation) {
             acknowledge_no_network_task(*operation);
             operation->coordinator.cancel(tk::ota::Outcome::NoMemory);
             complete_operation(*operation);
         } else {
-            s_updating.store(false, std::memory_order_release);
-            s_running.store(false, std::memory_order_release);
-            finish_operation(tk::OtaIdentityGateState::Ota);
+            release_unstarted_operation();
         }
-        set_check_error(kOtaNoMemory);
         return Result::InternalError;
     }
     return Result::Started;
 }
 
-static tk::OtaStartResult launch_operation(uint64_t origin, unsigned pr, bool image) {
-    OtaOperation* operation = nullptr;
-    const auto result = prepare_operation(origin, pr, image, operation);
+static tk::OtaStartResult prepare_operation(uint64_t origin, unsigned pr, bool image,
+                                           OtaOperation*& operation) {
+    if (!ensure_lock()) return tk::OtaStartResult::Unavailable;
+    const auto result = reserve_operation(pr, image);
     if (result != tk::OtaStartResult::Started) return result;
+    return prepare_owned_operation(origin, pr, ota_get_channel(), image, operation);
+}
+
+static tk::OtaStartResult launch_coordinator(OtaOperation* operation, bool image) {
     try {
     const BaseType_t created = image
         ? xTaskCreate(ota_task, "ota", kOtaTaskStackBytes, operation, tk::kPrioOta, nullptr)
@@ -1024,6 +1045,87 @@ static tk::OtaStartResult launch_operation(uint64_t origin, unsigned pr, bool im
     return tk::OtaStartResult::Started;
 }
 
+static tk::OtaStartResult launch_operation(uint64_t origin, unsigned pr, bool image) {
+    OtaOperation* operation = nullptr;
+    const auto result = prepare_operation(origin, pr, image, operation);
+    return result == tk::OtaStartResult::Started ? launch_coordinator(operation, image) : result;
+}
+
+// A single HTTP server task submits/consumes this fixed capture. The actual Ota gate excludes
+// replacement until callback consumption, refusal, or coordinator lease release. A nonwrapping
+// opaque ticket, rather than a pointer to reused capture storage, rejects stale callbacks.
+#if defined(CONFIG_HTTPD_QUEUE_WORK_BLOCKING) && CONFIG_HTTPD_QUEUE_WORK_BLOCKING
+#error "Deferred OTA metadata admission requires nonblocking HTTP work submission"
+#endif
+struct DeferredCheckCapture { uint64_t origin; unsigned pr; tk::OtaChannel channel; };
+static struct {
+    DeferredCheckCapture capture{};
+    uint32_t ticket{0}; // Submission and consumption run only on this same HTTP server task.
+} s_deferred_check;
+static uint32_t s_deferred_serial{0}; // Protected by the actual Ota owner, never wraps.
+static constexpr uint32_t kDeferredTicketLimit = uint32_t{1} << 31;
+
+static void ota_check_after_http_work(void* argument) noexcept {
+    tk::StackWatchScope f135_callback_exit(tk::StackWatch::Httpd);
+    try {
+        const auto token = reinterpret_cast<std::uintptr_t>(argument);
+        // Compare before narrowing: a wider host token must not alias a valid 32-bit ticket.
+        if (token == 0 || token != s_deferred_check.ticket) return;
+        const DeferredCheckCapture captured = s_deferred_check.capture;
+        s_deferred_check.ticket = 0;
+        // No access to shared capture after retirement/release: a successor may replace it.
+        if (s_heap_abort_requested.load(std::memory_order_acquire) ||
+            !operation_budget(captured.origin, false).live(operation_now(nullptr))) {
+            set_check_error("update deadline reached during setup");
+            release_unstarted_operation();
+            return;
+        }
+        OtaOperation* operation = nullptr;
+        if (prepare_owned_operation(captured.origin, captured.pr, captured.channel, false,
+                                    operation) == tk::OtaStartResult::Started)
+            (void)launch_coordinator(operation, false);
+    } catch (...) {
+        // Never infer a failed queue/task creation from an exception, fabricate Ack or release
+        // authority that a possibly started coordinator can still use.
+        set_check_error("update operation failed unexpectedly");
+    }
+}
+
+tk::OtaStartResult ota_check_start_after_http(unsigned pr, void* server) noexcept {
+    const uint64_t origin = operation_now(nullptr);
+    bool held = false;
+    try {
+        if (!server || s_deferred_serial == kDeferredTicketLimit - 1 || !ensure_lock())
+            return tk::OtaStartResult::Unavailable;
+        const auto reserved = reserve_operation(pr, false);
+        if (reserved != tk::OtaStartResult::Started) return reserved;
+        held = true;
+        const auto ticket = ++s_deferred_serial;
+        s_deferred_check.capture = {origin, pr, ota_get_channel()};
+        publish_operation_start(false);
+        s_deferred_check.ticket = ticket;
+        tk::ota::memory_checkpoint("http_req", ticket, origin);
+        if (httpd_queue_work(server, ota_check_after_http_work,
+                reinterpret_cast<void*>(static_cast<std::uintptr_t>(ticket))) != ESP_OK) {
+            s_deferred_check.ticket = 0;
+            set_check_error(tk::ota_start_reason(tk::OtaStartResult::Unavailable, true));
+            release_unstarted_operation();
+            return tk::OtaStartResult::Unavailable;
+        }
+        return tk::OtaStartResult::Started; // Accepted queue, not allocation/TLS admission.
+    } catch (...) {
+        if (held) {
+            set_check_error("update operation failed unexpectedly");
+            // Same-server work cannot run inline/concurrently with this handler. No Operation
+            // exists yet: revoke this nonreused token before release. Even if SDK submission
+            // succeeded before throwing, its later callback cannot match a successor's token.
+            s_deferred_check.ticket = 0;
+            release_unstarted_operation();
+        }
+        return tk::OtaStartResult::InternalError;
+    }
+}
+
 tk::OtaStartResult ota_check_start(unsigned pr_number) {
     // Capture t0 before status-lock, job, URL, buffer or either task allocation.
     const uint64_t origin = operation_now(nullptr);
@@ -1036,7 +1138,7 @@ tk::OtaStartResult ota_start(unsigned pr_number) {
 
 OtaCheckResult ota_check(unsigned pr_number) {
     // Preserve the documented blocking background API: its caller is the coordinator, never
-    // the network worker. HTTP continues to call only ota_check_start/ota_start.
+    // the network worker. HTTP uses deferred metadata admission or ota_start for images.
     const uint64_t origin = operation_now(nullptr);
     OtaOperation* operation = nullptr;
     const auto admission = prepare_operation(origin, pr_number, false, operation);
