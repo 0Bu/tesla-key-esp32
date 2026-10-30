@@ -1119,6 +1119,85 @@ test("otaCheck triggers load toast and resolves to up to date toast when idle", 
   assert.match(toastEl.innerHTML, /Firmware is up to date/);
 });
 
+test("OTA starts wait for a complete status body and pause new general polls", async () => {
+  for (const action of ["otaCheck", "startOtaUpdate"]) {
+    const {context}=loadUi();
+    const calls=[];
+    const frame={paired:false,vin:"UNKNOWN",key_present:true,version:"1.6.3"};
+    let finishBody;
+    context.fetch=async url=>{
+      calls.push(url);
+      if(url.startsWith("/status"))return {ok:true,json:()=>new Promise(resolve=>{finishBody=()=>resolve(frame);})};
+      if(url.startsWith("/ota/check"))return {ok:true,status:200,json:async()=>({started:true})};
+      if(url.startsWith("/ota/update"))return {ok:true,status:200,json:async()=>({result:true})};
+      if(url.startsWith("/ota/status"))return {ok:true,json:async()=>({state:action==="otaCheck"?"checking":"downloading",progress:1,message:"working",available:"1.6.4",current:"1.6.3",update_available:true})};
+      throw new Error("unexpected request "+url);
+    };
+    const status=context.poll();
+    await new Promise(resolve=>setImmediate(resolve));
+    const started=context[action]();
+    assert.equal(context.otaBusy,true,"busy before waiting for the response body");
+    assert.equal(context.poll(),status,"an existing status request stays single-flight");
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(calls.length,1,"no OTA request while status JSON remains unread");
+    finishBody();await status;await started;
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(calls.filter(url=>url.startsWith(action==="otaCheck"?"/ota/check":"/ota/update")).length,1);
+    await context.poll();
+    assert.equal(calls.filter(url=>url.startsWith("/status")).length,1,"no large status responses during OTA");
+    context.otaReset();
+    context.fetch=async url=>{calls.push(url);return {ok:true,json:async()=>frame};};
+    await context.poll();
+    assert.equal(calls.filter(url=>url.startsWith("/status")).length,2,"normal polling resumes after the flow ends");
+  }
+});
+
+test("a cancelled status-wait cannot launch OTA or cancel its replacement flow", async () => {
+  for(const replacement of [false,true]){
+    const {context}=loadUi();const calls=[];let finishBody;
+    context.fetch=async url=>{
+      calls.push(url);
+      if(url.startsWith("/status"))return {ok:true,json:()=>new Promise(resolve=>{finishBody=()=>resolve({version:"1.6.3"});})};
+      if(url.startsWith("/ota/check"))return {ok:true,status:200,json:async()=>({started:true})};
+      if(url.startsWith("/ota/status"))return {ok:true,json:async()=>({state:"idle",progress:0,message:"up to date",available:"1.6.3",current:"1.6.3",update_available:false})};
+      throw new Error("unexpected request "+url);
+    };
+    const status=context.poll();await new Promise(resolve=>setImmediate(resolve));
+    const cancelled=context.otaCheck();context.otaReset();
+    const current=replacement?context.otaCheck():Promise.resolve();
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(calls.length,1);
+    finishBody();await status;await cancelled;await current;
+    assert.equal(calls.filter(url=>url.startsWith("/ota/check")).length,replacement?1:0);
+    assert.equal(context.otaBusy,false);
+  }
+});
+
+test("waiting for status does not renew the original OTA deadline", async () => {
+  for(const action of ["otaCheck","startOtaUpdate"]){
+    const {context,element}=loadUi();let finishBody;const calls=[];
+    let now=Date.now();context.Date=class extends Date{static now(){return now;}};
+    context.fetch=async url=>{calls.push(url);return {ok:true,json:()=>new Promise(resolve=>{finishBody=()=>resolve({version:"1.6.3"});})};};
+    const status=context.poll();await new Promise(resolve=>setImmediate(resolve));
+    const waiting=context[action]();
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(calls.length,1,"deadline test requires the status-body wait");
+    now=context.otaDeadline+1;
+    finishBody();await status;await waiting;
+    assert.equal(calls.length,1,"expired waits must not start a backend operation");
+    assert.equal(context.otaBusy,false);
+    assert.match(element("toasts").children[0].innerHTML,/timed out/);
+  }
+});
+
+test("general status polling stays paused throughout the update prompt", async () => {
+  const {context}=loadUi();let calls=0;
+  context.feedOk=true;context.otaPrompting=true;
+  context.fetch=async()=>{calls++;return {ok:true,json:async()=>({version:"1.6.3"})};};
+  await context.poll();assert.equal(calls,0);assert.equal(context.feedOk,true);
+  context.otaReset();await context.poll();assert.equal(calls,1);
+});
+
 test("index.html defines SVG symbols, harmonizes setup rows, and drops dead button labels", () => {
   const html = fs.readFileSync(new URL("../main/www/index.html", import.meta.url), "utf8");
   // SVG defs and symbols
