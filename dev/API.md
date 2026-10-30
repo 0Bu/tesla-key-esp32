@@ -209,9 +209,13 @@ All of `/set_time`, `/set_mqtt`, `/set_syslog`, `/set_wifi` and `/set_ota` retur
 cannot be verified, and `500` when rotation is incomplete. Not-committed or ambiguous commits
 trigger a recovery reboot; a committed key with pending cleanup uses the supervisor retry path.
 `/ota/check` and `/ota/update` return `409` while another device operation owns their shared gate,
-`503` when the service is unavailable or ordinary-entry recovery memory is insufficient, and `500`
-when worker startup fails. A memory refusal uses `not enough memory for update` in both async replies
-and the blocking check result, creates no Operation/task and withdraws a stale update offer. `/ota/update` also
+`503` when the service or nonblocking check queue is unavailable, and `500` when startup fails.
+For `/ota/check`, `started:true` accepts one reserved request: memory admission and worker startup
+run after HTTP request cleanup and can subsequently publish an error through `/ota/status`.
+The queue wait consumes the original deadline; it does not allocate an Operation or task.
+For `/ota/update`, insufficient ordinary-entry recovery memory returns `503` immediately.
+A memory refusal uses `not enough memory for update`, creates no Operation/task and withdraws a
+stale update offer. `/ota/update` also
 returns `409` while the running image is NEW/PENDING_VERIFY, or `503` if its state cannot be
 verified. These refusals create no OTA worker. A manifest check remains available during probation.
 The web UI preserves the device's refusal reason; a failed start does not trigger polling or retry.
@@ -248,7 +252,8 @@ the uncertainty contract below.
 | `vehicle_data` | Wrapped `response`; `200` when all selected caches are usable; unusable required caches return `503`/`result:false`. Invalid URI/query/selectors retain `400`, VIN mismatch `404`. |
 | `body_controller_state` | Wrapped `response`; a completed retrieval attempt returns `200`; inspect `response.result` for its outcome. |
 | Configuration | Wrapped `response` for time/VIN/MQTT/Syslog/WiFi. Key generation is flat `{result,reason}`. Channel success is flat `{ok,result,channel}`; channel errors are wrapped. Invalid intake is `400`/`413`, unavailable resources `503`, failed persistence `500`. |
-| OTA start | Flat `{started,reason?}` for a check and `{result,reason}` for an update; `200` on start; `409` for busy/probation, `503` for unavailable service, insufficient ordinary-entry recovery memory or unknown image state, `500` for worker startup failure. |
+| OTA check | Flat `{started,reason?}`; `200` accepts the queued check, `409` for busy, `503` for unavailable service/queue, `500` for setup failure. Later memory/worker failures appear through `/ota/status`. |
+| OTA update | Flat `{result,reason}`; `200` on start; `409` for busy/probation, `503` for unavailable service, insufficient ordinary-entry recovery memory or unknown image state, `500` for worker startup failure. |
 | Pre-effect REST OOM fallback | Flat `{result:false,reason:"out of memory"}`, `503`, even for routes whose normal envelope is wrapped. |
 | Degraded mutation reply | HTTP `200` with explicit application outcome, as described below; this status alone does not establish success. |
 
