@@ -76,6 +76,7 @@ status:
   source: http
   uri: http://DEVICE_HOST/api/1/vehicles/REPLACE_WITH_VIN/vehicle_data?endpoints=charge_state
   jq: (if (.response.response.charge_state.charging_state == "Charging") then "C"
+    elif (.response.response.charge_state.charging_state == "Starting") then "B"
     elif (.response.response.charge_state.charging_state == "Stopped") then "B"
     elif (.response.response.charge_state.charging_state == "NoPower") then "B"
     elif (.response.response.charge_state.charging_state == "Complete") then "B"

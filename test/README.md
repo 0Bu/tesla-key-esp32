@@ -13,8 +13,10 @@ scripts/run-mock-tests.sh --require-all # fail closed: CI/Stop prerequisites are
 ```
 
 Normal mode needs C11 and C++17 compilers, using CMake when present or equivalent direct compilation.
+The evcc example check uses Ruby's standard YAML parser and `jq` to execute the shipped status
+expression, verify explicit setter deadlines and reject the historical `Starting` mapping.
 The separate real v6.3.0 tesla-ble/PSA harness requires C++20; pure firmware logic remains C++17.
-Strict mode requires Git, Python, Node, CMake, compiler and every gate file, with bounded subprocesses.
+Strict mode requires Git, Python, Node, Ruby, jq, CMake, compiler and every gate file, with bounded subprocesses.
 Missing tooling is failure, not reduced coverage reported green. A failed check fails its binary:
 the pure-logic suite and the tesla-ble harness report every failed check before exiting 1, while the
 NVS, runtime-boundary, cJSON OOM and MQTT JSON binaries and the fuzz smoke stop at the first failure.
