@@ -51,7 +51,8 @@ extern "C" unsigned uxTaskGetStackHighWaterMark(void* task) {
 using esp_err_t = int;
 constexpr int ESP_OK=0, ESP_FAIL=-1, ESP_ERR_NOT_FOUND=-2, HTTPD_400_BAD_REQUEST=400;
 static constexpr char TAG[]="offline-effect-adapter";
-struct httpd_req_t { const char* uri{"/offline"}; int content_len{}; const char* input{"{}"}; };
+static int fake_http_server;
+struct httpd_req_t { const char* uri{"/offline"}; int content_len{}; const char* input{"{}"}; void* handle{&fake_http_server}; };
 #include "config_commit_owner.generated.hpp"
 #include "effect_reply_context.generated.hpp"
 using Handler = esp_err_t(*)(GuardedReq);
@@ -63,6 +64,8 @@ static int transport_calls, fail_transport, response_attempts, response_status, 
 static BrowserClockStatus clock_status;
 static bool updating;
 static int check_starts, update_starts, query_read_error;
+static int immediate_check_starts, deferred_check_starts;
+static void* deferred_check_server;
 static unsigned last_ota_pr;
 static tk::OtaStartResult ota_result;
 static std::string query;
@@ -222,7 +225,8 @@ static int httpd_req_get_url_query_str(httpd_req_t*,char* out,size_t size) {
     std::snprintf(out,size,"%s",query.c_str()); return 0;
 }
 static bool ota_is_updating() { return updating; }
-static tk::OtaStartResult ota_check_start(unsigned pr) { ++check_starts; last_ota_pr=pr; if (ota_result==tk::OtaStartResult::Started) effect_done(); return ota_result; }
+[[maybe_unused]] static tk::OtaStartResult ota_check_start(unsigned pr) { ++immediate_check_starts; ++check_starts; last_ota_pr=pr; if (ota_result==tk::OtaStartResult::Started) effect_done(); return ota_result; }
+[[maybe_unused]] static tk::OtaStartResult ota_check_start_after_http(unsigned pr, void* server) { ++deferred_check_starts; deferred_check_server=server; ++check_starts; last_ota_pr=pr; if (ota_result==tk::OtaStartResult::Started) effect_done(); return ota_result; }
 static tk::OtaStartResult ota_start(unsigned pr) { ++update_starts; last_ota_pr=pr; if (ota_result==tk::OtaStartResult::Started) effect_done(); return ota_result; }
 static void ota_set_channel(tk::OtaChannel) { effect_done(); }
 struct OtaIdentityMutationGuard {
@@ -318,6 +322,7 @@ static void reset(Handler handler) {
     image_state=ESP_OTA_IMG_VALID; image_query_failure=false; image_queries=0; runtime_ready=true; host_synced=true; host_resets=0; commit_heap=4096; recovery_required=4096;
     throw_confirmation=false; allocation_fault_armed=false; allocation_fault_index=0; effect_allocations=0;
     clock_status=BrowserClockStatus::Applied; updating=false; check_starts=0; update_starts=0; last_ota_pr=0;
+    immediate_check_starts=deferred_check_starts=0; deferred_check_server=nullptr;
     ota_result=tk::OtaStartResult::Started;
     query="ms=1800000000000"; query_read_error=0;
     api_command_name="charge_start"; api_body=nullptr; api_path_vin="TESTVIN0000000001";
@@ -429,6 +434,13 @@ static void test_nominal_charge_reply_adapters() {
 int main() {
     CHECK(!tk::stack_watch_min_free_bytes(tk::StackWatch::Httpd).has_value());
     cJSON_Hooks hooks{gate_malloc,gate_free}; cJSON_InitHooks(&hooks);
+    // Execute the shipped HTTP handler: it must reserve a deferred check using the copied
+    // server handle, rather than sample admission while this request still owns SDK scratch.
+    reset(handle_ota_check); ntp_synced=true;
+    httpd_req_t metadata_request;
+    CHECK(handle_all(&metadata_request)==ESP_OK && response_status==200);
+    CHECK(deferred_check_starts==1 && immediate_check_starts==0);
+    CHECK(deferred_check_server==metadata_request.handle && check_starts==1);
     test_nominal_charge_reply_adapters();
     httpd_req_t req;
     for (auto handler : {shell_standard_fault_before_effect,shell_unknown_fault_before_effect}) {

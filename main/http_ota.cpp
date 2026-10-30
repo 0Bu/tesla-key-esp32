@@ -53,8 +53,8 @@ static bool parse_pr_param_(httpd_req_t* req, unsigned& pr) {
 }
 
 // GET /ota/check[?ms=<epoch>][&pr=<N>] — start a background version check, return at once.
-// The slow HTTPS manifest fetch runs in its own task (see ota_check_start) so it
-// never ties up the HTTP server; the UI polls /ota/status for the result.
+// Accept one reserved check; memory admission runs after this request's SDK scratch is freed.
+// The slow HTTPS fetch runs in its own task; the UI polls /ota/status for admission/result.
 esp_err_t handle_ota_check(GuardedReq rq) {
     httpd_req_t* req = rq.req();
     if (validate_query_string(req) != ESP_OK) {
@@ -88,7 +88,7 @@ esp_err_t handle_ota_check(GuardedReq rq) {
                                     : clock == BrowserClockStatus::Busy ? 503 : 500, json.release());
     }
     rq.reply()->state.attempting(tk::RequestEffect::OtaStart);
-    const auto result = ota_check_start(pr);
+    const auto result = ota_check_start_after_http(pr, req->handle);
     const bool started = result == tk::OtaStartResult::Started;
     if (started) rq.reply()->state.succeeded();
     else rq.reply()->state.refused(tk::RequestEffect::OtaStart);

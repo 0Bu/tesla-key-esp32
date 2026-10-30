@@ -696,8 +696,13 @@ def validate(root: Path) -> None:
                   '"$work/test_ota_tls_admission" normal', '"$work/test_ota_tls_admission" commit',
                   '"$work/test_ota_tls_admission" uncertain', '-DF145_HOST_TEST_HOOKS=1',
                   '"$work/test_ota_tls_admission" budget', '"$work/test_ota_tls_admission" cleanup-cas',
-                  '"$work/test_ota_tls_admission" cleanup-failed'):
+                  '"$work/test_ota_tls_admission" cleanup-failed',
+                  '"$work/test_ota_tls_admission" deferred-task-uncertain',
+                  '"$work/test_ota_tls_admission" deferred-inline',
+                  '-DCONFIG_HTTPD_QUEUE_WORK_BLOCKING=1'):
         require(token in ota_native, "actual OTA native family missing " + token)
+    require(ota_native.count('"${ota_test_flags[@]}"') == 2,
+            "actual OTA native family missing shared positive/negative compiler flags")
     require('ota_operation_contract.py' in (root / 'test/test_runtime_boundary_contract.py').read_text(),
             'actual OTA closed source contract is not called by the runtime boundary gate')
     require("add_test(NAME runtime_boundary_tests" in cmake,
@@ -1034,6 +1039,14 @@ def self_test(root: Path) -> None:
          ': normal', "actual OTA native family missing"),
         ("test/run-cjson-oom-tests.sh", '-DF145_HOST_TEST_HOOKS=1',
          '-UF145_HOST_TEST_HOOKS', "actual OTA native family missing"),
+        ("test/run-cjson-oom-tests.sh", '"${ota_test_flags[@]}"',
+         '', "actual OTA native family missing shared positive/negative compiler flags"),
+        ("test/run-cjson-oom-tests.sh", '"$work/test_ota_tls_admission" deferred-task-uncertain',
+         ': deferred-task-uncertain', "actual OTA native family missing"),
+        ("test/run-cjson-oom-tests.sh", '"$work/test_ota_tls_admission" deferred-inline',
+         ': deferred-inline', "actual OTA native family missing"),
+        ("test/run-cjson-oom-tests.sh", '-DCONFIG_HTTPD_QUEUE_WORK_BLOCKING=1',
+         '-UCONFIG_HTTPD_QUEUE_WORK_BLOCKING', "actual OTA native family missing"),
         ("test/run-cjson-oom-tests.sh", '"$work/test_ota_tls_admission" budget',
          ': budget', "actual OTA native family missing"),
         ("test/run-cjson-oom-tests.sh", '"$work/test_ota_tls_admission" cleanup-cas',

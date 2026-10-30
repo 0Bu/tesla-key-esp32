@@ -96,6 +96,27 @@ pinned ESP-TLS and `http_parser` components provide transport and incremental HT
 `esp_http_client` and `esp_https_ota` are not used by this OTA path. Authentication/publication
 remain in [Security](SECURITY.md#signed-ota-images).
 
+The browser waits for an in-flight general `/status` request to finish or time out, including
+body handling, before starting a check or install. It pauses new general polls through the OTA
+flow and its installation dialog. Small
+`/ota/status` progress polls and the separate post-reboot verification remain active. Waiting
+does not renew the original UI deadline; cancelled or replaced flows cannot launch a delayed
+request. Normal polling resumes when the flow ends. After manifest validation, the coordinator
+copies the version and frees the parsed manifest before reserving the notes body or opening its
+TLS connection, so the manifest tree does not coexist with notes buffering and TLS.
+
+HTTP metadata checks reserve the shared operation gate and enqueue one fixed capture on the same
+HTTP server. The pinned nonblocking work queue invokes its callback on a later server turn, after
+request parser scratch is freed. Only then does the unchanged entry memory screen run, before
+Operation/task/body/TLS allocation. The HTTP response accepts a request; later admission failure is
+reported through `/ota/status`. Native/background checks and image installation retain immediate
+admission. The capture owns the original time, PR and channel, never a request or stack pointer.
+Nonwrapping tickets reject stale/duplicate callbacks; cancellation and queue time cannot renew the
+deadline. Refused or uncertain submission revokes the unstarted ticket before releasing the
+reservation: a late callback cannot match a successor. Uncertain coordinator creation still retains
+the Operation and lease. The source contract restricts this entry to the
+synchronous wildcard handler and rejects blocking work-queue configuration.
+
 Capture the operation origin before lock/job/task/URL/body allocation. Manifest, optional changelog,
 image, redirects, TLS retry conditions and trickled bytes share a single nonrenewable budget:
 15 s setup + ceil(maximum bytes / 16 KiB/s) + 10 s finalization. Metadata permits two bodies of
@@ -238,9 +259,12 @@ exception path and does not promise a cache refresh or unchanged metadata.
 Update admission queries the running image state while holding the same operation gate, before
 creating a worker or starting HTTPS. NEW/PENDING_VERIFY refuses with `409`; unknown/error state
 refuses with `503`. A manifest-only check can still run during probation. Busy owners return
-`409`, service initialization or ordinary-entry memory refusals `503`, and worker startup failures
-`500`. A typed entry-memory result preserves the fixed memory reason for blocking checks and both
-HTTP starters, withdraws a stale offer with the requested target under its owner, and creates no worker. Worker-creation
+`409`. HTTP metadata checks return `200` when queued, `503` for unavailable service/queue or `500`
+for setup failure; subsequent memory or coordinator failure is published through `/ota/status`.
+Image starters retain immediate service/memory refusal `503` and worker-startup failure `500`.
+The typed native entry-memory result preserves the fixed reason for blocking checks and immediate
+image starters. Deferred checks publish the same memory reason asynchronously. Memory refusal
+withdraws a stale offer with the requested target under its owner and creates no worker. Worker-creation
 failures attempt to publish their terminal error before releasing the owner, so a delayed
 publication cannot overwrite a later worker's status.
 `/status.ota.verification` reads an atomic last-observed cache only. Startup seeds it before HTTP;
@@ -965,7 +989,7 @@ publication, and atomic operations perform no allocation, logging or task-mutex 
 The four original aliases retain their names; values are conservative 256-byte lower bounds,
 measured zero is distinct from unknown, and saturation means at least 15872 bytes. Consumers emit the
 adjacent `stack_min_free_quantum_bytes:256` metadata and never use the diagnostic bank as health,
-restart or command admission. `test/stack_context_hook_owners.json` owns the exact 44 entry-to-lane
+restart or command admission. `test/stack_context_hook_owners.json` owns the exact 45 entry-to-lane
 routes, including separate fixed PingNet/PingSyslog callbacks without a larger callback argument.
 Actual task entries, iteration scopes and explicit no-unwind delete/restart samples complement
 callback exit scopes placed before local guards. Inner BLE enqueue-only adapters remain unchanged

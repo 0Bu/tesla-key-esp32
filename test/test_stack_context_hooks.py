@@ -30,6 +30,7 @@ TASKS = {
     'ota_network_task': ('main/ota_transport.cpp', 'OtaNetwork', None),
 }
 CALLBACKS = {
+    'ota_check_after_http_work': ('main/ota_update.cpp', 'Httpd'),
     'on_sync_cb': ('main/ble_client.cpp', 'NimbleHost'),
     'on_reset_cb': ('main/ble_client.cpp', 'NimbleHost'),
     'gap_event_cb': ('main/ble_client.cpp', 'NimbleHost'),
@@ -114,8 +115,8 @@ def contract(parts, owners, helpers):
         ('ble_link_event_cb_', 'main/vehicle_ctrl.cpp', 'NimbleHost'),
         ('ble_rx_event_cb_', 'main/vehicle_ctrl.cpp', 'NimbleHost')}
     actual = {(r['entry'], r['path'], r['context']) for r in owners['rows']}
-    require(actual == expected and len(owners['rows']) == len(expected) == 44,
-            'exact 44 owner rows, no duplicate/missing route')
+    require(actual == expected and len(owners['rows']) == len(expected) == 45,
+            'exact 45 owner rows, no duplicate/missing route')
     require({r['context'] for r in owners['rows']} == set(CONTEXTS), 'all 27 lanes mapped')
     enum = re.search(r'enum class StackContext[^\{]*\{(.*?)\};',
                      parts['main/logic/stack_context.hpp'], re.S)
@@ -230,7 +231,7 @@ def main(root, self_test):
             except AssertionError:
                 continue
             raise AssertionError('valid source omission passed: ' + label)
-    print('stack context source contract: exact27 lanes/44 owner rows; source-only PASS')
+    print('stack context source contract: exact27 lanes/45 owner rows; source-only PASS')
 
 
 if __name__ == '__main__':

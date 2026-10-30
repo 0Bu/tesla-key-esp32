@@ -142,7 +142,8 @@ for row in json.loads((p/'provenance.json').read_text())['files']:
 PYVERIFY
 "$cc" -std=c11 -Wall -Wextra -Werror ${sanitize_flags[@]+"${sanitize_flags[@]}"} \
     -I"$repo_root/test/ota_http_parser" -c "$repo_root/test/ota_http_parser/http_parser.c" -o "$work/http_parser.o"
-"$cxx" -std=c++17 -Wall -Wextra -Werror -pthread -DF145_HOST_TEST_HOOKS=1 ${sanitize_flags[@]+"${sanitize_flags[@]}"} \
+ota_test_flags=(-pthread -DF145_HOST_TEST_HOOKS=1)
+"$cxx" -std=c++17 -Wall -Wextra -Werror "${ota_test_flags[@]}" ${sanitize_flags[@]+"${sanitize_flags[@]}"} \
     -I"$repo_root/test/ota_stubs" -I"$repo_root/test/ota_http_parser" \
     -I"$repo_root/main" -I"$cjson_dir" -I"$work" \
     "$repo_root/test/test_ota_tls_admission.cpp" "$repo_root/main/ota_transport.cpp" \
@@ -158,3 +159,20 @@ PYVERIFY
 "$work/test_ota_tls_admission" uncertain
 # Failed destroy deliberately retains the allocated quarantine; no LSan reclamation claim.
 "$work/test_ota_tls_admission" cleanup-failed
+"$work/test_ota_tls_admission" deferred-task-uncertain
+# Invalid SDK configurations/ordering must trip the executable contract rather than silently
+# treating a request-context sample as an ordinary post-cleanup reference.
+if "$work/test_ota_tls_admission" deferred-inline >"$work/inline.log" 2>&1; then
+    echo "OTA inline work negative control unexpectedly passed" >&2
+    exit 1
+fi
+grep -Fq '!http_request_live' "$work/inline.log"
+if "$cxx" -std=c++17 "${ota_test_flags[@]}" -DCONFIG_HTTPD_QUEUE_WORK_BLOCKING=1 \
+    -I"$repo_root/test/ota_stubs" -I"$repo_root/test/ota_http_parser" \
+    -I"$repo_root/main" -I"$cjson_dir" -I"$work" \
+    -fsyntax-only "$repo_root/test/test_ota_tls_admission.cpp" >"$work/blocking.log" 2>&1; then
+    echo "OTA blocking work queue negative control unexpectedly compiled" >&2
+    exit 1
+fi
+grep -Fq 'Deferred OTA metadata admission requires nonblocking HTTP work submission' "$work/blocking.log"
+echo 'OTA deferred HTTP inline/configuration negative controls passed'

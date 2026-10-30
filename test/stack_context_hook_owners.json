@@ -254,6 +254,14 @@
     },
     {
       "kind": "callback",
+      "path": "main/ota_update.cpp",
+      "entry": "ota_check_after_http_work",
+      "context": "Httpd",
+      "placement": "function-first, before local lock guards",
+      "boundaryScope": true
+    },
+    {
+      "kind": "callback",
       "path": "main/http_server.cpp",
       "entry": "handle_all",
       "context": "Httpd",

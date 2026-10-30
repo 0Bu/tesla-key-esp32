@@ -5,6 +5,7 @@ function setHTML(el,html){ if(el && el.__h!==html){ el.__h=html; el.innerHTML=ht
 var state=null, otaTimer=null, otaAvail=null, waking=false, wakeTimeout=null, chgBusy=false, feedOk=false;
 var otaBusy=false, otaPhase=null, otaPollState=null, otaDeadline=0, otaExpectedVersion=null, otaChannel='release', otaChannelInitialSet=false;
 var otaChannelInFlight=false, otaChannelTarget=null, otaPrompting=false;
+var otaFlowToken=null;
 var fwFocusId=null;   // control that started the running check/channel change; refocused once the UI is idle again
 
 function isOtaRunning(){
@@ -159,6 +160,9 @@ function toast(msg, type, key){
 var statusPoll=null;
 function poll(){
   if(statusPoll) return statusPoll;
+  // OTA has its own small progress response. Avoid a second full status tree during TLS,
+  // and retain the existing in-flight promise so starts can wait for its complete body.
+  if(isOtaFlowBusy()) return Promise.resolve();
   statusPoll=requestJsonWithTimeout('/status?ms='+Date.now(),{cache:'no-store'},8000)
     .then(function(s){
       render(s); feedOk=true;
@@ -1178,8 +1182,16 @@ function otaBarProgress(pct){
   if(bar&&bar.classList){ bar.classList.toggle('hide',pct==null); bar.classList.toggle('indet',pct==='indet'); }
   if(fill&&fill.style&&pct!=null&&pct!=='indet') fill.style.width=Math.max(0,Math.min(100,pct))+'%';
 }
-function otaBegin(phase,timeout){ otaPhase=phase; otaDeadline=Date.now()+timeout; otaLastToastMilestone=null; renderVerLink(); }
-function otaReset(){ clearTimeout(otaTimer); otaBarProgress(); otaBusy=false; otaPrompting=false; otaPhase=null; otaPollState=null; otaDeadline=0; otaExpectedVersion=null; otaLastToastMilestone=null; renderVerLink(); if(typeof syncOtaUi === 'function') syncOtaUi(); fwRefocus(); }
+function otaBegin(phase,timeout){ otaFlowToken={}; otaPhase=phase; otaDeadline=Date.now()+timeout; otaLastToastMilestone=null; renderVerLink(); }
+function otaReset(){ otaFlowToken=null; clearTimeout(otaTimer); otaBarProgress(); otaBusy=false; otaPrompting=false; otaPhase=null; otaPollState=null; otaDeadline=0; otaExpectedVersion=null; otaLastToastMilestone=null; renderVerLink(); if(typeof syncOtaUi === 'function') syncOtaUi(); fwRefocus(); }
+function otaAfterStatusPoll(start){
+  var token=otaFlowToken;
+  return (statusPoll||Promise.resolve()).then(function(){
+    if(!token||otaFlowToken!==token) return null;
+    if(!otaDeadline||Date.now()>=otaDeadline) throw new Error(otaPhase==='check'?'check timed out':'update timed out');
+    return start();
+  });
+}
 function otaFail(message){ otaReset(); if(typeof closeOtaModal === 'function') closeOtaModal(false); toast(message, 'err', 'ota'); if(typeof syncOtaUi === 'function') syncOtaUi(); }
 function otaSchedule(fn,delay){
   if(!otaDeadline||Date.now()<otaDeadline){ otaTimer=setTimeout(fn,delay); return; }
@@ -1355,18 +1367,22 @@ function startOtaUpdate(availVer){
   otaExpectedVersion = ver || null;
   otaBusy = true;
   otaBegin('update', OTA_UPDATE_TIMEOUT_MS);
+  var token=otaFlowToken;
   toast('Starting update…', 'load', 'ota');
   otaBarProgress('indet');
   if(typeof syncOtaUi === 'function') syncOtaUi();
   var updatePr=otaPrSelection();
-  return requestOtaStart('/ota/update'+(updatePr?'?pr='+updatePr:''), { method: 'POST' }).then(function(j){
+  return otaAfterStatusPoll(function(){
+    return requestOtaStart('/ota/update'+(updatePr?'?pr='+updatePr:''), { method: 'POST' });
+  }).then(function(j){
+    if(otaFlowToken!==token) return;
     if(!j || j.result !== true){
       var reason = (j && j.reason) || 'update did not start';
       throw new Error(reason);
     }
     otaPoll();
   }).catch(function(err){
-    otaFail((err && err.message) || 'update failed to start');
+    if(otaFlowToken===token) otaFail((err && err.message) || 'update failed to start');
   });
 }
 
@@ -1504,15 +1520,19 @@ function otaCheck(){
   if(!fwFocusId) fwFocusId = 'fwCheckBtn';
   otaBusy=true;
   otaBegin('check',OTA_CHECK_TIMEOUT_MS);
+  var token=otaFlowToken;
   if(typeof syncOtaUi === 'function') syncOtaUi();
   toast('Checking for updates…', 'load', 'ota');
   otaBarProgress('indet');
   var prSel=otaPrSelection();
-  var checkUrl='/ota/check?'+(prSel?'pr='+prSel+'&':'')+'ms='+Date.now();
-  return requestOtaStart(checkUrl,{}).then(function(j){
+  return otaAfterStatusPoll(function(){
+    var checkUrl='/ota/check?'+(prSel?'pr='+prSel+'&':'')+'ms='+Date.now();
+    return requestOtaStart(checkUrl,{});
+  }).then(function(j){
+    if(otaFlowToken!==token) return;
     if(!j||j.started!==true) throw new Error((j&&j.reason)||'check did not start');
     return otaCheckPoll();
-  }).catch(function(err){ otaFail((err && err.message) || 'check failed'); });
+  }).catch(function(err){ if(otaFlowToken===token) otaFail((err && err.message) || 'check failed'); });
 }
 function otaCheckPoll(){
   clearTimeout(otaTimer);

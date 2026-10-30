@@ -34,7 +34,7 @@ struct OtaCheckResult {
 };
 
 // Fetch the manifest and compare versions. Blocking background coordinator API; the separate
-// worker owns network calls. HTTP uses ota_check_start. This is not a hard SDK wall-time guarantee.
+// worker owns network calls. HTTP uses ota_check_start_after_http. This is not a hard SDK wall-time guarantee.
 // pr_number == 0 checks main channel; pr_number > 0 checks PR preview channel.
 OtaCheckResult ota_check(unsigned pr_number = 0);
 
@@ -43,6 +43,13 @@ OtaCheckResult ota_check(unsigned pr_number = 0);
 // Idle (then read update_available/available/current) or Error. Keeps the slow TLS
 // fetch off the HTTP server task so the UI and evcc stay responsive.
 tk::OtaStartResult ota_check_start(unsigned pr_number = 0);
+
+// HTTP-handler-only entry: reserve one metadata request and enqueue work on that same server.
+// Started means accepted/Checking; unchanged memory admission runs after request cleanup and may
+// publish Error. Copy the server handle, never retain a request pointer. The pinned nonblocking
+// HTTP work queue must not invoke its callback until this handler has returned. Native/background
+// callers use the immediate API above. Queue waits consume the original operation deadline.
+tk::OtaStartResult ota_check_start_after_http(unsigned pr_number, void* server) noexcept;
 
 // Kick off a background download+install task. Refuse pending/unknown image verification before
 // creating a worker or starting HTTPS; inspect the SDK state under the operation gate.

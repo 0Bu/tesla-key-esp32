@@ -244,6 +244,7 @@ EXPECTED_TASKS = {
 }
 
 EXPECTED_CALLBACKS = {
+    "ota_check_after_http_work",
     'parser_begin',
     'parser_field',
     'parser_value',
@@ -279,6 +280,7 @@ EXPECTED_CALLBACKS = {
 # These boundaries contain their own catch-all in the registered function/task body. The gate
 # inspects the body rather than trusting this list alone, so deleting the catch makes it red.
 CONTAINED = {
+    "ota_check_after_http_work",
     "publisher_task",
     "heap_supervisor_task",
     "ota_check_task",
@@ -740,6 +742,7 @@ F135_TASK_CONTEXTS = {
     "ota_network_task": "OtaNetwork",
 }
 F135_CALLBACK_CONTEXTS = {
+    "ota_check_after_http_work": "Httpd",
     "on_sync_cb": "NimbleHost", "on_reset_cb": "NimbleHost",
     "gap_event_cb": "NimbleHost", "svc_disc_cb": "NimbleHost",
     "chr_disc_cb": "NimbleHost", "dsc_disc_cb": "NimbleHost",
@@ -2320,22 +2323,33 @@ def require_recovery_reference_contract(ota_source: str) -> None:
     getter = function_body_in(ota_source, "ota_recovery_required_bytes")
     if "return tk::ota_recovery_required_bytes_for(use);" not in getter:
         raise AssertionError("actual recovery policy must delegate to the real pure selector")
-    entry = function_body_in(ota_source, "prepare_operation")
-    ordered = ("try_begin_ota_operation()", "reclaim_finished_operation()", "s_target_pr.store(pr, std::memory_order_release);",
-               "const auto entry_largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);",
+    reservation = function_body_in(ota_source, "reserve_operation")
+    ordered = ("try_begin_ota_operation()", "reclaim_finished_operation()",
+               "s_target_pr.store(pr, std::memory_order_release);",
+               "s_heap_abort_requested.store(false, std::memory_order_release);")
+    for token in ordered:
+        if token not in reservation: raise AssertionError("ordinary-entry reservation missing " + token)
+    for first, second in zip(ordered, ordered[1:]):
+        require_before("ordinary-entry reservation order", reservation, first, second)
+    wrapper = function_body_in(ota_source, "prepare_operation")
+    require_before("immediate entry reserves before allocation", wrapper,
+                   "reserve_operation(pr, image)", "prepare_owned_operation(origin, pr, ota_get_channel(), image, operation)")
+    entry = function_body_in(ota_source, "prepare_owned_operation")
+    ordered = ("const auto entry_largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);",
                "tk::ota_recovery_required_bytes(tk::OtaRecoveryUse::OperationEntry)",
+               "publish_operation_start(image)",
                "operation = new (std::nothrow) OtaOperation")
     for token in ordered:
         if token not in entry: raise AssertionError("ordinary-entry recovery missing " + token)
     for first, second in zip(ordered, ordered[1:]):
         require_before("ordinary-entry owner/reference/allocation order", entry, first, second)
     start = entry.index("if (!tk::ota_recovery_memory_affordable(entry_largest,")
-    stop = entry.index("s_running.store(true, std::memory_order_release);")
+    stop = entry.index("publish_operation_start(image)")
     refused = entry[start:stop]
-    for token in ("set_check_error(kOtaNoMemory);", "finish_operation(tk::OtaIdentityGateState::Ota);", "return Result::NoMemory;"):
+    for token in ("set_check_error(kOtaNoMemory);", "release_unstarted_operation();", "return Result::NoMemory;"):
         if token not in refused: raise AssertionError("typed entry-memory refusal missing " + token)
-    require_before("memory publication before owner release", refused, "set_check_error", "finish_operation")
-    require_before("memory release before typed result", refused, "finish_operation", "return Result::NoMemory")
+    require_before("memory publication before owner release", refused, "set_check_error", "release_unstarted_operation")
+    require_before("memory release before typed result", refused, "release_unstarted_operation", "return Result::NoMemory")
 
 
 def require_runtime_health_sampler_contract(ota_source: str) -> None:
@@ -8971,11 +8985,62 @@ def self_test_concurrency_regression_contract(parts: dict[str, str]) -> None:
         require_mutation_rejected(label, lambda mutated=changed: require_concurrency_regression_contract(mutated))
 
 
+def require_http_ota_deferred_contract(parts: dict[str, str]) -> None:
+    """The plain capture is valid only on one server's serialized request/control turns."""
+    references = {
+        "ota_check_start_after_http": {"ota_update.cpp": 1, "ota_update.hpp": 1, "http_ota.cpp": 1},
+        "ota_check_after_http_work": {"ota_update.cpp": 2},
+        "handle_ota_check": {"http_ota.cpp": 1, "http_handlers.hpp": 1, "http_server.cpp": 1},
+        "handle_all_dispatch": {"http_server.cpp": 2},
+        "handle_all": {"http_server.cpp": 3},
+    }
+    for symbol, expected in references.items():
+        actual = {name: len(re.findall(r"\b" + symbol + r"\b", scrub_cpp(source)))
+                  for name, source in parts.items()}
+        if {name: count for name, count in actual.items() if count} != expected:
+            raise AssertionError(f"deferred OTA HTTP-only caller surface changed: {symbol}")
+    handler = " ".join(scrub_cpp(function_body_in(parts["http_ota.cpp"], "handle_ota_check")).split())
+    if "const auto result = ota_check_start_after_http(pr, req->handle);" not in handler:
+        raise AssertionError("deferred OTA must copy this request's server handle")
+    dispatch = " ".join(scrub_cpp(function_body_in(parts["http_server.cpp"], "handle_all_dispatch")).split())
+    if "case tk::HttpRoute::OtaCheck: return handle_ota_check(rq);" not in dispatch:
+        raise AssertionError("deferred OTA must remain in the synchronous wildcard dispatch")
+    if "httpd_req_async_handler_begin" in scrub_cpp(parts["http_server.cpp"]):
+        raise AssertionError("deferred OTA cannot inherit asynchronous request dispatch")
+    guard = ('#if defined(CONFIG_HTTPD_QUEUE_WORK_BLOCKING) && CONFIG_HTTPD_QUEUE_WORK_BLOCKING\n'
+             '#error "Deferred OTA metadata admission requires nonblocking HTTP work submission"\n'
+             '#endif')
+    if guard not in strip_cpp_comments(parts["ota_update.cpp"]):
+        raise AssertionError("deferred OTA lost its nonblocking SDK configuration guard")
+
+
+def self_test_http_ota_deferred_contract(parts: dict[str, str]) -> None:
+    cases = (
+        ("non-HTTP caller", "extra.cpp", "void f() { ota_check_start_after_http(0, nullptr); }"),
+        ("concurrent callback caller", "extra.cpp", "void f() { ota_check_after_http_work(nullptr); }"),
+        ("direct handler caller", "extra.cpp", "void f() { handle_ota_check({}); }"),
+        ("foreign server", "http_ota.cpp", parts["http_ota.cpp"].replace("pr, req->handle", "pr, nullptr")),
+        ("inline admission", "http_ota.cpp", parts["http_ota.cpp"].replace("ota_check_start_after_http(pr, req->handle)", "ota_check_start(pr)")),
+        ("async dispatch", "http_server.cpp", parts["http_server.cpp"] + "\nvoid f() { httpd_req_async_handler_begin(0,0); }"),
+        ("blocking queue", "ota_update.cpp", parts["ota_update.cpp"].replace("#if defined(CONFIG_HTTPD_QUEUE_WORK_BLOCKING) && CONFIG_HTTPD_QUEUE_WORK_BLOCKING", "#if 0")),
+    )
+    for label, name, source in cases:
+        require_mutation_rejected(label, lambda changed={**parts, name: source}:
+                                  require_http_ota_deferred_contract(changed))
+        require_http_ota_deferred_contract(parts)
+
+
 def main() -> int:
     tasks = task_inventory(ALL_CODE)
     callbacks = callback_inventory(ALL_CODE)
     check_contract(tasks, callbacks)
     self_test_canaries(tasks, callbacks)
+    # Include untracked/new C++ files as well as the closed CMake/header inventory. An added
+    # non-HTTP caller must not evade the single-server premise before CMake enrolment.
+    deferred_parts = {**MAIN_CODE, **{p.relative_to(MAIN).as_posix(): p.read_text()
+                      for p in MAIN.rglob("*") if p.is_file() and p.suffix in (".cpp", ".cc", ".cxx")}}
+    require_http_ota_deferred_contract(deferred_parts)
+    self_test_http_ota_deferred_contract(deferred_parts)
     self_test_f135_programs(f135_program_parts())
     self_test_f135_ping_targets(MAIN_CODE["ping_probe.hpp"], SOURCES["net.cpp"], SOURCES["syslog.cpp"])
     self_test_f137_source_contract({"mqtt": SOURCES["mqtt_ha.cpp"], "net": SOURCES["net.cpp"],
