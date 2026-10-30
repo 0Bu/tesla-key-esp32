@@ -17,6 +17,12 @@ startup. This is intended to mitigate the reported Super Mini startup failures i
 no serial reset log, so a brownout is not confirmed. If startup still fails, retain a serial boot
 log and check the USB cable, power supply and board antenna before erasing configuration.
 
+esp32c3 boards on v1.6.3, or on a later Dev build without the C3 RAM settings, refuse every update
+check (`not enough memory for update`) and cannot install them over the air. Reinstall such a board
+once with USB **Flash** (see [Updates and recovery](#updates-and-recovery)), which keeps WiFi, VIN,
+pairing and sessions; later updates work over the air again. Boards on v1.6.2 or older update
+normally.
+
 The pinned library also declares C5, but this firmware does not support it: restoring C5 requires
 separate firmware, signing-size and hardware acceptance. Undeclared chips such as esp32c61 need
 upstream support first. [Target decision](adr/0004-drop-esp32c5-target.md).

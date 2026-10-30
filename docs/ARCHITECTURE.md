@@ -159,15 +159,6 @@ or prove a TLS allocation margin between samples. Image writing, OTA probation a
 allocator histories of the other three targets remain separate, unexercised boundaries of this
 series. It does not replace their build or delivery checks.
 
-ESP32-C3 shares one region between IRAM and DRAM. With only the common defaults an unpaired C3
-bench settled at a 38912-B INTERNAL largest block after boot, so every check was refused and an
-OTA-installed image could never be confirmed. `sdkconfig.defaults.esp32c3` therefore runs the WiFi
-hot paths from flash, disables BLE controller features the firmware never uses and sizes the
-controller and NimBLE pools and the static WiFi RX buffers for one connection plus scanning. The
-same bench then held 81920 B at runtime and completed a manifest and release-notes check with a
-27692-B minimum free heap. That is bench evidence for the C3 operating point, not a paired-vehicle
-or image-write measurement; esp32 and esp32c6 remain unmeasured.
-
 The earlier S3 fixed-INTERNAL/TLS1.2 AS series performed three manifest-only checks on the private
 calibration profile. Post-reclaim operation-entry samples were 61440 B; one ordinary track sample
 was 57344 B and would wait/refuse under the selected policy. All sampled ordinary points in the
@@ -179,6 +170,16 @@ contiguous minimum and do not form an additive allocation ledger. The private pr
 and used simultaneous real record probes; that profile is not final non-injected delivery. These
 manifest-only observations establish no notes, redirect, image-write/probation or other-target
 physical allocator history.
+
+ESP32-C3 shares one region between IRAM and DRAM. Before its target defaults reserved memory for
+OTA, an unpaired C3 bench (no BLE link, MQTT off) settled at a 38912-B INTERNAL largest block, so
+every check was refused, and an image installed by an older build stayed pending verification and
+rolled back on the next reboot. `sdkconfig.defaults.esp32c3` therefore runs the WiFi hot paths from
+flash, disables BLE controller features the firmware never uses, sizes the controller activities
+and large NimBLE buffers for one connection plus scanning and keeps the static WiFi RX buffers at
+the RX block-ack window. With this configuration the same bench stayed above the threshold at
+runtime and completed a manifest check and an image download. A paired link, live sessions and
+MQTTS consume more INTERNAL memory and have not been measured; esp32 and esp32c6 remain unmeasured.
 
 Every TLS leg still samples real INTERNAL largest before context creation and after that allocation,
 before connect. These later phases use a separate conservative single-record capacity screen:
