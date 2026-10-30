@@ -173,13 +173,15 @@ physical allocator history.
 
 ESP32-C3 shares one region between IRAM and DRAM. Before its target defaults reserved memory for
 OTA, an unpaired C3 bench (no BLE link, MQTT off) settled at a 38912-B INTERNAL largest block, so
-every check was refused, and an image installed by an older build stayed pending verification and
-rolled back on the next reboot. `sdkconfig.defaults.esp32c3` therefore runs the WiFi hot paths from
+every check was refused, and an OTA-installed image without these settings stayed pending
+verification for 600 s and rolled back on the next reboot. `sdkconfig.defaults.esp32c3` therefore runs the WiFi hot paths from
 flash, disables BLE controller features the firmware never uses, sizes the controller activities
 and large NimBLE buffers for one connection plus scanning and keeps the static WiFi RX buffers at
 the RX block-ack window. With this configuration the same bench stayed above the threshold at
-runtime and completed a manifest check and an image download. A paired link, live sessions and
-MQTTS consume more INTERNAL memory and have not been measured; esp32 and esp32c6 remain unmeasured.
+runtime and completed a manifest check; an image download completed on an otherwise identical
+build with smaller inbound ACL and HCI event pools. Confirmation of an OTA-installed image with these
+settings, a paired link, live sessions and MQTTS have not been measured; MQTTS and a live link
+consume more INTERNAL memory. esp32 and esp32c6 remain unmeasured.
 
 Every TLS leg still samples real INTERNAL largest before context creation and after that allocation,
 before connect. These later phases use a separate conservative single-record capacity screen:
