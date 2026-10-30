@@ -17,12 +17,13 @@ startup. This is intended to mitigate the reported Super Mini startup failures i
 no serial reset log, so a brownout is not confirmed. If startup still fails, retain a serial boot
 log and check the USB cable, power supply and board antenna before erasing configuration.
 
-An esp32c3 board that refuses every update check with `not enough memory for update` runs a build
-without the C3 RAM settings (v1.6.3 and the Dev builds around it) and cannot fetch them over the
-air. Reinstall it once with USB **Flash** (see [Updates and recovery](#updates-and-recovery)),
-which keeps WiFi, VIN, pairing and sessions; the reinstalled build admits update checks again.
-Boards on v1.6.2 or older are not refused, but update them only to a build that includes these
-settings: an image without them cannot confirm itself and rolls back on the next reboot.
+An esp32c3 board that refuses every update check with `not enough memory for update` usually runs
+v1.6.3 or a Dev build around it. Those builds lack the C3 RAM settings and cannot fetch them over
+the air. Once a release newer than v1.6.3 is published, reinstall such a board once with USB
+**Flash** (see [Updates and recovery](#updates-and-recovery)), which keeps WiFi, VIN, pairing and
+sessions; update checks are then admitted again. Boards on v1.6.2 or older are not refused, but
+update them only to a release newer than v1.6.3: v1.6.3 itself cannot confirm on a C3 and rolls
+back on the next reboot.
 
 The pinned library also declares C5, but this firmware does not support it: restoring C5 requires
 separate firmware, signing-size and hardware acceptance. Undeclared chips such as esp32c61 need
