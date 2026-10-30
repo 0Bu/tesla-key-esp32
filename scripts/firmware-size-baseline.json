@@ -34,7 +34,7 @@
       "maxIramUsed": 0,
       "maxUnsignedApp": 1769472,
       "maxElfTotal": 1742822,
-      "maxFlashCodeAndRodata": 1637144
+      "maxFlashCodeAndRodata": 1649994
     },
     "esp32c6": {
       "memoryModel": "unified",

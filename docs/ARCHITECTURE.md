@@ -159,6 +159,15 @@ or prove a TLS allocation margin between samples. Image writing, OTA probation a
 allocator histories of the other three targets remain separate, unexercised boundaries of this
 series. It does not replace their build or delivery checks.
 
+ESP32-C3 shares one region between IRAM and DRAM. With only the common defaults an unpaired C3
+bench settled at a 38912-B INTERNAL largest block after boot, so every check was refused and an
+OTA-installed image could never be confirmed. `sdkconfig.defaults.esp32c3` therefore runs the WiFi
+hot paths from flash, disables BLE controller features the firmware never uses and sizes the
+controller and NimBLE pools and the static WiFi RX buffers for one connection plus scanning. The
+same bench then held 81920 B at runtime and completed a manifest and release-notes check with a
+27692-B minimum free heap. That is bench evidence for the C3 operating point, not a paired-vehicle
+or image-write measurement; esp32 and esp32c6 remain unmeasured.
+
 The earlier S3 fixed-INTERNAL/TLS1.2 AS series performed three manifest-only checks on the private
 calibration profile. Post-reclaim operation-entry samples were 61440 B; one ordinary track sample
 was 57344 B and would wait/refuse under the selected policy. All sampled ordinary points in the

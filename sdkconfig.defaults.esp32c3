@@ -5,3 +5,25 @@ CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 # Limit WiFi power in PHY init data, before either the setup AP or station starts.
 # Mitigate reported Super Mini startup failures (#415); this value is in dBm.
 CONFIG_ESP_PHY_MAX_WIFI_TX_POWER=10
+
+# ── INTERNAL RAM budget for OTA (docs/ARCHITECTURE.md#ota-self-update) ──
+# C3 IRAM and DRAM are one region, so code kept in RAM is heap the board never gets. With only the
+# common defaults the running C3 settles at a 38912-B INTERNAL largest block, below the shared
+# 59392-B recovery threshold: it can neither start an OTA nor confirm an OTA-installed image.
+# Run the WiFi hot paths from flash (~20 KB, lower peak throughput).
+CONFIG_ESP_WIFI_IRAM_OPT=n
+CONFIG_ESP_WIFI_RX_IRAM_OPT=n
+# Controller features this central/observer firmware never uses: no advertising, no direct test
+# mode, no link-layer encryption (host SMP is already off in sdkconfig.defaults). ~6 KB.
+CONFIG_BT_CTRL_DTM_ENABLE=n
+CONFIG_BT_NIMBLE_DTM_MODE_TEST=n
+CONFIG_BT_CTRL_BLE_ADV=n
+CONFIG_BT_CTRL_BLE_SECURITY_ENABLE=n
+# Pools sized for one connection plus scanning instead of the multi-link defaults: three controller
+# activities (828 B each: scan, initiator, connection) and halved NimBLE buffer pools. ~12 KB.
+CONFIG_BT_CTRL_BLE_MAX_ACT=3
+CONFIG_BT_NIMBLE_MSYS_2_BLOCK_COUNT=12
+CONFIG_BT_NIMBLE_TRANSPORT_ACL_FROM_LL_COUNT=12
+CONFIG_BT_NIMBLE_TRANSPORT_EVT_COUNT=16
+# Static WiFi RX buffers (~1.6 KB each, allocated at esp_wifi_init) kept at the RX BA window. ~6 KB.
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=6
