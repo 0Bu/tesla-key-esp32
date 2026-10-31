@@ -10,6 +10,8 @@ static_assert(CONFIG_LOG_TIMESTAMP_SOURCE_RTOS, "diagnostic credential guard req
 #if defined(CONFIG_LOG_COLORS) && CONFIG_LOG_COLORS
 #error "diagnostic credential guard requires uncolored log records"
 #endif
+#elif !defined(CONFIG_TESLA_DIAG_LOG_BYTES)
+#define CONFIG_TESLA_DIAG_LOG_BYTES 16384  // host builds: the Kconfig default
 #endif
 
 #include <esp_log.h>
@@ -25,18 +27,19 @@ static_assert(CONFIG_LOG_TIMESTAMP_SOURCE_RTOS, "diagnostic credential guard req
 #include "rtos_guard.hpp"
 
 // Ring buffer of console output. It WRAPS: once full, the oldest bytes are
-// overwritten so the log always holds the MOST RECENT ~16 KB. This is what you
-// want for live debugging (watching a pairing or key-deletion happen now) — the
-// earlier non-wrapping design kept the boot prologue but then stopped capturing,
+// overwritten so the log always holds the MOST RECENT CONFIG_TESLA_DIAG_LOG_BYTES. This
+// is what you want for live debugging (watching a pairing or key-deletion happen now) —
+// the earlier non-wrapping design kept the boot prologue but then stopped capturing,
 // so a long-running device showed stale output and missed the event of interest.
 // reboot or /diag?clear=1 to reset.
 //
-// Sized at 16 KB, not 48 KB: this is a STATIC .bss buffer, so its size comes
+// Sized at 16 KB by default, not 48 KB: this is a STATIC .bss buffer, so its size comes
 // straight off the DRAM heap budget. At 48 KB it was the single largest static
 // consumer in our code and pushed the heap start up, leaving the largest free block
-// at only ~31 KB — too small for e.g. the OTA TLS record buffers. 16 KB still holds a
-// solid burst of recent lifecycle output and frees 32 KB back to the heap.
-static constexpr size_t DIAG_CAP = 16 * 1024;
+// at only ~31 KB — too small for e.g. the OTA TLS record buffers. The classic esp32
+// uses 8 KB (sdkconfig.defaults.esp32) so its runtime block clears the OTA threshold.
+static constexpr size_t DIAG_CAP = CONFIG_TESLA_DIAG_LOG_BYTES;
+static_assert(DIAG_CAP >= 4096 && DIAG_CAP <= 49152, "diag ring size outside its Kconfig range");
 static char              s_buf[DIAG_CAP];
 static size_t            s_head    = 0;      // next write position
 static bool              s_wrapped = false;  // buffer has wrapped at least once

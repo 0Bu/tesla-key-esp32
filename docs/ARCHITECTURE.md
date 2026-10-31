@@ -181,7 +181,16 @@ static WiFi RX buffers at the RX block-ack window. With this configuration the s
 above the threshold at runtime and completed a manifest check; an image download completed on an
 otherwise identical build with smaller inbound ACL and HCI event pools. Confirmation of an
 OTA-installed image with these settings, a paired link, live sessions and MQTTS have not been
-measured; MQTTS and a live link consume more INTERNAL memory. esp32 and esp32c6 remain unmeasured.
+measured; MQTTS and a live link consume more INTERNAL memory.
+
+The classic esp32 has the same shortfall with a separate IRAM, so code placement frees no heap
+there, and NimBLE already returns the classic-BT controller memory. An unpaired esp32 bench under
+the same conditions settled at a 51200-B largest block and refused every check.
+`sdkconfig.defaults.esp32` therefore configures one controller connection, halves the large NimBLE
+buffers, keeps the static WiFi RX buffers at the RX block-ack window and halves the `/diag` ring
+(`CONFIG_TESLA_DIAG_LOG_BYTES`). The bench then held its largest block above the threshold before
+and after a completed manifest check, whose low point left the smallest margin measured on any
+target. The same limits as on the C3 apply; esp32c6 remains unmeasured.
 
 Every TLS leg still samples real INTERNAL largest before context creation and after that allocation,
 before connect. These later phases use a separate conservative single-record capacity screen:
