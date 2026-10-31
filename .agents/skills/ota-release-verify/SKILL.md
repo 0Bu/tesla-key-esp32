@@ -179,7 +179,11 @@ download_release_asset() {
   endpoint=$(printf '%s' "$row" | jq -er \
     '.url | sub("^https://api.github.com/"; "") | select(length > 0)')
   digest=$(printf '%s' "$row" | jq -r '.digest // ""')
-  gh api -H 'Accept: application/octet-stream' "$endpoint" > "$RELEASE/$name"
+  # gh >= 2.97 rejects output with escape bytes unless it recognizes binary content, and the
+  # esp32 image's leading 4 KiB of 0xFF padding is not recognized (older gh lacks the flag and
+  # fails closed). The digest check below still binds the bytes.
+  gh api --allow-escape-sequences -H 'Accept: application/octet-stream' "$endpoint" \
+    > "$RELEASE/$name"
   [[ -f "$RELEASE/$name" && ! -L "$RELEASE/$name" ]] || {
     echo "REFUSING: unsafe downloaded Release asset: $name" >&2; exit 1;
   }
