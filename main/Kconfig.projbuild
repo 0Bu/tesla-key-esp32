@@ -273,4 +273,14 @@ menu "Tesla Key Configuration"
             SoC) dim further in firmware.
     endif
 
+    config TESLA_DIAG_LOG_BYTES
+        int "In-RAM diagnostic log ring (bytes)"
+        default 16384
+        range 4096 49152
+        help
+            Size of the wrapping console ring behind GET /diag. It is a static .bss buffer, so
+            every byte comes off the INTERNAL heap that OTA admission and confirmation need
+            (docs/ARCHITECTURE.md#ota-self-update). sdkconfig.defaults.esp32 lowers it for
+            the classic esp32; Syslog keeps the longer history.
+
 endmenu
