@@ -96,6 +96,27 @@ pinned ESP-TLS and `http_parser` components provide transport and incremental HT
 `esp_http_client` and `esp_https_ota` are not used by this OTA path. Authentication/publication
 remain in [Security](SECURITY.md#signed-ota-images).
 
+The browser waits for an in-flight general `/status` request to finish or time out, including
+body handling, before starting a check or install. It pauses new general polls through the OTA
+flow and its installation dialog. Small
+`/ota/status` progress polls and the separate post-reboot verification remain active. Waiting
+does not renew the original UI deadline; cancelled or replaced flows cannot launch a delayed
+request. Normal polling resumes when the flow ends. After manifest validation, the coordinator
+copies the version and frees the parsed manifest before reserving the notes body or opening its
+TLS connection, so the manifest tree does not coexist with notes buffering and TLS.
+
+HTTP metadata checks reserve the shared operation gate and enqueue one fixed capture on the same
+HTTP server. The pinned nonblocking work queue invokes its callback on a later server turn, after
+request parser scratch is freed. Only then does the unchanged entry memory screen run, before
+Operation/task/body/TLS allocation. The HTTP response accepts a request; later admission failure is
+reported through `/ota/status`. Native/background checks and image installation retain immediate
+admission. The capture owns the original time, PR and channel, never a request or stack pointer.
+Nonwrapping tickets reject stale/duplicate callbacks; cancellation and queue time cannot renew the
+deadline. Refused or uncertain submission revokes the unstarted ticket before releasing the
+reservation: a late callback cannot match a successor. Uncertain coordinator creation still retains
+the Operation and lease. The source contract restricts this entry to the
+synchronous wildcard handler and rejects blocking work-queue configuration.
+
 Capture the operation origin before lock/job/task/URL/body allocation. Manifest, optional changelog,
 image, redirects, TLS retry conditions and trickled bytes share a single nonrenewable budget:
 15 s setup + ceil(maximum bytes / 16 KiB/s) + 10 s finalization. Metadata permits two bodies of
@@ -149,6 +170,18 @@ contiguous minimum and do not form an additive allocation ledger. The private pr
 and used simultaneous real record probes; that profile is not final non-injected delivery. These
 manifest-only observations establish no notes, redirect, image-write/probation or other-target
 physical allocator history.
+
+ESP32-C3 shares one region between IRAM and DRAM. Before its target defaults reserved memory for
+OTA, an unpaired C3 bench (no BLE link, MQTT off) settled at a 38912-B INTERNAL largest block, so
+every check was refused, and an OTA-installed image without these settings stayed pending
+verification for 600 s and rolled back on the next reboot. `sdkconfig.defaults.esp32c3` therefore
+runs the WiFi hot paths from flash, disables BLE controller features the firmware never uses, sizes
+the controller activities and large NimBLE buffers for one connection plus scanning and keeps the
+static WiFi RX buffers at the RX block-ack window. With this configuration the same bench stayed
+above the threshold at runtime and completed a manifest check; an image download completed on an
+otherwise identical build with smaller inbound ACL and HCI event pools. Confirmation of an
+OTA-installed image with these settings, a paired link, live sessions and MQTTS have not been
+measured; MQTTS and a live link consume more INTERNAL memory. esp32 and esp32c6 remain unmeasured.
 
 Every TLS leg still samples real INTERNAL largest before context creation and after that allocation,
 before connect. These later phases use a separate conservative single-record capacity screen:
@@ -238,9 +271,12 @@ exception path and does not promise a cache refresh or unchanged metadata.
 Update admission queries the running image state while holding the same operation gate, before
 creating a worker or starting HTTPS. NEW/PENDING_VERIFY refuses with `409`; unknown/error state
 refuses with `503`. A manifest-only check can still run during probation. Busy owners return
-`409`, service initialization or ordinary-entry memory refusals `503`, and worker startup failures
-`500`. A typed entry-memory result preserves the fixed memory reason for blocking checks and both
-HTTP starters, withdraws a stale offer with the requested target under its owner, and creates no worker. Worker-creation
+`409`. HTTP metadata checks return `200` when queued, `503` for unavailable service/queue or `500`
+for setup failure; subsequent memory or coordinator failure is published through `/ota/status`.
+Image starters retain immediate service/memory refusal `503` and worker-startup failure `500`.
+The typed native entry-memory result preserves the fixed reason for blocking checks and immediate
+image starters. Deferred checks publish the same memory reason asynchronously. Memory refusal
+withdraws a stale offer with the requested target under its owner and creates no worker. Worker-creation
 failures attempt to publish their terminal error before releasing the owner, so a delayed
 publication cannot overwrite a later worker's status.
 `/status.ota.verification` reads an atomic last-observed cache only. Startup seeds it before HTTP;
@@ -495,9 +531,13 @@ each transport keeps its own gateway-reachability baseline.
 
 ESP32-S3 probes W5500 candidates in configured order. Cache T-Dongle detection before any
 W5500 pin drive: its display shares GPIO5 with the first W5500 candidate. Every candidate must audit
-all SPI and auxiliary INT/RST pins it touches against **every later board**, not only earlier mappings. After a positive probe, resources remain in one startup record until activation;
-failures unwind in reverse order. If uninstall fails, retain resources the driver may still call and
-fail boot closed. Active fallback retains the driver for later cable takeover.
+all SPI and auxiliary INT/RST pins it touches against **every later board**, not only earlier mappings. After a positive probe, resources remain in one startup record until activation.
+Before the first start attempt, cleanup releases resources only after each prerequisite succeeds;
+an unconfirmed step retains the remaining resources and fails boot closed. Once start has been
+attempted, cleanup requests a best-effort stop and retains the entire graph for the existing fatal
+boot path. A successful stop does not prove that every pending RX callback has exited, so handlers,
+driver, MAC/PHY, netif, event group and SPI ownership remain intact until reset. This path neither retries
+startup nor falls back to WiFi. Normal active fallback retains the driver for later cable takeover.
 
 No PHY link falls back after 4 s; link-without-lease waits up to three 20 s intervals. A wired
 boot that obtains DHCP before fallback never initializes WiFi or consumes a trial-credential backup. W5500 polling
@@ -812,7 +852,7 @@ runtime call depth.
 | `result_mutex_` | mutex, RAII, leaf | the externally visible `last_error_` snapshot HTTP/MCP read after a foreground command |
 | `CommandCompletion::sem` | per-request binary semaphore, shared ownership | fixed callback result/error record and generation-checked completion, signalled even after its catch-all |
 | `StatusCompletion::sem` | per-request binary semaphore, shared ownership | fixed status-success fields; the C++ runner failure callback may allocate its request-owned `std::string error` before signalling |
-| `ble_events_.mux` | dedicated `portMUX`, bounded POD only | every ready/queue push, pop and clear; same-generation adjacent RX bytes pack into16 static244-byte cells, with ordered whole link barriers; unlock before generation/Client/runner/storage/link work |
+| `ble_events_.mux` | dedicated `portMUX`, bounded POD and lock-free timer read | every ready/queue push, pop and clear; same-generation/window RX bytes pack into16 static244-byte cells; arrival and empty-queue timestamps are linearized here; ordered link barriers; unlock before generation/Client/runner/storage/link work |
 | `telemetry_pending_mux_` | `portMUX`, innermost, POD only | the fixed latest-value nanopb mailboxes, pending mask and charging-amps feedback generation written synchronously by tesla-ble callbacks |
 
 Order for identity/OTA-coordinated transactions: shared operation-gate admission →
@@ -825,12 +865,19 @@ controller-owned runtime Client/runner access requires Vehicle ownership.
 The deferred mailbox owns its bytes; no callback-local buffer or mbuf pointer survives return.
 A callback of1..244 bytes is accepted completely or refused before mutation. The Vehicle consumer
 copies at most20 RX bytes per pop into an independent result, retaining the head offset until the
-cell is exhausted. One fresh2050-byte framed response occupies nine cells even with one-byte
+cell is exhausted. RX arrival time is sampled with the allocation-free, RTOS-lock-free
+`esp_timer_get_time()` under the mailbox mux. Coalescing retains first/last arrival times within
+one3s window; a later arrival starts a new cell. The framer checks the first arrival against the
+previous batch and renews partial-frame expiry from the last, including when a cell fits one pop.
+Empty-queue observation and the periodic expiry clock share the same mux, so drain latency cannot
+erase a queued timely continuation or hide a real gap. The256-byte cell,32-byte pop and4100-byte
+queue limits remain fixed. One fresh2050-byte framed response within that window occupies nine cells even with one-byte
 notifications. This is not an unlimited-burst, scheduling or allocator-capacity guarantee. Old
 LinkDown remains a barrier; LinkUp/RX require the current stable generation. An observed overflow
 clears/reset/disconnects fail-closed; flag publication, queue clear and the entire drain are not one
 atomic transaction. Continuous producer traffic is not a new total-drain time bound.
-The pending mux is innermost and permits bounded POD copies only: no semaphore, allocation, logging,
+The BLE mailbox mux permits bounded POD copies and the above timer read; the telemetry pending mux
+permits only bounded POD copies. Neither permits semaphore waits, allocation, logging,
 parsing or callbacks. Use `tk::SemGuard`/`MutexGuard` and `InFlightGuard` for unwind-safe ownership.
 
 - Hold Vehicle lock only for Client/runner access, never across completion-semaphore wait.
@@ -954,7 +1001,7 @@ publication, and atomic operations perform no allocation, logging or task-mutex 
 The four original aliases retain their names; values are conservative 256-byte lower bounds,
 measured zero is distinct from unknown, and saturation means at least 15872 bytes. Consumers emit the
 adjacent `stack_min_free_quantum_bytes:256` metadata and never use the diagnostic bank as health,
-restart or command admission. `test/stack_context_hook_owners.json` owns the exact 44 entry-to-lane
+restart or command admission. `test/stack_context_hook_owners.json` owns the exact 45 entry-to-lane
 routes, including separate fixed PingNet/PingSyslog callbacks without a larger callback argument.
 Actual task entries, iteration scopes and explicit no-unwind delete/restart samples complement
 callback exit scopes placed before local guards. Inner BLE enqueue-only adapters remain unchanged

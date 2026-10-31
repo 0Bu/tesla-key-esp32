@@ -195,12 +195,13 @@ agent tools, logs, repository files or tests. Tests use throwaway keys only.
 
 Counts and file sets are enforced by validators: 53 allowlisted unsigned payloads, 12 root firmware
 files, 28 diagnostics, 40 stable Release assets and 16 manifest parts. Do not use globs to broaden them.
-The main DAG starts prepare and both host gates together; the two per-target build legs need only
-prepare; then the build and independent-rebuild joins → publish → deploy. `build` requires prepare,
-both host jobs (`logic-test` and `logic-harness`) and target builds. It is a required status check,
-and GitHub treats a check skipped because a need failed as passed, so `build` runs with
+The main DAG starts `prepare`, `logic-test` and `logic-harness` together. The producer matrix
+`build-target` and the matrix `independent-rebuild-target` each need only `prepare`, so producer
+and independent target compiles run concurrently before protected publication. The `build` join
+needs `prepare`, both host jobs and `build-target`; `independent-rebuild` needs `build` and every
+`independent-rebuild-target` leg; `publish` and then `deploy` follow. `build` is a required status
+check, and GitHub treats a check skipped because a need failed as passed, so `build` runs with
 `if: ${{ always() }}` and fails first unless every need succeeded. The independent join has no key.
-Producer/independent target compiles run concurrently before protected publication.
 
 | Phase | Required proof and authority |
 |---|---|
@@ -266,7 +267,10 @@ uses GitHub's `releases/latest` entry, requiring a canonical immutable stable ta
 uniquely named digest/size-bearing merged assets; it does not scan for a newer eligible Release or
 byte-validate that numeric base's assets. Refetch default-branch head before key,
 upload and Pages boundaries; main advancement retires stale runs. Per-PR concurrency couples publisher
-and trusted-base cleanup on close/force-push/unlabel; daily reconciliation removes stale manifests.
+and trusted default-branch cleanup on close/force-push/unlabel; daily reconciliation removes stale manifests.
+Event cleanup checks out the repository's current default branch, as reconciliation does. A PR's
+historical base SHA can lack the validators required by the current workflow; neither that stale
+snapshot nor a PR-selected head/base ref supplies cleanup code.
 Key-free [served preview acceptance](DEVELOPMENT.md#served-pr-preview-acceptance) compares all 16
 published parts and checks bounded URL absence after removal; a branch write alone is not acceptance.
 

@@ -57,9 +57,11 @@ dispatch; the same rule applies to vehicle-data routes.
   no-ops below are HTTP `200` with `result:true`. Every other failed command (car refusal, authentication or role fault,
   asleep or unreachable car, timeout, or a device-side refusal such as a full command queue) keeps
   the Tesla-compatible JSON (`result:false` plus the reason) but uses HTTP `502`, not a misleading
-  `200`. Intake and out-of-memory failures before dispatch keep their own codes; a reply that
-  cannot be built after the attempt is the degraded HTTP `200` reply with `result:false` and
-  `outcome:"unknown"` (see [Response classes](#response-classes)).
+  `200`. Intake and out-of-memory failures before dispatch keep their own codes. If the reply
+  cannot be built after the attempt, the degraded HTTP `200` reply carries `outcome:"succeeded"`
+  only for a successful command, including `already_set` and these no-ops, otherwise
+  `result:false` and `outcome:"unknown"` (see
+  [Response classes](#response-classes)).
   vehicle-command's proxy maps these differently (200 for car refusals, otherwise 408/412/500/503
   with an error-only body, or a Fleet server error's own status); see
   [ADR-0005](adr/0005-tesla-ble-seam.md#2-platform-forced-departures-and-reference-deviations).
@@ -86,6 +88,8 @@ dispatch; the same rule applies to vehicle-data routes.
   `timeout` applies only to reads; setters retain the [10 s client default](https://github.com/evcc-io/evcc/blob/bf5c276cdb395443fda4601b99151c0a962d0db4/util/request/helper.go#L16)
   and can time out before wake confirmation. The [custom vehicle example](examples/evcc-custom-vehicle.yaml)
   sets each HTTP plugin's timeout to 30 s, including charge enable, current and wake setters.
+  Its status expression maps `Starting` to connected/not charging (`B`), so evcc can still send
+  a stop while charging is starting; mapping it to disconnected (`A`) suppresses that setter.
   Waiting at the [single HTTP worker](ARCHITECTURE.md#http-request-serialization) can still
   exceed this timeout. Check state before repeating an uncertain action, as described above.
 
@@ -205,9 +209,13 @@ All of `/set_time`, `/set_mqtt`, `/set_syslog`, `/set_wifi` and `/set_ota` retur
 cannot be verified, and `500` when rotation is incomplete. Not-committed or ambiguous commits
 trigger a recovery reboot; a committed key with pending cleanup uses the supervisor retry path.
 `/ota/check` and `/ota/update` return `409` while another device operation owns their shared gate,
-`503` when the service is unavailable or ordinary-entry recovery memory is insufficient, and `500`
-when worker startup fails. A memory refusal uses `not enough memory for update` in both async replies
-and the blocking check result, creates no Operation/task and withdraws a stale update offer. `/ota/update` also
+`503` when the service or nonblocking check queue is unavailable, and `500` when startup fails.
+For `/ota/check`, `started:true` accepts one reserved request: memory admission and worker startup
+run after HTTP request cleanup and can subsequently publish an error through `/ota/status`.
+The queue wait consumes the original deadline; it does not allocate an Operation or task.
+For `/ota/update`, insufficient ordinary-entry recovery memory returns `503` immediately.
+A memory refusal uses `not enough memory for update`, creates no Operation/task and withdraws a
+stale update offer. `/ota/update` also
 returns `409` while the running image is NEW/PENDING_VERIFY, or `503` if its state cannot be
 verified. These refusals create no OTA worker. A manifest check remains available during probation.
 The web UI preserves the device's refusal reason; a failed start does not trigger polling or retry.
@@ -244,7 +252,8 @@ the uncertainty contract below.
 | `vehicle_data` | Wrapped `response`; `200` when all selected caches are usable; unusable required caches return `503`/`result:false`. Invalid URI/query/selectors retain `400`, VIN mismatch `404`. |
 | `body_controller_state` | Wrapped `response`; a completed retrieval attempt returns `200`; inspect `response.result` for its outcome. |
 | Configuration | Wrapped `response` for time/VIN/MQTT/Syslog/WiFi. Key generation is flat `{result,reason}`. Channel success is flat `{ok,result,channel}`; channel errors are wrapped. Invalid intake is `400`/`413`, unavailable resources `503`, failed persistence `500`. |
-| OTA start | Flat `{started,reason?}` for a check and `{result,reason}` for an update; `200` on start; `409` for busy/probation, `503` for unavailable service, insufficient ordinary-entry recovery memory or unknown image state, `500` for worker startup failure. |
+| OTA check | Flat `{started,reason?}`; `200` accepts the queued check, `409` for busy, `503` for unavailable service/queue, `500` for setup failure. Later memory/worker failures appear through `/ota/status`. |
+| OTA update | Flat `{result,reason}`; `200` on start; `409` for busy/probation, `503` for unavailable service, insufficient ordinary-entry recovery memory or unknown image state, `500` for worker startup failure. |
 | Pre-effect REST OOM fallback | Flat `{result:false,reason:"out of memory"}`, `503`, even for routes whose normal envelope is wrapped. |
 | Degraded mutation reply | HTTP `200` with explicit application outcome, as described below; this status alone does not establish success. |
 
