@@ -22,9 +22,10 @@ update` usually runs a build without its target's RAM settings: v1.6.3 (and for 
 also v1.6.4) or a Dev build around them. Such a board cannot fetch the settings over the air.
 Reinstall it once with USB **Flash** (see [Updates and recovery](#updates-and-recovery)) from a
 release that includes them — v1.6.4 or newer for esp32c3, a release newer than v1.6.4 for esp32 —
-which keeps WiFi, VIN, pairing and sessions; update checks are then admitted again. Boards on
-v1.6.2 or older are not refused, but update them only to such a release: a build without the
-settings cannot confirm itself and rolls back on the next reboot.
+which keeps WiFi, VIN, pairing and sessions; update checks are then admitted again. The classic
+esp32 keeps little margin, so a live vehicle link or MQTTS can still make a check refuse; retry
+after a reboot. Boards on v1.6.2 or older are not refused, but update them only to such a
+release: a build without the settings cannot confirm itself and rolls back on the next reboot.
 
 The pinned library also declares C5, but this firmware does not support it: restoring C5 requires
 separate firmware, signing-size and hardware acceptance. Undeclared chips such as esp32c61 need
@@ -150,7 +151,8 @@ evcc, BLE and pairing. Runtime design:
 
 `main/syslog.cpp` forwards the same output as `GET /diag` — the device's console log — to a UDP
 Syslog collector (RFC 5424), best-effort. Useful to watch a pairing/reconnect live, or to keep history
-past the in-RAM ring (16 KB, 8 KB on the classic esp32) and past a reboot. It is **cleartext and unredacted**
+past the in-RAM ring (16 KB, 8 KB on the classic esp32) and past a reboot. It is
+**cleartext and unredacted**
 ([SECURITY](SECURITY.md#syslog-and-diagnostic-export)); design: [ARCHITECTURE](ARCHITECTURE.md#syslog-forwarder).
 
 **Enable:** set the server in the web UI (**Syslog** row, pencil icon, `IP:PORT`, e.g.
