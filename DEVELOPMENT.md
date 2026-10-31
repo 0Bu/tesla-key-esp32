@@ -222,7 +222,10 @@ an application build or treat its presence as a flashable or physically tested r
 
 Unsigned local images **cannot boot**. Use provenance-bound signed artifacts and the canonical
 `$flash-esp32`, `$deploy-bench`, `$ship` or `$usb-recovery` procedure, as appropriate. Every physical write
-requires explicit authorization for the board, target and scope. Verify every image's signature;
+requires explicit authorization for the board, target and scope. The user's explicit `$deploy-bench`
+instruction supplies its standard USB preflight/reset/read/flash and passive acceptance approval;
+identify and verify the concrete board/artifact without asking for that approval again.
+Verify every image's signature;
 production and preview artifacts must match the production public-key pin. An authorized local
 development image must match the supplied development key. Size/chip/version checks alone do not
 authenticate an image.
@@ -233,7 +236,8 @@ last. NVS stays intact. Merged-image writes and full erases destroy configuratio
 a separate trust lineage and needs an explicit key and scope.
 
 `$deploy` handles commit, push, PR creation, current-head reviews/CI and canonical squash merge,
-then observes the main build. It does not contact devices.
+then observes the main build. The user's explicit invocation authorizes those steps, including
+protected Dev signing/publication; no additional phase confirmation is needed. It does not contact devices.
 [`$deploy-bench`](../.agents/skills/deploy-bench/SKILL.md) identifies the physical USB bench across
 Tesla/Daikin firmware, flashes a signed PR preview or development-key image through `$flash-esp32`
 or an already-published image through `$usb-recovery`'s provenance and app-only steps, and tests
@@ -259,6 +263,10 @@ all 16 parts and a final manifest from the API-confirmed `PR/<N>/` authority. Ea
 complete fresh snapshot. Redirects, non-200 status, mixed or incomplete bytes and expired deadlines
 fail acceptance. At most 20 attempts share a 180-second network deadline and 10-second request caps.
 
+Event and scheduled cleanup select the repository default branch at checkout, keeping the decision
+producer and served checker together. A historical PR base can predate both their shared contract
+and the checker; it is not a cleanup-code source.
+
 Cleanup emits one JSON decision: `kept-eligible`, `already-absent` or `removed`. Eligible previews
 are retained without an absence claim. The other decisions require 404/410 for the manifest,
 installer entrypoint, all 16 canonical parts and every validated path collected before deletion.
@@ -270,7 +278,8 @@ separate results; a failed acceptance does not repeat signing or grant a recover
 ### Retained-bootloader references
 
 `scripts/check-bootloader-compat.py` compares stable ESP-IDF descriptors before an app-only USB
-write. Some IDF bootloaders omit that descriptor. These require a byte match to
+write. For some bootloaders esptool reports no ESP-IDF version (esptool 5.6.0 on the esp32c6 v6.1
+bootloader, although the image carries a descriptor). These require a byte match to
 [`scripts/bootloader-references.json`](../scripts/bootloader-references.json), never a guessed
 version or the assumption that the current app's bootloader is installed. The selected target's
 reference binds image length/SHA-256, source commit, CI run/artifact identity and ZIP digest,
@@ -286,7 +295,7 @@ source `e1c3197596575728f336bec9eee0eafc4a0793f6`, and match the separately acce
 That workflow's host sanitizer failure remains a publication blocker; these references certify
 only the recorded bootloader bytes and toolchain, with no app-delivery or whole-workflow approval.
 
-For a descriptorless image, accept only the exact recorded image or the full confirmed project
+For an image whose ESP-IDF version esptool does not report, accept only the exact recorded image or the full confirmed project
 bootloader region with an all-`0xff` suffix: `0x1000/0x7000` on ESP32, `0x0/0x8000` on S3/C3/C6.
 Unknown bytes, partial padding, missing provenance or a wrong target fail closed. Collection
 belongs to the explicitly identified board and approved read plan; the checker contacts no device.
@@ -302,7 +311,7 @@ command shown with `<placeholders>` runs inline once each holds its literal valu
 blocks this way:
 
 1. Write the blocks approved for this call, unchanged and in document order, to one script in the
-   session's scratch directory with the file-writing tool, not a shell redirect.
+   runner's scratch directory (or `$TMPDIR`) with the file-writing tool, not a shell redirect.
 2. Run it with one static command, `bash <script-path>`. Put inputs the blocks require (`PR`,
    `TARGET`, `PORT`, `RUNID`, `DEVICE_IP`, …) in front as literal `NAME=value` assignments
    so the hooks still see them.
@@ -312,7 +321,29 @@ blocks this way:
 
 Never put `git push`, `gh pr create`, `gh pr merge`, or a key, NVS or credential path into such a
 script: those stay standalone, statically bound commands that the hooks inspect, or the operator's
-step. A script grants no authorization; every approval boundary of the workflow still applies.
+step. The hooks see only `bash <script-path>`, not the script's contents, so they cannot enforce
+this rule; the agent writing the script does. A script grants no authorization; every approval
+boundary of the workflow still applies.
+
+### Standalone read checks
+
+The publication classifier recognizes bounded literal reads so quoted search/query data can name
+publication commands without being treated as commands themselves. Use `rg --no-config` with
+literal arguments and the supported ordinary search options; preprocessors, hostname commands,
+unquoted globs, expansions, wrappers and pipelines retain conservative classification. GitHub CLI
+exceptions require a supported `pr`/`run` read command with active `--json` and `--jq`/`-q` options.
+For example, run `rg --no-config -n 'git push|gh pr merge' AGENTS.md` as a separate shell call.
+The credential guard uses the same literal-read classification only for its stdin-shell check;
+all secret-path, credential-output and partition checks still apply.
+
+The partition guard permits only the reviewed validator's isolated, input-only invocation from the
+repository root: `python3 -I -S scripts/check-partition-contract.py --csv partitions.csv`.
+An optional final `--binary <file>` may name an existing regular file within that worktree; a
+symlink or an external path is rejected. The validator's exact SHA-256 is pinned in the hook.
+Changing it needs review and a deliberate pin update. Python isolation prevents repository or
+environment imports from replacing its standard-library dependencies. Bare Python, alternate
+scripts, extra flags, redirections and chained commands receive no exception. These classifications
+grant no device-read, publication or vehicle authority.
 
 ## Reviews and documentation
 
