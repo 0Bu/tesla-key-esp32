@@ -9,3 +9,18 @@
 # since ~2020). The other targets (s3/c3/c6) support V2 RSA at their default min revision, so
 # they need no equivalent override. Documented in docs/SECURITY.md.
 CONFIG_ESP32_REV_MIN_3=y
+
+# ── INTERNAL RAM budget for OTA (docs/ARCHITECTURE.md#ota-self-update) ──
+# Without the settings below a running classic esp32 keeps less INTERNAL largest block than the
+# shared recovery threshold (logic/ota_recovery_memory.hpp) requires: it can neither start an OTA
+# nor confirm one. Its IRAM is a separate region, so moving code out of IRAM frees no heap here;
+# NimBLE already returns the classic-BT controller memory in BLE-only mode.
+# One BLE connection: the controller reserves 1 KB static DRAM per configured connection.
+CONFIG_BTDM_CTRL_BLE_MAX_CONN=1
+# Half of NimBLE's large 320-B msys blocks; the inbound ACL and HCI event pools keep their
+# defaults because one vehicle frame arrives as up to ~100 notifications at ATT MTU 23.
+CONFIG_BT_NIMBLE_MSYS_2_BLOCK_COUNT=12
+# Static WiFi RX buffers (~1.6 KB each, allocated at esp_wifi_init) kept at the RX BA window.
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=6
+# Half of the default /diag console ring (static .bss); Syslog keeps the longer history.
+CONFIG_TESLA_DIAG_LOG_BYTES=8192
