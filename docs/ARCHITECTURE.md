@@ -200,8 +200,10 @@ until the next reboot rolls it back; the previous Dev build had confirmed on the
 61440 B. Static RAM barely differs between the two builds, so the loss arose at runtime and its
 cause is not identified. `sdkconfig.defaults.esp32s3` therefore applies the C3 settings. Against
 the CI build of the same source they move 23856 B of code out of IRAM, which shrinks the DRAM span
-reserved for IRAM by 24064 B, and they shrink the controller and NimBLE pools. The runtime largest
-block, an OTA download and confirmation with these settings are not yet measured.
+reserved for IRAM by 24064 B, and they shrink the controller and NimBLE pools. A signed preview with
+these settings, installed over the air on the same board, held a 90112-B largest block and confirmed
+after 90 s; the previous Dev build held 61440 B there after a cold boot. Other S3 boards, including
+WiFi-only ones, remain unmeasured.
 
 Every TLS leg still samples real INTERNAL largest before context creation and after that allocation,
 before connect. These later phases use a separate conservative single-record capacity screen:
