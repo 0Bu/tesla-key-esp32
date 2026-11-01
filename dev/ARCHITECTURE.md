@@ -1026,8 +1026,9 @@ publication, and atomic operations perform no allocation, logging or task-mutex 
 The four original aliases retain their names; values are conservative 256-byte lower bounds,
 measured zero is distinct from unknown, and saturation means at least 15872 bytes. Consumers emit the
 adjacent `stack_min_free_quantum_bytes:256` metadata and never use the diagnostic bank as health,
-restart or command admission. `test/stack_context_hook_owners.json` owns the exact 45 entry-to-lane
-routes, including separate fixed PingNet/PingSyslog callbacks without a larger callback argument.
+restart or command admission. `test/stack_context_hook_owners.json` owns the exact entry-to-lane
+routes (`test/test_stack_context_hooks.py` pins their count), including separate fixed
+PingNet/PingSyslog callbacks without a larger callback argument.
 Actual task entries, iteration scopes and explicit no-unwind delete/restart samples complement
 callback exit scopes placed before local guards. Inner BLE enqueue-only adapters remain unchanged
 and are covered by their outer NimBLE task callbacks. A logger sample is a diagnostic aggregate,
