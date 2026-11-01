@@ -27,6 +27,16 @@ esp32 keeps little margin, so a live vehicle link or MQTTS can still make a chec
 after a reboot. Boards on v1.6.2 or older are not refused, but update them only to such a
 release: a build without the settings cannot confirm itself and rolls back on the next reboot.
 
+An esp32s3 board without the S3 RAM settings (v1.6.5 and older, or a Dev build without them) can
+settle below the memory OTA needs; this was observed on a paired board on Ethernet. An image
+installed over the air then stays pending verification, update checks are refused with `not enough
+memory for update`, and the next restart returns the board to its previous firmware. The firmware
+has no restart control, so power-cycle the board once (unplug its PoE or USB power). Do not
+reinstall v1.6.5; update to a release newer than v1.6.5, which carries the S3 RAM settings. If
+checks are still refused, reinstall it once with USB **Flash** (see
+[Updates and recovery](#updates-and-recovery)) from such a release, which keeps WiFi, VIN, pairing and
+sessions.
+
 The pinned library also declares C5, but this firmware does not support it: restoring C5 requires
 separate firmware, signing-size and hardware acceptance. Undeclared chips such as esp32c61 need
 upstream support first. [Target decision](adr/0004-drop-esp32c5-target.md).
