@@ -6,6 +6,7 @@
 #include "runtime_fault_log.hpp"
 #include <esp_log.h>
 #include <esp_timer.h>
+#include "sdkconfig.h"
 #include <array>
 #include <cstring>
 #include <cstdio>
@@ -249,7 +250,11 @@ bool BleClient::start() {
 
     // The ATT MTU this client offers when it starts the exchange after the CCCD subscription
     // (on_subscribe_write). Without a GATT server it cannot accept a vehicle-initiated exchange.
-    ble_att_set_preferred_mtu(247);
+    // The offer bounds the largest notification (MTU - 3), which must fit the fixed RX slot and
+    // deferred-queue cell; a larger one would trip the fail-closed slot guard on every connection.
+    static_assert(CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU == tk::kBleMaxWritePayload + 3,
+                  "preferred ATT MTU must match the 244-byte RX slot");
+    ble_att_set_preferred_mtu(static_cast<uint16_t>(tk::kBleMaxWritePayload + 3));
 
     // This device is BLE *central only* (it scans, connects, writes, subscribes).
     // It never advertises or exposes a GATT server, so the GAP/GATT *server*

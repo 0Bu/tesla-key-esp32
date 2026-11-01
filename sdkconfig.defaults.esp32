@@ -18,7 +18,7 @@ CONFIG_ESP32_REV_MIN_3=y
 # One BLE connection: the controller reserves 1 KB static DRAM per configured connection.
 CONFIG_BTDM_CTRL_BLE_MAX_CONN=1
 # Half of NimBLE's large 320-B msys blocks; the inbound ACL and HCI event pools keep their
-# defaults because one vehicle frame arrives as up to ~100 notifications at ATT MTU 23.
+# defaults because one vehicle frame arrives as up to ~100 notifications at the fallback ATT MTU 23.
 CONFIG_BT_NIMBLE_MSYS_2_BLOCK_COUNT=12
 # Static WiFi RX buffers (~1.6 KB each, allocated at esp_wifi_init) kept at the RX BA window.
 CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=6

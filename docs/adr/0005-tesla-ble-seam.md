@@ -179,7 +179,8 @@ The entries above were checked against [vehicle-command `83baa078`](https://gith
   Insufficient Encryption 0x0F) raises no error. The command then fails only through
   `tk::CommandRunner`'s 7 s response or 5 s step timeout and its retries, which looks the same as
   radio loss, and the transmit-completed `Wake` (N1) carries no vehicle-side acceptance at all. The
-  vehicle accepts Write Commands in field operation, but Tesla documents no support for them.
+  vehicle accepts 20-byte Write Commands in field operation, but Tesla documents no support for them.
+  Longer Write Commands after the MTU exchange (next entries, #437) have no hardware evidence yet.
   Status: inherited, unchanged by this record. Aligning is a separate wire change that needs
   hardware validation: NimBLE queues ATT requests while one is outstanding (`client_att_busy` in
   `ble_att_cmd.c`), but each Write Request is a GATT procedure bounded by
@@ -219,11 +220,16 @@ The entries above were checked against [vehicle-command `83baa078`](https://gith
   `CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=247`), and `BLE_GAP_EVENT_MTU` raises the write payload to
   `min(MTU - 3, 244)` (`tk::ble_write_payload_for_mtu`). The largest notification at MTU 247 is
   244 bytes, which fits the fixed host RX slot.
-  - **Readiness:** the exchange does not gate it. The first request may still go out in 20-byte chunks,
-    and a failed start or exchange keeps 20-byte writes, matching the reference fallback.
-  - **Timeout:** the firmware departs from the reference. NimBLE terminates a link whose GATT procedure
-    times out, so a vehicle that never answered would lose every connection after the procedure
-    timeout. After one timeout `BleClient::on_mtu_exchange()` disables the exchange until reboot.
+  - **Readiness (departure):** the reference returns the connection only after `ExchangeMTU`
+    completes. Here the exchange does not gate readiness, so the first request may still go out in
+    20-byte chunks. A failed start or ATT error keeps 20-byte writes, matching the reference fallback.
+    NimBLE does not queue Write Commands behind the outstanding MTU request.
+  - **Timeout (departure):** go-ble gives up after its 30 s protocol timeout, logs a warning, keeps
+    the link and falls back to the default MTU. NimBLE instead terminates a link whose GATT procedure
+    exceeds its own 30 s limit, so a vehicle that never answered would lose every connection after
+    30 s. After one timed-out exchange `BleClient::on_mtu_exchange()` therefore makes later
+    connections skip it until reboot. A transient stall on one long-lived link has the same effect;
+    the WARN line `ATT MTU exchange timed out; not retried until reboot` records it.
   - **Vehicle-initiated exchange:** it still cannot take effect. `CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=n`
     disables the NimBLE GATT server (`BT_NIMBLE_GATT_SERVER` depends on it, so
     `MYNEWT_VAL(BLE_GATTS)` is 0), and the `BLE_ATT_OP_MTU_REQ` handler is compiled only with
@@ -232,8 +238,8 @@ The entries above were checked against [vehicle-command `83baa078`](https://gith
     paired ESP32-S3 at 1.6.3-dev.7 (verbose RX logging, `/diag?verbose=1`) showed only 4- and
     20-byte notifications, so every longer frame arrived as a run of 20-byte chunks; a 380-byte
     vehicle-data response needed 19 notifications instead of 2. Over five weeks of field syslog
-    (#437), responses lost their tail about once per session establishment while the link stayed
-    up, with no host-side drop logged. The truncated frame then absorbed the next response in the
+    (#437), responses lost their tail about once per session establishment while the link most
+    likely stayed up, with no host-side drop logged. The truncated frame then absorbed the next response in the
     length-prefix framer, which caused parse failures, health-poll timeouts and session rebuilds.
     The vehicle side cannot be observed, so the link between run length and truncation is
     plausible, not proven.

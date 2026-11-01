@@ -108,8 +108,9 @@ Verify every dimension against the reviewed revisions; previous audit results ar
    the **first 8 bytes** of `sha1(VIN)` (⇒ `S` + 16 hex + `C`); 2-byte big-endian length prefix;
    block `min(txMtu,maxBLEMessageSize)-3`; `ErrMaxConnectionsExceeded` keyed off the advert
    **`Connectable`** flag (not the connect error). (The firmware starts the MTU exchange after the
-   CCCD write and cannot accept one; writes use 20-byte chunks until `BLE_GAP_EVENT_MTU` raises them
-   to `min(MTU-3, 244)`, and a timed-out exchange is disabled until reboot.
+   CCCD write succeeds and cannot accept one; writes use 20-byte chunks until `BLE_GAP_EVENT_MTU`
+   raises them to `min(MTU-3, 244)`. After one timed-out exchange (NimBLE drops that link), later
+   connections skip it until reboot.
    Check ATT Write Command versus reference Write Request, CCCD 0x0001 notifications versus Linux
    reference indications, no ATT server and disabled SMP against every ADR-0005 departure. Treat the
    negotiated MTU as field behavior only where hardware evidence shows it.)

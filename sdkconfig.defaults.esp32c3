@@ -21,8 +21,8 @@ CONFIG_BT_CTRL_BLE_ADV=n
 CONFIG_BT_CTRL_BLE_SECURITY_ENABLE=n
 # Sized for one connection plus scanning instead of the multi-link defaults: three controller
 # activities (828 B each: scan, initiator, connection) and half of NimBLE's large 320-B msys blocks.
-# The inbound ACL and HCI event pools keep their defaults: at ATT MTU 23 one vehicle frame arrives as
-# up to ~100 notifications (docs/adr/0005-tesla-ble-seam.md). ~6 KB.
+# The inbound ACL and HCI event pools keep their defaults: at the fallback ATT MTU 23 one vehicle frame
+# arrives as up to ~100 notifications (docs/adr/0005-tesla-ble-seam.md). ~6 KB.
 CONFIG_BT_CTRL_BLE_MAX_ACT=3
 CONFIG_BT_NIMBLE_MSYS_2_BLOCK_COUNT=12
 # Static WiFi RX buffers (~1.6 KB each, allocated at esp_wifi_init) kept at the RX BA window. ~6 KB.
