@@ -72,8 +72,9 @@ CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
 # Manager, so its symbol no longer exists and is not set here.
 CONFIG_BT_NIMBLE_SECURITY_ENABLE=n
 
-# Preferred ATT MTU only; the firmware does not initiate an exchange. Writes use 20-byte chunks
-# until a negotiated-MTU event updates their limit (docs/adr/0005-tesla-ble-seam.md).
+# ATT MTU the client offers when it starts the exchange after subscribing (main/ble_client.cpp).
+# Writes use 20-byte chunks until a negotiated-MTU event raises their limit
+# (docs/adr/0005-tesla-ble-seam.md).
 CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=247
 
 # WiFi

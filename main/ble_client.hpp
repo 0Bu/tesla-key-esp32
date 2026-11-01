@@ -181,6 +181,8 @@ public:
                      uint32_t generation);
     int  on_subscribe_write(uint16_t conn_handle, const ble_gatt_error* error,
                             uint32_t generation);
+    int  on_mtu_exchange(uint16_t conn_handle, const ble_gatt_error* error, uint16_t mtu,
+                         uint32_t generation);
 
 private:
     // All discovery-procedure state transitions are serialized by intent_mutex_. The locked
@@ -277,8 +279,14 @@ private:
     // Tying it to the generation also rejects a delayed callback after handle reuse.
     std::atomic<uint32_t> ready_generation_{tk::ble::kNoReadyGeneration};
     // ATT payload available for the current connection generation. It starts at the mandatory
-    // 20-byte default and is raised only after NimBLE publishes a negotiated MTU event.
+    // 20-byte default and is raised only after NimBLE publishes a negotiated MTU event, which
+    // follows the exchange this client starts after the CCCD subscription.
     std::atomic<uint16_t> write_payload_size_{tk::kBleDefaultWritePayload};
+    // Set once an MTU exchange timed out (NimBLE then drops the link); later connections skip the
+    // exchange until the next boot so an unanswered request cannot become a reconnect loop.
+    std::atomic<bool> mtu_exchange_disabled_{false};
+    // Last negotiated MTU written to the INFO log, so a reconnect with the same value stays quiet.
+    std::atomic<uint16_t> logged_mtu_{0};
     // disconnect() is asynchronous: the GAP event that clears the handle arrives later. This
     // flag closes that interval immediately, so a following command cannot enqueue on a link
     // already being terminated. The host task clears it only after publishing a fresh link.

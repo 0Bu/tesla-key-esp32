@@ -191,6 +191,14 @@
     {
       "kind": "callback",
       "path": "main/ble_client.cpp",
+      "entry": "mtu_exchange_cb",
+      "context": "NimbleHost",
+      "placement": "function-first, before local lock guards",
+      "boundaryScope": true
+    },
+    {
+      "kind": "callback",
+      "path": "main/ble_client.cpp",
       "entry": "scan_timeout_cb",
       "context": "BleScanTimer",
       "placement": "function-first, before local lock guards",
