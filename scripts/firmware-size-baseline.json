@@ -17,13 +17,13 @@
     "esp32s3": {
       "memoryModel": "unified",
       "staticCapacity": 341760,
-      "maxStaticUsed": 166903,
-      "maxBss": 50824,
+      "maxStaticUsed": 143015,
+      "maxBss": 50792,
       "iramCapacity": 16384,
       "maxIramUsed": 16384,
       "maxUnsignedApp": 1703936,
-      "maxElfTotal": 1675965,
-      "maxFlashCodeAndRodata": 1544646
+      "maxElfTotal": 1660941,
+      "maxFlashCodeAndRodata": 1553478
     },
     "esp32c3": {
       "memoryModel": "unified",
