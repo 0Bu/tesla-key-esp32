@@ -198,9 +198,10 @@ ran an OTA-installed Dev build of v1.6.5's source, without these settings, at a 
 largest block for its whole 600-s probation window. The image was never confirmed and stays pending
 until the next reboot rolls it back; the previous Dev build had confirmed on the same board at
 61440 B. Static RAM barely differs between the two builds, so the loss arose at runtime and its
-cause is not identified. `sdkconfig.defaults.esp32s3` therefore applies the C3 settings, which
-return 24096 B of static RAM (IRAM code -23856 B) and shrink the controller and NimBLE pools. The
-runtime largest block, an OTA download and confirmation with these settings are not yet measured.
+cause is not identified. `sdkconfig.defaults.esp32s3` therefore applies the C3 settings. Against
+the CI build of the same source they move 23856 B of code out of IRAM, which shrinks the DRAM span
+reserved for IRAM by 24064 B, and they shrink the controller and NimBLE pools. The runtime largest
+block, an OTA download and confirmation with these settings are not yet measured.
 
 Every TLS leg still samples real INTERNAL largest before context creation and after that allocation,
 before connect. These later phases use a separate conservative single-record capacity screen:
