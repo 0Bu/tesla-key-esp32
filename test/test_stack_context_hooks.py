@@ -38,6 +38,7 @@ CALLBACKS = {
     'chr_disc_cb': ('main/ble_client.cpp', 'NimbleHost'),
     'dsc_disc_cb': ('main/ble_client.cpp', 'NimbleHost'),
     'subscribe_write_cb': ('main/ble_client.cpp', 'NimbleHost'),
+    'mtu_exchange_cb': ('main/ble_client.cpp', 'NimbleHost'),
     'scan_timeout_cb': ('main/ble_client.cpp', 'BleScanTimer'),
     'form_get': ('main/provisioning.cpp', 'CaptiveHttp'),
     'save_post': ('main/provisioning.cpp', 'CaptiveHttp'),
@@ -115,8 +116,8 @@ def contract(parts, owners, helpers):
         ('ble_link_event_cb_', 'main/vehicle_ctrl.cpp', 'NimbleHost'),
         ('ble_rx_event_cb_', 'main/vehicle_ctrl.cpp', 'NimbleHost')}
     actual = {(r['entry'], r['path'], r['context']) for r in owners['rows']}
-    require(actual == expected and len(owners['rows']) == len(expected) == 45,
-            'exact 45 owner rows, no duplicate/missing route')
+    require(actual == expected and len(owners['rows']) == len(expected) == 46,
+            'exact 46 owner rows, no duplicate/missing route')
     require({r['context'] for r in owners['rows']} == set(CONTEXTS), 'all 27 lanes mapped')
     enum = re.search(r'enum class StackContext[^\{]*\{(.*?)\};',
                      parts['main/logic/stack_context.hpp'], re.S)
@@ -231,7 +232,7 @@ def main(root, self_test):
             except AssertionError:
                 continue
             raise AssertionError('valid source omission passed: ' + label)
-    print('stack context source contract: exact27 lanes/45 owner rows; source-only PASS')
+    print('stack context source contract: exact27 lanes/46 owner rows; source-only PASS')
 
 
 if __name__ == '__main__':
