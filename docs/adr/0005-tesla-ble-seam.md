@@ -179,8 +179,9 @@ The entries above were checked against [vehicle-command `83baa078`](https://gith
   Insufficient Encryption 0x0F) raises no error. The command then fails only through
   `tk::CommandRunner`'s 7 s response or 5 s step timeout and its retries, which looks the same as
   radio loss, and the transmit-completed `Wake` (N1) carries no vehicle-side acceptance at all. The
-  vehicle accepts 20-byte Write Commands in field operation, but Tesla documents no support for them.
-  Longer Write Commands after the MTU exchange (next entries, #437) have no hardware evidence yet.
+  vehicle accepts 20-byte Write Commands in field operation, but Tesla documents no support for
+  them. Longer Write Commands after the MTU exchange (see the MTU exchange entry below, #437) have
+  no hardware evidence yet.
   Status: inherited, unchanged by this record. Aligning is a separate wire change that needs
   hardware validation: NimBLE queues ATT requests while one is outstanding (`client_att_busy` in
   `ble_att_cmd.c`), but each Write Request is a GATT procedure bounded by
