@@ -1,3 +1,10 @@
 # ESP32-C6-only defaults, merged after sdkconfig.defaults by `idf.py set-target esp32c6`.
 # The native USB-Serial/JTAG console is available on C6; classic ESP32 keeps UART0 instead.
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# ── Flash budget (scripts/firmware-size-baseline.json) ──
+# The C6 app sits just below a 64 KiB image step; a raw app above 0x1e0000 no longer fits the OTA
+# slot once signed. Drop NimBLE host code this central never uses: direct test mode (also off on the
+# C3 and S3) and the name tables for NimBLE's own error logs, which then print numeric codes.
+CONFIG_BT_NIMBLE_DTM_MODE_TEST=n
+CONFIG_BT_NIMBLE_PRINT_ERR_NAME=n

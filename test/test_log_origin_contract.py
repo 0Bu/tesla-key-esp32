@@ -103,6 +103,8 @@ for raw_message in (
     "CCCD discovery error: %d",
     "CCCD subscription write failed: %d",
     "BLE link deferred after CCCD (handle %d, generation %lu)",
+    "ATT MTU exchange not started (%d); keeping 20-byte writes",
+    "ATT MTU exchange failed (%d); keeping 20-byte writes",
 ):
     assert f'ESP_LOGD(TAG, "{raw_message}' in ble_client
     assert not re.search(rf'ESP_LOG[IEW]\(TAG, "{re.escape(raw_message)}', ble_client)
@@ -137,6 +139,11 @@ expected_production_ble_logs = {
     ("E", "CCCD subscribed but connected callback is unavailable"),
     ("E", "subscribe completion exception (dropping connection): %s"),
     ("E", "subscribe completion exception (dropping connection)"),
+    # Once per boot: a timeout disables further exchanges; the value logs only when it changes.
+    ("W", "ATT MTU exchange timed out; not retried until reboot"),
+    ("I", "ATT MTU %u negotiated"),
+    ("E", "MTU exchange completion exception: %s"),
+    ("E", "MTU exchange completion exception"),
 }
 assert set(production_ble_logs) == expected_production_ble_logs
 assert len(production_ble_logs) == len(expected_production_ble_logs)

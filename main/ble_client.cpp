@@ -129,6 +129,16 @@ static int subscribe_write_cb(uint16_t conn_handle, const ble_gatt_error* error,
     return client->on_subscribe_write(conn_handle, error, generation);
 }
 
+static int mtu_exchange_cb(uint16_t conn_handle, const ble_gatt_error* error, uint16_t mtu,
+                           void* arg) {
+    tk::StackWatchScope f135_callback_exit(tk::StackWatch::NimbleHost);
+
+    auto* client = ble_client_instance();
+    if (!client) return 0;
+    const uint32_t generation = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(arg));
+    return client->on_mtu_exchange(conn_handle, error, mtu, generation);
+}
+
 // ─── BleClient ───────────────────────────────────────────────────────────────
 
 static void scan_timeout_cb(void* arg) {
@@ -237,7 +247,8 @@ bool BleClient::start() {
         return false;
     }
 
-    // Preferred value only: no ATT MTU exchange is initiated or accepted by this firmware.
+    // The ATT MTU this client offers when it starts the exchange after the CCCD subscription
+    // (on_subscribe_write). Without a GATT server it cannot accept a vehicle-initiated exchange.
     ble_att_set_preferred_mtu(247);
 
     // This device is BLE *central only* (it scans, connects, writes, subscribes).
@@ -1308,6 +1319,18 @@ int BleClient::on_subscribe_write(uint16_t conn_handle, const ble_gatt_error* er
         }
         ESP_LOGD(TAG, "BLE link deferred after CCCD (handle %d, generation %lu)",
                  cccd_handle_, static_cast<unsigned long>(generation));
+        // vehicle-command exchanges the ATT MTU right after subscribing (ble.go). At the default
+        // MTU of 23 every vehicle response arrives as a run of 20-byte notifications, and a run cut
+        // short desynchronizes the length-prefix framer (#437). Writes keep the 20-byte payload
+        // until BLE_GAP_EVENT_MTU raises it; a failed start or exchange only keeps that payload
+        // and never gates readiness.
+        if (!mtu_exchange_disabled_.load()) {
+            void* generation_arg = reinterpret_cast<void*>(static_cast<uintptr_t>(generation));
+            const int mtu_rc = ble_gattc_exchange_mtu(conn_handle, mtu_exchange_cb, generation_arg);
+            if (mtu_rc != 0) {
+                ESP_LOGD(TAG, "ATT MTU exchange not started (%d); keeping 20-byte writes", mtu_rc);
+            }
+        }
         return 0;
     } catch (const std::exception& e) {
         ESP_LOGE(TAG, "subscribe completion exception (dropping connection): %s", e.what());
@@ -1318,6 +1341,37 @@ int BleClient::on_subscribe_write(uint16_t conn_handle, const ble_gatt_error* er
         ESP_LOGE(TAG, "subscribe completion exception (dropping connection)");
         ready_generation_.store(tk::ble::kNoReadyGeneration);
         disconnect_from_callback_();
+        return 0;
+    }
+}
+
+int BleClient::on_mtu_exchange(uint16_t conn_handle, const ble_gatt_error* error, uint16_t mtu,
+                               uint32_t generation) {
+    try {
+        const int status = error ? error->status : -1;
+        if (status == BLE_HS_ETIMEOUT) {
+            // NimBLE terminates a link whose GATT procedure times out. A vehicle that never
+            // answered the request would otherwise drop every connection after the procedure
+            // timeout, so later connections skip the exchange until the next boot.
+            mtu_exchange_disabled_.store(true);
+            ESP_LOGW(TAG, "ATT MTU exchange timed out; not retried until reboot");
+            return 0;
+        }
+        if (!connection_snapshot_matches_(conn_handle, generation)) return 0;
+        // BLE_GAP_EVENT_MTU (on_gap_event) raises the write payload. The negotiated value is
+        // logged at INFO only when it differs from the last one, so it stays visible in the
+        // Syslog without one line per reconnect.
+        if (status != 0) {
+            ESP_LOGD(TAG, "ATT MTU exchange failed (%d); keeping 20-byte writes", status);
+        } else if (logged_mtu_.exchange(mtu) != mtu) {
+            ESP_LOGI(TAG, "ATT MTU %u negotiated", static_cast<unsigned>(mtu));
+        }
+        return 0;
+    } catch (const std::exception& e) {
+        ESP_LOGE(TAG, "MTU exchange completion exception: %s", e.what());
+        return 0;
+    } catch (...) {
+        ESP_LOGE(TAG, "MTU exchange completion exception");
         return 0;
     }
 }

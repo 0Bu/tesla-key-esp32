@@ -260,6 +260,7 @@ EXPECTED_CALLBACKS = {
     "chr_disc_cb",
     "dsc_disc_cb",
     "subscribe_write_cb",
+    "mtu_exchange_cb",
     "scan_timeout_cb",
     "form_get",
     "save_post",
@@ -314,6 +315,7 @@ DELEGATES_TO_CONTAINED = {
     "chr_disc_cb": "on_chr_disc",
     "dsc_disc_cb": "on_dsc_disc",
     "subscribe_write_cb": "on_subscribe_write",
+    "mtu_exchange_cb": "on_mtu_exchange",
 }
 
 DELEGATE_ALLOWED_CALLS = {
@@ -322,6 +324,7 @@ DELEGATE_ALLOWED_CALLS = {
     "chr_disc_cb": {"ble_client_instance", "on_chr_disc"},
     "dsc_disc_cb": {"ble_client_instance", "on_dsc_disc"},
     "subscribe_write_cb": {"ble_client_instance", "on_subscribe_write"},
+    "mtu_exchange_cb": {"ble_client_instance", "on_mtu_exchange"},
 }
 
 # Reviewed exceptions are deliberately restricted to fixed-buffer/C/atomic paths. Adding another
@@ -496,6 +499,7 @@ def callback_inventory(text: str) -> set[str]:
         "ble_gattc_disc_all_chrs": 3,
         "ble_gattc_disc_all_dscs": 3,
         "ble_gattc_write_flat": 4,
+        "ble_gattc_exchange_mtu": 1,
         "esp_log_set_vprintf": 0,
         "esp_ipc_call": 1,
         "esp_ipc_call_blocking": 1,
@@ -746,7 +750,8 @@ F135_CALLBACK_CONTEXTS = {
     "on_sync_cb": "NimbleHost", "on_reset_cb": "NimbleHost",
     "gap_event_cb": "NimbleHost", "svc_disc_cb": "NimbleHost",
     "chr_disc_cb": "NimbleHost", "dsc_disc_cb": "NimbleHost",
-    "subscribe_write_cb": "NimbleHost", "scan_timeout_cb": "BleScanTimer",
+    "subscribe_write_cb": "NimbleHost", "mtu_exchange_cb": "NimbleHost",
+    "scan_timeout_cb": "BleScanTimer",
     "form_get": "CaptiveHttp", "save_post": "CaptiveHttp",
     "wifi_event_handler": "WifiEvent", "eth_event_handler": "EthEvent",
     "mqtt_event_handler": "MqttEvent", "on_mqtt_probe": "MqttProbeEvent",
@@ -3933,6 +3938,7 @@ def require_ble_callback_lock_contract(ble_source: str) -> None:
         "subscribe_notify_",
         "on_dsc_disc",
         "on_subscribe_write",
+        "on_mtu_exchange",
     }
     # Include both BleClient members and translation-unit free/static helpers. A callback path
     # must not be able to hide an allocating helper merely by moving it outside the class.
@@ -3959,6 +3965,7 @@ def require_ble_callback_lock_contract(ble_source: str) -> None:
         "on_chr_disc",
         "on_dsc_disc",
         "on_gap_event",
+        "on_mtu_exchange",
         "on_reset",
         "on_scan_timeout",
         "on_subscribe_write",
@@ -4008,6 +4015,10 @@ def require_ble_callback_lock_contract(ble_source: str) -> None:
             "on_connected_", "on_rx_data_", "os_mbuf_copydata", "size", "snprintf", "store",
             "strcmp", "terminate_published_link_", "what",
         },
+        "on_mtu_exchange": {
+            "ESP_LOGD", "ESP_LOGE", "ESP_LOGI", "ESP_LOGW", "connection_snapshot_matches_",
+            "exchange", "store", "what",
+        },
         "on_reset": {
             "compare_exchange_weak", "connect_lifecycle_after_host_reset", "fetch_add", "intent",
             "load", "on_connected_", "store",
@@ -4017,7 +4028,7 @@ def require_ble_callback_lock_contract(ble_source: str) -> None:
             "load", "manual_discovery_timeout_may_cancel",
         },
         "on_subscribe_write": {
-            "ESP_LOGD", "ESP_LOGE", "connect_attempt_may_advance",
+            "ESP_LOGD", "ESP_LOGE", "ble_gattc_exchange_mtu", "connect_attempt_may_advance",
             "connection_snapshot_matches_", "disconnect_from_callback_", "intent", "load",
             "on_connected_", "store", "what",
         },
@@ -4052,9 +4063,10 @@ def require_ble_callback_lock_contract(ble_source: str) -> None:
         "on_chr_disc": "02ae0d160e0c2e143672a61f53d687abb98b8f9268aa0af3cd925ed0a5f162f3",
         "on_dsc_disc": "5cb6705aca81956c2e1d6a493d3915dd89ed893f305b5f73b7c133e329d7f618",
         "on_gap_event": "8119fa18dcc9a2d10783fbf88c814e15bba9ec0caf79529d5065cf64b0a054e0",
+        "on_mtu_exchange": "28a7ad2c78f9efd5f6f9a53b31c53ec7a51c79b0c6e2431837c79f752c4dc520",
         "on_reset": "a6a11090a79118c9ef6526cb04fe27e35adb57b18f5801fa2479cb9a2110b990",
         "on_scan_timeout": "7611bc6220fd5cc504a1f6b3b0503645a304f5ee97d32c47b91b22486f1fce95",
-        "on_subscribe_write": "81ae3da42c21def1cfc51bb8aea945e57cfff8ac1e43e7210770bb678f557d9d",
+        "on_subscribe_write": "a369a89bd9bbdb4530995e36d99a966033f6e83cb018d1db625f941df7aad4b1",
         "on_svc_disc": "77cd5b3c710eddaba67c822084dca5bee1a39de1028fd5d330b30823d0dae50f",
         "on_sync": "7c8b104bd654a1ac3a460c0764aa100d2ef356eead442851ae6729ad4b9266bc",
         "start_scan_locked_": "15d90a0dd3771816e41339b817f74ccf8c8068bc86d26b87f9077e173cc629ca",
@@ -4071,6 +4083,7 @@ def require_ble_callback_lock_contract(ble_source: str) -> None:
         "on_chr_disc": {"std::exception"},
         "on_dsc_disc": {"std::exception"},
         "on_gap_event": {"std::array", "std::exception", "std::memcpy", "std::min", "std::strcmp"},
+        "on_mtu_exchange": {"std::exception"},
         "on_reset": {"std::memory_order_acq_rel", "std::memory_order_acquire", "std::uint32_t"},
         "on_subscribe_write": {"std::exception"},
         "on_svc_disc": {"std::exception"},
