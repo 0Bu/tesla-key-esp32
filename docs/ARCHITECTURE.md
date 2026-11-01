@@ -194,15 +194,15 @@ whose low point left the smallest margin measured on any target. No esp32 image 
 confirmation, paired link, live sessions or MQTTS have been measured; esp32c6 remains unmeasured.
 
 ESP32-S3 shares one IRAM/DRAM region like the C3. A paired S3 on Ethernet with a live vehicle link
-ran an OTA-installed Dev build of v1.6.5's source, without these settings, at a 53248-B INTERNAL
-largest block for its whole 600-s probation window. The image was never confirmed and stays pending
-until the next reboot rolls it back; the previous Dev build had confirmed on the same board at
-61440 B. Static RAM barely differs between the two builds, so the loss arose at runtime and its
-cause is not identified. `sdkconfig.defaults.esp32s3` therefore applies the C3 settings. Against
-the CI build of the same source they move 23856 B of code out of IRAM, which shrinks the DRAM span
-reserved for IRAM by 24064 B, and they shrink the controller and NimBLE pools. A signed preview with
-these settings, installed over the air on the same board, held a 90112-B largest block and confirmed
-after 90 s; the previous Dev build held 61440 B there after a cold boot. Other S3 boards, including
+ran an OTA-installed Dev build of v1.6.5's source, without the C3 settings, at a 53248-B INTERNAL
+largest block in every sample of its 600-s probation window. The image was never confirmed and stays
+pending until the next restart rolls it back. The previous Dev build had confirmed on the same board
+at 61440 B and held that value again after a cold boot. Static RAM barely differs between the two
+builds, so the loss arose at runtime and its cause is not identified. `sdkconfig.defaults.esp32s3`
+therefore applies the C3 settings. Against the CI build of the same source they move 23856 B of
+code out of IRAM, which shrinks the DRAM span reserved for IRAM by 24064 B, and they shrink the
+controller and NimBLE pools. A signed preview with these settings, installed over the air on the
+same board, held a 90112-B largest block and confirmed after 90 s. Other S3 boards, including
 WiFi-only ones, remain unmeasured.
 
 Every TLS leg still samples real INTERNAL largest before context creation and after that allocation,
@@ -338,7 +338,10 @@ NimBLE SMP/link-layer pairing and bonding are compiled out on all four targets
 (`CONFIG_BT_NIMBLE_SECURITY_ENABLE=n`); protection is Tesla application crypto and NFC/VCSEC key
 enrollment. No host link keys exist. A peer SMP request is dropped with no reply and one `rc=6`
 error; that numeric BLE_HS_ENOMEM means unsupported SMP here, not an allocation failure.
-Controller `BLE_INIT ... SMP:1` describes its separate unchanged capability. [ATT/SMP departures](adr/0005-tesla-ble-seam.md#2-platform-forced-departures-and-reference-deviations).
+On esp32c3 and esp32s3 the controller's link-layer encryption, advertising and DTM are compiled out
+as well (`CONFIG_BT_CTRL_BLE_SECURITY_ENABLE=n`, `CONFIG_BT_CTRL_BLE_ADV=n`,
+`CONFIG_BT_CTRL_DTM_ENABLE=n`), so their boot line reads `BLE_INIT: Feature Config, ADV:0, ..., DTM:0,
+..., SMP:0`. [ATT/SMP departures](adr/0005-tesla-ble-seam.md#2-platform-forced-departures-and-reference-deviations).
 
 All targets use the manifest-pinned v6.3.0 graph and lexical, hash-checked patch series. The firmware
 uses `TeslaBLE::Client` directly; `main/logic/` owns framing, UUID/session tracking and an eight-slot
