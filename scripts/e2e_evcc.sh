@@ -598,9 +598,9 @@ for i in $(seq 1 $N); do
   # A real failure is a transport error/timeout OR an unexpected HTTP status code
   # (neither 200 nor 503) OR a body missing the charge_state evcc parses.
   # A well-formed body with HTTP 503 or "result":false is the honest stale-cache
-  # response while the car is asleep (served in ~0ms; evcc reads
-  # .response.response.charge_state.* and never checks .response.result), so count it
-  # separately as "stale" rather than conflating it with a timeout.
+  # response (served in ~0ms). evcc fails on a non-2xx before its jq runs and logs an
+  # error (docs/API.md says when that stops its loadpoint cycle), so count it separately
+  # as "stale" rather than conflating it with a timeout.
   if [ -z "$b" ] || [ -z "$code" ] || { [ "$code" != "200" ] && [ "$code" != "503" ]; } || ! echo "$b" | grep -q "\"charge_state\""; then
     f=$((f+1))
   elif [ "$code" = "503" ] || ! echo "$b" | grep -q "\"result\":true"; then
@@ -617,7 +617,7 @@ AVGMS=$(echo "$RES" | sed -n 's/.*AVG=\([0-9]*\).*/\1/p')
 SAMPLE=$(echo "$RES" | sed -n 's/^SAMPLE=//p')
 echo "  latency: avg=${AVGMS}ms max=${MAXMS}ms   transport failures: ${FAILS}/${ITER}   stale (car asleep): ${STALE:-0}/${ITER}"
 [ "${FAILS:-1}" = 0 ] && ok "0 timeouts/transport failures over ${ITER} polls" || bad "${FAILS} timeout(s)/transport failure(s)"
-[ "${STALE:-0}" != 0 ] && echo "  NOTE  ${STALE}/${ITER} returned result:false (stale cache — car asleep); well-formed & ~0ms, evcc-safe (it reads charge_state, not result)"
+[ "${STALE:-0}" != 0 ] && echo "  NOTE  ${STALE}/${ITER} returned result:false (stale cache); well-formed & ~0ms. evcc logs an error for a 503, see docs/API.md"
 # evcc parses these fields; all must be present and numeric (battery_range as float)
 for fld in charging_state battery_level charge_limit_soc charger_power charge_rate charge_amps battery_range charge_energy_added minutes_to_full_charge; do
   echo "$SAMPLE" | grep -q "\"$fld\"" && ok "field present: $fld" || bad "field MISSING: $fld"

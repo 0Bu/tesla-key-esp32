@@ -3119,6 +3119,65 @@ static void test_vehicle_data() {
             "minutes_to_full_charge=45\n"));
     }
 
+    // Scenario 2c — what a reader sees over one departure, composed from the shipped decisions:
+    // availability decides 200 versus 503, the link decides the state. t is the age of the car's
+    // last answer; an unavailable read emits the handler's zeroed result.
+    {
+        const auto step = [](const char* cached_state, uint32_t t, bool recent_cmd,
+                             bool expect_available, const char* expect_state) {
+            ChargeStateResult cached{};
+            cached.valid = true;
+            cached.charging_state = cached_state;
+            const bool charging = cached.charging_state == "Charging" || cached.charging_state == "Starting";
+            tk::LinkInputs in{};
+            in.have_contact = true;
+            in.contact_age_s = t;
+            in.have_reachable = true;
+            in.reachable_age_s = t;
+            const bool window = tk::active_window_open({recent_cmd, charging, true, t});
+            const bool available = tk::charge_cache_usable(true, window, true, t);
+            CHECK(available == expect_available);
+            const ChargeStateResult served = available ? cached : ChargeStateResult{};
+            CHECK(std::string(tk::vehicle_charging_state(served, tk::compute_link_state(in))) == expect_state);
+        };
+
+        // Parked, no command: the last state until the link is gone, then Unknown, always a 200.
+        step("Complete", 0, false, true, "Complete");
+        step("Complete", 149, false, true, "Complete");
+        step("Complete", 150, false, true, "Unknown");
+        step("Complete", 86400, false, true, "Unknown");
+
+        // Charging when the link drops: the charging arm's 503 gap, then the same end state.
+        step("Charging", 30, false, true, "Charging");
+        step("Charging", 31, false, false, "Disconnected");
+        step("Charging", 59, false, false, "Disconnected");
+        step("Charging", 60, false, true, "Charging");
+        step("Charging", 149, false, true, "Charging");
+        step("Charging", 150, false, true, "Unknown");
+
+        // A recent command keeps the 503 past the link's end; the state converges once it expires.
+        step("Complete", 30, true, true, "Complete");
+        step("Complete", 31, true, false, "Disconnected");
+        step("Complete", 150, true, false, "Unknown");
+        step("Complete", 299, true, false, "Unknown");
+        step("Complete", 300, false, true, "Unknown");
+
+        // The zeroed body of that 503 keeps the complete schema.
+        CollectEmitter e_unavailable;
+        tk::emit_vehicle_charge_state(ChargeStateResult{}, tk::LinkState::Unreachable, e_unavailable);
+        CHECK(golden_eq(e_unavailable.out,
+            "charging_state=\"Unknown\"\n"
+            "battery_level=0\n"
+            "usable_battery_level=0\n"
+            "charge_limit_soc=0\n"
+            "charger_power=0\n"
+            "charge_rate=0\n"
+            "charge_amps=0\n"
+            "charge_energy_added=0\n"
+            "battery_range=0\n"
+            "minutes_to_full_charge=0\n"));
+    }
+
     // Scenario 3 — climate_state actively conditioning & defroster on (evcc climater / .is_preconditioning)
     ClimateStateResult cl1{};
     cl1.valid = true;

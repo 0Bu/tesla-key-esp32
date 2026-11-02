@@ -3,9 +3,10 @@
 #include <cstdint>
 
 // Pure, hardware-free model of VehicleController::link_state() — the single source
-// of truth for the car's high-level connectivity, shared by the web UI hero and the
-// MQTT/HA bridge so the two never drift. The firmware gathers the atomic member
-// state into LinkInputs and calls compute_link_state(); the host mock build tests
+// of truth for the car's high-level connectivity, shared by the web UI hero, MCP, the
+// MQTT/HA bridge and the REST charging_state override so they never drift. The
+// firmware gathers the atomic member state into LinkInputs and calls
+// compute_link_state(); the host mock build tests
 // the decision (incl. the debounced-ASLEEP asymmetry) without a board. See the long
 // rationale on VehicleController::link_state() in vehicle_ctrl.hpp / .cpp.
 namespace tk {

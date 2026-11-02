@@ -115,12 +115,11 @@ inline double vehicle_data_number(double value) noexcept {
     return std::isfinite(value) ? value : 0.0;
 }
 
-// charging_state is the one present-tense claim in the charge schema: evcc maps it to the
-// plugged-in status behind its vehicle detection. The cache is never invalidated on a link
-// loss, so a car that drove off would stay "Complete" (evcc B) or "Charging" (C) until it
-// returned. Once the link is Unreachable the state is unknown; the jq mapping turns that into A.
-// The numeric fields stay last-known: an HTTP 503 here would abort evcc's loadpoint cycle through
-// getmaxcurrent for as long as the car is away.
+// charging_state is the field evcc reads as the car's plugged-in status. The cache is never
+// invalidated on a link loss, so a car that drove off would stay "Complete" (evcc B) or "Charging"
+// (C) until it returned. Once the link is Unreachable the state is unknown; the jq mapping turns
+// that into A. The numeric fields stay last-known, because an HTTP 503 would stop evcc's loadpoint
+// cycle on some chargers. docs/API.md (Vehicle data) owns the conditions and the trade-off.
 inline const char* vehicle_charging_state(const ChargeStateResult& cs, LinkState link) noexcept {
     if (link == LinkState::Unreachable) return "Unknown";
     return cs.charging_state.empty() ? "Disconnected" : cs.charging_state.c_str();

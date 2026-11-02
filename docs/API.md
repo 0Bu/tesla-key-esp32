@@ -138,7 +138,7 @@ must be available for `200`/`result:true`; otherwise the response is `503`/`resu
 
 | Selected domain | Availability and units |
 |---|---|
-| Charge | Valid idle cache may be old. In the active window, data older than 30 s is unavailable. While `link` is `unreachable`, `charging_state` is `Unknown` (evcc maps it to status A) and the numeric fields stay last known, so evcc does not see a car that left as plugged in. The proxy answers `503` for an unreachable car; here that would stop evcc's loadpoint cycle through `getmaxcurrent`. |
+| Charge | Valid idle cache may be old. In the active window, data older than 30 s is unavailable. |
 | Climate | Valid cache required; inside the active window it must be ≤300 s old. Unreported `is_preconditioning` is `false`; other optional fields use typed zero/false fallbacks. |
 | Drive | Valid cache with reported odometer required; last-known odometer is served in miles. Missing odometer returns `503` with `odometer:0`, where the proxy returns `200` with zero; evcc rejects either. |
 
@@ -149,6 +149,21 @@ telemetry, restarted at climate on window entry. Missing/stale climate is retrie
 slot, with at most two consecutive attempts before another domain. After reboot it stays unavailable
 until a poll obtains a sample; the boot window is not seeded after a heap-watchdog restart.
 Drive refreshes through the rotation and a best-effort `NO_WAKE_SKIP` wake/bootstrap one-shot.
+
+While `link` is `unreachable` and no command was attempted in the last five minutes (failed attempts
+count), the response is `200` with `charging_state: Unknown` and last-known numbers. evcc maps
+`Unknown` to status A, so it does not see a car that left as plugged in. Inside that window the
+response stays `503`, with zeroed fields that evcc does not parse. `Unknown` also reports an unmapped
+or absent car state. MCP, MQTT and `/status` keep the last-known string beside `link`. When the link
+returns, the last-known state is served until the next ChargeState: one round trip for an awake car,
+until it wakes for a sleeping one.
+
+TeslaBleHttpProxy answers `503` once its cache window has passed. Here that would stop evcc's loadpoint
+cycle on a `twc3` charger with an active vehicle and an enabled loadpoint (`charger get max current`),
+and on chargers that take status from the vehicle (`charger status`). The status A has its own cost on
+those second chargers (`vehicle-api` or a custom status plugin): a BLE gap of 150 s on a plugged-in car
+ends the session and resets mode and limits. Without a default vehicle, evcc also does not identify a
+car plugged in during a long BLE outage.
 
 ## Body controller state (foreground VCSEC request)
 

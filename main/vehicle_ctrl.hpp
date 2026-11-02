@@ -153,8 +153,8 @@ public:
         return true;
     }
 
-    // Single source of truth for the car's high-level connectivity, shared by the web UI
-    // and the MQTT/HA bridge so the two never drift:
+    // Single source of truth for the car's high-level connectivity, shared by the web UI, MCP,
+    // the MQTT/HA bridge and the REST charging_state override so they never drift:
     //   Awake       — fresh live infotainment telemetry (we have current data).
     //   Asleep      — no live data AND positive, debounced proof the car is sleeping: its
     //                 own VCSEC sleep flag has held ASLEEP for kAsleepDebounceS while the
