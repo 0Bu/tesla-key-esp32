@@ -166,7 +166,8 @@ Verify every dimension against the reviewed revisions; previous audit results ar
 9. **evcc / TeslaBleHttpProxy HTTP shape** — `/api/.../command/{name}` names, `vehicle_data` =
    `.response.response.charge_state.*` with **`charge_amps`** (not `charging_amps`), doubled
    `response`, **miles/mph on the `/api` path** (metric is MQTT-only), `charging_state` strings
-   `Charging/Disconnected/Complete/Stopped/NoPower/Starting`. Verify selectors, cache freshness,
+   `Charging/Disconnected/Complete/Stopped/NoPower/Starting`, plus `Unknown` for an unmapped or
+   absent car state (including upstream `Calibrating`) and while `link` is `unreachable`. Verify selectors, cache freshness,
    energy/preconditioning/odometer presence and intentional proxy departures in
    [API](../../../docs/API.md#vehicle-data) against all emitters and consumers. Verify the command
    outcome status too: REST status/`result` and MCP `isError` for success, `already_set`, the

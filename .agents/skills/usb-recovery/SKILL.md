@@ -31,14 +31,15 @@ failure-stop checks remain mandatory.
 > `POST /ota/check` is state-changing and must be named explicitly in that live approval.
 
 Typical uses are an unsigned-app boot loop or an evidenced signing-authority mismatch.
-`downloaded image is invalid` alone is not proof of key mismatch; rule out chip/revision/corruption.
+`download or image validation failed` alone is not proof of key mismatch; rule out transfer faults,
+chip/revision and corruption.
 The signed app and final otadata erase recover firmware while preserving NVS.
 
 > ### Which path do I need?
 > - **OTA still works** — `/ota/check` → `update_available`, `/ota/update` installs and reboots
 >   onto the new version → **not this skill**; just OTA (or use [`$ship`](../ship/SKILL.md)).
 > - **Board boots but reports the wrong / old version and OTA is refused** ("signature bad" /
->   "downloaded image is invalid") → **this skill**.
+>   "download or image validation failed") → **this skill**.
 > - **Board is dead / bootlooping** (e.g. after an unsigned local flash) → **this skill**.
 > - **You want to wipe pairing too** (start completely clean) → *do not use this skill*. Stop and
 >   hand off to the installed global `$nvs-backup`/`$nvs-delete` workflow with separate explicit
