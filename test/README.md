@@ -128,7 +128,7 @@ cases and a shell contract binding the final acquire load after view constructio
 not claim an executed erase precisely after view construction; the real header-read/erase
 interleaving remains covered separately. Status models, SDK queries and renderers can allocate.
 
-Locked-cJSON tests compile the actual crash HTTP bodies and F031 serializer/outer catch, exhaust
+Locked-cJSON tests compile the actual crash HTTP bodies and serializer/outer catch, exhaust
 post-erase JSON allocations and fail each header/read/chunk. They verify no second response, clean
 failed-stream terminator, automatic retry or false dismissal. No real crash dump or flash is used.
 
@@ -196,7 +196,7 @@ control with fully backed buffers. These selector checks do
 not generate protocol messages or establish cryptographic answers; the real-library V1 harness
 owns those answers. Explicit peer reset remains a fresh-bootstrap boundary, not a durable key pin.
 
-The F116 deferred-delivery cases use `generate_ble_deferred_adapter.py` to extract both real
+The deferred-delivery cases use `generate_ble_deferred_adapter.py` to extract both real
 callback adapters, enqueue/ready/pop/clear helpers, the actual mailbox declarations and the whole
 `process_ble_host_events_` body without rewriting. The existing native Client/Peer/PSA, dispatcher,
 framer and response handlers remain real. Only the RTOS/clock/lock, readiness/link and storage/cache
@@ -350,6 +350,11 @@ firmware compilation and signed-artifact checks remain independent.
 
 ## What's *not* covered (by design)
 
+Host stubs do not exercise actual esp_http_server, NimBLE, flash/NVS, device scheduling, OTA rollback
+or the car. Pinned cJSON tests use real emitters but deterministic transport/publish seams.
+Four-target IDF build, disposable signing, remote CI, bench/USB, OTA and vehicle E2E are separate
+proofs and authorization boundaries. Never infer physical acceptance from green host tests.
+
 The effect-reply gate compiles functions extracted from the shipped HTTP/MCP adapters and handlers,
 not rewritten models. Device/storage/vehicle/RTOS operations remain passive doubles. IDF faults are
 return codes with simulated partial bytes; generic renderer spies also throw after the terminal
@@ -383,11 +388,6 @@ executed with exact first CHECKs and restoration positives.
 Effect-reply tests separately exercise all typed HTTP outcomes
 and preserve an earlier clock effect when OTA is definitely refused.
 
-Host stubs do not exercise actual esp_http_server, NimBLE, flash/NVS, device scheduling, OTA rollback
-or the car. Pinned cJSON tests use real emitters but deterministic transport/publish seams.
-Four-target IDF build, disposable signing, remote CI, bench/USB, OTA and vehicle E2E are separate
-proofs and authorization boundaries. Never infer physical acceptance from green host tests.
-
 Vehicle-free bench ingest validates schema-v2 report identity and plausibility, then fingerprints and
 uploads that exact report. Firmware signature, NVS preservation and physical observations are operator
 declarations. Final normal-workload stack floors are httpd/vehicle ≥1024 B, MQTT ≥768 B and optional
@@ -402,7 +402,7 @@ end-manifest consistency, response/deadline bounds, and required 404/410 evidenc
 The build-gate contract also rejects omitted publication and both cleanup invocation points.
 These tests do not publish a preview, remove real Pages content or establish live CDN propagation.
 
-## F137 actual task host layer
+## Actual task and runtime layers
 
 `test/test_f137_host.py` regenerates complete MQTT publisher and network watchdog/gateway/recovery
 bodies with the real current-task WDT helper and `PingProbeControl`. Passive SDK/RTOS facades
@@ -429,18 +429,6 @@ completed exact-source run; it does not establish SDK or live acceptance.
 The exact MQTT cleanup/reset/net source contracts retain
 all generic boundary checks and include15 source canaries; existing DNS-delay contracts remain.
 Target task/heap/ABI and static limiter storage still need separate qualification.
-
-## Adding to it
-
-1. Put bounded hardware-free logic in `main/logic/`; firmware delegates to it.
-2. Add meaningful normal/boundary/error/transition CHECKs in `test_logic.cpp`, including repeated
-   cycles and quiescence for timers/state machines.
-3. Register the concrete owner in `logic_test_ownership.json`; mirrored code also needs parity and
-   a negative control proving drift is caught.
-4. Run the relevant host gate. Add a CMake/direct-fallback target only when real glue or stubs need it.
-5. Update the owning documentation and [feature catalog](../docs/FEATURES.md) for a changed contract.
-
-Use `$add-logic-test` for the detailed workflow. Integration-shell changes still need pinned IDF.
 
 The runtime boundary binary also compiles the shipped background-enqueue method with the real
 bounded command runner. A staged foreground-start interleaving must leave its queue and builders
@@ -507,8 +495,7 @@ also exits before destructor/LSan reclamation. The normal, budget and cleanup-ca
 workers and explicitly clean owned contexts. None of these terminal fixtures proves per-task
 lifetime or leak reclamation. Native SDK layouts and
 TLS/flash/crypto doubles establish no target ABI, real CA/signature acceptance, network latency,
-FreeRTOS scheduling or physical restart evidence. All new tests, runtime omission controls,
-sanitizers and four-target resource measurements must be run and reviewed before delivery.
+FreeRTOS scheduling or physical restart evidence.
 
 Both configured OTA URLs retain unconditional compile-time HTTPS assertions. The predicate does
 not validate a full URL or TLS peer. The parser test fixture is byte-bound to the existing pinned
@@ -562,10 +549,22 @@ inventories, sanitized allowlist environment, retained streams/tool/pre-executio
 60-second commands and a 600-second whole budget. An unknown group blocks all subsequent work.
 It does not execute the unqualified runtime omission recipes: their concrete first CHECKs and
 restoration positives still need a separately reviewed mutation operator and actual independent
-acceptance. No prepared test described here has been executed by this implementation handoff.
+acceptance.
 
 The complete OTA application adapter also checks fixed INTERNAL diagnostic checkpoints against
 independent heap/log spies: exact guard samples, fragmented completed headers, TLS destroy ordering,
 known cleanup references and contained diagnostic failures. The existing six OTA modes and all
 prior assertions remain mandatory; `f146_runtime_omissions.json` records unqualified runtime
 omission recipes. Passive SDK doubles do not establish target heap minima or TLS allocation safety.
+
+## Adding to it
+
+1. Put bounded hardware-free logic in `main/logic/`; firmware delegates to it.
+2. Add meaningful normal/boundary/error/transition CHECKs in `test_logic.cpp`, including repeated
+   cycles and quiescence for timers/state machines.
+3. Register the concrete owner in `logic_test_ownership.json`; mirrored code also needs parity and
+   a negative control proving drift is caught.
+4. Run the relevant host gate. Add a CMake/direct-fallback target only when real glue or stubs need it.
+5. Update the owning documentation and [feature catalog](../docs/FEATURES.md) for a changed contract.
+
+Use `$add-logic-test` for the detailed workflow. Integration-shell changes still need pinned IDF.

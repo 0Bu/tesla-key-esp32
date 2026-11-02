@@ -1690,12 +1690,12 @@ def self_test(root: Path) -> None:
         ("ble-peripheral-role-commented-out", "sdkconfig.defaults",
          "CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=n", "# CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=n",
          "the NimBLE peripheral role and GATT server must stay disabled"),
-        ("ble-peripheral-role-target-override", "sdkconfig.defaults.esp32c3",
-         "CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y", "CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=y",
-         "must not override the disabled NimBLE peripheral role or SMP"),
-        ("ble-security-manager-target-override", "sdkconfig.defaults.esp32s3",
-         "CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y", "CONFIG_BT_NIMBLE_SECURITY_ENABLE=y",
-         "must not override the disabled NimBLE peripheral role or SMP"),
+        *(
+            (f"{setting}-override-{target}", f"sdkconfig.defaults.{target}",
+             "\n", f"\n{setting}=y\n", "must not override the disabled NimBLE peripheral role or SMP")
+            for target in TARGETS
+            for setting in ("CONFIG_BT_NIMBLE_ROLE_PERIPHERAL", "CONFIG_BT_NIMBLE_SECURITY_ENABLE")
+        ),
         ("boundary-build-ignore", ".gitignore", "/build_boundary_*/", "/build_boundary_removed/",
          "boundary-build trees must stay outside the source fingerprint"),
         ("manifest-layout", "scripts/check-pages-manifest.py",

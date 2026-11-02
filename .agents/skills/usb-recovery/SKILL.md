@@ -278,8 +278,8 @@ printf '%s\n' "$APP_INFO" | grep -qx "Detected image type: $FAMILY" \
 
 ## 2. (Only with separate explicit approval if bootloader / partition-table are ALSO damaged)
 
-The two writes in step 3 fix the app + boot-select and are enough for the signature-bad /
-unsigned-app cases. If serial shows the *bootloader itself* failing (not the app signature
+The two writes in step 3 fix the app + boot-select and are enough for the signing-authority
+mismatch / unsigned-app cases. If serial shows the *bootloader itself* failing (not the app signature
 check), restore those regions too — but only from the exact `firmware-unsigned` support artifact
 of the **same validated main run**. A local build or Pages copy is not source-SHA-bound recovery
 material. If the support artifact expired, stop.

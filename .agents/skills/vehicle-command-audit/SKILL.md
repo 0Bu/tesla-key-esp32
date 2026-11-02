@@ -114,6 +114,9 @@ Verify every dimension against the reviewed revisions; previous audit results ar
    Check ATT Write Command versus reference Write Request, CCCD 0x0001 notifications versus Linux
    reference indications, no ATT server and disabled SMP against every ADR-0005 departure. Treat the
    negotiated MTU as field behavior only where hardware evidence shows it.)
+   Across all `sdkconfig.defaults*` files, compare BLE roles, SMP, controller features, connection
+   count, preferred MTU and NimBLE pools against the same departures. Target defaults apply after
+   the root file.
 2. **Roles / Charging-Manager scope** — charging commands + wake only; everything else
    (lights/horn/sentry/**climate**/locks) is role-rejected.
 3. **Session / signing / clock** — `expires_at` = **vehicle's `SessionInfo.ClockTime` + a

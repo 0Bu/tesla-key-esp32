@@ -75,7 +75,7 @@ than one board on the network use the target board's IP address: the name can re
 A vehicle identity change is deliberately separate because it clears the old pairing:
 
 ```bash
-python3 provision.py --url http://tesla-key-esp32.local --mode lan \
+python3 provision.py --url http://<ESP32-IP> --mode lan \
   --vin-only --vin '<VIN>' --confirm-vin-change
 ```
 
