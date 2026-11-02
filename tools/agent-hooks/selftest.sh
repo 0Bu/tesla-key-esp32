@@ -879,6 +879,32 @@ for path in paths:
 PY
 then pass_case 'neutral core has no foreign-project policy residue'; else fail_case 'foreign-project residue'; fi
 
+# A configured alias must not open an ungated path: a regular alias that reaches a guarded action
+# counts as that action, and a shell alias is opaque, so it counts for what it could hide.
+alias_repo="$tmp/alias-repo"
+alias_bin="$tmp/alias-bin"
+git init -q "$alias_repo"
+git -C "$alias_repo" config alias.pp push
+git -C "$alias_repo" config alias.ppp pp
+git -C "$alias_repo" config alias.shx '!git push'
+git -C "$alias_repo" config alias.st status
+mkdir -p "$alias_bin"
+printf '#!/bin/sh\n[ "$1 $2" = "alias list" ] || exit 1\nprintf "mp: pr merge\\nco: pr checkout\\nsh: !git push\\n"\n' \
+  >"$alias_bin/gh"
+chmod +x "$alias_bin/gh"
+expect_alias_actions() {  # <command> <expected action kinds> <label>
+  local got
+  got="$(GATE_PROJ="$alias_repo" PATH="$alias_bin:$PATH" gate_bash_actions "$1" | cut -f1 | sort | xargs)"
+  if [ "$got" = "$2" ]; then pass_case "$3"; else fail_case "$3 (want='$2' got='$got')"; fi
+}
+expect_alias_actions 'git pp' 'push' 'git alias that reaches push counts as a push'
+expect_alias_actions 'git ppp' 'push' 'git alias chain that reaches push counts as a push'
+expect_alias_actions 'git shx' 'create merge push' 'shell git alias is opaque to every guarded action'
+expect_alias_actions 'git st' '' 'git alias that reaches no guarded action stays unguarded'
+expect_alias_actions 'gh mp 1' 'merge' 'gh alias that reaches pr merge counts as a merge'
+expect_alias_actions 'gh sh' 'create merge' 'shell gh alias is opaque to create and merge'
+expect_alias_actions 'gh co 1' '' 'gh alias that reaches no guarded action stays unguarded'
+
 # Shared-predicate loader canaries: a missing, truncated, incomplete or wrong-API pr-gate-lib.sh
 # must block before the payload is even parsed, which covers create, push and merge (all five
 # gates); the canaries drive a create payload. The --check and push-hook entries have their own
