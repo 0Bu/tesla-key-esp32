@@ -3041,7 +3041,7 @@ static void test_vehicle_data() {
     cs1.minutes_to_full_charge = 45;
 
     CollectEmitter e1;
-    tk::emit_vehicle_charge_state(cs1, e1);
+    tk::emit_vehicle_charge_state(cs1, tk::LinkState::Awake, e1);
     CHECK(golden_eq(e1.out,
         "charging_state=\"Charging\"\n"
         "battery_level=72\n"
@@ -3059,7 +3059,7 @@ static void test_vehicle_data() {
     ChargeStateResult cs2{};
 
     CollectEmitter e2;
-    tk::emit_vehicle_charge_state(cs2, e2);
+    tk::emit_vehicle_charge_state(cs2, tk::LinkState::Awake, e2);
     CHECK(golden_eq(e2.out,
         "charging_state=\"Disconnected\"\n"
         "battery_level=0\n"
@@ -3071,6 +3071,53 @@ static void test_vehicle_data() {
         "charge_energy_added=0\n"
         "battery_range=0\n"
         "minutes_to_full_charge=0\n"));
+
+    // Scenario 2b — the car left BLE range with a cached state that evcc reads as plugged in. The
+    // state comes from the real link decision, on both sides of the reachability boundary.
+    {
+        tk::LinkInputs gone{};
+        gone.have_contact = true;
+        gone.contact_age_s = tk::kReachableMaxAgeS;
+        gone.have_reachable = true;
+        gone.reachable_age_s = tk::kReachableMaxAgeS - 1;
+        CHECK(tk::compute_link_state(gone) == tk::LinkState::Idle);
+        ChargeStateResult cached{};
+        cached.valid = true;
+        cached.charging_state = "Complete";
+        CHECK(std::string(tk::vehicle_charging_state(cached, tk::compute_link_state(gone))) == "Complete");
+        gone.reachable_age_s = tk::kReachableMaxAgeS;
+        CHECK(tk::compute_link_state(gone) == tk::LinkState::Unreachable);
+        CHECK(std::string(tk::vehicle_charging_state(cached, tk::compute_link_state(gone))) == "Unknown");
+
+        // A reachable parked or sleeping car keeps its last-known state, so read-only polling
+        // never has a reason to wake it; a cached "Charging" must not outlive the link either.
+        for (const auto link : {tk::LinkState::Awake, tk::LinkState::Idle, tk::LinkState::Asleep,
+                                tk::LinkState::Unknown}) {
+            CHECK(std::string(tk::vehicle_charging_state(cached, link)) == "Complete");
+        }
+        cached.charging_state = "Charging";
+        CHECK(std::string(tk::vehicle_charging_state(cached, tk::LinkState::Unreachable)) == "Unknown");
+        // An empty state keeps the schema's "Disconnected" fallback unless the link rules it out.
+        CHECK(std::string(tk::vehicle_charging_state(ChargeStateResult{}, tk::LinkState::Idle)) == "Disconnected");
+        CHECK(std::string(tk::vehicle_charging_state(ChargeStateResult{}, tk::LinkState::Unreachable)) == "Unknown");
+
+        // Only the state changes: the last-known numbers stay on the wire for evcc's getters.
+        ChargeStateResult away = cs1;
+        away.charging_state = "Complete";
+        CollectEmitter e_away;
+        tk::emit_vehicle_charge_state(away, tk::LinkState::Unreachable, e_away);
+        CHECK(golden_eq(e_away.out,
+            "charging_state=\"Unknown\"\n"
+            "battery_level=72\n"
+            "usable_battery_level=72\n"
+            "charge_limit_soc=80\n"
+            "charger_power=11\n"
+            "charge_rate=58.25\n"
+            "charge_amps=16\n"
+            "charge_energy_added=12.5\n"
+            "battery_range=280.5\n"
+            "minutes_to_full_charge=45\n"));
+    }
 
     // Scenario 3 — climate_state actively conditioning & defroster on (evcc climater / .is_preconditioning)
     ClimateStateResult cl1{};

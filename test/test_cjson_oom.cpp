@@ -333,7 +333,7 @@ tk::JsonOwner build_vehicle_data_fixture(std::string_view endpoints,
     e.obj_begin("response");
     if (selected.charge_state) {
         e.obj_begin("charge_state");
-        tk::emit_vehicle_charge_state(charge, e);
+        tk::emit_vehicle_charge_state(charge, tk::LinkState::Awake, e);
         e.obj_end();
     }
     bool climate_ok = false;
@@ -416,7 +416,7 @@ void test_vehicle_data_numeric_domain() {
                 charge.*(field.member) = sample.input;
                 tk::JsonBuilder json;
                 tk::StatusJsonEmitter emitter(json);
-                tk::emit_vehicle_charge_state(charge, emitter);
+                tk::emit_vehicle_charge_state(charge, tk::LinkState::Awake, emitter);
                 check_wire_number(emitter.finish(), field.key, sample.expected);
             }
             CHECK(live_allocations == 0);
@@ -476,7 +476,7 @@ void test_vehicle_data_numeric_domain() {
             charge.usable_battery_level = sample.input;
             tk::JsonBuilder json;
             tk::StatusJsonEmitter emitter(json);
-            tk::emit_vehicle_charge_state(charge, emitter);
+            tk::emit_vehicle_charge_state(charge, tk::LinkState::Awake, emitter);
             check_wire_number(emitter.finish(), "usable_battery_level", 42);
         }
         CHECK(live_allocations == 0);
@@ -487,7 +487,7 @@ void test_vehicle_data_numeric_domain() {
             charge.usable_battery_level = 42;
             tk::JsonBuilder json;
             tk::StatusJsonEmitter emitter(json);
-            tk::emit_vehicle_charge_state(charge, emitter);
+            tk::emit_vehicle_charge_state(charge, tk::LinkState::Awake, emitter);
             check_wire_number(emitter.finish(), "usable_battery_level", sample.expected);
         }
         CHECK(live_allocations == 0);

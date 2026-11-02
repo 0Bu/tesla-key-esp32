@@ -138,7 +138,7 @@ must be available for `200`/`result:true`; otherwise the response is `503`/`resu
 
 | Selected domain | Availability and units |
 |---|---|
-| Charge | Valid idle cache may be old. In the active window, data older than 30 s is unavailable. |
+| Charge | Valid idle cache may be old. In the active window, data older than 30 s is unavailable. While `link` is `unreachable`, `charging_state` is `Unknown` (evcc maps it to status A) and the numeric fields stay last known, so evcc does not see a car that left as plugged in. |
 | Climate | Valid cache required; inside the active window it must be ≤300 s old. Unreported `is_preconditioning` is `false`; other optional fields use typed zero/false fallbacks. |
 | Drive | Valid cache with reported odometer required; last-known odometer is served in miles. Missing odometer returns `503` with `odometer:0`, where the proxy returns `200` with zero; evcc rejects either. |
 

@@ -201,6 +201,7 @@ change state; distinguish them from reading an existing log or cached status.
 | No pairing prompt | VIN configured, `key_present`, BLE range, NFC card on reader | Place the keycard on the reader and wait for the automatic same-key retry with backoff, then confirm on the touchscreen. |
 | BLE connection fails | `/status.ble.connect_fail`, `car_connectable`, log cause | Move closer; disconnect another phone/fob if the car advertises non-connectable. |
 | Command times out | BLE availability and car asleep | An intentional wake may be needed; wait for the link and retry. Preserve keys and logs. |
+| evcc shows the car as disconnected while it is plugged in | BLE range, `link` in `/status` | An unreachable car reports `charging_state: Unknown`, which evcc maps to status A; it clears once the car answers again. |
 | evcc has no SOC/current | `port: 80`, VIN, cache freshness | Inspect `.response.response.charge_state` from `vehicle_data`; active stale telemetry returns `503`. |
 | Key needs attention | `reauth`, stored session and BLE availability | Reconnection and same-key pairing run automatically. Place the NFC card on the reader and confirm a pairing prompt on the touchscreen. No firmware erase is required. |
 | MQTT save fails | `mqtt.error`; HTTP `400`, `502` or `503` | Check credentials, reachability or contiguous heap respectively. A failed probe saves nothing. |

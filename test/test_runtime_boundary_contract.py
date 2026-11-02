@@ -1546,7 +1546,7 @@ def require_status_production_seams(producer: str, handler: str, emitter_header:
 
 
 VEHICLE_DATA_SEAMS = (
-    "tk::StatusJsonEmitter", "tk::emit_vehicle_charge_state", "e.release()",
+    "tk::StatusJsonEmitter", "tk::emit_vehicle_charge_state(cs, g_vehicle->link_state(), e)", "e.release()",
     "strchr(req->uri, '?')", 'tk::parse_vehicle_data_endpoints(query ? query + 1 : "")',
     "endpoints.empty() || endpoints.has_unsupported", "static_assert(kQueryBufBytes == 128",
     "endpoints.charge_state && g_vehicle->get_charge_state(cs)",
