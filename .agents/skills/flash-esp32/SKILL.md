@@ -151,7 +151,7 @@ fi
 `Flash memory region erased successfully …` for the otadata erase and
 `Hard resetting via RTS pin...`. The app image lands at `0x20000` (dual-OTA layout). After reset
 the device rejoins WiFi in a few seconds; reload the board's IP address to see UI changes (every
-board announces the same `tesla-key-esp32.local`, so that name can reach another board).
+board requests the same mDNS name, so `tesla-key-esp32.local` can reach another board).
 
 > ⚠️ **A local (unsigned) build crash-loops at boot — flash a _signed_ image.** Since the
 > signed-OTA config landed (`CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT` in

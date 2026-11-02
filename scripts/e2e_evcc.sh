@@ -7,7 +7,7 @@
 # BLE → car). The headline goal is the one that matters for evcc: every read must
 # return well-formed data with NO timeouts.
 #
-# Usage:
+# Usage (each line also needs ESP32_URL=http://<board-ip>, see Required below):
 #   scripts/e2e_evcc.sh                 # read-only: status, /api/proxy/1/version, vehicle_data
 #                                       #   (charge_state burst, climate_state + drive_state
 #                                       #   cache-only), body_controller (safe)
@@ -21,11 +21,11 @@
 #                                       #   of the evcc path; for a full post-flash command smoke test.
 #
 # Required (every mode, env var):
-#   ESP32_URL=http://<board-ip>      (the approved board. Every board announces the same
-#                                     tesla-key-esp32.local, so that name can reach another board)
+#   ESP32_URL=http://<board-ip>      (the approved board. Every board requests the same mDNS name,
+#                                     so tesla-key-esp32.local can reach another board)
 #
 # Overrides (env vars; fall back to the built-in defaults shown below if unset):
-#   VIN=<auto>                      (unset → discovered from GET $ESP32_URL/status .vin, so the
+#   VIN=<auto>                       (unset → discovered from GET $ESP32_URL/status .vin, so the
 #                                     real vehicle identifier never has to live in this repo)
 #   EVCC_NS=default                  ITER=15  (vehicle_data burst size)
 #   TIMEOUT=15                       (per-request seconds; evcc itself uses a short client timeout)
@@ -528,11 +528,17 @@ PY
   expect_request "charge_stop" 'false' evcc_charge_stop
   expect_request "set_charging_amps" '{"charging_amps": 16}' evcc_max_current 16
 
-  # A live run must name its board and refuse before it contacts the cluster or a device.
+  # A live run must name its board and refuse before it contacts the cluster or a device. The child
+  # gets an inert kubectl and no command scopes, so a regressed guard cannot reach a real cluster.
+  printf '#!/bin/sh\n: > "$E2E_KUBECTL_CALLED"\nexit 1\n' > "$st_dir/bin/kubectl"
+  chmod +x "$st_dir/bin/kubectl"
   local refused refused_rc=0
-  refused="$(env -u ESP32_URL bash "${BASH_SOURCE[0]}" 2>&1)" || refused_rc=$?
-  if [ "$refused_rc" -ne 2 ] || [[ "$refused" != *"approved board address"* ]]; then
-    echo "self_test FAILED: a live run without ESP32_URL must refuse (rc=$refused_rc)" >&2
+  refused="$(env -u ESP32_URL -u VIN -u RUN_COMMANDS -u ALLOW_CHARGE_TOGGLE -u RUN_ALL_COMMANDS \
+    E2E_KUBECTL_CALLED="$st_dir/kubectl-called" PATH="$st_dir/bin:$PATH" \
+    bash "${BASH_SOURCE[0]}" 2>&1)" || refused_rc=$?
+  if [ "$refused_rc" -ne 2 ] || [[ "$refused" != *"approved board address"* ]] ||
+     [ -e "$st_dir/kubectl-called" ]; then
+    echo "self_test FAILED: a live run without ESP32_URL must refuse before kubectl (rc=$refused_rc)" >&2
     exit 1
   fi
 
@@ -546,7 +552,7 @@ if [ "${1:-}" = "--self-test" ]; then
 fi
 
 if [ -z "$ESP32_URL" ]; then
-  echo "FATAL: set ESP32_URL to the approved board address; every board announces tesla-key-esp32.local" >&2
+  echo "FATAL: set ESP32_URL to the approved board address; every board requests the same mDNS name" >&2
   exit 2
 fi
 

@@ -159,6 +159,10 @@ REQUIRED_FILES = (
     "scripts/test-build-contracts.sh",
     "scripts/run-mock-tests.sh",
     "sdkconfig.defaults",
+    "sdkconfig.defaults.esp32",
+    "sdkconfig.defaults.esp32s3",
+    "sdkconfig.defaults.esp32c3",
+    "sdkconfig.defaults.esp32c6",
     "esp-idf-toolchain.txt",
     "main/idf_component.yml",
     "dependencies.lock.esp32",
@@ -556,6 +560,13 @@ def validate(root: Path) -> None:
         len(re.findall(r"^CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=n$", sdkconfig_defaults, re.M)) == 1,
         "sdkconfig.defaults: the NimBLE peripheral role and GATT server must stay disabled (ADR-0005)",
     )
+    for target in TARGETS:
+        # Target defaults are applied after the root file, so an assignment here would win.
+        require(
+            not re.search(r"^CONFIG_BT_NIMBLE_(ROLE_PERIPHERAL|SECURITY_ENABLE)=",
+                          read(root, f"sdkconfig.defaults.{target}"), re.M),
+            f"sdkconfig.defaults.{target}: must not override the disabled NimBLE peripheral role or SMP",
+        )
     require(
         idf_docker.count("docker run --rm --cpus 1.5 --memory 1800m") == 2,
         "idf-docker.sh: build containers must retain the explicit 1.5 CPU / 1800 MiB limits",
@@ -1679,6 +1690,12 @@ def self_test(root: Path) -> None:
         ("ble-peripheral-role-commented-out", "sdkconfig.defaults",
          "CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=n", "# CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=n",
          "the NimBLE peripheral role and GATT server must stay disabled"),
+        ("ble-peripheral-role-target-override", "sdkconfig.defaults.esp32c3",
+         "CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y", "CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=y",
+         "must not override the disabled NimBLE peripheral role or SMP"),
+        ("ble-security-manager-target-override", "sdkconfig.defaults.esp32s3",
+         "CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y", "CONFIG_BT_NIMBLE_SECURITY_ENABLE=y",
+         "must not override the disabled NimBLE peripheral role or SMP"),
         ("boundary-build-ignore", ".gitignore", "/build_boundary_*/", "/build_boundary_removed/",
          "boundary-build trees must stay outside the source fingerprint"),
         ("manifest-layout", "scripts/check-pages-manifest.py",

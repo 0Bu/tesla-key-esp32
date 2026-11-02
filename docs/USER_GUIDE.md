@@ -70,8 +70,9 @@ python3 provision.py --url http://192.168.4.1 --ssid MyNet --vin '<VIN>'
 ```
 
 For an already reachable device use `--url http://tesla-key-esp32.local`, which calls
-`POST /set_wifi` with its one-shot rollback. A vehicle identity change is deliberately separate
-because it clears the old pairing:
+`POST /set_wifi` with its one-shot rollback. Every board requests that same mDNS name, so with more
+than one board on the network use the target board's IP address: the name can reach another board.
+A vehicle identity change is deliberately separate because it clears the old pairing:
 
 ```bash
 python3 provision.py --url http://tesla-key-esp32.local --mode lan \

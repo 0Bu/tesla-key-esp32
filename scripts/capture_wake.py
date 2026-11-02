@@ -32,7 +32,7 @@
 #   scripts/capture_wake.py ESP32_URL
 #   scripts/capture_wake.py http://<board-ip> --wake                       # also fire one wake_up itself
 #   scripts/capture_wake.py http://<board-ip> --interval 0.5 --duration 120  # faster poll, stop after 2 min
-# ESP32_URL is required: every board announces the same tesla-key-esp32.local, so that name can reach
+# ESP32_URL is required: every board requests the same mDNS name, so tesla-key-esp32.local can reach
 # another board.
 #
 # Then tap "Wake" in the web UI (or pass --wake) and watch. Ctrl-C to stop; the tool
