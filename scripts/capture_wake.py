@@ -29,10 +29,11 @@
 #   whitelist / authentication failed                pairing/role fault (NOT expected on a wake)
 #
 # Usage:
-#   scripts/capture_wake.py [ESP32_URL]
-#   scripts/capture_wake.py http://tesla-key.local
-#   scripts/capture_wake.py http://tesla-key-esp32.local --wake  # also fire one wake_up itself
-#   scripts/capture_wake.py --interval 0.5 --duration 120        # faster poll, auto-stop after 2 min
+#   scripts/capture_wake.py ESP32_URL
+#   scripts/capture_wake.py http://<board-ip> --wake                       # also fire one wake_up itself
+#   scripts/capture_wake.py http://<board-ip> --interval 0.5 --duration 120  # faster poll, stop after 2 min
+# ESP32_URL is required: every board announces the same tesla-key-esp32.local, so that name can reach
+# another board.
 #
 # Then tap "Wake" in the web UI (or pass --wake) and watch. Ctrl-C to stop; the tool
 # turns verbose RX back off on exit.
@@ -161,8 +162,7 @@ def open_private_log(output=None):
 
 def main():
     ap = argparse.ArgumentParser(description="Capture what the Tesla returns on a wake request.")
-    ap.add_argument("url", nargs="?", default="http://tesla-key.local",
-                    help="ESP32 base URL (default http://tesla-key.local)")
+    ap.add_argument("url", help="base URL of the approved board, for example http://<board-ip>")
     ap.add_argument("--wake", action="store_true",
                     help="actively POST one wake_up after baseline (VIN read from /status)")
     ap.add_argument("--interval", type=float, default=1.0, help="poll interval seconds (default 1.0)")
@@ -181,7 +181,7 @@ def main():
         st = json.loads(http_get(base + "/status"))
     except (urllib.error.URLError, OSError, ValueError) as e:
         print(f"ERROR: cannot reach {base}/status — {e}", file=sys.stderr)
-        print("Pass the device URL/IP, e.g.:  scripts/capture_wake.py http://tesla-key-esp32.local", file=sys.stderr)
+        print("Pass the approved board's URL, e.g.:  scripts/capture_wake.py http://<board-ip>", file=sys.stderr)
         return 2
     vin = st.get("vin", "")
     link = st.get("link", "?")

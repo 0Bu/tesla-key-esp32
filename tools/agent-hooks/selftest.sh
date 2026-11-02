@@ -352,8 +352,17 @@ for patch_input in scripts/apply-tesla-ble-patches.sh scripts/apply-tesla-ble-pa
     fail_case "patch admission input requires protocol review: $patch_input"
   fi
 done
+for ble_config_input in sdkconfig.defaults sdkconfig.defaults.esp32 sdkconfig.defaults.esp32s3 sdkconfig.defaults.esp32c3 sdkconfig.defaults.esp32c6; do
+  if printf '%s\n' "$ble_config_input" | gate_vehicle_command_relevant; then
+    pass_case "BLE stack configuration requires protocol review: $ble_config_input"
+  else
+    fail_case "BLE stack configuration requires protocol review: $ble_config_input"
+  fi
+done
 if printf '%s\n' 'docs/README.md' | gate_vehicle_command_relevant \
    || printf '%s\n' 'main/display.cpp' | gate_vehicle_command_relevant \
+   || printf '%s\n' 'sdkconfig' | gate_vehicle_command_relevant \
+   || printf '%s\n' 'sdkconfig.defaultsX' | gate_vehicle_command_relevant \
    || printf '%s\n' 'main/logic/soc_gradient.hpp' | gate_vehicle_command_relevant; then
   fail_case 'unrelated files match vehicle-command relevance'
 else

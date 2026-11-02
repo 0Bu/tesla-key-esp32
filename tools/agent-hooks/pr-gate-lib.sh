@@ -90,9 +90,11 @@ gate_is_renovate_maintenance() {
 
 # gate_vehicle_command_relevant
 #   Reads repo-relative changed paths on stdin and succeeds when vehicle command dispatch,
-#   BLE protocol client, command registry, or pinned tesla-ble dependencies can have moved.
+#   BLE protocol client, command registry, pinned tesla-ble dependencies, or the BLE stack
+#   configuration can have moved. Every sdkconfig.defaults file counts: the BLE roles live in the
+#   root file and the controller features and pools in the per-target files.
 gate_vehicle_command_relevant() {
-  grep -Eq '^(main/(command_exec\.cpp|vehicle_commands\.cpp|vehicle_ctrl\.(cpp|hpp)|vehicle_ctrl_internal\.hpp|vehicle_telemetry\.cpp|vehicle_pairing\.cpp|ble_client\.(cpp|hpp)|logic/(command_registry|command_runner|ble_dispatcher|rx_framing|session_state|command_result|key_rotation|ble_chunk|ble_deferred_event|wake_poll|active_window|telemetry_poll)\.hpp|idf_component\.yml)|patches/tesla-ble/|\.agents/skills/vehicle-command-audit/|test/test_tesla_ble_harness\.cpp|scripts/test-tesla-ble-harness\.sh|scripts/(apply-tesla-ble-patches\.(sh|py)|tesla-ble-patch-state\.json|check-dependency-contract\.py)$|docs/adr/0005-tesla-ble-seam\.md)'
+  grep -Eq '^(sdkconfig\.defaults($|\.)|main/(command_exec\.cpp|vehicle_commands\.cpp|vehicle_ctrl\.(cpp|hpp)|vehicle_ctrl_internal\.hpp|vehicle_telemetry\.cpp|vehicle_pairing\.cpp|ble_client\.(cpp|hpp)|logic/(command_registry|command_runner|ble_dispatcher|rx_framing|session_state|command_result|key_rotation|ble_chunk|ble_deferred_event|wake_poll|active_window|telemetry_poll)\.hpp|idf_component\.yml)|patches/tesla-ble/|\.agents/skills/vehicle-command-audit/|test/test_tesla_ble_harness\.cpp|scripts/test-tesla-ble-harness\.sh|scripts/(apply-tesla-ble-patches\.(sh|py)|tesla-ble-patch-state\.json|check-dependency-contract\.py)$|docs/adr/0005-tesla-ble-seam\.md)'
 }
 
 # gate_firmware_size_relevant

@@ -265,12 +265,13 @@ the corresponding versioned merged asset attached to the bound GitHub Release.
 ### 4. (Optional — live board) confirm a real device agrees
 
 Only with explicit user approval to contact a device on the trusted LAN (no auth). `IP` = the
-board's address or `tesla-key-esp32.local`. `POST /ota/check` starts a channel check and changes the
-reported OTA-check state, so it is outside the default public-channel read and still never
-authorizes `POST /ota/update`.
+approved board's address. Every board announces the same `tesla-key-esp32.local`, so that name can
+reach another board. `POST /ota/check` starts a channel check and changes the reported OTA-check
+state, so it is outside the default public-channel read and still never authorizes
+`POST /ota/update`.
 
 ```bash
-IP=tesla-key-esp32.local
+: "${IP:?set IP to the approved board address}"
 # running version + chip. proxy .version carries the fixed "-esp32" suffix for ALL targets;
 # the real chip is in .platform (ESP32/ESP32-S3/ESP32-C3/ESP32-C6).
 curl -s "http://$IP/api/proxy/1/version"           # {"version":"X.Y.Z-esp32","platform":"ESP32-S3"}

@@ -21,7 +21,8 @@ parameters, a serial session that can toggle reset, and any recovery need separa
 [`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md) owns pairing lifecycle and invalidation.
 [API](../../../docs/API.md#management) owns status fields/units/presence;
 [Architecture](../../../docs/ARCHITECTURE.md#sleep--link-state-the-single-source-of-truth) owns link proof.
-Set `DEVICE_IP` to `tesla-key-esp32.local` or the explicitly approved board IP.
+Set `DEVICE_IP` to the explicitly approved board IP. Every board announces the same
+`tesla-key-esp32.local`, so that name can reach another board.
 
 ## 1. Status
 

@@ -86,7 +86,7 @@ and `src/{vehicle.cpp, client.cpp, peer.cpp, message_builders.cpp, message_proce
 Code: `main/ble_client.{cpp,hpp}`, `main/vehicle_ctrl.{cpp,hpp}` (+ `vehicle_commands.cpp`,
 `vehicle_telemetry.cpp`, `vehicle_pairing.cpp`), `main/http_server.cpp` (+ `http_api.cpp`,
 `http_status.cpp`, `http_ota.cpp`, `http_config.cpp`), `main/command_exec.cpp`, `main/mqtt_ha.cpp`,
-`main/ota_update.cpp`, `main/Kconfig.projbuild`, `partitions.csv`.
+`main/ota_update.cpp`, `main/Kconfig.projbuild`, `sdkconfig.defaults*`, `partitions.csv`.
 Docs to hold accountable: [`README.md`](../../../README.md) and
 [`docs/SECURITY.md`](../../../docs/SECURITY.md).
 [`docs/API.md`](../../../docs/API.md) owns the HTTP command catalog.

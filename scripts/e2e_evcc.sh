@@ -20,11 +20,12 @@
 #                                       #   scheduled_charging) — PHYSICALLY actuates the car, NOT part
 #                                       #   of the evcc path; for a full post-flash command smoke test.
 #
+# Required (every mode, env var):
+#   ESP32_URL=http://<board-ip>      (the approved board. Every board announces the same
+#                                     tesla-key-esp32.local, so that name can reach another board)
+#
 # Overrides (env vars; fall back to the built-in defaults shown below if unset):
-#   ESP32_URL=http://tesla-key-esp32.local   (the device's mDNS name — resolvable from the
-#                                             pod on the same LAN; override with the IP if mDNS
-#                                             isn't available in your cluster)
-#   VIN=<auto>                       (unset → discovered from GET $ESP32_URL/status .vin, so the
+#   VIN=<auto>                      (unset → discovered from GET $ESP32_URL/status .vin, so the
 #                                     real vehicle identifier never has to live in this repo)
 #   EVCC_NS=default                  ITER=15  (vehicle_data burst size)
 #   TIMEOUT=15                       (per-request seconds; evcc itself uses a short client timeout)
@@ -36,7 +37,7 @@ ITER="${ITER:-15}"
 # clamp to >=1 so the pod-side vehicle_data loop never divides by zero (AVG=sum/N)
 [ "$ITER" -ge 1 ] 2>/dev/null || ITER=15
 TIMEOUT="${TIMEOUT:-15}"
-ESP32_URL="${ESP32_URL:-http://tesla-key-esp32.local}"
+ESP32_URL="${ESP32_URL:-}"
 VIN="${VIN:-}"   # empty → auto-discovered from the device's own /status below
 RUN_COMMANDS="${RUN_COMMANDS:-0}"
 ALLOW_CHARGE_TOGGLE="${ALLOW_CHARGE_TOGGLE:-0}"
@@ -527,6 +528,14 @@ PY
   expect_request "charge_stop" 'false' evcc_charge_stop
   expect_request "set_charging_amps" '{"charging_amps": 16}' evcc_max_current 16
 
+  # A live run must name its board and refuse before it contacts the cluster or a device.
+  local refused refused_rc=0
+  refused="$(env -u ESP32_URL bash "${BASH_SOURCE[0]}" 2>&1)" || refused_rc=$?
+  if [ "$refused_rc" -ne 2 ] || [[ "$refused" != *"approved board address"* ]]; then
+    echo "self_test FAILED: a live run without ESP32_URL must refuse (rc=$refused_rc)" >&2
+    exit 1
+  fi
+
   echo "e2e_evcc self-test: PASS"
   return 0
 }
@@ -534,6 +543,11 @@ PY
 if [ "${1:-}" = "--self-test" ]; then
   self_test
   exit 0
+fi
+
+if [ -z "$ESP32_URL" ]; then
+  echo "FATAL: set ESP32_URL to the approved board address; every board announces tesla-key-esp32.local" >&2
+  exit 2
 fi
 
 POD="$(kubectl get pod -n "$EVCC_NS" -l app=evcc -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"
