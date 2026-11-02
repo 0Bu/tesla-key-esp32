@@ -619,7 +619,8 @@ PY
 
 # gate_git_alias_kind <git-subcommand>
 #   Resolve only the exact repository's configured alias chain. A regular alias that reaches push
-#   is reported as push; a shell alias is opaque and therefore unsafe for every guarded action.
+#   is reported as push; a shell alias, or one that starts with a global option such as `-c`, is
+#   opaque and therefore unsafe for every guarded action.
 gate_git_alias_kind() {
   local command_name="$1" expansion first depth=0 seen=" "
   printf '%s' "$command_name" | grep -Eq '^[A-Za-z0-9_.-]+$' || return 1
@@ -643,7 +644,7 @@ PY
     )" || { printf 'opaque\n'; return 0; }
     case "$first" in
       push) printf 'push\n'; return 0 ;;
-      '') printf 'opaque\n'; return 0 ;;
+      ''|-*) printf 'opaque\n'; return 0 ;;
       *) command_name="$first" ;;
     esac
     depth=$((depth + 1))
@@ -654,6 +655,8 @@ PY
 # gate_gh_alias_kind <gh-command>
 #   gh aliases are local config and require no network. A regular alias is lexed as `gh <value>`;
 #   shell aliases are opaque because they may invoke git/gh through arbitrary shell expansion.
+#   `gh alias list` prints YAML, so a value with special characters arrives single-quoted; any
+#   other quoting is opaque.
 gate_gh_alias_kind() {
   local command_name="$1" aliases expansion kind
   command -v gh >/dev/null 2>&1 || return 1
@@ -662,6 +665,10 @@ gate_gh_alias_kind() {
   expansion="$(printf '%s\n' "$aliases" \
     | awk -F ': ' -v name="$command_name" '$1 == name { sub(/^[^:]*: /, ""); print; found++ }
       END { if (found != 1) exit 1 }')" || return 1
+  case "$expansion" in
+    *"''"*|\"*) printf 'opaque\n'; return 0 ;;
+    "'"*"'") expansion="${expansion#?}"; expansion="${expansion%?}" ;;
+  esac
   case "$expansion" in !*) printf 'opaque\n'; return 0 ;; esac
   kind="$(gate_lex_guarded_action "gh $expansion" 2>/dev/null || true)"
   case "$kind" in

@@ -20,7 +20,7 @@ one page at build time, plus the separate captive-portal `setup.html`), which is
 app binary. A successful local compile is not a flashable artifact:
 `CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=n` by design.
 
-> This flashes over **USB**. For a remote, no-cable update use OTA (**Check for updates**
+> This flashes over **USB**. For a remote, no-cable update use OTA (**Check for firmware updates**
 > in the web UI's **Firmware** row). USB flashing requires physical access and the board plugged in.
 
 > **Authorization boundary.** A build request authorizes no signing-key use or USB write. A review,

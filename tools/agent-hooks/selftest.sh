@@ -880,18 +880,32 @@ PY
 then pass_case 'neutral core has no foreign-project policy residue'; else fail_case 'foreign-project residue'; fi
 
 # A configured alias must not open an ungated path: a regular alias that reaches a guarded action
-# counts as that action, and a shell alias is opaque, so it counts for what it could hide.
+# counts as that action, and a shell alias or one with a leading global option is opaque, so it
+# counts for what it could hide. The gh fixture prints what `gh alias list` prints, YAML quoting
+# included.
 alias_repo="$tmp/alias-repo"
 alias_bin="$tmp/alias-bin"
+alias_none_bin="$tmp/alias-none-bin"
 git init -q "$alias_repo"
 git -C "$alias_repo" config alias.pp push
 git -C "$alias_repo" config alias.ppp pp
+git -C "$alias_repo" config alias.pg '-c foo.bar=1 push'
+git -C "$alias_repo" config alias.pgc pg
 git -C "$alias_repo" config alias.shx '!git push'
 git -C "$alias_repo" config alias.st status
-mkdir -p "$alias_bin"
-printf '#!/bin/sh\n[ "$1 $2" = "alias list" ] || exit 1\nprintf "mp: pr merge\\nco: pr checkout\\nsh: !git push\\n"\n' \
-  >"$alias_bin/gh"
-chmod +x "$alias_bin/gh"
+mkdir -p "$alias_bin" "$alias_none_bin"
+cat >"$alias_bin/gh" <<'GH'
+#!/bin/sh
+[ "$1 $2" = "alias list" ] || exit 1
+cat <<'LIST'
+co: pr checkout
+mp: pr merge
+mq: 'pr merge 1 --subject "a: b"'
+sh: '!git push'
+LIST
+GH
+printf '#!/bin/sh\n[ "$1 $2" = "alias list" ] || exit 1\n' >"$alias_none_bin/gh"
+chmod +x "$alias_bin/gh" "$alias_none_bin/gh"
 expect_alias_actions() {  # <command> <expected action kinds> <label>
   local got
   got="$(GATE_PROJ="$alias_repo" PATH="$alias_bin:$PATH" gate_bash_actions "$1" | cut -f1 | sort | xargs)"
@@ -899,11 +913,25 @@ expect_alias_actions() {  # <command> <expected action kinds> <label>
 }
 expect_alias_actions 'git pp' 'push' 'git alias that reaches push counts as a push'
 expect_alias_actions 'git ppp' 'push' 'git alias chain that reaches push counts as a push'
+expect_alias_actions 'git pg' 'create merge push' 'git alias with a leading global option is opaque to every guarded action'
+expect_alias_actions 'git pgc' 'create merge push' 'git alias chain to a leading global option is opaque to every guarded action'
 expect_alias_actions 'git shx' 'create merge push' 'shell git alias is opaque to every guarded action'
 expect_alias_actions 'git st' '' 'git alias that reaches no guarded action stays unguarded'
 expect_alias_actions 'gh mp 1' 'merge' 'gh alias that reaches pr merge counts as a merge'
-expect_alias_actions 'gh sh' 'create merge' 'shell gh alias is opaque to create and merge'
+expect_alias_actions 'gh mq' 'merge' 'quoted gh alias that reaches pr merge counts as a merge'
+expect_alias_actions 'gh sh' 'create merge' 'quoted shell gh alias is opaque to create and merge'
 expect_alias_actions 'gh co 1' '' 'gh alias that reaches no guarded action stays unguarded'
+
+# With no alias configured, the hook entry must still refuse a gh subcommand it does not know.
+expect_unknown_gh_block() {  # <command> <label>
+  local out rc
+  payload Bash command "$1" "$root" >"$tmp/alias.json"
+  out="$(env PATH="$alias_none_bin:$PATH" bash "$gate" --payload-file "$tmp/alias.json" 2>&1)"; rc=$?
+  if [ "$rc" = 2 ] && printf '%s' "$out" | grep -qF 'unknown gh subcommand'; then pass_case "$2"
+  else fail_case "$2 (rc=$rc: $(printf '%s' "$out" | tail -c 200))"; fi
+}
+expect_unknown_gh_block 'gh sh' 'hook entry refuses an unknown gh subcommand'
+expect_unknown_gh_block 'gh mp 1' 'hook entry refuses an unknown gh subcommand with arguments'
 
 # Shared-predicate loader canaries: a missing, truncated, incomplete or wrong-API pr-gate-lib.sh
 # must block before the payload is even parsed, which covers create, push and merge (all five
