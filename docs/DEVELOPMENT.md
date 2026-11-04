@@ -244,6 +244,32 @@ or an already-published image through `$usb-recovery`'s provenance and app-only 
 the implementation on that same board. Device delivery after merge remains a separately requested
 `$ship` operation.
 
+### Installed-layout proof
+
+Every app-only USB path, including standalone `$usb-recovery`, requires evidence of the selected
+board's installed partition table before writing. A matching chip or signed app does not establish
+its layout. Reuse collected evidence only while its physical-board binding and installed layout
+remain established. Otherwise obtain the missing bounded read scope and collect only the table
+metadata at the established table location (`0x8000`, at most `0x1000` bytes for this project),
+excluding NVS. `$deploy-bench` already authorizes its scoped preflight reads; do not request that
+approval again. Keep per-board evidence outside Git.
+
+Decode the table with the pinned SDK tooling and verify:
+
+- Valid entries and termination, and the format's checksum. A checksum-less historical table needs
+  independently established byte identity with a known compatible table; unknown integrity stops.
+- All regions fit the established physical flash capacity without overlap. The protected NVS range
+  remains `0x9000/0x6000`, and OTA data remains `0xf000/0x2000`.
+- The intended `ota_0` app starts at `0x20000`, has the correct app subtype and can hold the complete
+  verified signed image. Erasing OTA data must select that app, without a factory app taking priority.
+
+Compatible historical tables may omit newer diagnostic partitions or have different remaining
+regions; they need not equal today's table byte-for-byte. Record the actual table checks, selected
+image length/hash and same-board binding rather than a manually asserted pass flag. If evidence is
+missing, unreadable or incompatible, stop the app-only procedure. A broader conversion or
+bootloader/table recovery needs its separately authorized plan; it is not an automatic fallback.
+The retained-bootloader and signature checks remain separate prerequisites.
+
 ### Local OTA test before merge
 
 The global maintainer skill `$ota` tests the intended local source on an explicitly selected

@@ -378,6 +378,13 @@ pick can select the wrong device even when both share the same chip family.
 
 ### Retained-bootloader compatibility
 
+First complete the shared [installed-layout proof](../../../docs/DEVELOPMENT.md#installed-layout-proof)
+for this same board and signed image. This prerequisite applies to standalone recovery as well as
+delegated bench delivery: establish table integrity, protected NVS/otadata ranges, app location and
+capacity, and boot selection before any app-only step-3 write. Reuse valid collected evidence or obtain the
+missing bounded table-read scope; never infer compatibility from the chip or app signature. Unknown
+or incompatible layout stops the app-only path for a separately authorized recovery plan.
+
 The shared checker accepts stable `vMAJOR.MINOR[.PATCH]` descriptors only. Prerelease, development,
 dirty or unknown suffixes stop instead of being treated as equal to a stable release. This
 metadata comparison does not replace signed-artifact validation or prove runtime compatibility.
