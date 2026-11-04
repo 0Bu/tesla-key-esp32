@@ -8,6 +8,7 @@ Start with [installation, pairing and evcc](../README.md).
 | Integrate HTTP or MQTT | [API reference](API.md) |
 | Connect an MCP client | [MCP reference](MCP.md) |
 | Build firmware or change the project | [Development](DEVELOPMENT.md) |
+| Check which ESP-IDF features are used or evaluated, including the ULP assessment | [ESP-IDF matrix](ESP_IDF_MATRIX.md) |
 | Run or extend host tests | [Test guide](../test/README.md) |
 | Understand data flow, state, task ownership and recovery | [Architecture](ARCHITECTURE.md) |
 | Assess pre-HTTP USB-only recovery and the default-off cfg-only maintenance role | [Configuration recovery](CONFIG_RECOVERY.md) |
