@@ -222,10 +222,11 @@ static_assert(kHeapHistorySamples * kHeapHistoryDtS == 86400, "the trend is mean
 // into the partition that also holds the WiFi credentials and the private key, to keep an artifact
 // whose whole value is the last day — that trade was rejected when this file was written and it is
 // still wrong. What changes is that there is a third option between "RAM" and "flash": DRAM that
-// the startup code does not clear. A `.noinit` object survives every reset that KEPT POWER — a
-// software restart, a panic, a watchdog, an OTA reboot — which is exactly the set of events this
-// trend needs to outlive, and it costs zero flash writes and zero extra RAM (the ring simply moves
-// section). A power cut still clears it, and must: the values would be meaningless.
+// the startup code does not clear. A `.noinit` object can survive a software restart, panic or
+// watchdog reset while its memory stays intact. Across OTA, the object's address and size must
+// remain compatible and its bytes must survive boot loading/startup. Adoption checks magic,
+// fingerprint and CRC; power loss or overwritten bytes start an empty ring. It costs zero flash
+// writes and zero extra RAM (the ring simply moves section).
 //
 // WHY A CRC AND NOT A RESET-REASON CHECK. After a power-on the section holds whatever the SRAM
 // happened to power up as, so the retained image has to prove itself rather than be inferred from

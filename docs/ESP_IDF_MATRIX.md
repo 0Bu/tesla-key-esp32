@@ -49,7 +49,7 @@ The **Component/source** column names the exact CMake component or managed depen
 | U01 | Build system, four targets and reproducible application metadata | ✅ Direct | all | IDF core | One `main` component, gnu++17 with C++ exceptions, 4 MiB flash, per-target component locks, an embedded gzipped web UI, silent assertions, an esp32 ECO3 floor, reproducible metadata, and an application role plus a default-off config-repair role | [`CMakeLists.txt`](../CMakeLists.txt), [`main/CMakeLists.txt`](../main/CMakeLists.txt), [`sdkconfig.defaults`](../sdkconfig.defaults), [`esp-idf-toolchain.txt`](../esp-idf-toolchain.txt), [`DEVELOPMENT.md`](DEVELOPMENT.md) | [Build system](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32/api-guides/build-system.html) |
 | U02 | FreeRTOS kernel | ✅ Direct | all | IDF core | Fixed-priority tasks, queues, semaphores, event groups and `portMUX` critical sections. Also an 8 KiB main task, an end-of-stack watchpoint and stack high-water sampling | [`task_config.hpp`](../main/task_config.hpp), [`rtos_guard.hpp`](../main/rtos_guard.hpp), [`stack_watch.cpp`](../main/stack_watch.cpp), [`ARCHITECTURE.md`](ARCHITECTURE.md#concurrency-normative-contract) | [FreeRTOS](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32/api-reference/system/freertos.html) |
 | U03 | System, heap, logging, MAC and ROM APIs | ✅ Direct | all | IDF core | Restart and reset reason, the INTERNAL largest-free-block measure, logging and the bounded diagnostic ring. Also MAC-derived identity, the application descriptor, and ROM microsecond delays for board probes | [`main.cpp`](../main/main.cpp), [`heap_supervisor.cpp`](../main/heap_supervisor.cpp), [`http_status.cpp`](../main/http_status.cpp), [`diag_log.cpp`](../main/diag_log.cpp), [`board.cpp`](../main/board.cpp) | [System API](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32/api-reference/system/misc_system_api.html), [memory allocation](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32/api-reference/system/mem_alloc.html), [logging](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32/api-reference/system/log.html) |
-| U04 | Uninitialized DRAM retention (`.noinit`) | ✅ Direct | all | IDF core | The 24-hour heap trend survives resets that keep power. It is adopted only after magic, layout fingerprint and CRC validation. Whether it survives an OTA to a different image depends on the section address ([placement](#retention-placement)) | [`heap_trend.cpp`](../main/heap_trend.cpp), [`logic/heap_history.hpp`](../main/logic/heap_history.hpp) | [Memory types](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32/api-guides/memory-types.html) |
+| U04 | Uninitialized DRAM retention (`.noinit`) | ✅ Direct | all | IDF core | The 24-hour heap trend can survive resets while its bytes remain intact. Adoption checks magic, layout fingerprint and CRC. OTA retention also needs compatible placement of the retained object ([placement](#retention-placement)) | [`heap_trend.cpp`](../main/heap_trend.cpp), [`logic/heap_history.hpp`](../main/logic/heap_history.hpp) | [Memory types](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32/api-guides/memory-types.html) |
 | U05 | High-resolution timer and Task Watchdog | ✅ Direct | all | `esp_timer` | Monotonic deadlines, BLE and OTA budgets, and the timestamp read under the mailbox mux. The Task Watchdog runs at 60 s with panic and explicit subscriptions for blocking workers | [`task_watchdog_subscription.hpp`](../main/task_watchdog_subscription.hpp), [`vehicle_telemetry.cpp`](../main/vehicle_telemetry.cpp), [`mqtt_ha.cpp`](../main/mqtt_ha.cpp), [`sdkconfig.defaults`](../sdkconfig.defaults) | [ESP Timer](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32/api-reference/system/esp_timer.html), [watchdogs](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32/api-reference/system/wdts.html) |
 | U06 | Random numbers and startup entropy | ✅ Direct + 🧩 Backend | all | `bootloader_support`, IDF core | SAR-ADC entropy (`bootloader_random_enable`) stays active through key load and first-boot generation, before the radios start. PSA draws use the hardware RNG; the config-repair challenge uses `esp_fill_random` | [`main.cpp`](../main/main.cpp), [`config_repair.cpp`](../main/config_repair.cpp) | [Random number generation](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32/api-reference/system/random.html) |
 | U07 | Non-volatile storage | ✅ Direct | all | `nvs_flash` | Secret material: WiFi, VIN, MQTT settings, private key and sessions. Also display rotation and the safe-mode boot counter | [`nvs_storage.hpp`](../main/nvs_storage.hpp), [`nvs_storage.cpp`](../main/nvs_storage.cpp), [`display.cpp`](../main/display.cpp), [`SECURITY.md`](SECURITY.md#nvs-retention) | [NVS Flash](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32/api-reference/storage/nvs_flash.html) |
@@ -58,7 +58,7 @@ The **Component/source** column names the exact CMake component or managed depen
 | U10 | WiFi station and SoftAP | ✅ Direct | all | `esp_wifi` | Station with reconnect and the open setup AP; `WIFI_PS_MIN_MODEM` modem sleep, which BLE coexistence requires. No Enterprise, SAE-PK, WPA3-SoftAP or OWE. Static RX buffers are cut to 6 on esp32, esp32s3 and esp32c3; WiFi IRAM optimization is off on esp32s3 and esp32c3; esp32c3 TX power is capped at 10 dBm | [`net.cpp`](../main/net.cpp), [`provisioning.cpp`](../main/provisioning.cpp), [`sdkconfig.defaults`](../sdkconfig.defaults), [`USER_GUIDE.md`](USER_GUIDE.md#hardware) | [Wi-Fi](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32/api-reference/network/esp_wifi.html), [RF coexistence](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32/api-guides/coexist.html) |
 | U11 | Event loop and network interfaces | ✅ Direct | all | `esp_event`, `esp_netif` | Shared WiFi and Ethernet lifecycle, IP events and active-interface selection | [`net.cpp`](../main/net.cpp), [`net.hpp`](../main/net.hpp), [`main.cpp`](../main/main.cpp), [`ARCHITECTURE.md`](ARCHITECTURE.md#wifi--lan-connectivity) | [Event loop](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32/api-reference/system/esp_event.html), [ESP-NETIF](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32/api-reference/network/esp_netif.html) |
 | U12 | lwIP sockets, ICMP echo and SNTP | ✅ Direct | all | `lwip` | HTTP and setup-portal sockets, UDP syslog with an advisory ARP hint, and a gateway ping probe. SNTP runs through a guarded `sntp_sync_time` hook. IPv4 only, 16 sockets, 8×MSS TCP windows | [`syslog.cpp`](../main/syslog.cpp), [`ping_probe.hpp`](../main/ping_probe.hpp), [`net.cpp`](../main/net.cpp), [`provisioning.cpp`](../main/provisioning.cpp), [`main.cpp`](../main/main.cpp) | [lwIP](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32/api-guides/lwip.html), [ICMP echo](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32/api-reference/protocols/icmp_echo.html), [system time](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32/api-reference/system/system_time.html) |
-| U13 | External W5500 Ethernet over SPI | ✅ Direct + 📦 Managed | esp32s3 | `esp_eth`, `esp_driver_spi`, `espressif/w5500` | Optional wired transport, probed at boot for two verified boards. WiFi never starts when wired DHCP succeeds | [`net.cpp`](../main/net.cpp), [`idf_component.yml`](../main/idf_component.yml), [`sdkconfig.defaults.esp32s3`](../sdkconfig.defaults.esp32s3), [`USER_GUIDE.md`](USER_GUIDE.md#wired-networking-optional-esp32s3) | [Ethernet](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32s3/api-reference/network/esp_eth.html), [W5500 component](https://components.espressif.com/components/espressif/w5500) |
+| U13 | External W5500 Ethernet over SPI | ✅ Direct + 📦 Managed | esp32s3 | `esp_eth`, `esp_driver_spi`, `espressif/w5500` | Optional wired transport, probed at boot for two verified boards. A lease during the initial Ethernet wait avoids starting WiFi; a later lease closes and deinitializes an AP-only setup portal | [`net.cpp`](../main/net.cpp), [`main.cpp`](../main/main.cpp), [`idf_component.yml`](../main/idf_component.yml), [`sdkconfig.defaults.esp32s3`](../sdkconfig.defaults.esp32s3), [`USER_GUIDE.md`](USER_GUIDE.md#wired-networking-optional-esp32s3) | [Ethernet](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32s3/api-reference/network/esp_eth.html), [W5500 component](https://components.espressif.com/components/espressif/w5500) |
 | U14 | HTTP server | ✅ Direct | all | `esp_http_server` | Web UI, the evcc-compatible API, MCP and the setup portal. Bounded headers and URI; OTA checks run through the nonblocking work queue | [`http_server.cpp`](../main/http_server.cpp), [`http_common.cpp`](../main/http_common.cpp), [`mcp_server.cpp`](../main/mcp_server.cpp), [`provisioning.cpp`](../main/provisioning.cpp), [`ota_update.cpp`](../main/ota_update.cpp) | [HTTP server](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32/api-reference/protocols/esp_http_server.html) |
 | U15 | ESP-TLS, certificate bundle and HTTP parser | ✅ Direct + 🧩 Backend | all | `esp-tls`, `http_parser` | OTA transport over ESP-TLS with incremental `http_parser` parsing. Bundled CA roots verify OTA, MQTTS and the broker probe | [`ota_transport.cpp`](../main/ota_transport.cpp), [`ota_http.hpp`](../main/ota_http.hpp), [`mqtt_ha.cpp`](../main/mqtt_ha.cpp), [`http_config.cpp`](../main/http_config.cpp) | [ESP-TLS](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32/api-reference/protocols/esp_tls.html), [certificate bundle](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32/api-reference/protocols/esp_crt_bundle.html) |
 | U16 | MQTT client | ✅ Direct + 📦 Managed | all | `espressif/mqtt` | Home Assistant discovery, retained state, LWT availability and MQTTS without cleartext fallback | [`mqtt_ha.cpp`](../main/mqtt_ha.cpp), [`http_config.cpp`](../main/http_config.cpp), [`idf_component.yml`](../main/idf_component.yml) | [ESP-MQTT component](https://components.espressif.com/components/espressif/mqtt) |
@@ -158,7 +158,9 @@ documentation sources at ESP-IDF tag `v6.1`.
 4. **Remaining gap.** If the car stays asleep, its domains stay unknown until it wakes by itself.
    After the window closes, charge and drive refill through the wake or bootstrap one-shot.
    Climate, tires and closures wait for a command or for charging. The firmware never wakes a
-   parked car to refresh a display.
+   parked car with an explicit wake command merely to refresh a display. `NO_WAKE_SKIP` can still
+   allow Infotainment and SessionInfo traffic when sleep state is unknown or awake; its physical
+   wake effects have not been measured.
 
 ### Restart behavior that matters for retained data
 
@@ -193,9 +195,13 @@ N02 is not implemented. A separately reviewed change could keep the last vehicle
   restored marker that evcc-facing reads refuse.
 - **Contract change:** restored values marked by their age would replace the `{}` clearing. That
   changes the [Architecture](ARCHITECTURE.md) and [API](API.md) contracts.
-- **Cost and proof:** the snapshot uses RTC memory, which on esp32s3, esp32c3 and esp32c6 is also
-  a small heap region by default, so the cost must be measured. Proof needs host tests, all four
-  target builds and an on-hardware OTA between two different builds.
+- **Cost and proof:** the snapshot reduces the RTC fast-memory heap on esp32c3 and esp32c6.
+  On esp32s3, `RTC_NOINIT_ATTR` uses RTC slow memory by default; it consumes the fast-memory
+  heap only with `CONFIG_ESP32S3_RTCDATA_IN_FAST_MEM=y`
+  ([placement](https://github.com/espressif/esp-idf/blob/v6.1/components/esp_system/ld/esp32s3/sections.ld.in),
+  [heap reservation](https://github.com/espressif/esp-idf/blob/v6.1/components/heap/port/esp32s3/memory_layout.c)).
+  Measure the cost for the effective configuration. Proof needs host tests, all four target builds
+  and an on-hardware OTA between two different builds.
 
 ### Retention placement
 
@@ -208,10 +214,12 @@ The v6.1 linker scripts place DRAM `.noinit` directly after `.dram0.data`
   so DRAM also starts after an IRAM-sized offset. The `.noinit` address therefore moves whenever
   `.dram0.data` changes size, or IRAM does on those three targets. How often an OTA moves it is
   not measured.
-- **Effect on the heap trend.** The trend survives an OTA only if the address is unchanged. The
-  owner wording, "survives restarts" in [API](API.md) and "an OTA reboot" in the `heap_trend`
-  comments, does not state that condition. A follow-up should compare `_noinit_start` across two
-  release ELFs and then qualify the owner text.
+- **Effect on the heap trend.** Retention requires the actual `s_persist_raw` address and size
+  to remain compatible and its bytes to survive boot loading and startup. Adoption then checks
+  magic, layout fingerprint and CRC; otherwise the ring starts empty. Comparing `_noinit_start`
+  alone is insufficient when other `.noinit` objects can move within the section. Compare the
+  retained object's range in both release ELFs and verify adoption on the device; this has not
+  been measured across different builds. [API](API.md) owns the diagnostic contract.
 - **`.rtc_noinit` address.** It follows only other RTC sections (`.rtc.text`, `.rtc.force_fast`,
   `.rtc.data` and `.rtc.bss`, as each target places them;
   [`ld.rtc.sections`](https://github.com/espressif/esp-idf/blob/v6.1/components/esp_system/ld/ld.rtc.sections)).
@@ -437,8 +445,9 @@ and fails when:
 - **Components disagree.** A `REQUIRES` component of `main/CMakeLists.txt` (including the
   config-repair `list(APPEND ...)` entries) or a direct dependency in `main/idf_component.yml` has
   no used row. A used row names a component that is no longer required. `REQUIRES` contains an
-  unknown CMake variable.
-- **Configuration disagrees.** An active assignment in a `sdkconfig.defaults*` or
+  unknown CMake variable. Quoted component names are accepted; line and bracket comments do not
+  count as dependencies.
+- **Configuration disagrees.** An active assignment, including a repeated occurrence, in a `sdkconfig.defaults*` or
   `maintenance/config-repair/sdkconfig.defaults*` file is missing, stale or out of file order, or
   maps to a missing used row. A defaults overlay names an unsupported target.
 - **Headers disagree.** A non-project, non-standard header included under `main/` is not listed, or
