@@ -46,6 +46,7 @@ static esp_eth_netif_glue_handle_t s_eth_glue;
 static esp_netif_t* s_eth_netif;
 static EventGroupHandle_t s_eth_events;
 static std::atomic<bool> s_eth_link{true};
+static std::atomic<bool> s_eth_started{false};
 enum class NetLink { Eth };
 static constexpr int IP_EVENT = 1, IP_EVENT_ETH_GOT_IP = 2, ETH_EVENT = 3, ESP_EVENT_ANY_ID = -1;
 static void eth_event_handler(void*, int, int, void*) {}
@@ -162,6 +163,7 @@ static EthStartupResources acquire(unsigned mask, bool published = false, bool a
     s_eth_handle = published ? r.handle : nullptr;
     s_eth_glue = published ? r.glue : nullptr;
     s_eth_link.store(true);
+    s_eth_started.store(activated);
     return r;
 }
 static void check_owner_matches_model(const EthStartupResources& r) {
@@ -185,6 +187,7 @@ static void check_retained(const EthStartupResources& r, const EthStartupResourc
     CHECK(s_eth_handle == (before.published ? before.handle : nullptr));
     CHECK(s_eth_glue == (before.published ? before.glue : nullptr));
     CHECK(s_eth_link.load() && !model.withdrawn && model.spi_up && model.pending_rx);
+    CHECK(s_eth_started.load() == before.start_attempted);
     check_owner_matches_model(r);
 }
 static void activated_graph_is_retained() {
@@ -212,6 +215,7 @@ static void passive_acquisition_prefixes_unwind() {
         check_owner_matches_model(r);
         CHECK(!r.events && !r.netif && !r.mac && !r.phy && !r.handle && !r.glue);
         CHECK(!r.ip_handler_registered && !r.eth_handler_registered && !model.spi_up);
+        CHECK(!s_eth_started.load());
     }
     auto r = acquire(All, true);
     CHECK(eth_cleanup_startup(r));

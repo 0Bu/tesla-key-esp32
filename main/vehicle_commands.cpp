@@ -142,7 +142,7 @@ VehicleController::begin_completion_(uint32_t& generation) {
     return completion;
 }
 
-void VehicleController::invalidate_and_flush_(uint32_t generation) {
+void VehicleController::invalidate_and_flush_(uint32_t generation) noexcept {
     // Invalidate first so any in-flight or late completions are recognized as stale.
     if (command_generation_.load() == generation) {
         uint32_t next = generation + 1;
@@ -150,22 +150,25 @@ void VehicleController::invalidate_and_flush_(uint32_t generation) {
     }
     {
         tk::SemGuard g(vehicle_mutex_);
+        retire_vcsec_contexts_();
         try {
-            retire_vcsec_contexts_();
             command_runner_.clear();
-            command_builders_.fill(nullptr);
-            request_framer_reset_();
-            command_runner_.dispatcher().reset();
-            mark_vcsec_unknown_();
-        } catch (const std::exception& e) {
-            ESP_LOGE(TAG, "command FIFO flush threw (%s) — forcing BLE reset", e.what());
-            ble_fault_.store(true);
         } catch (...) {
-            ESP_LOGE(TAG, "command FIFO flush threw (unknown) — forcing BLE reset");
+            // Cancellation can allocate its diagnostic before releasing the head. Do not let
+            // persistent OOM retain that slot or any request behind it.
             ble_fault_.store(true);
         }
+        while (command_runner_.current_command()) command_runner_.pop_current();
+        command_builders_.fill(nullptr);
+        request_framer_reset_();
+        command_runner_.dispatcher().reset();
+        mark_vcsec_unknown_();
     }
-    if (ble_) ble_->disconnect();
+    try {
+        if (ble_) ble_->disconnect();
+    } catch (...) {
+        ble_fault_.store(true);
+    }
 }
 
 void VehicleController::note_completion_timeout_(
@@ -197,42 +200,51 @@ VehicleController::CommandOutcome VehicleController::await_completion_(
         const std::shared_ptr<CommandCompletion>& completion,
         uint32_t generation, uint32_t deadline, const char* name,
         tk::CompletionTimeoutPolicy timeout_policy) {
-    CommandOutcome out;
-    if (!completion || !completion->sem) {
-        out.error = "command completion unavailable";
-        return out;
-    }
-    const bool signalled =
-        xSemaphoreTake(completion->sem, ticks_until_(deadline)) == pdTRUE;
-    if (signalled && command_generation_.load() == generation) {
-        tk::completion_ok_note(completion_timeout_);
-        out.completed = completion->completed;
-        out.success   = completion->success;
-        out.failure   = completion->failure;
-        out.error     = completion->error.data();
-        if (!out.error.empty()) ESP_LOGW(TAG, "command failed: %s", out.error.c_str());
-        if (completion->drop_link) {
-            ESP_LOGW(TAG, "telemetry desync: %d consecutive BLE failures — dropping link to resync",
-                     kCmdFailDropStreak);
+    bool invalidated = false;
+    try {
+        CommandOutcome out;
+        if (!completion || !completion->sem) {
+            out.error = "command completion unavailable";
+            return out;
         }
-        if (completion->callback_fault) {
-            ESP_LOGE(TAG, "result callback failed — command result may be partial");
+        const bool signalled =
+            xSemaphoreTake(completion->sem, ticks_until_(deadline)) == pdTRUE;
+        if (signalled && command_generation_.load() == generation) {
+            tk::completion_ok_note(completion_timeout_);
+            out.completed = completion->completed;
+            out.success   = completion->success;
+            out.failure   = completion->failure;
+            out.error     = completion->error.data();
+            if (!out.error.empty()) ESP_LOGW(TAG, "command failed: %s", out.error.c_str());
+            if (completion->drop_link) {
+                ESP_LOGW(TAG, "telemetry desync: %d consecutive BLE failures — dropping link to resync",
+                         kCmdFailDropStreak);
+            }
+            if (completion->callback_fault) {
+                ESP_LOGE(TAG, "result callback failed — command result may be partial");
+            }
+            return out;
         }
-        return out;
-    }
 
-    // Copy only POD under Vehicle lock before invalidation discards queue evidence.
-    out.failure = tk::uncertain_command_failure();
-    {
-        tk::SemGuard g(vehicle_mutex_, pdMS_TO_TICKS(50));
-        if (g && command_generation_.load() == generation)
-            out.failure = command_runner_.pending_failure_info(completion->command_id);
+        // Copy only POD under Vehicle lock before invalidation discards queue evidence.
+        out.failure = tk::uncertain_command_failure();
+        {
+            tk::SemGuard g(vehicle_mutex_, pdMS_TO_TICKS(50));
+            if (g && command_generation_.load() == generation)
+                out.failure = command_runner_.pending_failure_info(completion->command_id);
+        }
+        invalidate_and_flush_(generation);
+        invalidated = true;
+        note_completion_timeout_(name, timeout_policy);
+        if (tk::execution_uncertain(out.failure)) out.error = tk::uncertain_command_reason();
+        else out.error = "command completion deadline exhausted";
+        return out;
+    } catch (...) {
+        // Result strings are fallible too. Release ownership before the outer HTTP/task
+        // boundary handles the failure; even a completed command must not strand the FIFO.
+        if (!invalidated) invalidate_and_flush_(generation);
+        throw;
     }
-    if (tk::execution_uncertain(out.failure)) out.error = tk::uncertain_command_reason();
-    else out.error = "command completion deadline exhausted";
-    note_completion_timeout_(name, timeout_policy);
-    invalidate_and_flush_(generation);
-    return out;
 }
 
 VehicleController::ResultCb VehicleController::make_result_cb_(

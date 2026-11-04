@@ -1779,7 +1779,7 @@ void VehicleController::loop_task_fn_(void* arg) {
         //   • a one-shot on the VCSEC wake edge (issue #264) or cache-invalid bootstrap, fired ONCE
         //     outside the window so a self-woken or rebooted-awake car refreshes its stale/empty SOC
         //     without our opening the window — otherwise evcc keeps acting on the stale reading or
-        //     coasts on HTTP 503s. While the window is open the 10 s cadence mostly covers it,
+        //     failing on HTTP 503s. While the window is open the 10 s cadence mostly covers it,
         //     but a pending one-shot can still fire between two cadence ticks; the drive
         //     companion poll is then enqueued too (a harmless duplicate of the rotation's
         //     drive slot: NO_WAKE_SKIP, and background items expire after 10 s).

@@ -398,9 +398,9 @@ bool VehicleController::vin_is_plausible(const std::string& vin) {
 // ─── link_state — single source of truth for the car's connectivity ──────────
 
 // Derived connectivity state — see the enum doc in vehicle_ctrl.hpp and the pure decision in
-// logic/link_state.hpp. Centralised so the web UI (/status) and the MQTT/HA bridge consume one
-// consistent answer. The k* thresholds below are defined in logic/link_state.hpp; their
-// rationale:
+// logic/link_state.hpp. Centralised so the web UI (/status), MCP, the MQTT/HA bridge and the REST
+// charging_state override consume one consistent answer. The k* thresholds below are defined in
+// logic/link_state.hpp; their rationale:
 //   kAwakeMaxAgeS     mirrors the old per-file thresholds (charge polls refresh contact
 //                     every ~10 s while the window is open, so 60 s won't flap).
 //   kReachableMaxAgeS must span TWO full idle health-probe cycles incl. one missed probe so a

@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import re
+import runpy
 import shutil
 import subprocess
 import tempfile
@@ -88,7 +89,40 @@ def main() -> None:
                               ("mac-failure-continues", unconfirmed_mac)):
             run_case(directory, mutant, label, True)
         run_case(directory, source, "restored-positive", False)
+        portal_source = (ROOT / "main/provisioning.cpp").read_text()
+        locator = runpy.run_path(str(ROOT / "test/test_runtime_boundary_contract.py"))["function_body_in"]
+        portal_body = "\n\n".join(
+            ("static bool " if name == "portal_close_ap" else "void ") + name +
+            ("(SetupPortal& portal, bool keep_station) " if name == "portal_close_ap" else
+             "(NvsStorageAdapter& config_store) ") + locator(portal_source, name)
+            for name in ("portal_close_ap", "provisioning_run_with_retry")
+        )
+        for label, body, negative in (
+            ("portal-positive", portal_body, False),
+            ("portal-wifi-release-omitted", replace_once(portal_body,
+             "const esp_err_t deinit_wifi = esp_wifi_deinit();", "const esp_err_t deinit_wifi = ESP_OK;"), True),
+            ("portal-stop-failure-ignored", replace_once(portal_body,
+             "stop_wifi != ESP_OK && stop_wifi != ESP_ERR_WIFI_NOT_STARTED", "stop_wifi != ESP_OK && false"), True),
+            ("portal-physical-detection-as-recovery", replace_once(portal_body,
+             "!tk::net_eth_started()", "!tk::net_eth_present()"), True),
+            ("portal-restored-positive", portal_body, False),
+        ):
+            fixture = directory / label
+            fixture.mkdir()
+            (fixture / "portal_cleanup.generated.hpp").write_text(body)
+            compiler = shutil.which(os.environ.get("CXX", "c++"))
+            compiled = subprocess.run([compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                "-I" + str(fixture), "-I" + str(ROOT / "main"),
+                str(ROOT / "test/test_portal_cleanup.cpp"), "-o", str(fixture / "portal")],
+                capture_output=True, text=True, timeout=30)
+            if compiled.returncode:
+                raise AssertionError(label + " must compile:\n" + compiled.stderr[-3000:])
+            result = subprocess.run([str(fixture / "portal")], capture_output=True, text=True, timeout=10)
+            expected = 42 if negative else 0
+            if result.returncode != expected or (negative and "Portal CHECK" not in result.stderr):
+                raise AssertionError(label + " did not reach its runtime oracle:\n" + result.stderr[-3000:])
     print("Ethernet actual cleanup: PASS (2 positives, 4 executable safety controls, 3 pin controls; passive SDK model only)")
+    print("Portal actual wait/cleanup: PASS (2 positives, 3 executable safety controls; passive SDK/clock model only)")
 
 
 if __name__ == "__main__":

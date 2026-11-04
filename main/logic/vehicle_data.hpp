@@ -7,6 +7,7 @@
 #include <string_view>
 #include <type_traits>
 
+#include "logic/link_state.hpp"
 #include "logic/units.hpp"
 
 // Vehicle-state result structs — the cached shapes VehicleController hands to every
@@ -114,13 +115,23 @@ inline double vehicle_data_number(double value) noexcept {
     return std::isfinite(value) ? value : 0.0;
 }
 
+// charging_state is the field evcc reads as the car's plugged-in status. The cache is never
+// invalidated on a link loss, so a car that drove off would stay "Complete" (evcc B) or "Charging"
+// (C) until it returned. Once the link is Unreachable the state is unknown; the jq mapping turns
+// that into A. The numeric fields stay last-known, because an HTTP 503 would stop evcc's loadpoint
+// cycle on some chargers. docs/API.md (Vehicle data) owns the conditions and the trade-off.
+inline const char* vehicle_charging_state(const ChargeStateResult& cs, LinkState link) noexcept {
+    if (link == LinkState::Unreachable) return "Unknown";
+    return cs.charging_state.empty() ? "Unknown" : cs.charging_state.c_str();
+}
+
 // Serialize charge_state for GET /api/1/vehicles/{VIN}/vehicle_data
 // Shape mirrors Tesla Fleet API / TeslaBleHttpProxy: always emits every field so evcc
 // parsing floats/ints never hits a missing key. On failure/omission, cs is zero-initialised
 // and minutes_to_full_charge emits 0 (where evcc's > 0 guard correctly yields "").
 template <typename Emitter>
-void emit_vehicle_charge_state(const ChargeStateResult& cs, Emitter& e) {
-    e.str("charging_state", cs.charging_state.empty() ? "Disconnected" : cs.charging_state.c_str());
+void emit_vehicle_charge_state(const ChargeStateResult& cs, LinkState link, Emitter& e) {
+    e.str("charging_state", vehicle_charging_state(cs, link));
     e.num("battery_level",          vehicle_data_number(cs.battery_level));
     e.num("usable_battery_level",   vehicle_data_number(cs.has_usable_battery_level ? cs.usable_battery_level : cs.battery_level));
     e.num("charge_limit_soc",       vehicle_data_number(cs.charge_limit_soc));

@@ -39,8 +39,13 @@ bool net_eth_probe();
 // CONFIG_TESLA_ETH_WAIT_S intervals for DHCP while the link remains present.
 // Returns true only with a lease in hand — a controller with no cable, a dead switch port or an
 // absent DHCP server all return false so the caller can give WiFi a turn. The driver keeps
-// running either way, so a cable plugged in later still comes up.
+// running after a link/lease deadline, so a cable plugged in later still comes up. Construction
+// failures release the driver instead; use net_eth_started() to distinguish those outcomes.
 bool net_start_eth();
+
+// A successfully activated Ethernet driver remains available for late link/DHCP recovery.
+// False after construction fallback and on builds without Ethernet; not a current lease check.
+bool net_eth_started();
 
 // Bring up the WiFi station and wait for a DHCP lease.
 //

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import runpy
 import re
@@ -1546,7 +1547,7 @@ def require_status_production_seams(producer: str, handler: str, emitter_header:
 
 
 VEHICLE_DATA_SEAMS = (
-    "tk::StatusJsonEmitter", "tk::emit_vehicle_charge_state", "e.release()",
+    "tk::StatusJsonEmitter", "tk::emit_vehicle_charge_state(cs, g_vehicle->link_state(), e)", "e.release()",
     "strchr(req->uri, '?')", 'tk::parse_vehicle_data_endpoints(query ? query + 1 : "")',
     "endpoints.empty() || endpoints.has_unsupported", "static_assert(kQueryBufBytes == 128",
     "endpoints.charge_state && g_vehicle->get_charge_state(cs)",
@@ -1638,6 +1639,43 @@ CLIMATE_GETTER_FORBIDDEN = (
     ("ChargeStateResult c = last_known_charge_;", r"\bChargeStateResult\b"),
     ("auto c = copy_locked_(last_known_charge_);", r"copy_locked_"),
 )
+# These lexical inventories complement the semantic and lock-scope checks below. An added call
+# name is a review event, including vehicle-status reads that can connect or wake.
+CACHE_READ_ALLOWED_CALLS = {
+    "get_charge_state": {
+        "g", "load", "xTaskGetTickCount", "active_window_now_", "charge_cache_usable", "exchange",
+        "ESP_LOGW", "move",
+    },
+    "get_vehicle_climate": {
+        "g", "load", "vehicle_climate_data", "xTaskGetTickCount", "active_window_now_",
+        "climate_cache_usable",
+    },
+    "active_window_now_": {"load", "pdMS_TO_TICKS", "seconds_since_contact", "active_window_open"},
+}
+CACHE_READ_FORBIDDEN_CALLS = (
+    "{ VehicleStatusResult vs; (void)get_vehicle_status(vs, tk::ConnectOrigin::Foreground, 1000); }",
+    "(void)ensure_connected_until_(0, tk::ConnectOrigin::Foreground);",
+    "charge_state_poll();",
+    "enqueue_background_poll_();",
+    "(void)wake_up();",
+    "(void)send_infotainment_(nullptr, 0);",
+    "(void)send_vcsec_(nullptr, 0);",
+    "(void)pair();",
+    "(void)set_charging_amps(16);",
+    "tk::SemGuard c(command_mutex_);",
+    "auto copy = copy_locked_(last_known_charge_);",
+    'ESP_LOGI(TAG, "x");',
+)
+
+
+def require_cache_read_call_inventory(name: str, body: str) -> None:
+    calls = called_functions(body)
+    expected = CACHE_READ_ALLOWED_CALLS[name]
+    if calls != expected:
+        raise AssertionError(
+            f"{name}: cache-read call inventory drift: unexpected={sorted(calls - expected)}, "
+            f"missing={sorted(expected - calls)}"
+        )
 
 
 def if_statement_at(code: str, at: int, label: str) -> tuple[str, int, int]:
@@ -1693,6 +1731,7 @@ def require_vehicle_climate_getter_seam(source: str) -> None:
     for _, pattern in CLIMATE_GETTER_FORBIDDEN:
         if re.search(pattern, code):
             raise AssertionError(f"climate getter added a non-cache operation: {pattern}")
+    require_cache_read_call_inventory("get_vehicle_climate", raw)
     # The freshness decision must follow the unlock, never run under cache_mutex_.
     layout = scrub_cpp_preserving_layout(raw)
     _, locked_end = scope_around(layout, "tk::SemGuard g(cache_mutex_);")
@@ -1743,6 +1782,8 @@ CHARGE_GETTER_FORBIDDEN = (
     ("wake_up();", r"\bwake_up\b"),
     ("ble_->connect(\"\");", r"\bble_"),
     ("client_->x();", r"\bclient_"),
+    ("(void)command_mutex_;", r"command_mutex_"),
+    ("std::string s;", r"std::string"),
 )
 # active_window_now_() is the window both cache getters and the background poll share; dropping
 # its command or charging arm would silently disable in-window freshness everywhere.
@@ -1751,6 +1792,15 @@ ACTIVE_WINDOW_SEAMS = (
     "const bool recent_cmd = (lc != 0) && ((now_ticks - lc) < pdMS_TO_TICKS(kActiveWindowMs));",
     "const bool have_contact = seconds_since_contact(contact_age);",
     "return tk::active_window_open({recent_cmd, charging_state, have_contact, contact_age});",
+)
+# The contact age also has a reference write in seconds_since_contact(), which cpp_writes does
+# not count. These are the initializers; a later assignment must not bypass a pinned input.
+ACTIVE_WINDOW_WRITES = {"lc": 1, "recent_cmd": 1, "contact_age": 1, "have_contact": 1}
+CACHE_SEAM_WIRING = (
+    "require_vehicle_climate_cache_seam", "require_vehicle_drive_cache_seam",
+    "require_vehicle_drive_getter_seam", "require_vehicle_climate_getter_seam",
+    "require_charge_state_getter_seam", "require_active_window_seam",
+    "require_climate_publication_stamp",
 )
 
 
@@ -1762,12 +1812,31 @@ def cpp_writes(code: str, name: str) -> int:
 
 
 def require_active_window_seam(source: str) -> None:
-    code = " ".join(scrub_cpp(function_body_in(source, "active_window_now_")).split())
+    raw = function_body_in(source, "active_window_now_")
+    code = " ".join(scrub_cpp(raw).split())
     for token in ACTIVE_WINDOW_SEAMS:
         if token not in code:
             raise AssertionError(f"active window lost its command/charging/contact input: {token}")
     if len(re.findall(r"\breturn\b", code)) != 1:
         raise AssertionError("active window must have exactly one return (the shared decision)")
+    for name, expected in ACTIVE_WINDOW_WRITES.items():
+        if cpp_writes(code, name) != expected:
+            raise AssertionError(f"active window writes {name} {cpp_writes(code, name)}x, expected {expected}")
+    require_cache_read_call_inventory("active_window_now_", raw)
+
+
+def require_cache_seam_wiring(contract_source: str) -> None:
+    for node in ast.parse(contract_source).body:
+        if isinstance(node, ast.FunctionDef) and node.name == "require_runtime_source_contracts":
+            calls = {
+                call.func.id for call in ast.walk(node)
+                if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+            }
+            missing = set(CACHE_SEAM_WIRING) - calls
+            if missing:
+                raise AssertionError(f"cache seam checks are no longer run: {sorted(missing)}")
+            return
+    raise AssertionError("contract runner require_runtime_source_contracts is missing")
 
 
 def strip_cpp_comments(text: str) -> str:
@@ -1789,6 +1858,7 @@ def require_charge_state_getter_seam(source: str) -> None:
     for _, pattern in CHARGE_GETTER_FORBIDDEN:
         if re.search(pattern, code):
             raise AssertionError(f"charge getter added a non-cache operation: {pattern}")
+    require_cache_read_call_inventory("get_charge_state", raw)
     # The snapshot is copied inside the locked scope; the freshness decision follows the unlock.
     layout = scrub_cpp_preserving_layout(raw)
     locked_start, locked_end = scope_around(layout, "tk::MutexGuard g(cache_mutex_);")
@@ -3524,6 +3594,9 @@ def require_syslog_start_lifetime_contract(syslog_source: str, gate_header: str,
 
 
 def require_ethernet_start_cleanup_contract(net_source: str, runtime_tests: str) -> None:
+    if "static std::atomic<bool> s_eth_started{false};" not in net_source or \
+            "return s_eth_started.load();" not in function_body_in(net_source, "net_eth_started"):
+        raise AssertionError("Ethernet recovery admission must start false and read activation state")
     cleanup = function_body_in(net_source, "eth_cleanup_startup")
     for token in (
         "esp_eth_stop(r.handle)", "esp_event_handler_unregister(",
@@ -3531,7 +3604,7 @@ def require_ethernet_start_cleanup_contract(net_source: str, runtime_tests: str)
         "ETH_EVENT, ESP_EVENT_ANY_ID, eth_event_handler", "if (r.published)",
         "esp_eth_del_netif_glue(r.glue)", "esp_eth_driver_uninstall(r.handle)",
         "r.mac->del(r.mac)", "r.phy->del(r.phy)", "esp_netif_destroy(r.netif)",
-        "vEventGroupDelete(r.events)", "eth_release_spi_bus()",
+        "vEventGroupDelete(r.events)", "eth_release_spi_bus()", "s_eth_started.store(false);",
     ):
         if token not in cleanup:
             raise AssertionError(f"Ethernet reverse cleanup missing {token!r}")
@@ -3570,6 +3643,11 @@ def require_ethernet_start_cleanup_contract(net_source: str, runtime_tests: str)
                    "r.ip_handler_registered = true;", "s_eth_events = r.events;")
     require_before("Ethernet coherent publication before activation", start,
                    "r.published = true;", "esp_eth_start(r.handle)")
+    activation = ('err = esp_eth_start(r.handle); if (err != ESP_OK) { '
+                  'ESP_LOGE(TAG, "Ethernet driver start failed: %s", esp_err_to_name(err)); '
+                  'eth_startup_fatal(r, "Ethernet driver start"); } s_eth_started.store(true);')
+    if activation not in " ".join(start.split()) or start.count("s_eth_started.store(true);") != 1:
+        raise AssertionError("Ethernet recovery must be admitted only after successful activation")
     post_start = start[start.find("esp_eth_start(r.handle)"):]
     if "eth_startup_fallback(r)" in post_start:
         raise AssertionError("Ethernet no-link/DHCP fallback tears down the live driver")
@@ -3687,28 +3765,30 @@ def require_explicit_idf_boot_error_contract(main_source: str, net_source: str,
             "while (true) { tk::StackWatchScope f135_portal_wait_exit(tk::StackWatch::Main); vTaskDelay(pdMS_TO_TICKS(1000)); }" not in terminal:
         raise AssertionError("first-time setup portal must stay terminal")
     retry = function_body_in(provisioning_source, "provisioning_run_with_retry")
-    for token in ("if (!tk::net_wifi_station_started()) {", "provisioning_run(config_store);",
-                  "portal_open(config_store, /*keep_station=*/true);", "tk::portal_step(state,",
+    for token in ("const bool retry_station = tk::net_wifi_station_started();",
+                  "if (!retry_station && !tk::net_eth_started()) {", "provisioning_run(config_store);",
+                  "portal_open(config_store, retry_station);", "tk::portal_step(state,",
+                  "{tk::net_is_up(), ap_open, clients, now_s, retry_station}",
                   "tk::net_wifi_retry_station();", "return;", "esp_timer_get_time()"):
         if token not in retry:
             raise AssertionError(f"retrying setup portal lost {token!r}")
     # A failed AP close keeps the AP marked open and is reported to the policy (backoff); Leave
     # continues the boot only once the AP is down.
     retry_flat = " ".join(scrub_cpp(retry).split())
-    for token in ("if (portal_close_ap(portal)) ap_open = false; else tk::portal_close_failed(state, now_s);",
-                  "if (ap_open && !portal_close_ap(portal)) { tk::portal_close_failed(state, now_s); break; }"):
+    for token in ("if (portal_close_ap(portal, retry_station)) ap_open = false; else tk::portal_close_failed(state, now_s);",
+                  "if (ap_open && !portal_close_ap(portal, retry_station)) { tk::portal_close_failed(state, now_s); break; }"):
         if token not in retry_flat:
             raise AssertionError(f"retrying setup portal lost {token!r}")
     # APSTA needs the running station: rejected credentials take the terminal portal first.
     require_before("retrying setup portal falls back before joining a missing station", retry,
-                   "if (!tk::net_wifi_station_started()) {", "provisioning_run(config_store);")
+                   "if (!retry_station && !tk::net_eth_started()) {", "provisioning_run(config_store);")
     require_before("retrying setup portal falls back before joining a missing station", retry,
-                   "provisioning_run(config_store);", "portal_open(config_store, /*keep_station=*/true);")
+                   "provisioning_run(config_store);", "portal_open(config_store, retry_station);")
     # The terminal fallback must sit INSIDE the station check, or the retrying portal is dead code.
     retry_code = scrub_cpp(retry)
-    guard = retry_code.find("if (!tk::net_wifi_station_started()) {")
+    guard = retry_code.find("if (!retry_station && !tk::net_eth_started()) {")
     if guard < 0 or "provisioning_run(config_store);" not in retry_code[guard:retry_code.find("}", guard)]:
-        raise AssertionError("the terminal setup portal must be reached only without a running station")
+        raise AssertionError("terminal setup must remain available without a started recovery transport")
     if "[[noreturn]] void provisioning_run(NvsStorageAdapter& config_store);" not in \
             (ROOT / "main/provisioning.hpp").read_text(encoding="utf-8"):
         raise AssertionError("provisioning_run must be declared [[noreturn]]")
@@ -3717,14 +3797,21 @@ def require_explicit_idf_boot_error_contract(main_source: str, net_source: str,
     # The boot takes the retrying portal after a stored-credential WiFi failure; the terminal one
     # stays for missing credentials and for a rollback that could not be persisted.
     boot = " ".join(main_source.split())
-    if boot.count("provisioning_run_with_retry(config_store);") != 1:
-        raise AssertionError("the boot must call the retrying setup portal exactly once")
-    require_before("stored-credential WiFi failure takes the retrying portal", boot,
+    if boot.count("provisioning_run_with_retry(config_store);") != 2:
+        raise AssertionError("the boot must recover both missing-WiFi Ethernet and stored-WiFi failures")
+    wired_start = boot.find("if (!on_wire && ssid.empty()) {")
+    wifi_start = boot.find("!tk::net_start_wifi(ssid.c_str(), password.c_str(), cfg_blob.wifi_rollback_active)) {")
+    wired_recovery = boot[wired_start:wifi_start]
+    for token in ("provisioning_run_with_retry(config_store);", "on_wire = tk::net_kind() == tk::NetLink::Eth;"):
+        if wired_start < 0 or token not in wired_recovery:
+            raise AssertionError(f"credential-free Ethernet recovery lost {token}")
+    wifi_boot = boot[wifi_start:]
+    require_before("stored-credential WiFi failure takes the retrying portal", wifi_boot,
                    "!tk::net_start_wifi(ssid.c_str(), password.c_str(), cfg_blob.wifi_rollback_active)) {",
                    "provisioning_run_with_retry(config_store);")
-    unpersisted = boot.find("} else if (rollback_unpersisted) {")
+    unpersisted = wifi_boot.find("} else if (rollback_unpersisted) {")
     if unpersisted < 0 or "provisioning_run(config_store);" not in \
-            boot[unpersisted:boot.find("provisioning_run_with_retry(config_store);")]:
+            wifi_boot[unpersisted:wifi_boot.find("provisioning_run_with_retry(config_store);")]:
         raise AssertionError("an unpersisted rollback must take the terminal setup portal")
     # The captive DNS task must be stoppable (receive timeout applied, or no task) and must not
     # spin on a persistent socket error.
@@ -6072,6 +6159,8 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
         ("forced closed", "    const uint32_t lc", "    return false;\n    const uint32_t lc"),
         ("charging arm dropped", "{recent_cmd, charging_state,", "{recent_cmd, false,"),
         ("command arm dropped", "{recent_cmd, charging_state,", "{false, charging_state,"),
+        ("contact age reset before the decision",
+         "    return tk::active_window_open(", "    contact_age = 0;\n    return tk::active_window_open("),
     ):
         if old not in window_body:
             raise AssertionError(f"active window semantic mutation did not apply: {old}")
@@ -6079,6 +6168,45 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
             f"active window {label}",
             lambda old=old, new=new: require_active_window_seam(
                 climate_telemetry.replace(window_body, window_body.replace(old, new, 1), 1)),
+        )
+
+    # Prove each new call is rejected by the inventory itself, independently of neighbouring pins.
+    for name, body, check in (
+        ("get_charge_state", charge_getter, require_charge_state_getter_seam),
+        ("get_vehicle_climate", climate_getter, require_vehicle_climate_getter_seam),
+        ("active_window_now_", window_body, require_active_window_seam),
+    ):
+        for injected in CACHE_READ_FORBIDDEN_CALLS:
+            mutated = body.replace("{", "{ " + injected, 1)
+            require_mutation_rejected(
+                f"{name} call inventory {injected!r}",
+                lambda name=name, mutated=mutated: require_cache_read_call_inventory(name, mutated),
+            )
+            require_mutation_rejected(
+                f"{name} non-cache call {injected!r}",
+                lambda body=body, check=check, mutated=mutated: check(
+                    climate_telemetry.replace(body, mutated, 1)),
+            )
+    require_mutation_rejected(
+        "get_charge_state call inventory missing the stale log",
+        lambda: require_cache_read_call_inventory(
+            "get_charge_state", charge_getter.replace("ESP_LOGW(", "(void)(", 1)),
+    )
+    output_line = "    if (!tk::charge_cache_usable("
+    require_mutation_rejected(
+        "charge getter output written before the verdict",
+        lambda: require_charge_state_getter_seam(
+            charge_getter_mutated(output_line, "    out = cached;\n" + output_line)),
+    )
+    contract_text = Path(__file__).read_text(encoding="utf-8")
+    require_cache_seam_wiring(contract_text)
+    for name in CACHE_SEAM_WIRING:
+        unwired = contract_text.replace(f"\n    {name}(", f"\n    _unwired_{name}(")
+        if unwired == contract_text:
+            raise AssertionError(f"cache seam wiring mutation did not apply: {name}")
+        require_mutation_rejected(
+            f"cache seam check {name} no longer run",
+            lambda unwired=unwired: require_cache_seam_wiring(unwired),
         )
 
     stamp_lines = ("                last_climate_ticks_.store(xTaskGetTickCount());\n"
@@ -7114,6 +7242,11 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
             "Ethernet retired mirrored fixture restored",
             net_source,
             runtime_tests + "\nstruct EthernetStartupFixture {};\n",
+        ),
+        (
+            "Ethernet activation admission omitted",
+            net_source.replace("s_eth_started.store(true);", "", 1),
+            runtime_tests,
         ),
     ):
         require_mutation_rejected(

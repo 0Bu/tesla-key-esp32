@@ -67,8 +67,9 @@
 #include <vector>
 
 static bool fail_next_cpp_allocation = false;
+static bool fail_cpp_allocations = false;
 void* operator new(std::size_t size) {
-    if (fail_next_cpp_allocation) { fail_next_cpp_allocation = false; throw std::bad_alloc(); }
+    if (fail_cpp_allocations || fail_next_cpp_allocation) { fail_next_cpp_allocation = false; throw std::bad_alloc(); }
     if (void* value = std::malloc(size ? size : 1)) return value;
     throw std::bad_alloc();
 }

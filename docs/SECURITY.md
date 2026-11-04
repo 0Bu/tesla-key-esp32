@@ -12,7 +12,7 @@ charging, but cannot unlock or drive. NVS also holds WiFi credentials, VIN and M
 |---|---|
 | Physical USB/JTAG | Factory flash is readable and firmware replaceable; protection requires separately planned hardware hardening. |
 | LAN/API | Unauthenticated plaintext control; trusted LAN, firewall/VLAN or authenticated reverse proxy. |
-| BLE | Tesla application crypto, authenticated responses, request binding and replay windows; NimBLE SMP/bonding is compiled out on all targets. |
+| BLE | Encrypted replies are authenticated and replay-checked. Legacy plaintext replies remain accepted under request UUID/address and one-response checks; those checks do not authenticate the sender. NimBLE SMP/bonding is compiled out on all targets. |
 | Build/publication | Pinned inputs, independent rebuild, protected signing and byte-bound artifacts. |
 
 First-boot key generation enables hardware entropy before WiFi/BLE. IDF6 PSA draws from the hardware
@@ -41,10 +41,13 @@ log, commit, upload, publicly attach or casually inspect them.
 
 ### NVS retention
 
-`main/logic/nvs_contract.hpp` owns the exact namespace/key/API/retention inventory and records
+`main/logic/nvs_contract.hpp` owns the exact application/pinned-library namespace/key/API/retention inventory and records
 which entries contain secrets. The secret flag is classification metadata; it does not encrypt or
 redact stored values. The storage adapter rejects unknown records, wrong APIs, collisions and names
 over 15 bytes.
+
+SDK-owned WiFi settings and PHY calibration also share this partition. Its secrecy and
+preservation requirements cover those records as well; they are outside the application registry.
 
 | Namespace / logical key (stored key where different) | Owner | Retention |
 |---|---|---|
@@ -76,16 +79,27 @@ flash** requires a separate confirmation with a secret-NVS backup reminder befor
 starts. Firmware rollback does not restore keys/configuration. Destructive or identity work needs
 explicit authorization and a backup/rollback plan.
 
+## MQTT transport
+
+Schemeless broker entries select TLS when a username or URI userinfo exists; credential-free
+entries select plaintext. Explicit `mqtt://` and `mqtts://` schemes are honored, so an explicit
+plaintext URI can send credentials without encryption. TLS verifies bundled CA roots and has no
+plaintext fallback. Status exposes the selected transport and connection error without broker
+credentials. Configuration belongs to the [user guide](USER_GUIDE.md#home-assistant-mqtt);
+the [runtime owner](ARCHITECTURE.md#home-assistant-mqtt-bridge) defines admission and retries.
+
 ## HTTP API exposure
 
 Port 80 has no authentication or TLS. Any LAN peer can call commands, change configuration/identity,
 trigger updates or remove crash evidence; the key role bounds car privileges, not device control.
 Never port-forward the device. Setup AP is open and provisioning uses plaintext HTTP; keep its
-window short. With stored credentials the open setup AP closes when the network comes up, after 10
+window short. With a running WiFi station or a successfully started Ethernet driver waiting for a lease, the open
+setup AP closes when the network comes up, after 10
 minutes without a client, and 30 minutes after opening even with one; a failed close is retried
 with backoff, the boot does not continue while the AP is up, and a power cycle reopens it.
-First-time setup, stored credentials that fail validation, and a credential rollback that could not
-be saved keep it open until the form is saved. mDNS advertises version, not VIN.
+Without either recovery transport, first-time setup or unusable credentials keep it open until
+the form is saved, including after Ethernet driver construction fails. An unsaved rollback also keeps the
+terminal portal open. mDNS advertises version, not VIN.
 
 Browser mutations require a device-owned Host, matching Origin when present, and no cross-site
 fetch. Owned names are the shared DHCP boot name and the current mDNS name (bare or `.local`),
@@ -242,16 +256,10 @@ acceptance binds firmware to an immutable Release/tag; Dev checks its declared s
 requiring a Release. Both require exact served changelog bytes. Absent Dev authority falls back to
 the stable baseline; known metadata or served-byte mismatches keep reconciliation open.
 
-Stable and Dev acceptance first observe the latest Pages build with up to eight status reads and
-exponential delays capped at 60 seconds (310 seconds of default waiting). Queued/building, failed
-builds and unavailable status have distinct diagnostics before byte acceptance starts. This latest
-build observation is a readiness hint, not provenance for a particular firmware snapshot.
-Post-publication byte acceptance then retries the complete manifest, all 16 Pages parts and changelog with
-exponential delays capped at 60 seconds (190 seconds of default waiting). Each attempt uses a fresh
-cache key and must independently pass all
-identity, size, hash and byte-binding checks. Results from incomplete attempts are never combined.
-Invalid staged Dev bytes, expected changelog or immutable Release metadata/assets fail before Pages polling. This
-handles delayed CDN propagation; it does not establish an atomic CDN snapshot.
+Publication acceptance requires a complete fresh manifest/part/changelog snapshot; incomplete
+attempts cannot be combined. [Development](DEVELOPMENT.md#served-pages-acceptance) owns the bounded
+readiness polling, byte checks and retry procedure.
+
 A stale run must not replace unrepresented firmware. Top-level `docs/*.md` files are shipped Pages
 content, so their changes follow the normal four-target build, independent rebuild and protected
 Dev publication. Older firmware is never relabelled with a newer documentation source SHA. Unshipped

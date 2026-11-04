@@ -14,7 +14,7 @@
 // wake-edge detector never sees an ASLEEP→AWAKE transition, so nothing refreshes the cache.
 //   • Device power-cycle / reboot: last_known_charge_ starts invalid, and if the car is already
 //     awake (or wakes before a stable asleep run can accumulate) no edge ever arrives. evcc gets
-//     HTTP 503 ("stale or unavailable"), coasts on its own cache, and never sends a command.
+//     HTTP 503 ("stale or unavailable"), treats the read as failed, and never sends a command.
 //   • The car drives away and comes back (the common daily case): the pre-drive wake already
 //     consumed the arm, BLE drops on departure — which forces the sleep mirror to UNKNOWN — and the
 //     reconnect on arrival reads AWAKE. That is an UNKNOWN→AWAKE transition, which never fires, and

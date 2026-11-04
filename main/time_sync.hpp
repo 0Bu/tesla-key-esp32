@@ -6,7 +6,7 @@
 // Restored and browser time are temporary estimates. Historical dates have no source marker.
 bool clock_is_authoritative() noexcept;
 bool clock_synced_via_ntp() noexcept; // ever committed; a later failed sync does not clear it
-int64_t clock_plausibility_ceiling() noexcept; // exclusive, build year + 10
+int64_t clock_plausibility_ceiling() noexcept; // exclusive; reproducible no-date builds use 2033-01-01
 
 enum class BrowserClockStatus : uint8_t { Applied, AlreadyNtpSynced, Busy, Invalid, SetFailed };
 struct BrowserClockResult { BrowserClockStatus status; int64_t seconds; };

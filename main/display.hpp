@@ -29,8 +29,8 @@ class VehicleController;
 //     ble_*/link_state accessors — it NEVER triggers a BLE round-trip, so it can
 //     never wake the car or queue behind a poll in the single BLE FIFO.
 //   • Independent of MQTT — needs no live MQTT session.
-//   • Framebuffer: PSRAM where present, else ~25 KB of internal SRAM allocated once at
-//     boot, before WiFi/BLE fragment the heap. The shipped esp32s3 build enables no PSRAM
+//   • Framebuffer: PSRAM where present, else ~25 KB of internal SRAM allocated once by
+//     the optional display startup after network/BLE services. The shipped build enables no PSRAM
 //     (a generic ESP32-S3 may have none), so in practice the internal path is what runs;
 //     only a one-line bounce buffer is internal/DMA either way.
 //
