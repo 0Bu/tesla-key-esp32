@@ -24,9 +24,10 @@
 // ~100k writes a year for an artifact whose whole value is the last day. But the ring must survive
 // a RESTART, because the heap watchdog's answer to exhaustion is a restart: in .bss the trend was
 // erased by the one event it exists to explain. It therefore lives in .noinit — DRAM the startup
-// code neither loads nor zeroes — which survives every reset that kept power (deliberate restart,
-// panic, task watchdog, OTA reboot) at zero flash cost and zero extra RAM. A power cut still clears
-// it, and the retained image must pass a CRC and a layout fingerprint before it is believed;
+// code neither loads nor zeroes. Retention needs intact memory; across OTA the object's address
+// and size must also stay compatible and its bytes must survive boot loading/startup. It costs
+// zero flash writes and no extra RAM. Adoption checks magic, CRC and layout fingerprint;
+// power loss or overwritten bytes start an empty ring. See docs/ESP_IDF_MATRIX.md#retention-placement;
 // mechanics in logic/heap_history.hpp.
 
 namespace tk {

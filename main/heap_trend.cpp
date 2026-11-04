@@ -15,10 +15,11 @@ namespace {
 
 const char* TAG = "heap_trend";
 
-// .noinit — the one section the ESP-IDF startup code neither loads nor zeroes (it is NOBITS, and
-// startup zeroes only .bss), so this storage holds whatever the previous run left in it across any
-// reset that KEPT POWER: a deliberate restart, a panic, the task watchdog, an OTA reboot. That is
-// the whole point — the heap watchdog's answer to exhaustion IS a restart, so a trend in .bss would
+// .noinit is NOBITS: the ESP-IDF startup code neither loads nor zeroes it (and
+// startup zeroes only .bss). It can retain the previous run across a restart, panic or watchdog
+// reset when its memory stays intact. Across an OTA, s_persist_raw must also keep a compatible
+// address/size and survive boot loading/startup; adoption still checks magic, fingerprint and CRC.
+// The heap watchdog's answer to exhaustion IS a restart, so a trend in .bss would
 // be erased by the single event it exists to explain. Costs no flash writes and no extra RAM: the
 // same ~1.2 KB, in a different section.
 //

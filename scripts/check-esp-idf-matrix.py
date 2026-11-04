@@ -14,9 +14,11 @@ Exit: 0 = clean, 1 = drift findings, 2 = malformed or missing audit input, or a 
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import json
 from pathlib import Path
 import re
+import shlex
 import shutil
 import sys
 import tempfile
@@ -58,6 +60,10 @@ DOCS_LINK = re.compile(r"https://docs\.espressif\.com/projects/esp-idf/en/([^/]+
 SOURCE_LINK = re.compile(r"https://(?:github\.com/espressif/esp-idf/(?:blob|tree)|"
                          r"raw\.githubusercontent\.com/espressif/esp-idf)/([^/]+)/")
 COMMIT_LINK = re.compile(r"https://github\.com/espressif/esp-idf/commit/")
+CMAKE_LEXEME = re.compile(
+    r'(?P<argument>"(?:\\.|[^"\\])*"|\[(?P<argument_equals>=*)\[.*?\](?P=argument_equals)\])'
+    r'|(?P<comment>\#\[(?P<comment_equals>=*)\[.*?\](?P=comment_equals)\]|\#[^\n]*)',
+    re.DOTALL)
 ASSIGNMENT = re.compile(r"^(CONFIG_[A-Z0-9_]+)=(.*)$")
 NOT_SET = re.compile(r"^# (CONFIG_[A-Z0-9_]+) is not set$")
 
@@ -122,19 +128,24 @@ def manifest(root: Path) -> tuple[str | None, list[str]]:
 
 
 def cmake_components(root: Path) -> tuple[list[str], list[str]]:
-    text = read(root, "main/CMakeLists.txt")
+    # Preserve quoted/bracket arguments, but remove line and bracket comments before discovery.
+    text = CMAKE_LEXEME.sub(
+        lambda match: match.group("argument") or " " + "\n" * match.group(0).count("\n"),
+        read(root, "main/CMakeLists.txt"))
     findings: list[str] = []
     match = re.search(r"idf_component_register\((.*?)\n\)", text, re.DOTALL)
-    if not match or "REQUIRES" not in match.group(1):
+    arguments = shlex.split(match.group(1)) if match else []
+    if "REQUIRES" not in arguments:
         raise MatrixError("main/CMakeLists.txt: idf_component_register REQUIRES not found")
-    names = match.group(1).split("REQUIRES", 1)[1].split()
+    names = arguments[arguments.index("REQUIRES") + 1:]
     for variable in [name for name in names if name.startswith("${")]:
         if variable != REPAIR_VARIABLE:
             findings.append(f"unexpected CMake variable {variable} in REQUIRES")
     appended = re.findall(r"list\(APPEND TESLA_REPAIR_REQUIRES ([^)]*)\)", text)
     if REPAIR_VARIABLE in names and not appended:
         findings.append(f"{REPAIR_VARIABLE} is required but no list(APPEND ...) defines it")
-    names = [name for name in names if not name.startswith("${")] + " ".join(appended).split()
+    names = [name for name in names if not name.startswith("${")] + [
+        name for arguments in appended for name in shlex.split(arguments)]
     return sorted(set(names)), findings
 
 
@@ -276,11 +287,15 @@ def validate(root: Path) -> tuple[list[str], dict[str, int]]:
             findings.append(f"{setting} maps to missing used row {feature}")
     actual = active_assignments(root)
     if documented != actual:
-        for item in [entry for entry in actual if entry not in documented]:
-            findings.append(f"sdkconfig assignment missing from matrix: {item[0]}={item[1]} ({item[2]})")
-        for item in [entry for entry in documented if entry not in actual]:
-            findings.append(f"stale sdkconfig row in matrix: {item[0]}={item[1]} ({item[2]})")
-        if sorted(documented) == sorted(actual):
+        missing = Counter(actual) - Counter(documented)
+        stale = Counter(documented) - Counter(actual)
+        for item, count in missing.items():
+            findings.append(f"sdkconfig assignment missing from matrix: {item[0]}={item[1]} "
+                            f"({item[2]}; {count} occurrence(s))")
+        for item, count in stale.items():
+            findings.append(f"stale sdkconfig row in matrix: {item[0]}={item[1]} "
+                            f"({item[2]}; {count} occurrence(s))")
+        if not missing and not stale:
             findings.append("sdkconfig rows are not in file order")
 
     listed: dict[str, str] = {}
@@ -364,6 +379,14 @@ def mutations(root: Path) -> list[tuple[str | None, Mutation]]:
     first, second = used[0], used[1]
     first_status = f"| {first[0]} | {first[1]} | {first[2]} |"
     first_row = "| " + " | ".join(first) + " |"
+    config = rows(read(root, DOC), "sdkconfig")[0]
+    config_row = "| " + " | ".join(config) + " |"
+    assignment = config[0].strip("`") + "=" + config[1].strip("`") + "\n"
+
+    def repeat_matching_assignment(tree: Path) -> None:
+        edit(tree, "sdkconfig.defaults", assignment, assignment * 2)
+        edit(tree, doc, config_row, config_row + "\n" + config_row)
+
     return [
         ("metadata targets", lambda r: edit(r, doc, '"targets":["esp32",', '"targets":["esp32h2","esp32",')),
         ("resolves ESP-IDF 6.1.1", lambda r: edit(r, "dependencies.lock.esp32c6", "    version: 6.1.0", "    version: 6.1.1")),
@@ -384,11 +407,23 @@ def mutations(root: Path) -> list[tuple[str | None, Mutation]]:
         ("names esp_eth, which is not a current component", lambda r: edit(r, "main/CMakeLists.txt", "        esp_eth\n", "")),
         ("names esp_driver_uart, which is not a current component", lambda r: edit(r, "main/CMakeLists.txt", "list(APPEND TESLA_REPAIR_REQUIRES esp_driver_uart)", "")),
         ("unexpected CMake variable ${EXTRA}", lambda r: edit(r, "main/CMakeLists.txt", "    REQUIRES\n", "    REQUIRES\n        ${EXTRA}\n")),
+        (None, lambda r: edit(r, "main/CMakeLists.txt", "        esp_eth\n", "        esp_eth # Wired networking\n")),
+        (None, lambda r: edit(r, "main/CMakeLists.txt", "        esp_eth\n", '        "esp_eth"\n')),
+        (None, lambda r: edit(r, "main/CMakeLists.txt", "# TESLA_REPAIR_REQUIREMENTS_BEGIN",
+                             "#[=[\nidf_component_register(\n    REQUIRES esp_adc\n)\n"
+                             "list(APPEND TESLA_REPAIR_REQUIRES esp_adc)\n]=]\n"
+                             "# TESLA_REPAIR_REQUIREMENTS_BEGIN")),
+        ("names esp_driver_uart, which is not a current component", lambda r: edit(
+            r, "main/CMakeLists.txt", "    list(APPEND TESLA_REPAIR_REQUIRES esp_driver_uart)",
+            "    # list(APPEND TESLA_REPAIR_REQUIRES esp_driver_uart)")),
         ("component espressif/led_strip has no used-table row", lambda r: edit(r, "main/idf_component.yml", "dependencies:\n", "dependencies:\n  espressif/led_strip:\n    version: \"==3.0.0\"\n")),
         ("component espressif/esp_lcd_st7735 has no used-table row", lambda r: edit(r, "main/idf_component.yml", "dependencies:\n", "dependencies:\n  \"espressif/esp_lcd_st7735\":\n    version: \"==1.0.0\"\n")),
         ("sdkconfig assignment missing", lambda r: append(r, "sdkconfig.defaults", "CONFIG_ESP_WIFI_AMPDU_RX_ENABLED=n\n")),
         ("stale sdkconfig row", lambda r: edit(r, "sdkconfig.defaults.esp32", "CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=6", "CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=7")),
         ("not in file order", swap_first_assignments),
+        ("sdkconfig assignment missing", lambda r: edit(r, "sdkconfig.defaults", assignment, assignment * 2)),
+        ("stale sdkconfig row", lambda r: edit(r, doc, config_row, config_row + "\n" + config_row)),
+        (None, repeat_matching_assignment),
         ("unclassified defaults overlay", lambda r: (r / "sdkconfig.defaults.esp32h2").write_text("CONFIG_X=y\n")),
         ("maps to missing used row U99", lambda r: edit(r, doc, "| `CONFIG_APP_REPRODUCIBLE_BUILD` | `y` | base | U01 |", "| `CONFIG_APP_REPRODUCIBLE_BUILD` | `y` | base | U99 |")),
         ("unlisted header esp_https_ota.h", lambda r: edit(r, "main/main.cpp", "\n", "\n#include <esp_https_ota.h>\n")),
