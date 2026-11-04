@@ -20,7 +20,7 @@ one page at build time, plus the separate captive-portal `setup.html`), which is
 app binary. A successful local compile is not a flashable artifact:
 `CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=n` by design.
 
-> This flashes over **USB**. For a remote, no-cable update use OTA (**Check for updates**
+> This flashes over **USB**. For a remote, no-cable update use OTA (**Check for firmware updates**
 > in the web UI's **Firmware** row). USB flashing requires physical access and the board plugged in.
 
 > **Authorization boundary.** A build request authorizes no signing-key use or USB write. A review,
@@ -150,7 +150,8 @@ fi
 **Success looks like:** `Hash of data verified.` for the app write, then
 `Flash memory region erased successfully …` for the otadata erase and
 `Hard resetting via RTS pin...`. The app image lands at `0x20000` (dual-OTA layout). After reset
-the device rejoins WiFi in a few seconds; reload `tesla-key-esp32.local` to see UI changes.
+the device rejoins WiFi in a few seconds; reload the board's IP address to see UI changes (every
+board requests the same mDNS name, so `tesla-key-esp32.local` can reach another board).
 
 > ⚠️ **A local (unsigned) build crash-loops at boot — flash a _signed_ image.** Since the
 > signed-OTA config landed (`CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT` in

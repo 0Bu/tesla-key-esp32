@@ -267,7 +267,10 @@ The entries above were checked against [vehicle-command `83baa078`](https://gith
   transaction timeout, after which a strictly compliant peer sends no further ATT PDUs on that
   bearer, notifications included, so the link would look connected but stay silent. This has not
   been observed: the field log above shows notifications arriving continuously. Status: inherited,
-  unchanged by this record. `CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=n` dates from the initial
+  unchanged by this record. Enabling the role would change this departure and the MTU entry above,
+  so `scripts/check-build-gate-contract.py` pins the setting and refuses a per-target override:
+  turning it on takes a reviewed change to that contract and to these entries.
+  `CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=n` dates from the initial
   implementation, but the gating of the server-side request handlers on `BLE_GATTS` arrived with
   the ESP-IDF 5.5 update (`707eb35`); the NimBLE of the earlier ESP-IDF 5.3 toolchain still
   dispatched the MTU request. Evidence status: static source reading

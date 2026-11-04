@@ -21,7 +21,8 @@ parameters, a serial session that can toggle reset, and any recovery need separa
 [`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md) owns pairing lifecycle and invalidation.
 [API](../../../docs/API.md#management) owns status fields/units/presence;
 [Architecture](../../../docs/ARCHITECTURE.md#sleep--link-state-the-single-source-of-truth) owns link proof.
-Set `DEVICE_IP` to `tesla-key-esp32.local` or the explicitly approved board IP.
+Set `DEVICE_IP` to the explicitly approved board IP. Every board requests the same mDNS name, so
+`tesla-key-esp32.local` can reach another board.
 
 ## 1. Status
 
@@ -92,7 +93,7 @@ owns the policy. A healthy current sample does not explain a past reboot.
 | BLE failures, non-connectable advert | Connection limit/another holder; weak signal is another possibility | One board per car, range/other connection check; do not infer a firmware defect |
 | `last_reboot:heap:<n>` | Sustained exhaustion was handled; repeated restarts do not solve its cause | Inspect prior heap/activity evidence; preserve watchdog limits |
 | MQTT disconnected, uptime stable | Network or broker/TLS failure, not proof of crash | Inspect transport/error; never downgrade TLS silently |
-| OTA invalid/signature-bad | Wrong authority is one possibility; corruption/chip/revision also need exclusion | Verified `$usb-recovery` only after matching evidence and separate approval |
+| `/ota/status` `download or image validation failed` | Wrong authority is one possibility; transport/corruption/chip/revision also need exclusion | Verified `$usb-recovery` only after matching evidence and separate approval |
 | Boot loop before app_main after local flash | Unsigned app fails startup signature check | Signed-artifact recovery, separately authorized |
 | `reauth:true` or `paired:false` | Attention hint or no observed stored VCSEC session; neither proves deletion on the car. `reauth` may coexist with `paired:true`. | Preserve identity and stored sessions; inspect the evidence. Same-key enrollment retries automatically; if it is needed, propose the user's step from the [User guide](../../../docs/USER_GUIDE.md#pairing-and-identity): NFC keycard on the reader, then the touchscreen confirmation. |
 

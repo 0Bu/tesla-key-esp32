@@ -87,6 +87,14 @@ class CaptureWakeClientContractTests(unittest.TestCase):
         self.assertEqual(req.get_method(), "POST")
         self.assertEqual(req.get_header("X-requested-with"), "capture_wake")
 
+    @unittest.mock.patch("urllib.request.urlopen")
+    def test_missing_board_url_refuses_before_any_request(self, mock_urlopen):
+        with unittest.mock.patch("sys.argv", ["capture_wake.py", "--wake"]), \
+                unittest.mock.patch("sys.stderr"), self.assertRaises(SystemExit) as refused:
+            capture_wake.main()
+        self.assertEqual(refused.exception.code, 2)
+        mock_urlopen.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
