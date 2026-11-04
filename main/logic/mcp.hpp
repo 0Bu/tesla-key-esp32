@@ -59,10 +59,9 @@ inline McpMethod mcp_method_from(const char* m) {
 
 // The MCP tool registry was here (enum McpTool + kMcpTools). It is now the MCP-visible
 // half of tk::kCommands in logic/command_registry.hpp: rows with a non-null mcp_name are
-// exactly the Charging-Manager command set plus the read-only get_vehicle_state; the
-// role-refused commands carry mcp_name == nullptr and never reach tools/list (the car
-// rejects them for this key role, so advertising them would only mislead the calling
-// model). Descriptions stay terse on purpose — tools/list is the endpoint's largest
+// the selected Charging-Manager subset plus the cached get_vehicle_state. Expected
+// role-denied commands carry mcp_name == nullptr and never reach tools/list; exposure
+// alone does not prove per-vehicle acceptance. Descriptions stay terse — tools/list is the largest
 // response and cJSON prints it into ONE contiguous heap block (see AGENTS.md).
 
 // MCP advertises these arguments as JSON Schema `integer`. Accepting a fractional cJSON

@@ -107,7 +107,8 @@ The only enabled role is `TESLA_BUILD_ROLE=config-repair`, project `tesla-key-co
 `cfgrepair-<16 source-fingerprint hex characters>`. Role, effective config and actual CMake project
 must agree. The effective compiler, dependency, include, Ninja, link and ELF-to-app gates inspect
 that real project name. They do not rename maintenance files to impersonate normal output. Pins,
-five patches, partitions, compiler options,1.5CPU/1800MiB wrapper limits and resource caps are unchanged.
+five patches, partitions, compiler options, 1.5 CPU / 1800 MiB wrapper limits and resource caps are
+unchanged.
 
 After integration and independent source review, this is the unsigned qualification command:
 
@@ -141,23 +142,23 @@ signed size and, when explicitly validating a signed app, the existing public RS
 Protected maintenance signing needs a separately reviewed publication role and independent exact-source
 rebuild, with the existing authority and key-removal controls. This unsigned builder cannot provide
 that authority or produce a flashable result. Normal Pages, Dev/Release and preview pipelines remain
-ordinary-application-only; never insert these files into their16parts or reuse their manifests.
+ordinary-application-only; never insert these files into their 16 parts or reuse their manifests.
 
 ## Raw physical console ownership
 
-Actual retained four-target configurations use UART0 at115200 for ESP32 and native USB-Serial-JTAG
-for S3/C3/C6. The enabled overlay selects SDK console NONE and compile-time maximum log level0,
+Actual retained four-target configurations use UART0 at 115200 for ESP32 and native USB-Serial-JTAG
+for S3/C3/C6. The enabled overlay selects SDK console NONE and compile-time maximum log level 0,
 then the early maintenance branch alone installs its raw driver. Native targets explicitly keep
 USB-Serial-JTAG enabled. An already installed driver is refused rather than stolen from another
 owner. No normal diag logger, BootGuard, clock bootstrap, network, Vehicle or application writer
 starts before this branch, and the branch always parks.
 
 For classic ESP32, preserve the admitted normal bootloader's actual UART0 GPIO route; no board pin
-is guessed or rerouted. The private owner configures1152008N1 and RX1024/no TX ring, uses zero-tick
-RX reads and deadline-checked bounded FIFO TX/idle polling. It deliberately avoids `uart_tx_chars`
+is guessed or rerouted. The private owner configures 115200 baud, 8N1, a 1024-byte RX ring and no
+TX ring. It uses zero-tick RX reads and deadline-checked bounded FIFO TX/idle polling, avoiding `uart_tx_chars`
 and ordinary UART write APIs: pinned IDF can wait indefinitely on their TX mutex. Native USB uses
-RX1024/TX256, zero-tick bounded reads/writes and TX-completion polling. All loops check the same
-absolute deadline and yield one tick when they cannot progress. SDK calls, ISR/clock routing,
+1024-byte RX and 256-byte TX rings, zero-tick bounded reads/writes and TX-completion polling. All loops
+check the same absolute deadline and yield one tick when they cannot progress. SDK calls, ISR/clock routing,
 allocation/driver failure and real USB disconnect behavior still require target and board proof;
 no host mock establishes those facts.
 
@@ -183,11 +184,11 @@ no host mock establishes those facts.
      --evidence-directory <new-private-directory> --execute-once-explicit-config-write
    ```
 
-   Without the final flag it does not open a port. It scans at most64KiB/15seconds for one complete
+   Without the final flag it does not open a port. It scans at most 64 KiB over 15 seconds for one complete
    INFO, validates the independent authority before writing, prepares the frame offline in the same
    still-open session, and invokes one APPLY write only. It retains private console/request/receipt
-   files with0600 and never prints identities, credentials or SDK exception text. Its receipt wait
-   is bounded to40seconds. PySerial is a host transport prerequisite, not firmware or signing authority.
+   files with mode 0600 and never prints identities, credentials or SDK exception text. Its receipt wait
+   is bounded to 40 seconds. PySerial is a host transport prerequisite, not firmware or signing authority.
 5. Treat partial/throwing write, missing/malformed receipt, any uncertain result or lost reply as
    Ambiguous. Never resend, reset to retry, erase cfg or fall back to a stale mirror. A complete
    Refused result authorizes no change of identity or scope. Confirmed requires all four device

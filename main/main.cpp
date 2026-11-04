@@ -822,7 +822,7 @@ extern "C" void app_main() {
     //
     // A controller with no cable falls through to WiFi rather than stranding the board, and its
     // driver keeps running, so a cable plugged in later still takes over.
-    const bool on_wire = have_wire && tk::net_start_eth();
+    bool on_wire = have_wire && tk::net_start_eth();
     if (on_wire) log_heap("eth");
 
     if (!on_wire && ssid.empty()) {
@@ -830,7 +830,8 @@ extern "C" void app_main() {
         // to fall back to. Rebooting would just repeat this; the portal at least makes the device
         // configurable by someone standing next to it.
         ESP_LOGE(TAG, "Ethernet present but not usable and no WiFi configured — setup portal");
-        provisioning_run(config_store);  // never returns; reboots on save
+        provisioning_run_with_retry(config_store);
+        on_wire = tk::net_kind() == tk::NetLink::Eth;
     }
 
     // Connect to WiFi. With stored credentials, a failure is usually a transient

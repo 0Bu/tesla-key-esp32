@@ -35,8 +35,9 @@ namespace tk {
 // confirms one), reset the crash counter so a fault loop could never reach safe mode, re-seed the
 // vehicle active window on every cycle, and put the armed credential backup at risk.
 //
-// First-time setup and unusable stored credentials do not use this policy: that portal stays
-// open until the form is saved, which reboots (provisioning_run()).
+// With a successfully started Ethernet driver but no usable WiFi station, the same AP limits apply while waiting
+// for a wired lease, without station attempts. Without either recovery transport, first-time
+// setup stays open until the form is saved (provisioning_run()).
 
 inline constexpr uint32_t kPortalRetryFirstS = 30;
 inline constexpr uint32_t kPortalRetryMaxS   = 300;
@@ -48,6 +49,7 @@ struct PortalInput {
     bool     ap_open;     // the setup AP is still advertised
     uint32_t ap_clients;  // stations associated with the setup AP
     uint32_t now_s;       // seconds since the portal opened (monotonic)
+    bool     retry_station = true;  // false when only the Ethernet driver can recover
 };
 
 struct PortalState {
@@ -81,6 +83,7 @@ inline PortalAction portal_step(PortalState& s, const PortalInput& in) {
     // because the close failed no longer defers attempts.
     if (in.ap_clients > 0 && in.now_s < kPortalApMaxOpenS) return PortalAction::None;
     if (in.ap_open && close_due && in.now_s - s.idle_since_s >= kPortalIdleCloseS) return PortalAction::CloseAp;
+    if (!in.retry_station) return PortalAction::None;
     if (in.now_s < s.next_attempt_s) return PortalAction::None;
     ++s.attempts;
     s.backoff_s      = std::min(kPortalRetryMaxS, s.backoff_s * 2);

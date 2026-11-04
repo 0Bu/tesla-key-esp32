@@ -103,8 +103,11 @@ static std::atomic<esp_netif_t*> s_active_netif{nullptr};
 // than behind an #ifdef in every caller: the presenters ask "does this board have a wire?"
 // and must compile identically on a build with no Ethernet support at all.
 static std::atomic<bool> s_eth_present{false};
+// Detection survives construction fallback; only successful driver activation can recover a lease.
+static std::atomic<bool> s_eth_started{false};
 
 bool         net_eth_present()    { return s_eth_present.load(); }
+bool         net_eth_started()    { return s_eth_started.load(); }
 bool         net_is_up()          { return s_kind.load() != NetLink::None; }
 NetLink      net_kind()           { return s_kind.load(); }
 esp_netif_t* net_active_netif()   { return s_active_netif.load(); }
@@ -527,6 +530,8 @@ static bool eth_cleanup_startup(EthStartupResources& r) {
         return false;
     }
 
+    s_eth_started.store(false);
+
     // Before activation, polling/RX was never enabled. Only a confirmed teardown step permits
     // the next dependent resource to be released; any failure leaves the remaining tail intact.
     if (r.ip_handler_registered) {
@@ -893,6 +898,7 @@ bool net_start_eth() {
         ESP_LOGE(TAG, "Ethernet driver start failed: %s", esp_err_to_name(err));
         eth_startup_fatal(r, "Ethernet driver start");
     }
+    s_eth_started.store(true);
 
     // Ownership is now process-lifetime state.  It remains active even when the boot-time link or
     // DHCP windows below return false, so later cable insertion can claim the wired lease.

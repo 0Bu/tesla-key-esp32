@@ -320,7 +320,7 @@ esp_err_t handle_vehicle_data(GuardedReq rq) {
     e.obj_begin("response");
     if (endpoints.charge_state) {
         e.obj_begin("charge_state");
-        tk::emit_vehicle_charge_state(cs, e);
+        tk::emit_vehicle_charge_state(cs, g_vehicle->link_state(), e);
         e.obj_end();
     }
     if (endpoints.climate_state) {

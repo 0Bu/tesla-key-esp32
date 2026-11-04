@@ -11,6 +11,8 @@
 #include "logic/http_body.hpp"
 #include "logic/wifi_credentials.hpp"
 #include "logic/vin.hpp"
+#include "logic/vin_transition.hpp"
+#include "logic/nvs_contract.hpp"
 #include "logic/runtime_admission.hpp"
 #include <vector>
 #include <array>
@@ -426,7 +428,19 @@ static bool readable_cfg, write_ok, throw_write, receive_failure, throw_restart;
 static int writes, restarts, transport_calls, status_attempts, fail_transport;
 static std::string wire;
 static int response_status;
-struct NvsStorageAdapter {};
+static tk::NvsStringLoadState journal_state;
+static std::string journal_text;
+static unsigned journal_reads;
+static bool throw_journal;
+struct NvsStorageAdapter {
+    tk::NvsStringLoadState load_str_state(const char* key, std::string& out, bool allow_empty=false) {
+        CHECK(std::strcmp(key,tk::nvs_contract::kVinTransition)==0 && !allow_empty);
+        ++journal_reads;
+        if (throw_journal) throw std::bad_alloc();
+        if (journal_state==tk::NvsStringLoadState::Present) out=journal_text;
+        return journal_state;
+    }
+};
 static NvsStorageAdapter config_store;
 static NvsStorageAdapter* g_cfg=&config_store;
 static tk::ConfigBlob stored_cfg, written_cfg;
@@ -483,6 +497,8 @@ static void reset_portal(uint32_t state=ESP_OTA_IMG_VALID) {
     reset_state(state); readable_cfg=true; write_ok=true; throw_write=false;
     receive_failure=false; throw_restart=false; writes=restarts=transport_calls=status_attempts=0;
     fail_transport=0; response_status=0; wire.clear(); stored_cfg={}; written_cfg={};
+    journal_state=tk::NvsStringLoadState::Missing; journal_text.clear();
+    journal_reads=0; throw_journal=false;
 }
 static httpd_req_t portal_request(const char* body="ssid=offline&pass=&vin=") {
     return {body, int(std::strlen(body)),0};
@@ -539,6 +555,32 @@ static void portal_tests() {
     reset_portal(); stored_cfg.vin="5YJ3E1EA1JF000001";
     req=portal_request("ssid=offline&pass=&vin=5YJ3E1EA1JF000002"); CHECK(save_post(&req)==ESP_OK);
     CHECK(response_status==409 && writes==0 && restarts==0);
+    const char* first_vin="5YJ3E1EA1JF000001";
+    const std::string armed=tk::make_vin_transition_marker("","AA:BB:CC:DD");
+    tk::VinTransitionMarker marker;
+    CHECK(tk::parse_vin_transition_marker(armed,marker));
+    CHECK(tk::decide_vin_transition_recovery(marker,first_vin,"AA:BB:CC:DD")==
+          tk::VinTransitionRecovery::RollBackPreviousVin);
+    for (auto state : {tk::NvsStringLoadState::Missing,tk::NvsStringLoadState::Present,
+                       tk::NvsStringLoadState::Error}) {
+        reset_portal(); journal_state=state; journal_text=armed;
+        req=portal_request("ssid=offline&pass=&vin=5YJ3E1EA1JF000001");
+        CHECK(save_post(&req)==ESP_OK && journal_reads==1);
+        const bool allowed=state==tk::NvsStringLoadState::Missing;
+        CHECK(response_status==(allowed?200:state==tk::NvsStringLoadState::Present?409:503));
+        CHECK(writes==int(allowed) && restarts==int(allowed) && journal_text==armed);
+        if (allowed) CHECK(written_cfg.vin==first_vin);
+        reset_portal(); journal_state=state; journal_text=armed; throw_journal=true;
+        req=portal_request(); CHECK(save_post(&req)==ESP_OK);
+        CHECK(response_status==200 && writes==1 && restarts==1 && journal_reads==0);
+        CHECK(written_cfg.vin.empty() && journal_text==armed);
+        CHECK(tk::decide_vin_transition_recovery(marker,written_cfg.vin,"AA:BB:CC:DD")==
+              tk::VinTransitionRecovery::ClearMarker);
+    }
+    reset_portal(); throw_journal=true;
+    req=portal_request("ssid=offline&pass=&vin=5YJ3E1EA1JF000001");
+    CHECK(save_post(&req)==ESP_OK);
+    CHECK(response_status==503 && journal_reads==1 && writes==0 && restarts==0);
 }
 
 int main() {

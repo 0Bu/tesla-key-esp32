@@ -30,16 +30,21 @@ agent_gate_run_bounded() {
 
 agent_gate_workdir_matches() {
   local root="$1" requested="${2:-}" root_real requested_real root_git requested_git
+  local root_git_dir requested_git_dir
   [ -n "$requested" ] || return 1
   root_real="$(cd "$root" 2>/dev/null && pwd -P)" || return 1
   requested_real="$(cd "$requested" 2>/dev/null && pwd -P)" || return 1
   [ "$root_real" = "$requested_real" ] && return 0
-  case "$requested_real" in
-    "$root_real"/*) return 0 ;;
-  esac
+  # Descendants can be independent clones or linked worktrees. Approval belongs to one
+  # Git top-level, not every repository below its filesystem directory.
   root_git="$(git -C "$root_real" rev-parse --show-toplevel 2>/dev/null)" || return 1
   requested_git="$(git -C "$requested_real" rev-parse --show-toplevel 2>/dev/null)" || return 1
-  [ "$root_git" = "$requested_git" ]
+  [ "$root_git" = "$requested_git" ] || return 1
+  # core.worktree can make a separate repository report the approved top-level. Bind
+  # the actual per-worktree metadata too; a common directory would conflate worktrees.
+  root_git_dir="$(git -C "$root_real" rev-parse --absolute-git-dir 2>/dev/null)" || return 1
+  requested_git_dir="$(git -C "$requested_real" rev-parse --absolute-git-dir 2>/dev/null)" || return 1
+  [ "$root_git_dir" = "$requested_git_dir" ]
 }
 
 # gate_feature_docs_relevant

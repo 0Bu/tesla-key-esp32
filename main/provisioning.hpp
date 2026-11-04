@@ -15,6 +15,8 @@
 // open-time cap, this policy defers new attempts while an AP client is present; station-event retries
 // remain independent. AP closure is requested at the idle/open-time limits and retried with backoff
 // on failure. Saving the form still reboots. Returns once the network is up and the portal torn down,
-// so boot continues in place. Never reboots on its own. Call only after net_start_wifi() failed; when it
-// never started the station (rejected credentials), this is provisioning_run() and never returns.
+// so boot continues in place. Never reboots on its own. Also used after Ethernet startup without
+// usable WiFi: it waits for a late wired lease without station attempts, applies the same AP limits
+// and releases the AP-only WiFi driver before returning. Without a running station or a successfully
+// started Ethernet driver it falls back to provisioning_run() and never returns.
 void provisioning_run_with_retry(NvsStorageAdapter& config_store);
