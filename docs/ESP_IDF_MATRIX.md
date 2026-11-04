@@ -49,11 +49,11 @@ The **Component/source** column names the exact CMake component or managed depen
 | U01 | Build system, four targets and reproducible application metadata | ✅ Direct | all | IDF core | One `main` component, gnu++17 with C++ exceptions, 4 MiB flash, per-target component locks, an embedded gzipped web UI, silent assertions, an esp32 ECO3 floor, reproducible metadata, and an application role plus a default-off config-repair role | [`CMakeLists.txt`](../CMakeLists.txt), [`main/CMakeLists.txt`](../main/CMakeLists.txt), [`sdkconfig.defaults`](../sdkconfig.defaults), [`esp-idf-toolchain.txt`](../esp-idf-toolchain.txt), [`DEVELOPMENT.md`](DEVELOPMENT.md) | [Build system](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32/api-guides/build-system.html) |
 | U02 | FreeRTOS kernel | ✅ Direct | all | IDF core | Fixed-priority tasks, queues, semaphores, event groups and `portMUX` critical sections. Also an 8 KiB main task, an end-of-stack watchpoint and stack high-water sampling | [`task_config.hpp`](../main/task_config.hpp), [`rtos_guard.hpp`](../main/rtos_guard.hpp), [`stack_watch.cpp`](../main/stack_watch.cpp), [`ARCHITECTURE.md`](ARCHITECTURE.md#concurrency-normative-contract) | [FreeRTOS](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32/api-reference/system/freertos.html) |
 | U03 | System, heap, logging, MAC and ROM APIs | ✅ Direct | all | IDF core | Restart and reset reason, the INTERNAL largest-free-block measure, logging and the bounded diagnostic ring. Also MAC-derived identity, the application descriptor, and ROM microsecond delays for board probes | [`main.cpp`](../main/main.cpp), [`heap_supervisor.cpp`](../main/heap_supervisor.cpp), [`http_status.cpp`](../main/http_status.cpp), [`diag_log.cpp`](../main/diag_log.cpp), [`board.cpp`](../main/board.cpp) | [System API](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32/api-reference/system/misc_system_api.html), [memory allocation](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32/api-reference/system/mem_alloc.html), [logging](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32/api-reference/system/log.html) |
-| U04 | Uninitialized DRAM retention (`.noinit`) | ✅ Direct | all | IDF core (`esp_attr.h`) | The 24-hour heap trend survives resets that keep power. It is adopted only after magic, layout fingerprint and CRC validation. Whether it survives an OTA to a different image depends on the section address ([placement](#retention-placement)) | [`heap_trend.cpp`](../main/heap_trend.cpp), [`logic/heap_history.hpp`](../main/logic/heap_history.hpp) | [Memory types](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32/api-guides/memory-types.html) |
+| U04 | Uninitialized DRAM retention (`.noinit`) | ✅ Direct | all | IDF core | The 24-hour heap trend survives resets that keep power. It is adopted only after magic, layout fingerprint and CRC validation. Whether it survives an OTA to a different image depends on the section address ([placement](#retention-placement)) | [`heap_trend.cpp`](../main/heap_trend.cpp), [`logic/heap_history.hpp`](../main/logic/heap_history.hpp) | [Memory types](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32/api-guides/memory-types.html) |
 | U05 | High-resolution timer and Task Watchdog | ✅ Direct | all | `esp_timer` | Monotonic deadlines, BLE and OTA budgets, and the timestamp read under the mailbox mux. The Task Watchdog runs at 60 s with panic and explicit subscriptions for blocking workers | [`task_watchdog_subscription.hpp`](../main/task_watchdog_subscription.hpp), [`vehicle_telemetry.cpp`](../main/vehicle_telemetry.cpp), [`mqtt_ha.cpp`](../main/mqtt_ha.cpp), [`sdkconfig.defaults`](../sdkconfig.defaults) | [ESP Timer](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32/api-reference/system/esp_timer.html), [watchdogs](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32/api-reference/system/wdts.html) |
 | U06 | Random numbers and startup entropy | ✅ Direct + 🧩 Backend | all | `bootloader_support`, IDF core | SAR-ADC entropy (`bootloader_random_enable`) stays active through key load and first-boot generation, before the radios start. PSA draws use the hardware RNG; the config-repair challenge uses `esp_fill_random` | [`main.cpp`](../main/main.cpp), [`config_repair.cpp`](../main/config_repair.cpp) | [Random number generation](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32/api-reference/system/random.html) |
 | U07 | Non-volatile storage | ✅ Direct | all | `nvs_flash` | Secret material: WiFi, VIN, MQTT settings, private key and sessions. Also display rotation and the safe-mode boot counter | [`nvs_storage.hpp`](../main/nvs_storage.hpp), [`nvs_storage.cpp`](../main/nvs_storage.cpp), [`display.cpp`](../main/display.cpp), [`SECURITY.md`](SECURITY.md#nvs-retention) | [NVS Flash](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32/api-reference/storage/nvs_flash.html) |
-| U08 | Custom partition table and Partition API | ✅ Direct | all | IDF core (`esp_partition`) | Immutable 4 MiB dual-OTA table with `nvs`, `otadata`, `phy_init`, `coredump`, `ota_0` and `ota_1`. Raw coredump reads serve the summary and the stream | [`partitions.csv`](../partitions.csv), [`diag_crash.cpp`](../main/diag_crash.cpp), [`http_status.cpp`](../main/http_status.cpp) | [Partition tables](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32/api-guides/partition-tables.html), [Partition API](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32/api-reference/storage/partition.html) |
+| U08 | Custom partition table and Partition API | ✅ Direct | all | IDF core | Immutable 4 MiB dual-OTA table with `nvs`, `otadata`, `phy_init`, `coredump`, `ota_0` and `ota_1`. Raw coredump reads serve the summary and the stream | [`partitions.csv`](../partitions.csv), [`diag_crash.cpp`](../main/diag_crash.cpp), [`http_status.cpp`](../main/http_status.cpp) | [Partition tables](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32/api-guides/partition-tables.html), [Partition API](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32/api-reference/storage/partition.html) |
 | U09 | Core dump to flash and panic diagnostics | ✅ Direct | all | `espcoredump` | ELF dump into the 48 KiB partition, with SDK boot checks and DRAM capture off. A bounded boot summary and the full 64-hex ELF SHA, `/coredump` export and explicit erase. Xtensa and RISC-V exception frames plus `esp_memory_utils` checks for crash records | [`diag_crash.cpp`](../main/diag_crash.cpp), [`coredump_hash.hpp`](../main/coredump_hash.hpp), [`http_status.cpp`](../main/http_status.cpp), [`ARCHITECTURE.md`](ARCHITECTURE.md#crash-diagnostics) | [Core dump](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32/api-guides/core_dump.html), [fatal errors](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32/api-guides/fatal-errors.html) |
 | U10 | WiFi station and SoftAP | ✅ Direct | all | `esp_wifi` | Station with reconnect and the open setup AP; `WIFI_PS_MIN_MODEM` modem sleep, which BLE coexistence requires. No Enterprise, SAE-PK, WPA3-SoftAP or OWE. Static RX buffers are cut to 6 on esp32, esp32s3 and esp32c3; WiFi IRAM optimization is off on esp32s3 and esp32c3; esp32c3 TX power is capped at 10 dBm | [`net.cpp`](../main/net.cpp), [`provisioning.cpp`](../main/provisioning.cpp), [`sdkconfig.defaults`](../sdkconfig.defaults), [`USER_GUIDE.md`](USER_GUIDE.md#hardware) | [Wi-Fi](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32/api-reference/network/esp_wifi.html), [RF coexistence](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32/api-guides/coexist.html) |
 | U11 | Event loop and network interfaces | ✅ Direct | all | `esp_event`, `esp_netif` | Shared WiFi and Ethernet lifecycle, IP events and active-interface selection | [`net.cpp`](../main/net.cpp), [`net.hpp`](../main/net.hpp), [`main.cpp`](../main/main.cpp), [`ARCHITECTURE.md`](ARCHITECTURE.md#wifi--lan-connectivity) | [Event loop](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32/api-reference/system/esp_event.html), [ESP-NETIF](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32/api-reference/network/esp_netif.html) |
@@ -186,8 +186,11 @@ N02 is not implemented. A separately reviewed change could keep the last vehicle
 - **Contents:** fixed-size charge, climate, drive, tire and closure fields, about 0.5 KB. No VIN,
   key, session, Wi-Fi or MQTT material.
 - **Identity binding:** a changed VIN, a pairing reset or a new key adopts nothing.
-- **Age:** carry the true sample age across the restart, or discard the snapshot. The existing
-  freshness rules stay in force, so evcc control never runs on restored data.
+- **Age and evcc:** carry the true sample age across the restart, or discard the snapshot.
+  Outside the active window, any valid charge or climate cache is served regardless of its age,
+  including to evcc (`logic/charge_control.hpp`). A restored domain must therefore stay off
+  `/api/1/vehicles/{VIN}/vehicle_data` until a fresh sample replaces it, or carry an explicit
+  restored marker that evcc-facing reads refuse.
 - **Contract change:** restored values marked by their age would replace the `{}` clearing. That
   changes the [Architecture](ARCHITECTURE.md) and [API](API.md) contracts.
 - **Cost and proof:** the snapshot uses RTC memory, which on esp32s3, esp32c3 and esp32c6 is also
@@ -261,8 +264,8 @@ WLED, Theengs, Meshtastic and ESPHome `bluetooth_proxy`.
 
 ## Header inventory
 
-ESP-IDF headers included under `main/`, grouped by their feature row. tesla-ble headers (`client.h`,
-`*.pb.h`, `vin_utils.h`, `adapters.h`, `crypto_context.h`) belong to U26.
+Every non-project header included under `main/`, grouped by its feature row. C and C++ standard
+headers and newlib `sys/` headers are exempt; everything else must be listed here.
 
 <!-- esp-idf-matrix:headers:start -->
 | Headers | Feature ID |
@@ -291,6 +294,7 @@ ESP-IDF headers included under `main/`, grouped by their feature row. tesla-ble 
 | `driver/gpio.h` | U22 |
 | `driver/spi_master.h` | U23 |
 | `driver/uart.h`, `driver/usb_serial_jtag.h`, `hal/uart_ll.h` | U25 |
+| `client.h`, `adapters.h`, `crypto_context.h`, `vin_utils.h`, `car_server.pb.h`, `keys.pb.h`, `signatures.pb.h`, `universal_message.pb.h`, `vcsec.pb.h` | U26 |
 <!-- esp-idf-matrix:headers:end -->
 
 ## Active ESP-IDF configuration contract
@@ -422,22 +426,33 @@ target overlays.
 ## What the gate proves
 
 `scripts/check-esp-idf-matrix.py` runs through `scripts/repo-lint.sh`, and therefore in the CI
-`logic-test` job of every pull request. It fails when:
+`logic-test` job of every pull request. It compares this document with the tree in both directions
+and fails when:
 
-- the targets, the ESP-IDF version in any per-target lockfile, the manifest floor or the
-  `esp-idf-toolchain.txt` channel differ from this document;
-- a documentation link is not on that channel or names an unsupported target;
-- a `REQUIRES` component of `main/CMakeLists.txt` or a direct dependency in
-  `main/idf_component.yml` has no used row;
-- an active assignment in a `sdkconfig.defaults*` or `maintenance/config-repair/sdkconfig.defaults*`
-  file is missing, stale or out of file order, or maps to a missing used row;
-- a defaults overlay names an unsupported target;
-- an ESP-IDF header included under `main/` is unclassified, or a listed header is no longer
-  included;
-- a row has a duplicate id, an invalid status or no official documentation link, or the evaluated
-  ULP or `esp_https_ota` decision disappears.
+- **Pins disagree.** The metadata targets, the ESP-IDF version in any per-target lockfile, the
+  manifest floor or the `esp-idf-toolchain.txt` channel differ from this document. A
+  docs.espressif.com link or an ESP-IDF GitHub source link is off that channel, or a link names an
+  unsupported target.
+- **Components disagree.** A `REQUIRES` component of `main/CMakeLists.txt` (including the
+  config-repair `list(APPEND ...)` entries) or a direct dependency in `main/idf_component.yml` has
+  no used row. A used row names a component that is no longer required. `REQUIRES` contains an
+  unknown CMake variable.
+- **Configuration disagrees.** An active assignment in a `sdkconfig.defaults*` or
+  `maintenance/config-repair/sdkconfig.defaults*` file is missing, stale or out of file order, or
+  maps to a missing used row. A defaults overlay names an unsupported target.
+- **Headers disagree.** A non-project, non-standard header included under `main/` is not listed, or
+  a listed header is no longer included. Includes inside line-leading block comments are ignored.
+- **Rows are malformed.** A row has a duplicate id, an invalid status or no official documentation
+  link. A table loses its expected columns, or the evaluated ULP or `esp_https_ota` decision
+  disappears.
 
-Its `--self-test` mode reintroduces each class of drift in a throwaway copy of the tree. The check
-does not access the network. It proves the inventory is complete and current, not that the
-decision texts remain correct; `$project-review` judges those. An ESP-IDF pin change always sends
-the whole document back through review.
+`--self-test` copies the tree, reintroduces each listed failure as a mutation, and also runs a
+clean control, which must pass, with block-commented and standard includes.
+
+**Limits:**
+
+- The check reads source text, not the preprocessor, so an include assembled by macros is not
+  seen.
+- It proves that the listed inventory matches the tree, not that a decision text is still right;
+  `$project-review` judges those.
+- An ESP-IDF pin change always sends the whole document back through review.

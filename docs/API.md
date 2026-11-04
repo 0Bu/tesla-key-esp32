@@ -350,8 +350,9 @@ The current web UI has no crash delete/dismiss caller or background raw-download
 
 `/heap` samples are tenths of a KiB, oldest first, with `null` for empty buckets. A falling `free[]`
 suggests a leak; `largest[]` sinking toward the 4 KiB watchdog floor suggests fragmentation. The
-`.noinit` DRAM ring survives restarts and is cleared by a power cut; samples before `b_boot` belong
-to an earlier run.
+`.noinit` DRAM ring survives restarts that keep power and is cleared by a power cut; an OTA to an
+image whose DRAM layout moved starts it empty ([placement](ESP_IDF_MATRIX.md#retention-placement)).
+Samples before `b_boot` belong to an earlier run.
 
 ### Configuration checks
 
