@@ -901,6 +901,9 @@ cat <<'LIST'
 co: pr checkout
 mp: pr merge
 mq: 'pr merge 1 --subject "a: b"'
+multi: |-
+    pr merge 1
+    --squash
 sh: '!git push'
 LIST
 GH
@@ -920,6 +923,7 @@ expect_alias_actions 'git st' '' 'git alias that reaches no guarded action stays
 expect_alias_actions 'gh mp 1' 'merge' 'gh alias that reaches pr merge counts as a merge'
 expect_alias_actions 'gh mq' 'merge' 'quoted gh alias that reaches pr merge counts as a merge'
 expect_alias_actions 'gh sh' 'create merge' 'quoted shell gh alias is opaque to create and merge'
+expect_alias_actions 'gh multi' 'create merge' 'multi-line gh alias is opaque to create and merge'
 expect_alias_actions 'gh co 1' '' 'gh alias that reaches no guarded action stays unguarded'
 
 # With no alias configured, the hook entry must still refuse a gh subcommand it does not know.

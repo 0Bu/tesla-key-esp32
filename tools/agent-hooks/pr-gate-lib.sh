@@ -656,7 +656,7 @@ PY
 #   gh aliases are local config and require no network. A regular alias is lexed as `gh <value>`;
 #   shell aliases are opaque because they may invoke git/gh through arbitrary shell expansion.
 #   `gh alias list` prints YAML, so a value with special characters arrives single-quoted; any
-#   other quoting is opaque.
+#   other quoting or a block scalar is opaque.
 gate_gh_alias_kind() {
   local command_name="$1" aliases expansion kind
   command -v gh >/dev/null 2>&1 || return 1
@@ -666,7 +666,7 @@ gate_gh_alias_kind() {
     | awk -F ': ' -v name="$command_name" '$1 == name { sub(/^[^:]*: /, ""); print; found++ }
       END { if (found != 1) exit 1 }')" || return 1
   case "$expansion" in
-    *"''"*|\"*) printf 'opaque\n'; return 0 ;;
+    *"''"*|\"*|\|*|\>*) printf 'opaque\n'; return 0 ;;
     "'"*"'") expansion="${expansion#?}"; expansion="${expansion%?}" ;;
   esac
   case "$expansion" in !*) printf 'opaque\n'; return 0 ;; esac

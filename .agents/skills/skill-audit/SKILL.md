@@ -122,9 +122,11 @@ PR creation uses one exact body source; an authorized existing-body edit precede
 GitHub state fails closed; new commits stale every record. Hygiene remains an independent gate.
 
 Guarded create/push/merge must be the only shell segment. Wrappers/path-qualified actions and Git/GH
-context overrides are recognized conservatively; aliases, dynamic argv/globs, changed cwd/repository,
-foreign remotes and ambiguous context fail closed. Do not mutate HEAD/config/PR before the action
-within the same call. `scripts/test-pr-gates.sh` pins adversarial forms.
+context overrides are recognized conservatively; dynamic argv/globs, changed cwd/repository,
+foreign remotes and ambiguous context fail closed. A Git alias fails closed only as a direct, unquoted
+`git <name>`; a wrapped, path-qualified or quoted spelling is not resolved. A `gh` alias is refused as
+an unknown subcommand. Do not mutate HEAD/config/PR before the action within the same call.
+`scripts/test-pr-gates.sh` pins adversarial forms.
 
 Push supports only current HEAD→current branch on sole matching origin fetch/push URL, one refspec.
 Alternate refs/remotes, tag/all/mirror pushes, followTags, custom multiple pushes and ambiguous syntax
