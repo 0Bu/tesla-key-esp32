@@ -34,9 +34,8 @@ agent_gate_workdir_matches() {
   root_real="$(cd "$root" 2>/dev/null && pwd -P)" || return 1
   requested_real="$(cd "$requested" 2>/dev/null && pwd -P)" || return 1
   [ "$root_real" = "$requested_real" ] && return 0
-  case "$requested_real" in
-    "$root_real"/*) return 0 ;;
-  esac
+  # Descendants can be independent clones or linked worktrees. Approval belongs to one
+  # Git top-level, not every repository below its filesystem directory.
   root_git="$(git -C "$root_real" rev-parse --show-toplevel 2>/dev/null)" || return 1
   requested_git="$(git -C "$requested_real" rev-parse --show-toplevel 2>/dev/null)" || return 1
   [ "$root_git" = "$requested_git" ]

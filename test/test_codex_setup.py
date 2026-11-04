@@ -37,6 +37,30 @@ def denied(value):
 
 assert run('PreToolUse', tool('Bash', {'command': 'git status --short'})) == {}
 
+# Real native publication guards must bind the execution Git root, even when a
+# foreign repository is physically nested below the approved checkout. No tool runs.
+with tempfile.TemporaryDirectory(prefix='codex-source-canary-', dir=ROOT) as directory:
+    fixture = Path(directory)
+    ordinary = fixture / 'ordinary'
+    ordinary.mkdir()
+    nested = fixture / 'independent-repo'
+    nested.mkdir()
+    subprocess.run(['git', 'init', '-q', str(nested)], check=True, capture_output=True)
+    subprocess.run(['git', '-C', str(nested), '-c', 'user.name=Fixture', '-c',
+                    'user.email=fixture@example.invalid', 'commit', '--quiet', '--allow-empty',
+                    '-m', 'Independent nested repository fixture'], check=True, capture_output=True)
+    subprocess.run(['git', '-C', str(nested), 'remote', 'add', 'origin',
+                    'https://github.com/example/unreviewed.git'], check=True, capture_output=True)
+    head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
+    nested_head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=nested, text=True).strip()
+    assert head != nested_head
+    body = fixture / 'body.md'
+    body.write_text(f'- [x] $skill-audit clean — PR create/push gate @ {head}\n'
+                    f'- [x] $pr-hygiene clean — content gate @ {head}\n')
+    command = f'gh pr create --body-file {body}'
+    assert run('PreToolUse', tool('exec_command', {'cmd': command, 'workdir': str(ordinary)})) == {}
+    assert denied(run('PreToolUse', tool('exec_command', {'cmd': command, 'workdir': str(nested)})))
+
 # Literal jq/search syntax must remain data through both independent guards. These
 # payloads are inspected only; no GitHub, device, partition or shell command runs.
 literal_reads = [
