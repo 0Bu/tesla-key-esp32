@@ -203,7 +203,8 @@ and frames over 4096 B; they do not prove call depth or runtime stack margin.
 An approved toolchain migration must update the image tag and digest in `esp-idf-toolchain.txt`,
 the dependency verifier's IDF/Mbed TLS pins, all four lockfiles, the harness `MBEDTLS_REF`,
 the workflow's `logic-harness` version assertion, both resource baselines' toolchain identities,
-the SDK-default and build-semantic version literals, and the compiled X509 bundle hash.
+the SDK-default and build-semantic version literals, the compiled X509 bundle hash, and the
+version, links and rows of the [ESP-IDF matrix](ESP_IDF_MATRIX.md).
 Review the PSA patch and canonical postimages, then rerun the protocol vectors and complete
 four-target contract. CI action inputs must still use the toolchain output, and both target
 matrices must still contain exactly the four supported targets. This list is a migration checklist,
