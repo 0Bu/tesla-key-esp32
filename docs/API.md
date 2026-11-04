@@ -189,14 +189,14 @@ wall-time bound. A completed retrieval attempt returns `200`; check `response.re
 |---|---|
 | `GET /` (`/index.html`) | Web UI (status, pairing, quick commands). |
 | `GET /status[?redact=1]` | Full device/vehicle status. Use `redact=1` for sharing; the board MAC remains visible. Export rules below. |
-| `POST /scan` | Time-limited BLE discovery scan (fills `ble.devices`). |
+| `POST /scan` | Time-limited BLE discovery scan (fills `ble.devices`); flat `200` `{result:true,reason}`, or `503` if scanning cannot start. |
 | `GET` or `POST /diag[?verbose=0\|1][&clear=1][&redact=1]` | Plain-text in-memory log. `verbose` changes logging; `clear=1` deletes the log. Export rules below. |
 | `GET` or `POST /coredump[?raw=1\|clear=1]` | Private bounded crash image; default requires current-build verification. `raw=1` explicitly exports an admitted artifact without that verification. `clear=1` erases instead; modes cannot be combined. |
 | `POST /crash/dismiss` | Acknowledges after confirmed absence or successful erase. Unconfirmed erase returns `200` with `ok:false`, `result:false`, `outcome:"unknown"`; do not retry automatically. |
 | `GET /heap` | `{dt, b0, b_boot, unit:"KiB", scale:10, free[], largest[]}` — 24 h memory trend; interpretation below. |
 | `POST /gen_keys[?force=1]` | Generate the ECDSA P-256 key (refuses overwrite without `force`, `409`). Identity mutation is Stable-only: `PendingVerify`, unknown OTA state or an active OTA/update returns `503` before anything changes. |
 | `POST /set_vin` | `{"vin":"<17-character VIN>"}`; trims and uppercases the value. An unchanged VIN skips persistence and reboot. A changed VIN rotates identity and reboots; pending identity recovery returns `409`, with the same Stable-only `503` rule as `/gen_keys`. |
-| `POST /set_mqtt` | `{"broker":"host:port"}` or full `"mqtt://…"`; `""` disables. Changed brokers are tested before persistence; failure saves nothing. |
+| `POST /set_mqtt` | `{"broker":"host:port"}` or a full `mqtt://`/`mqtts://` URI; `""` disables. Transport selection follows the rules below. Changed brokers are tested before persistence; failure saves nothing. |
 | `POST /set_syslog` | `{"server":"host:port"}` (a bare host defaults to 514; `""` disables) and reboot. |
 | `POST /set_wifi` | `{"ssid":"…","pass":"…"}` with one-shot credential rollback. Both unchanged and saved credentials return the same acceptance text; only a changed pair is written and requests a reboot. curl/`provision.py` only; validation and rollback below. |
 | `POST /set_time` | `{"ms":<epoch milliseconds>}` — temporary browser estimate, neither persisted nor authority for new durable dates. After valid body/schema intake, synchronized NTP makes this a successful no-op. |
@@ -361,6 +361,9 @@ cannot be read; they preserve the unreadable state instead of saving defaults ov
 `/set_mqtt` connects to a changed non-empty broker before saving: refusal/credentials return `400`,
 unreachable/no answer `502`, insufficient contiguous memory `503`. Failure neither persists nor
 reboots; an empty broker disables MQTT. A failed durable configuration save returns `500`.
+Without an explicit scheme, a configured username or URI userinfo selects `mqtts://`; an
+unauthenticated broker selects `mqtt://`. Explicit schemes are honored. TLS verifies bundled CA
+roots and never falls back to plaintext; inspect `/status.mqtt.tls` and `error` for diagnosis.
 
 `/set_wifi` accepts an empty password for an open network, 8–63 UTF-8 bytes for WPA2, or exactly
 64 ASCII hex characters for a raw PSK. The atomic config keeps the previous credentials for one
@@ -389,12 +392,12 @@ gate refuses the request before any save.
 | `mqtt` | `{configured, connected, tls, broker, error?}`; `broker` is the credential-free `host:port` even if the saved URI has userinfo. |
 | `syslog` | `{configured, resolved, reachable, host?, port?, error?, dropped_lines?}`; `reachable` is an advisory ping hint, never a delivery gate. |
 | `ota` | `{channel, verification}`; channel is `"release"\|"dev"`. Verification is the cached last observed running-image state: `stable`, `pending_verify` or `unknown`. Status performs no SDK/flash query for this field; it does not identify an earlier rollback. |
-| `tele` | `{climate, drive, tires, closures}` read-only telemetry, emitted only while the BLE link is up. |
+| `tele` | Optional `{climate, drive, tires, closures}` cached domains while the BLE link is up; presence-aware subkeys and units follow the [status emitter schema](../main/logic/status_model.hpp). |
 | `last_reboot` | `"heap:<n>"` records a consumed heap-restart breadcrumb (`n` = consecutive such restarts). `heap:nvs-read-error`, `heap:nvs-clear-error` and `heap:nvs-invalid` report storage/validation ambiguity, not proof of the prior reset cause. Absent when no breadcrumb or consumption error exists. |
 | `pairing_blocked` | Optional cached reason: `key_reload_required`, `key_runtime_mismatch`, `key_storage_unavailable`, `key_cleanup_pending` or `vin_transition_pending`. Absent during normal pairing. Reading it does not probe storage or change identity. |
 | `identity_state` | Cached recovery condition: `ok`, `reboot_required`, `cleanup_pending`, `vin_transition`, `storage_unavailable` or `unknown`. `ok` means Ready with no known local recovery block; it does not prove a usable key, session or vehicle acceptance. |
 | `sys` | Always present: `{board_mac, free_heap, min_free_heap, largest_block, uptime_s, wifi_reconnects, reset_reason, safe_mode, runtime_state, fatal_component?, diag_dropped_lines?, stack_min_free_quantum_bytes, stack_min_free_bytes:{<context>:number|null}}`. |
-| `last_crash` | Reset/report facts plus `artifact_present`, `raw_available`, `query_error`, `foreign_dump`, `checksum_verified`, `dump_identity` (`current`/`foreign`/`unverified`), and `summary_available`. A summary emits numeric `pc` (including zero), optional `task`/hex-string `backtrace`, and `corrupted`/`truncated`/`isr`; `elf_sha256` and `dump_elf_sha256` distinguish running and dump builds. Present for undismissed faults, artifacts or query errors. |
+| `last_crash` | `reason`, `reason_code`, `fault`, `coredump` plus `artifact_present`, `raw_available`, `query_error`, `foreign_dump`, `checksum_verified`, `dump_identity` (`current`/`foreign`/`unverified`), and `summary_available`. A summary emits numeric `pc` (including zero), optional `task`/hex-string `backtrace`, and `corrupted`/`truncated`/`isr`; `elf_sha256` and `dump_elf_sha256` distinguish running and dump builds. Present for undismissed faults, artifacts or query errors. |
 
 `sys.stack_min_free_quantum_bytes` is 256. `sys.stack_min_free_bytes` always contains the 27
 [registered contexts](../main/logic/stack_context.hpp). A never-sampled context is `null`; a number
@@ -413,15 +416,16 @@ retains its existing semantics.
 `syslog.dropped_lines` counts full-queue losses. Both are boot-local unsigned counters modulo 2^32,
 omitted at zero. Clearing the ring does not reset the loss counter. Neither proves UDP delivery.
 
-`ble.rssi` appears only when a live-link RSSI sample is available.
+`ble.rssi` is a live-link sample while connected. During failed connection attempts it may
+instead be the latest target-advertisement sample; its presence does not prove a connection.
 `ble.phase` and `phase_s` appear together: `connecting` counts down to giving up, `waiting` to a
 retry, and zero means now. Heap fields are INTERNAL-only; PSRAM cannot mask them. The watchdog
 acts on `sys.largest_block`. All stack contexts use the nullable conservative boot minima and
 256-byte quantum described above; measured zero remains visible. `sys.board_mac` is the physical
 eFuse identity.
 
-Crash `backtrace`/`corrupted` exist only on Xtensa (esp32/s3). RISC-V (c3/c6) has no on-device
-backtrace; downloaded dumps unwind offline on every target.
+On-device crash `backtrace` exists only on Xtensa (esp32/s3); `corrupted` can also appear on
+RISC-V (c3/c6). RISC-V has no on-device backtrace; downloaded dumps unwind offline on every target.
 
 `/api/proxy/1/version` appends the fixed `-esp32` suffix on every target. Strip it when
 comparing to `/status.version`; `platform` identifies the actual chip.
@@ -473,7 +477,8 @@ the field and entity IDs stay stable.
 
 All state topics are retained JSON. Numeric fields appear only when the car reported them, so an
 unseen value shows as *unknown* in HA, not a phantom `0`; range, rate and odometer are converted to
-metric (km, km/h). While a parked car sleeps, ordinary source polls pause and MQTT keeps serving
+metric (km, km/h). An invalid or initially empty cache publishes retained `{}` once to clear stale
+readings, then stays quiet until valid data returns. While a parked car sleeps, ordinary source polls pause and MQTT keeps serving
 last-known values until the next successful relevant poll. Charge and drive can also refresh on
 the wake/bootstrap one-shot outside an active window. These topics carry no per-domain age;
 broker publication or link state alone does not establish each retained field's freshness.

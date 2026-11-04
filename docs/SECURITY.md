@@ -79,6 +79,15 @@ flash** requires a separate confirmation with a secret-NVS backup reminder befor
 starts. Firmware rollback does not restore keys/configuration. Destructive or identity work needs
 explicit authorization and a backup/rollback plan.
 
+## MQTT transport
+
+Schemeless broker entries select TLS when a username or URI userinfo exists; credential-free
+entries select plaintext. Explicit `mqtt://` and `mqtts://` schemes are honored, so an explicit
+plaintext URI can send credentials without encryption. TLS verifies bundled CA roots and has no
+plaintext fallback. Status exposes the selected transport and connection error without broker
+credentials. Configuration belongs to the [user guide](USER_GUIDE.md#home-assistant-mqtt);
+the [runtime owner](ARCHITECTURE.md#home-assistant-mqtt-bridge) defines admission and retries.
+
 ## HTTP API exposure
 
 Port 80 has no authentication or TLS. Any LAN peer can call commands, change configuration/identity,

@@ -290,6 +290,21 @@ static esp_err_t save_post_impl(httpd_req_t* req, PortalSaveContext& context) {
             "<a href=/>Back</a>.</p>");
     }
 
+    if (!vin.empty() && vin != cfg.vin) {
+        // Safe Mode can reach setup before finishing an armed identity transaction. A first
+        // VIN saved here could later be rolled back by that journal. Network-only saves remain
+        // available; only proven journal absence permits a new identity value.
+        std::string journal;
+        const auto journal_state = g_cfg->load_str_state(tk::nvs_contract::kVinTransition, journal);
+        if (journal_state != tk::NvsStringLoadState::Missing) {
+            return portal_save_send(req, context,
+                journal_state == tk::NvsStringLoadState::Error ? "503 Service Unavailable" : "409 Conflict",
+                "text/html", "<p>VIN recovery is pending or unreadable, so the VIN was not changed. "
+                "Leave VIN blank to save network settings, then finish identity recovery. "
+                "<a href=/>Back</a>.</p>");
+        }
+    }
+
     if (!context.restart.try_begin())
         return portal_save_send(req, context, "409 Conflict", "text/plain", tk::kConfigRestartBusyReason);
 

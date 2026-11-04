@@ -11,8 +11,8 @@
       "iramCapacity": 131072,
       "maxIramUsed": 115559,
       "maxUnsignedApp": 1638400,
-      "maxElfTotal": 1595189,
-      "maxFlashCodeAndRodata": 1456682
+      "maxElfTotal": 1595421,
+      "maxFlashCodeAndRodata": 1456914
     },
     "esp32s3": {
       "memoryModel": "unified",
@@ -22,8 +22,8 @@
       "iramCapacity": 16384,
       "maxIramUsed": 16384,
       "maxUnsignedApp": 1703936,
-      "maxElfTotal": 1662617,
-      "maxFlashCodeAndRodata": 1555154
+      "maxElfTotal": 1662961,
+      "maxFlashCodeAndRodata": 1555498
     },
     "esp32c3": {
       "memoryModel": "unified",
@@ -33,8 +33,8 @@
       "iramCapacity": 0,
       "maxIramUsed": 0,
       "maxUnsignedApp": 1769472,
-      "maxElfTotal": 1731646,
-      "maxFlashCodeAndRodata": 1651798
+      "maxElfTotal": 1731838,
+      "maxFlashCodeAndRodata": 1651990
     },
     "esp32c6": {
       "memoryModel": "unified",
@@ -44,8 +44,8 @@
       "iramCapacity": 0,
       "maxIramUsed": 0,
       "maxUnsignedApp": 1966080,
-      "maxElfTotal": 1960102,
-      "maxFlashCodeAndRodata": 1822836
+      "maxElfTotal": 1960294,
+      "maxFlashCodeAndRodata": 1823028
     }
   }
 }

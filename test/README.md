@@ -158,7 +158,9 @@ raw-state/config confirmation, full timed health task and setup portal, plus unm
 CRC/query fragments through an explicit passive type/I/O bridge. It exercises five occupied owners,
 raw NEW/PENDING/VALID/UNDEFINED, blank/CRC/query errors, timed Wait/Stop/GiveUp, fresh post-owner
 refusals, returned/exceptional SDK effects, cache-before-diagnostic ordering, portal outer catches
-and partial replies. Controlled timers and task-deletion doubles bound these scenarios; neither
+and partial replies. The actual portal handler also exercises missing, pending and unreadable VIN
+journals and a throwing journal read: only proven absence permits a first VIN, while network-only
+saves skip the journal probe. Controlled timers and task-deletion doubles bound these scenarios; neither
 executes the physical scheduler. Pure sampler tests check reader order, short circuits and heap
 boundaries; the configuration path keeps its existing offline confirmation policy.
 Locked-cJSON tests run actual HTTP handlers across matching/different WiFi submissions and preserve

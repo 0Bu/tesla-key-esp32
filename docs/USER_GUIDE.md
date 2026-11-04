@@ -86,6 +86,10 @@ Changing VIN or forcing key generation removes the old pairing. Re-saving the sa
 Use these operations only for an intentional identity change, then pair again. Connection timeouts
 alone do not require a new key. [Pairing lifecycle](ARCHITECTURE.md#pairing-lifecycle--invalidation).
 
+The setup portal refuses a first VIN while an identity-recovery journal is pending (HTTP 409) or
+unreadable (503). Leave VIN blank to save network settings, then finish identity recovery before
+setting the VIN. This preserves the pending recovery record.
+
 ## Updates and recovery
 
 In the web UI, click the download icon on **Firmware**, confirm the offered update and wait for
@@ -138,10 +142,12 @@ settle below the memory OTA needs; this was observed on a paired board on Ethern
 installed over the air then stays pending verification, update checks are refused with `not enough
 memory for update`, and the next restart returns the board to its previous firmware. The firmware
 has no restart control, so power-cycle the board once (unplug its PoE or USB power). Do not
-reinstall v1.6.5; update to a release newer than v1.6.5, which carries the S3 RAM settings. If
-checks are still refused, reinstall it once with USB **Flash** (see
-[Updates and recovery](#updates-and-recovery)) from such a release, which keeps WiFi, VIN, pairing and
-sessions.
+reinstall v1.6.5. Use a newer release that includes the S3 RAM settings; if none is published,
+use a provenance-verified, production-signed Dev build known to include them. If checks are
+still refused, use its compatible signed installer for USB **Flash** once, preserving WiFi, VIN,
+pairing and sessions. Follow [Updates and recovery](#updates-and-recovery) and the signed-image,
+chip/bootloader compatibility and NVS-preservation checks. A signed app alone instead needs the
+[app-only USB procedure](DEVELOPMENT.md#delivery); a locally unsigned build is not a recovery source.
 
 ## Home Assistant (MQTT)
 
@@ -155,6 +161,11 @@ evcc, BLE and pairing. Runtime design:
 **Enable:** set the broker in the web UI (**MQTT** row, pencil icon, `IP:PORT`); it is stored in NVS
 (`mqtt_uri`) and applied after the reboot it triggers. Compile-time defaults/credentials live in
 `scripts/idf-docker.sh idf.py menuconfig` → *Tesla Key Configuration*:
+
+A broker without a scheme uses TLS (`mqtts://`) when a username or URI userinfo is present,
+otherwise plaintext (`mqtt://`). An explicit scheme is honored. TLS verifies the bundled CA
+roots and never falls back to plaintext after a failure. Check the secured MQTT row and
+`/status.mqtt.tls`/`error`; see the [transport trust boundary](SECURITY.md#mqtt-transport).
 
 | Option | Default | Purpose |
 |--------|---------|---------|
