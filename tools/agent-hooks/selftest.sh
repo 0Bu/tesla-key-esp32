@@ -916,6 +916,10 @@ expect_alias_actions() {  # <command> <expected action kinds> <label>
 }
 expect_alias_actions 'git pp' 'push' 'git alias that reaches push counts as a push'
 expect_alias_actions 'git ppp' 'push' 'git alias chain that reaches push counts as a push'
+expect_alias_actions 'env git pp' 'push' 'git alias after env counts as a push'
+expect_alias_actions 'command git pp' 'push' 'git alias after command counts as a push'
+expect_alias_actions 'FOO=1 git pp' 'push' 'git alias after an assignment counts as a push'
+expect_alias_actions 'git -C . pp' 'push' 'unlisted subcommand after a git global option counts as a push'
 expect_alias_actions 'git pg' 'create merge push' 'git alias with a leading global option is opaque to every guarded action'
 expect_alias_actions 'git pgc' 'create merge push' 'git alias chain to a leading global option is opaque to every guarded action'
 expect_alias_actions 'git shx' 'create merge push' 'shell git alias is opaque to every guarded action'
@@ -936,6 +940,9 @@ expect_unknown_gh_block() {  # <command> <label>
 }
 expect_unknown_gh_block 'gh sh' 'hook entry refuses an unknown gh subcommand'
 expect_unknown_gh_block 'gh mp 1' 'hook entry refuses an unknown gh subcommand with arguments'
+expect_unknown_gh_block 'gh "mp" 1' 'hook entry refuses a quoted unknown gh subcommand'
+expect_unknown_gh_block '/usr/bin/gh mp 1' 'hook entry refuses a path-qualified unknown gh subcommand'
+expect_unknown_gh_block 'nohup gh mp 1' 'hook entry refuses a wrapped unknown gh subcommand'
 
 # Shared-predicate loader canaries: a missing, truncated, incomplete or wrong-API pr-gate-lib.sh
 # must block before the payload is even parsed, which covers create, push and merge (all five

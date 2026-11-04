@@ -121,12 +121,18 @@ records; fenced/quoted/HTML/dynamic/ambiguous/foreign or stale forms fail. No fi
 PR creation uses one exact body source; an authorized existing-body edit precedes push. Unreadable
 GitHub state fails closed; new commits stale every record. Hygiene remains an independent gate.
 
-Guarded create/push/merge must be the only shell segment. Wrappers/path-qualified actions and Git/GH
-context overrides are recognized conservatively; dynamic argv/globs, changed cwd/repository,
-foreign remotes and ambiguous context fail closed. A Git alias fails closed only as a direct, unquoted
-`git <name>`; a wrapped, path-qualified or quoted spelling is not resolved. A `gh` alias is refused as
-an unknown subcommand. Do not mutate HEAD/config/PR before the action within the same call.
-`scripts/test-pr-gates.sh` pins adversarial forms.
+Guarded create/push/merge must be the only shell segment. The gate is lexical and sees only command
+text. Path-qualified actions, Git/GH context overrides and the wrappers `gate_bash_actions` lists,
+around a literal action, are recognized conservatively; changed cwd/repository, foreign remotes and
+ambiguous context fail closed. A shell-expanded or globbed word fails closed where it can be the
+subcommand or sits beside a literal action word. Argv from stdin (`xargs git < args`), a substitution
+containing a space under `eval` or `bash -c`, a dynamic executable with a literal other word
+(`$GIT pp`) and unlisted wrappers stay unclassified. A Git alias is resolved only where normalization
+leaves `git <name>`, including after `env`, `command` or `VAR=value`; after a Git global option an
+unlisted subcommand fails closed unresolved; any other wrapper, path-qualified or quoted spelling is
+not resolved. A literal `gh <name>` outside the hook's builtin list is refused as an unknown
+subcommand, also through a listed wrapper, a path or quoting. Do not mutate HEAD/config/PR before the
+action within the same call. `scripts/test-pr-gates.sh` pins adversarial forms.
 
 Push supports only current HEAD→current branch on sole matching origin fetch/push URL, one refspec.
 Alternate refs/remotes, tag/all/mirror pushes, followTags, custom multiple pushes and ambiguous syntax
