@@ -63,10 +63,11 @@ spec lets the server pick either representation and this one always answers plai
 
 ## Tools
 
-The tool set mirrors **exactly the commands the enrolled Charging-Manager key can
-execute** — plus one read-only state tool. Commands the car refuses for this key role
-(doors, climate, horn, sentry) are deliberately not exposed: a tool that always fails
-only misleads the calling model.
+The tool set selects charging and wake commands for the enrolled Charging-Manager role, plus
+one cached state tool. Doors, climate, horn and sentry are deliberately omitted because they are
+outside that role's expected scope. Exposure does not establish acceptance by every vehicle or
+software version; the [charge-port domain choice](adr/0005-tesla-ble-seam.md#native-execution-framing-and-session-reuse)
+in particular still requires physical role acceptance.
 
 | Tool | Arguments | Behavior |
 |------|-----------|----------|

@@ -1,16 +1,10 @@
 # HTTP and MQTT API
 
-Base `http://<ESP32-IP>`. No auth, no TLS — see [SECURITY](SECURITY.md#http-api-exposure). Mutating
-browser requests require a device-owned Host and matching Origin; foreign/rebound origins get `403`.
-Headerless POST clients stay compatible. Mutating GETs require matching Origin/Referer or allowed
-fetch-site provenance; otherwise send the `X-Requested-With` header or use the POST
-alias (`/ota/check`, `/diag`, `/coredump`). Owned hosts are the shared DHCP boot name, the live mDNS
-name (bare or `.local`), and the active or connection-local IPv4 address; arbitrary router-added
-DNS suffixes are rejected. Diagnostic GETs `/status`, `/diag`, `/heap`, `/coredump`, `/ota/status`
-and `/ota/changelog` require such a Host even without browser headers and even with `redact=1`.
-The evcc version, vehicle-data and body-controller routes retain their compatibility behavior;
-`GET /mcp` returns a fixed 405. The static UI at `/` and `/index.html` rejects iframe embedding.
-This does not replace the trusted-LAN boundary.
+Base `http://<ESP32-IP>`; no authentication or TLS. Use a trusted LAN. Browser mutations and
+diagnostic reads require a device-owned Host, with matching Origin for browser mutations; foreign
+origins receive `403`. Headerless POST clients remain compatible. Mutating GET clients need browser
+provenance or `X-Requested-With`; prefer the POST aliases. [Security](SECURITY.md#http-api-exposure)
+owns the accepted hosts, provenance and framing restrictions.
 
 ## Commands
 
@@ -93,12 +87,12 @@ dispatch; the same rule applies to vehicle-data routes.
   Waiting at the [single HTTP worker](ARCHITECTURE.md#http-request-serialization) can still
   exceed this timeout. Check state before repeating an uncertain action, as described above.
 
-> A **Charging-Manager** key may only run charging actions + wake. The car therefore **rejects**
-> `door_lock`/`door_unlock`, `flash_lights`/`honk_horn`, `set_sentry_mode` and
-> `auto_conditioning_*` with an authentication failure — the API accepts them for completeness but
-> they never execute. Only `charge_start`/`charge_stop`, `set_charging_amps`, `set_charge_limit`,
-> `set_scheduled_charging`, `charge_port_door_open`/`charge_port_door_close` and `wake_up` run (see
-> [Security](SECURITY.md#http-api-exposure)).
+> The **Charging-Manager** role permits vehicle-data reads and charging control. The firmware
+> selects charging and wake commands for MCP; REST also retains doors, lights, horn, sentry and
+> climate routes for API compatibility, although they are expected to be denied for this role.
+> A route or builder does not prove acceptance by a particular vehicle/software version, especially
+> for the [VCSEC charge-port path](adr/0005-tesla-ble-seam.md#native-execution-framing-and-session-reuse).
+> Check the returned result; no exact refusal string is guaranteed.
 
 ```json
 { "response": { "result": true, "command": "charge_start",
@@ -150,11 +144,39 @@ slot, with at most two consecutive attempts before another domain. After reboot 
 until a poll obtains a sample; the boot window is not seeded after a heap-watchdog restart.
 Drive refreshes through the rotation and a best-effort `NO_WAKE_SKIP` wake/bootstrap one-shot.
 
+### evcc integration
+
+While `link` is `unreachable`, a valid cache and no command attempted in the last five minutes (failed
+attempts count) give `200` with `charging_state: Unknown` and last-known numbers. evcc maps `Unknown`
+to status A, so it does not see a car that left as plugged in. Inside that window, or with no
+ChargeState since boot, the response stays `503`, with zeroed fields that evcc does not parse. `Unknown`
+also reports an unmapped or absent car state. MCP and `/status` keep the last-known string beside
+`link`, and MQTT beside `sleep_status`. When the link returns, the last-known state is served until the
+next ChargeState: one round trip for an awake car, 30-300 s of backoff after a failed poll, and until
+it wakes for a sleeping car.
+
+TeslaBleHttpProxy answers `503` once its cache window has passed. Here that would stop evcc's loadpoint
+cycle in two configurations:
+
+- A `twc3` charger with an active vehicle and an enabled loadpoint. evcc logs `charger get max current`.
+- A charger that takes its status from the vehicle (`vehicle-api` or a custom status plugin). evcc logs
+  `charger status`.
+
+Status A has its own cost on the second kind: a BLE gap of 150 s on a plugged-in car ends the session
+and applies the loadpoint's default mode, if one is set. Without a default vehicle, evcc also does not
+identify a car plugged in during a BLE outage of over 10 minutes and treats it as a guest; a `twc3`
+charger then fails to relay to the vehicle until the car is replugged or selected manually.
+
 ## Body controller state (foreground VCSEC request)
 
 ```
 GET /api/1/vehicles/{VIN}/body_controller_state
 ```
+This foreground read may connect and establish VCSEC context before requesting `GET_STATUS`;
+it sends no explicit wake command. It uses the default 20-second shared transaction budget.
+[HTTP queueing](ARCHITECTURE.md#http-request-serialization) can add delay, so this is not a hard
+wall-time bound. A completed retrieval attempt returns `200`; check `response.result` for failure.
+
 ```json
 { "response": { "result": true, "vin": "<VIN>", "data": {
   "vehicle_lock_state": "LOCKED", "vehicle_sleep_status": "ASLEEP",
@@ -167,14 +189,14 @@ GET /api/1/vehicles/{VIN}/body_controller_state
 |---|---|
 | `GET /` (`/index.html`) | Web UI (status, pairing, quick commands). |
 | `GET /status[?redact=1]` | Full device/vehicle status. Use `redact=1` for sharing; the board MAC remains visible. Export rules below. |
-| `POST /scan` | Time-limited BLE discovery scan (fills `ble.devices`). |
+| `POST /scan` | Time-limited BLE discovery scan (fills `ble.devices`); flat `200` `{result:true,reason}`, or `503` if scanning cannot start. |
 | `GET` or `POST /diag[?verbose=0\|1][&clear=1][&redact=1]` | Plain-text in-memory log. `verbose` changes logging; `clear=1` deletes the log. Export rules below. |
 | `GET` or `POST /coredump[?raw=1\|clear=1]` | Private bounded crash image; default requires current-build verification. `raw=1` explicitly exports an admitted artifact without that verification. `clear=1` erases instead; modes cannot be combined. |
 | `POST /crash/dismiss` | Acknowledges after confirmed absence or successful erase. Unconfirmed erase returns `200` with `ok:false`, `result:false`, `outcome:"unknown"`; do not retry automatically. |
 | `GET /heap` | `{dt, b0, b_boot, unit:"KiB", scale:10, free[], largest[]}` — 24 h memory trend; interpretation below. |
 | `POST /gen_keys[?force=1]` | Generate the ECDSA P-256 key (refuses overwrite without `force`, `409`). Identity mutation is Stable-only: `PendingVerify`, unknown OTA state or an active OTA/update returns `503` before anything changes. |
-| `POST /set_vin` | `{"vin":"<17-character VIN>"}`; trims and uppercases the value. An unchanged VIN skips persistence and reboot. A changed VIN rotates identity and reboots; same Stable-only `503` rule as `/gen_keys`. |
-| `POST /set_mqtt` | `{"broker":"host:port"}` or full `"mqtt://…"`; `""` disables. Changed brokers are tested before persistence; failure saves nothing. |
+| `POST /set_vin` | `{"vin":"<17-character VIN>"}`; trims and uppercases the value. An unchanged VIN skips persistence and reboot. A changed VIN rotates identity and reboots; pending identity recovery returns `409`, with the same Stable-only `503` rule as `/gen_keys`. |
+| `POST /set_mqtt` | `{"broker":"host:port"}` or a full `mqtt://`/`mqtts://` URI; `""` disables. Transport selection follows the rules below. Changed brokers are tested before persistence; failure saves nothing. |
 | `POST /set_syslog` | `{"server":"host:port"}` (a bare host defaults to 514; `""` disables) and reboot. |
 | `POST /set_wifi` | `{"ssid":"…","pass":"…"}` with one-shot credential rollback. Both unchanged and saved credentials return the same acceptance text; only a changed pair is written and requests a reboot. curl/`provision.py` only; validation and rollback below. |
 | `POST /set_time` | `{"ms":<epoch milliseconds>}` — temporary browser estimate, neither persisted nor authority for new durable dates. After valid body/schema intake, synchronized NTP makes this a successful no-op. |
@@ -191,13 +213,9 @@ Changed MQTT/Syslog saves reserve the restart owner before writing; an occupied 
 without saving. A successful save returns `firmware_verification`: `already_valid`,
 `not_in_probation`, `confirmed`, or an explicit unconfirmed/uncertain code. `result:true` acknowledges
 saved configuration, not firmware confirmation. The reason explains refused readiness, BLE host or
-heap checks and uncertain SDK marking; the automatic restart still follows. Confirmation and
-OTA entry share one configured INTERNAL-largest threshold, sampled freshly under their actual
-owners. Their allocator phases can differ; the confirmation query does not reclaim retained Operation
-or RTOS memory. See the [recovery reference contract](ARCHITECTURE.md#ota-self-update) for the selected
-threshold and measured scope. TLS checks use the separate record-capacity screen rather than reserving
-a handshake budget. The legacy `critical_heap`
-confirmation code now means insufficient OTA recovery headroom, independently of the unchanged 4,096 B
+heap checks and uncertain SDK marking; the automatic restart still follows. The
+[OTA recovery contract](ARCHITECTURE.md#ota-self-update) owns memory admission and confirmation.
+The legacy `critical_heap` confirmation code means insufficient OTA recovery headroom, independently of the 4,096 B
 sustained-critical restart policy. Cleanup-unknown resources leave a known Pending image unconfirmed. Unchanged service
 acknowledgements omit the field. Setup `/save` never confirms a candidate and displays any known
 unconfirmed/uncertain outcome; `provision.py` preserves that warning.
@@ -219,9 +237,8 @@ stale update offer. `/ota/update` also
 returns `409` while the running image is NEW/PENDING_VERIFY, or `503` if its state cannot be
 verified. These refusals create no OTA worker. A manifest check remains available during probation.
 The web UI preserves the device's refusal reason; a failed start does not trigger polling or retry.
-A retired timed-out writer can become idle after its raw handle is quiescent while its one network
-context remains quarantined; a new check/update still returns `409` until real cleanup Ack allows
-reclamation. This does not add a status field. A deadline, memory failure or terminal network-cleanup
+A timed-out operation can keep later checks or updates at `409` while cleanup is pending.
+A deadline, memory failure or terminal network-cleanup
 failure withdraws the update offer. Optional release-note failure is best-effort only after clean
 connection closure; details and blocking-SDK limits belong to [Architecture](ARCHITECTURE.md#ota-self-update).
 
@@ -233,7 +250,9 @@ pair uniformly with `409`; unchanged admitted WiFi remains write/restart-free. S
 [configuration durability](ARCHITECTURE.md#configuration-durability) for older-writer limits.
 
 Before NTP has committed, `/set_time` accepts only finite milliseconds in the interval from
-1700000000000 (inclusive) to January 1 of build year + 10 (exclusive). Clock admission can return
+1700000000000 (inclusive) to the boot-time plausibility ceiling (exclusive). Normal reproducible
+builds omit the app date and use **2033-01-01** as that ceiling; the [clock contract](ARCHITECTURE.md#clock-authority-and-session-restore)
+describes the limit. Clock admission can return
 `503` when busy or `500` when the clock syscall fails; neither response claims successful application.
 `/ota/check?ms=` accepts canonical unsigned integer milliseconds in the same interval, including
 when NTP is already synchronized. Malformed supplied `pr` or `ms` returns `400` before any clock
@@ -248,10 +267,10 @@ the uncertainty contract below.
 
 | Route class | Status and envelope |
 |---|---|
-| Vehicle command | Wrapped `response`; `200` for success or `already_set`, `502` for a failed command. Intake errors use `400`/`413`/`503`. |
+| Vehicle command | Wrapped `response`; `200` for success or an accepted no-op, `502` for a failed command, `404` for an unknown command. Intake errors use `400`/`413`/`503`. |
 | `vehicle_data` | Wrapped `response`; `200` when all selected caches are usable; unusable required caches return `503`/`result:false`. Invalid URI/query/selectors retain `400`, VIN mismatch `404`. |
 | `body_controller_state` | Wrapped `response`; a completed retrieval attempt returns `200`; inspect `response.result` for its outcome. |
-| Configuration | Wrapped `response` for time/VIN/MQTT/Syslog/WiFi. Key generation is flat `{result,reason}`. Channel success is flat `{ok,result,channel}`; channel errors are wrapped. Invalid intake is `400`/`413`, unavailable resources `503`, failed persistence `500`. |
+| Configuration | Wrapped `response` for time/VIN/MQTT/Syslog/WiFi. Key generation is flat `{result,reason}`. Channel success is flat `{ok,result,channel}`; channel errors are wrapped. Invalid intake is `400`/`413`, pending VIN identity recovery `409`, unavailable resources `503`, failed persistence `500`. |
 | OTA check | Flat `{started,reason?}`; `200` accepts the queued check, `409` for busy, `503` for unavailable service/queue, `500` for setup failure. Later memory/worker failures appear through `/ota/status`. |
 | OTA update | Flat `{result,reason}`; `200` on start; `409` for busy/probation, `503` for unavailable service, insufficient ordinary-entry recovery memory or unknown image state, `500` for worker startup failure. |
 | Pre-effect REST OOM fallback | Flat `{result:false,reason:"out of memory"}`, `503`, even for routes whose normal envelope is wrapped. |
@@ -342,6 +361,9 @@ cannot be read; they preserve the unreadable state instead of saving defaults ov
 `/set_mqtt` connects to a changed non-empty broker before saving: refusal/credentials return `400`,
 unreachable/no answer `502`, insufficient contiguous memory `503`. Failure neither persists nor
 reboots; an empty broker disables MQTT. A failed durable configuration save returns `500`.
+Without an explicit scheme, a configured username or URI userinfo selects `mqtts://`; an
+unauthenticated broker selects `mqtt://`. Explicit schemes are honored. TLS verifies bundled CA
+roots and never falls back to plaintext; inspect `/status.mqtt.tls` and `error` for diagnosis.
 
 `/set_wifi` accepts an empty password for an open network, 8–63 UTF-8 bytes for WPA2, or exactly
 64 ASCII hex characters for a raw PSK. The atomic config keeps the previous credentials for one
@@ -370,20 +392,18 @@ gate refuses the request before any save.
 | `mqtt` | `{configured, connected, tls, broker, error?}`; `broker` is the credential-free `host:port` even if the saved URI has userinfo. |
 | `syslog` | `{configured, resolved, reachable, host?, port?, error?, dropped_lines?}`; `reachable` is an advisory ping hint, never a delivery gate. |
 | `ota` | `{channel, verification}`; channel is `"release"\|"dev"`. Verification is the cached last observed running-image state: `stable`, `pending_verify` or `unknown`. Status performs no SDK/flash query for this field; it does not identify an earlier rollback. |
-| `tele` | `{climate, drive, tires, closures}` read-only telemetry, emitted only while the BLE link is up. |
-| `last_reboot` | `"heap:<n>"` — only when the heap watchdog ended the previous boot (`n` = consecutive such restarts); absent on ordinary boots. |
+| `tele` | Optional `{climate, drive, tires, closures}` cached domains while the BLE link is up; presence-aware subkeys and units follow the [status emitter schema](../main/logic/status_model.hpp). |
+| `last_reboot` | `"heap:<n>"` records a consumed heap-restart breadcrumb (`n` = consecutive such restarts). `heap:nvs-read-error`, `heap:nvs-clear-error` and `heap:nvs-invalid` report storage/validation ambiguity, not proof of the prior reset cause. Absent when no breadcrumb or consumption error exists. |
 | `pairing_blocked` | Optional cached reason: `key_reload_required`, `key_runtime_mismatch`, `key_storage_unavailable`, `key_cleanup_pending` or `vin_transition_pending`. Absent during normal pairing. Reading it does not probe storage or change identity. |
 | `identity_state` | Cached recovery condition: `ok`, `reboot_required`, `cleanup_pending`, `vin_transition`, `storage_unavailable` or `unknown`. `ok` means Ready with no known local recovery block; it does not prove a usable key, session or vehicle acceptance. |
 | `sys` | Always present: `{board_mac, free_heap, min_free_heap, largest_block, uptime_s, wifi_reconnects, reset_reason, safe_mode, runtime_state, fatal_component?, diag_dropped_lines?, stack_min_free_quantum_bytes, stack_min_free_bytes:{<context>:number|null}}`. |
-| `last_crash` | Reset/report facts plus `artifact_present`, `raw_available`, `query_error`, `foreign_dump`, `checksum_verified`, `dump_identity` (`current`/`foreign`/`unverified`), and `summary_available`. A summary emits numeric `pc` (including zero), optional `task`/hex-string `backtrace`, and `corrupted`/`truncated`/`isr`; `elf_sha256` and `dump_elf_sha256` distinguish running and dump builds. Present for undismissed faults, artifacts or query errors. |
+| `last_crash` | `reason`, `reason_code`, `fault`, `coredump` plus `artifact_present`, `raw_available`, `query_error`, `foreign_dump`, `checksum_verified`, `dump_identity` (`current`/`foreign`/`unverified`), and `summary_available`. A summary emits numeric `pc` (including zero), optional `task`/hex-string `backtrace`, and `corrupted`/`truncated`/`isr`; `elf_sha256` and `dump_elf_sha256` distinguish running and dump builds. Present for undismissed faults, artifacts or query errors. |
 
 `sys.stack_min_free_quantum_bytes` is 256. `sys.stack_min_free_bytes` always contains the 27
 [registered contexts](../main/logic/stack_context.hpp). A never-sampled context is `null`; a number
 is a conservative historical lower bound in bytes, rounded down to a multiple of 256. Thus 0
 means a real observation in 0–255 bytes, not an unsampled context or proof of an overflow.
-15872 is the saturated lower bound for observations at or above that value. The original
-`httpd`, `vehicle`, `auto_pair` and `mqtt` names remain; their formerly optional fields now use
-explicit nulls. Callback names identify entry contexts: several contexts may share a task,
+15872 is the saturated lower bound for observations at or above that value. `httpd`, `vehicle`, `auto_pair` and `mqtt` use explicit nulls when unsampled. Callback names identify entry contexts: several contexts may share a task,
 and one context may aggregate several caller tasks. MQTT event/probe dispatch and the logger
 are such aggregates; they do not establish a minimum for one dedicated SDK task. A snapshot is six
 independent atomic observations, not a globally simultaneous measurement. These diagnostics
@@ -396,15 +416,16 @@ retains its existing semantics.
 `syslog.dropped_lines` counts full-queue losses. Both are boot-local unsigned counters modulo 2^32,
 omitted at zero. Clearing the ring does not reset the loss counter. Neither proves UDP delivery.
 
-`ble.rssi` appears only when a live-link RSSI sample is available.
+`ble.rssi` is a live-link sample while connected. During failed connection attempts it may
+instead be the latest target-advertisement sample; its presence does not prove a connection.
 `ble.phase` and `phase_s` appear together: `connecting` counts down to giving up, `waiting` to a
 retry, and zero means now. Heap fields are INTERNAL-only; PSRAM cannot mask them. The watchdog
 acts on `sys.largest_block`. All stack contexts use the nullable conservative boot minima and
 256-byte quantum described above; measured zero remains visible. `sys.board_mac` is the physical
 eFuse identity.
 
-Crash `backtrace`/`corrupted` exist only on Xtensa (esp32/s3). RISC-V (c3/c6) has no on-device
-backtrace; downloaded dumps unwind offline on every target.
+On-device crash `backtrace` exists only on Xtensa (esp32/s3); `corrupted` can also appear on
+RISC-V (c3/c6). RISC-V has no on-device backtrace; downloaded dumps unwind offline on every target.
 
 `/api/proxy/1/version` appends the fixed `-esp32` suffix on every target. Strip it when
 comparing to `/status.version`; `platform` identifies the actual chip.
@@ -456,10 +477,12 @@ the field and entity IDs stay stable.
 
 All state topics are retained JSON. Numeric fields appear only when the car reported them, so an
 unseen value shows as *unknown* in HA, not a phantom `0`; range, rate and odometer are converted to
-metric (km, km/h). While a parked car sleeps the source polls pause and MQTT keeps serving the
-last-known retained values until the next active window.
+metric (km, km/h). An invalid or initially empty cache publishes retained `{}` once to clear stale
+readings, then stays quiet until valid data returns. While a parked car sleeps, ordinary source polls pause and MQTT keeps serving
+last-known values until the next successful relevant poll. Charge and drive can also refresh on
+the wake/bootstrap one-shot outside an active window. These topics carry no per-domain age;
+broker publication or link state alone does not establish each retained field's freshness.
 The device payload's `paired` and `session_available` retain their status-field meanings above;
 the broker connection's `availability` topic is independent of either session fact. Its recovery fields use the same cached state names as `/status`; `fatal_component` is absent outside Fatal. They describe device recovery, not fresh vehicle authentication. They add no command topic or discovery entity.
-
 
 Configure brokers in the [user guide](USER_GUIDE.md#home-assistant-mqtt). Runtime ownership and publish failure behavior are in [Architecture](ARCHITECTURE.md#home-assistant-mqtt-bridge).
