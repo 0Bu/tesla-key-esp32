@@ -187,8 +187,8 @@ N02 is not implemented. A separately reviewed change could keep the last vehicle
   key, session, Wi-Fi or MQTT material.
 - **Identity binding:** a changed VIN, a pairing reset or a new key adopts nothing.
 - **Age and evcc:** carry the true sample age across the restart, or discard the snapshot.
-  Outside the active window, any valid charge or climate cache is served regardless of its age,
-  including to evcc (`logic/charge_control.hpp`). A restored domain must therefore stay off
+  Outside the active window, any valid charge, climate or drive cache is served regardless of its
+  age, including to evcc (`logic/charge_control.hpp`, `logic/vehicle_data.hpp`). A restored domain must therefore stay off
   `/api/1/vehicles/{VIN}/vehicle_data` until a fresh sample replaces it, or carry an explicit
   restored marker that evcc-facing reads refuse.
 - **Contract change:** restored values marked by their age would replace the `{}` clearing. That
@@ -265,7 +265,8 @@ WLED, Theengs, Meshtastic and ESPHome `bluetooth_proxy`.
 ## Header inventory
 
 Every non-project header included under `main/`, grouped by its feature row. C and C++ standard
-headers and newlib `sys/` headers are exempt; everything else must be listed here.
+headers and `sys/` headers are exempt: in ESP-IDF 6.1 these come from the C library (`esp_libc`)
+or lwIP's POSIX compatibility layer, which U12 covers. Everything else must be listed here.
 
 <!-- esp-idf-matrix:headers:start -->
 | Headers | Feature ID |
@@ -431,8 +432,8 @@ and fails when:
 
 - **Pins disagree.** The metadata targets, the ESP-IDF version in any per-target lockfile, the
   manifest floor or the `esp-idf-toolchain.txt` channel differ from this document. A
-  docs.espressif.com link or an ESP-IDF GitHub source link is off that channel, or a link names an
-  unsupported target.
+  docs.espressif.com link or an ESP-IDF GitHub or raw source link is off that channel, an ESP-IDF
+  commit link appears, or a link names an unsupported target.
 - **Components disagree.** A `REQUIRES` component of `main/CMakeLists.txt` (including the
   config-repair `list(APPEND ...)` entries) or a direct dependency in `main/idf_component.yml` has
   no used row. A used row names a component that is no longer required. `REQUIRES` contains an
@@ -441,7 +442,9 @@ and fails when:
   `maintenance/config-repair/sdkconfig.defaults*` file is missing, stale or out of file order, or
   maps to a missing used row. A defaults overlay names an unsupported target.
 - **Headers disagree.** A non-project, non-standard header included under `main/` is not listed, or
-  a listed header is no longer included. Includes inside line-leading block comments are ignored.
+  a listed header is no longer included. A file type under `main/` (outside `www/`) that is neither
+  C/C++ source nor a known non-source file fails closed. Includes inside line-leading block comments
+  are ignored.
 - **Rows are malformed.** A row has a duplicate id, an invalid status or no official documentation
   link. A table loses its expected columns, or the evaluated ULP or `esp_https_ota` decision
   disappears.
@@ -451,8 +454,9 @@ clean control, which must pass, with block-commented and standard includes.
 
 **Limits:**
 
-- The check reads source text, not the preprocessor, so an include assembled by macros is not
-  seen.
+- The check reads source text, not the preprocessor. An include assembled by macros is not seen,
+  an include under `#if 0` still counts, and a string literal whose line starts with `/*` could
+  hide a following include until the next `*/`.
 - It proves that the listed inventory matches the tree, not that a decision text is still right;
   `$project-review` judges those.
 - An ESP-IDF pin change always sends the whole document back through review.

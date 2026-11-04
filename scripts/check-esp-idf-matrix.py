@@ -36,9 +36,10 @@ TABLE_HEADERS = {
     "headers": ["Headers", "Feature ID"],
     "sdkconfig": ["Setting", "Value", "File", "Feature ID"],
 }
-# Headers that need no matrix row: the C standard library and newlib's sys/ headers. C++ standard
-# headers have neither an extension nor a directory (<array>, <cstdint>). Everything else that is
-# not a project header must be listed, so an unfamiliar ESP-IDF header cannot slip past a prefix.
+# Headers that need no matrix row: the C standard library and every sys/ header (C library,
+# esp_libc in ESP-IDF 6.1, plus lwIP's POSIX compatibility headers). C++ standard headers have
+# neither an extension nor a directory (<array>, <cstdint>). Everything else that is not a project
+# header must be listed, so an unfamiliar ESP-IDF header cannot slip past a prefix.
 C_STANDARD = {
     "alloca.h", "assert.h", "ctype.h", "errno.h", "float.h", "inttypes.h", "limits.h", "locale.h",
     "math.h", "setjmp.h", "signal.h", "stdarg.h", "stdatomic.h", "stdbool.h", "stddef.h",
@@ -46,11 +47,17 @@ C_STANDARD = {
 }
 REPAIR_VARIABLE = "${TESLA_REPAIR_REQUIRES}"
 SOURCE_SUFFIXES = {".c", ".cc", ".cpp", ".h", ".hpp"}
+# Files under main/ (outside the web UI) that cannot include a header. Any other file type fails
+# closed, so an assembler or include fragment cannot carry an unscanned ESP-IDF include.
+NON_SOURCE_NAMES = {"CMakeLists.txt", "Kconfig.projbuild", "idf_component.yml"}
+NON_SOURCE_SUFFIXES = {".md"}
 INCLUDE = re.compile(r'^\s*#\s*include\s*[<"]([^>"]+)[>"]', re.MULTILINE)
 BLOCK_COMMENT = re.compile(r"^\s*/\*.*?\*/", re.MULTILINE | re.DOTALL)
 TICKED = re.compile(r"`([^`]+)`")
 DOCS_LINK = re.compile(r"https://docs\.espressif\.com/projects/esp-idf/en/([^/]+)/([^/]+)/")
-SOURCE_LINK = re.compile(r"https://github\.com/espressif/esp-idf/(?:blob|tree)/([^/]+)/")
+SOURCE_LINK = re.compile(r"https://(?:github\.com/espressif/esp-idf/(?:blob|tree)|"
+                         r"raw\.githubusercontent\.com/espressif/esp-idf)/([^/]+)/")
+COMMIT_LINK = re.compile(r"https://github\.com/espressif/esp-idf/commit/")
 ASSIGNMENT = re.compile(r"^(CONFIG_[A-Z0-9_]+)=(.*)$")
 NOT_SET = re.compile(r"^# (CONFIG_[A-Z0-9_]+) is not set$")
 
@@ -166,6 +173,15 @@ def standard_header(header: str) -> bool:
     return header in C_STANDARD or header.startswith("sys/")
 
 
+def unscanned_files(root: Path) -> list[str]:
+    main = root / "main"
+    return sorted(
+        str(path.relative_to(root)) for path in main.rglob("*")
+        if path.is_file() and (main / "www") not in path.parents
+        and path.suffix not in SOURCE_SUFFIXES and path.suffix not in NON_SOURCE_SUFFIXES
+        and path.name not in NON_SOURCE_NAMES)
+
+
 def included_headers(root: Path) -> set[str]:
     main = root / "main"
     found: set[str] = set()
@@ -215,6 +231,8 @@ def validate(root: Path) -> tuple[list[str], dict[str, int]]:
     for ref in SOURCE_LINK.findall(text):
         if ref != channel:
             findings.append(f"ESP-IDF source link uses {ref}, pinned channel is {channel}")
+    if COMMIT_LINK.search(text):
+        findings.append(f"ESP-IDF commit link is not pinned to the {channel} channel")
 
     used = rows(text, "used")
     evaluated = rows(text, "evaluated")
@@ -271,6 +289,8 @@ def validate(root: Path) -> tuple[list[str], dict[str, int]]:
             findings.append(f"header row maps to missing used row {feature}")
         for header in TICKED.findall(headers):
             listed[header] = feature
+    for path in unscanned_files(root):
+        findings.append(f"unclassified file type under main/: {path}")
     included = included_headers(root)
     for header in sorted(included - listed.keys()):
         findings.append(f"unlisted header {header} included under main/")
@@ -343,6 +363,7 @@ def mutations(root: Path) -> list[tuple[str | None, Mutation]]:
     used = rows(read(root, DOC), "used")
     first, second = used[0], used[1]
     first_status = f"| {first[0]} | {first[1]} | {first[2]} |"
+    first_row = "| " + " | ".join(first) + " |"
     return [
         ("metadata targets", lambda r: edit(r, doc, '"targets":["esp32",', '"targets":["esp32h2","esp32",')),
         ("resolves ESP-IDF 6.1.1", lambda r: edit(r, "dependencies.lock.esp32c6", "    version: 6.1.0", "    version: 6.1.1")),
@@ -351,9 +372,13 @@ def mutations(root: Path) -> list[tuple[str | None, Mutation]]:
         ("documentation link uses v6.0", lambda r: edit(r, doc, "/en/v6.1/esp32/", "/en/v6.0/esp32/")),
         ("unsupported target esp32h2", lambda r: edit(r, doc, "/en/v6.1/esp32s3/", "/en/v6.1/esp32h2/")),
         ("source link uses v6.0", lambda r: edit(r, doc, "esp-idf/blob/v6.1/", "esp-idf/blob/v6.0/")),
+        ("source link uses master", lambda r: append(r, doc, "\n[raw](https://raw.githubusercontent.com/espressif/esp-idf/master/README.md)\n")),
+        ("commit link is not pinned", lambda r: append(r, doc, "\n[c](https://github.com/espressif/esp-idf/commit/0123456)\n")),
         (f"duplicate feature id {first[0]}", lambda r: edit(r, doc, f"| {second[0]} |", f"| {first[0]} |")),
         (f"{first[0]} has an invalid status", lambda r: edit(r, doc, first_status, first_status.rsplit("|", 2)[0] + "| 🚫 Not planned |")),
         ("required evaluated decision about ULP", lambda r: edit(r, doc, "ULP-FSM, ULP-RISC-V and LP core", "Low-power coprocessors")),
+        ("required evaluated decision about esp_https_ota", lambda r: edit(r, doc, "| `esp_https_ota` and `esp_http_client` |", "| HTTP convenience layers |")),
+        (f"{first[0]} has no official documentation link", lambda r: edit(r, doc, first_row, first_row.rsplit("|", 2)[0] + "| none |")),
         ("must start with columns", lambda r: edit(r, doc, "| Setting | Value | File | Feature ID |", "| Setting | Value | Feature ID | File |")),
         ("component esp_adc has no used-table row", lambda r: edit(r, "main/CMakeLists.txt", "    REQUIRES\n", "    REQUIRES\n        esp_adc\n")),
         ("names esp_eth, which is not a current component", lambda r: edit(r, "main/CMakeLists.txt", "        esp_eth\n", "")),
@@ -370,6 +395,7 @@ def mutations(root: Path) -> list[tuple[str | None, Mutation]]:
         ("unlisted header rom/ets_sys.h", lambda r: edit(r, "main/main.cpp", "\n", "\n#include \"rom/ets_sys.h\"\n")),
         ("unlisted header services/gap/ble_svc_gap.h", lambda r: edit(r, "main/net.cpp", "\n", "\n#include <services/gap/ble_svc_gap.h>\n")),
         ("stale header hal/uart_ll.h", lambda r: strip_includes(r, "hal/uart_ll.h")),
+        ("unclassified file type under main/: main/wake.S", lambda r: (r / "main/wake.S").write_text("#include \"esp_sleep.h\"\n")),
         ("header row maps to missing used row U98", lambda r: edit(r, doc, "| `driver/gpio.h` | U22 |", "| `driver/gpio.h` | U98 |")),
         (None, lambda r: edit(r, "main/main.cpp", "\n", "\n/*\n#include <esp_https_ota.h>\n*/\n#include <cstdint>\n#include <sys/time.h>\n")),
     ]
