@@ -121,18 +121,18 @@ records; fenced/quoted/HTML/dynamic/ambiguous/foreign or stale forms fail. No fi
 PR creation uses one exact body source; an authorized existing-body edit precedes push. Unreadable
 GitHub state fails closed; new commits stale every record. Hygiene remains an independent gate.
 
-Guarded create/push/merge must be the only shell segment. The gate is lexical and sees only command
-text. Path-qualified actions, Git/GH context overrides and the wrappers `gate_bash_actions` lists,
-around a literal action, are recognized conservatively; changed cwd/repository, foreign remotes and
-ambiguous context fail closed. A shell-expanded or globbed word fails closed where it can be the
-subcommand or sits beside a literal action word. Argv from stdin (`xargs git < args`), a substitution
-containing a space under `eval` or `bash -c`, a dynamic executable with a literal other word
-(`$GIT pp`) and unlisted wrappers stay unclassified. A Git alias is resolved only where normalization
-leaves `git <name>`, including after `env`, `command` or `VAR=value`; after a Git global option an
-unlisted subcommand fails closed unresolved; any other wrapper, path-qualified or quoted spelling is
-not resolved. A literal `gh <name>` outside the hook's builtin list is refused as an unknown
-subcommand, also through a listed wrapper, a path or quoting. Do not mutate HEAD/config/PR before the
-action within the same call. `scripts/test-pr-gates.sh` pins adversarial forms.
+Guarded create/push/merge must be the only shell segment. The gate classifies command text and
+configured aliases; it does not execute shell expansion. Recognized actions with changed
+cwd/repository, foreign remotes or ambiguous context fail closed. Do not mutate HEAD/config/PR
+before the action within the same call. `scripts/test-pr-gates.sh` tests the supported forms and
+selected limits below; the hook is lexical defense in depth, not a shell interpreter.
+
+| Form | Local gate behavior |
+|---|---|
+| Literal `git push` and `gh pr create` | Recognized through executable paths and the wrappers `bash`, `sh`, `zsh`, `env`, `eval`, `exec`, `sudo`, `nohup`, `nice`, `time`, `timeout` and `xargs`. Wrapper handling is not uniform: `nohup gh pr new` and `nohup gh -R a/b pr create` stay unclassified. |
+| Git alias | Resolved only where normalization leaves unquoted `git <name>`, including after `env`, `command` or `VAR=value`. After a Git global option, an unlisted subcommand fails closed unresolved. Other wrappers, executable paths and quoted alias names are not resolved. |
+| Unknown literal `gh <name>` | Refused, including through wrappers, executable paths and quoting. A literal `gh pr merge` is refused under any wrapper. |
+| Shell expansion or indirect argv | Not fully classified. Examples that stay unclassified are `git {push,origin}`, `gh {pr,create}`, `$X merge 1`, `$GIT pp`, `xargs git < args` and `eval "$(cat x)"`. Other dynamic forms can be refused conservatively; an unclassified example does not imply that similar spellings pass. |
 
 Push supports only current HEAD→current branch on sole matching origin fetch/push URL, one refspec.
 Alternate refs/remotes, tag/all/mirror pushes, followTags, custom multiple pushes and ambiguous syntax

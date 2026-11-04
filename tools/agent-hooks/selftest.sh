@@ -944,6 +944,69 @@ expect_unknown_gh_block 'gh "mp" 1' 'hook entry refuses a quoted unknown gh subc
 expect_unknown_gh_block '/usr/bin/gh mp 1' 'hook entry refuses a path-qualified unknown gh subcommand'
 expect_unknown_gh_block 'nohup gh mp 1' 'hook entry refuses a wrapped unknown gh subcommand'
 
+# Classify literal actions without executing them. Each case checks the action kind, so a
+# missing recognizer cannot pass merely because an unrelated later guard also refuses it.
+for wrapper in bash sh zsh env eval exec sudo nohup nice time timeout xargs; do
+  case "$wrapper" in
+    bash|sh|zsh) push_command="$wrapper -c 'git push'"; create_command="$wrapper -c 'gh pr create --body-file body.md'" ;;
+    timeout) push_command='timeout 5 git push'; create_command='timeout 5 gh pr create --body-file body.md' ;;
+    *) push_command="$wrapper git push"; create_command="$wrapper gh pr create --body-file body.md" ;;
+  esac
+  expect_alias_actions "$push_command" push "literal push recognized through $wrapper"
+  expect_alias_actions "$create_command" create "literal create recognized through $wrapper"
+done
+expect_alias_actions '/usr/bin/git push' push 'path-qualified literal push recognized'
+expect_alias_actions '/usr/bin/gh pr create --body-file body.md' create 'path-qualified literal create recognized'
+expect_alias_actions 'git --no-pager pp' push 'unlisted git subcommand after no-pager fails closed without alias resolution'
+expect_alias_actions 'git -c a.b=c pp' push 'unlisted git subcommand after configuration option fails closed'
+for dynamic_command in 'git $X' 'git p*'; do
+  expect_alias_actions "$dynamic_command" push "dynamic git subcommand classified: $dynamic_command"
+done
+for dynamic_command in 'gh pr $X' 'gh pr m*'; do
+  expect_alias_actions "$dynamic_command" 'create merge' "dynamic gh subcommand classified: $dynamic_command"
+done
+expect_alias_actions '$X push' push 'dynamic executable beside literal push classified'
+expect_alias_actions '$X pr create' create 'dynamic executable beside literal pr create classified'
+
+# Pin unsafe context markers independently of the later publication records.
+expect_unsafe_action() {  # <command> <kind> <label>
+  local got
+  got="$(GATE_PROJ="$alias_repo" PATH="$alias_bin:$PATH" gate_bash_actions "$1")"
+  if printf '%s\n' "$got" | grep -qF "$(printf '%s\t__GATE_UNSAFE_' "$2")"; then
+    pass_case "$3"
+  else
+    fail_case "$3 (got='$got')"
+  fi
+}
+for context_command in 'GIT_DIR=x git push' 'git --git-dir=x push' 'git -c a=b push'; do
+  expect_unsafe_action "$context_command" push "git context override classified unsafe: $context_command"
+done
+for context_command in 'GH_REPO=a/b gh pr create' 'gh -R a/b pr create' \
+    'gh pr create --body-file body.md -R a/b' 'gh pr create --body-file body.md --head other'; do
+  expect_unsafe_action "$context_command" create "gh context override classified unsafe: $context_command"
+done
+expect_unsafe_action 'git status && git push' push 'compound push classified unsafe'
+
+# Known lexer limits are data, not commands to run. Keep the documented examples honest.
+for unclassified in 'nohup gh pr new --body-file body.md' 'nohup gh -R a/b pr create' \
+    'git {push,origin}' 'gh {pr,create}' '$X merge 1' '$GIT pp' 'xargs git < args' 'eval "$(cat x)"'; do
+  expect_alias_actions "$unclassified" '' "documented lexical limit: $unclassified"
+done
+
+# Exercise source and remote admission with an offline repository, including a positive control.
+push_scope_repo="$tmp/push-scope-repo"
+git init -q "$push_scope_repo"
+git -C "$push_scope_repo" -c user.name=Test -c user.email=test@example.invalid commit -qm fixture --allow-empty
+git -C "$push_scope_repo" remote add origin https://github.com/0Bu/tesla-key-esp32.git
+push_scope_branch="$(git -C "$push_scope_repo" rev-parse --abbrev-ref HEAD)"
+expect_rc 0 'current HEAD push scope positive control' env GATE_PROJ="$push_scope_repo" bash -c \
+  '. "$1"; gate_push_head_sha "origin HEAD:$2"' sh "$lib_src" "$push_scope_branch"
+for push_scope in "foreign HEAD:$push_scope_branch" "https://example.invalid/x/y.git HEAD:$push_scope_branch" \
+    "origin other:$push_scope_branch"; do
+  expect_rc 2 "foreign remote or source refused: $push_scope" env GATE_PROJ="$push_scope_repo" bash -c \
+    '. "$1"; gate_push_head_sha "$2"' sh "$lib_src" "$push_scope"
+done
+
 # Shared-predicate loader canaries: a missing, truncated, incomplete or wrong-API pr-gate-lib.sh
 # must block before the payload is even parsed, which covers create, push and merge (all five
 # gates); the canaries drive a create payload. The --check and push-hook entries have their own
