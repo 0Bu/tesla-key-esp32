@@ -118,7 +118,7 @@ const usbAbsentApprovalProceeds = /(?:(?:approval|authorization)[^.!?]*(?:absent
 const reviewedSkillSha256 = new Map([
   ["add-logic-test", "564c0e171f99e6cb55117c55dcb272f9c07ac0342315b48199274c6c7f347b0a"],
   ["ci-heal", "dc84639ff9ac74ba436e994a653447d45eec85f63615a53851642ce08ed11128"],
-  ["deploy", "1d0566dca8aab3a972a923850d2071c97b6df7b8b4ffb8fd9c474e9f52bf6a37"],
+  ["deploy", "b32f7b57f6be0769112c996c848bfb94f91d80751607e2370aaec949fcc3cf0c"],
   ["deploy-bench", "3910491d1c3c295a8c91c36627b656b29d8f41257ea2c8f5fc15c4bb149d58cf"],
   ["device-diag", "d08f2540c21aa540a2d287d9139fdcce34abcd2214aa816684507b1747aa5fa7"],
   ["display-preview", "15e387aa51913799ca08e7aedbcaaf247c341e6f1535244a89d5744d860259a0"],
@@ -130,7 +130,7 @@ const reviewedSkillSha256 = new Map([
   ["project-review", "b888badbf89d878af2083f80cd883ca2a2b63e64e0e01615677c4bae1fcbc266"],
   ["ship", "7a465a7200a5d08aa541256bbbd696e72cc00e270ca020a666ad8a159de4b191"],
   ["skill-audit", "b5c8659f2e1f9255a61cd10bd85d4ed8bcc66cb5888570667672a5ff502af05a"],
-  ["usb-recovery", "231ee582c00c1bea894cc716e6d50d757129c59696563664cdd48e7809384776"],
+  ["usb-recovery", "60120c376e8dac1546cc92aafb98f946075753957db1dd0cb012106c1dfc56ca"],
   ["vehicle-command-audit", "c620e6ab777d5017c4402a8bbcca1105b4271ac13e02f0bf22f7196b121c7702"],
 ]);
 const featureDocsScopeTokens = [
