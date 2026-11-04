@@ -14,6 +14,8 @@
 #include <esp_tls.h>
 #include <esp_crt_bundle.h>
 #include <esp_timer.h>
+#include <esp_http_server.h>
+#include <sys/socket.h>
 #include <esp_heap_caps.h>
 #include <cJSON.h>
 #include <algorithm>
@@ -90,6 +92,14 @@ void* queued_http_argument=nullptr;
 unsigned queue_calls=0;
 bool queue_ok=true,queue_throw_before=false,queue_throw_after=false,queue_inline=false;
 bool http_request_live=false;
+bool async_copy_ok=true;
+unsigned async_copies=0,async_completions=0,upload_reads=0;
+size_t upload_cursor=0;
+int upload_fail_at=-1;
+int upload_expire_at=-1;
+bool upload_expire_on_end=false;
+std::string upload_body,upload_reply,upload_status;
+std::string written_image;
 bool throw_entry_sample=false;
 bool require_error_owner=false;
 void check_status_owner();
@@ -147,6 +157,7 @@ std::string image_body(){
  std::string result(1024,'x');esp_image_header_t image{};image.magic=ESP_IMAGE_HEADER_MAGIC;
  esp_app_desc_t desc{};desc.magic_word=ESP_APP_DESC_MAGIC_WORD;
  std::snprintf(desc.version,sizeof(desc.version),"%s",image_version.c_str());
+ std::snprintf(desc.project_name,sizeof(desc.project_name),"tesla-key-esp32");
  std::memcpy(result.data(),&image,sizeof(image));
  std::memcpy(result.data()+sizeof(image)+sizeof(esp_image_segment_header_t),&desc,sizeof(desc));
  return result;
@@ -192,7 +203,7 @@ extern "C" void vTaskDelay(TickType_t ticks){
  if(fixture::cleanup_hook_armed&&!fixture::cleanup_hook_entered){
   std::this_thread::sleep_for(std::chrono::microseconds(50));return;
  }
- if(ticks==10000&&fixture::terminal_case=="uncertain")fixture::check_uncertain_terminal();
+ if(ticks==10000&&(fixture::terminal_case=="uncertain"||fixture::terminal_case=="upload-uncertain"))fixture::check_uncertain_terminal();
  fixture::now.fetch_add(ticks);
  std::this_thread::sleep_for(std::chrono::microseconds(50));
 }
@@ -278,11 +289,14 @@ esp_err_t esp_ota_begin(const esp_partition_t* p,size_t n,esp_ota_handle_t* h){
 esp_err_t esp_ota_write(esp_ota_handle_t h,const void* bytes,size_t n){
  CHECK(!fixture::network_thread&&h==1&&bytes&&n&&n<=1024&&fixture::raw_handle_live);
  fixture::check_effect_admission();const int call=++fixture::writes;
+ fixture::written_image.append(static_cast<const char*>(bytes),n);
  return call==fixture::raw_write_error_at?fixture::raw_write_error:ESP_OK;
 }
 esp_err_t esp_ota_end(esp_ota_handle_t h){
  CHECK(!fixture::network_thread&&h==1&&fixture::raw_handle_live);fixture::check_effect_admission();
- ++fixture::ends;fixture::raw_handle_live=false;return fixture::raw_end_error; // Consumed on every SDK return.
+ ++fixture::ends;fixture::raw_handle_live=false;
+ if(fixture::upload_expire_on_end)fixture::now=300000;
+ return fixture::raw_end_error; // Consumed on every SDK return.
 }
 esp_err_t esp_ota_abort(esp_ota_handle_t h){
  CHECK(!fixture::network_thread&&h==1&&fixture::raw_handle_live);fixture::check_writer_owner();
@@ -324,6 +338,25 @@ extern "C" esp_err_t httpd_queue_work(void* server,void (*work)(void*),void* arg
  return ESP_OK; // Faithful SDK seam: callback executes on the later server-loop turn.
 }
 void esp_restart();
+esp_err_t httpd_req_async_handler_begin(httpd_req_t* req,httpd_req_t** out){
+ if(!fixture::async_copy_ok)return ESP_ERR_NO_MEM;
+ *out=new httpd_req_t(*req);++fixture::async_copies;return ESP_OK;
+}
+esp_err_t httpd_req_async_handler_complete(httpd_req_t* req){
+ CHECK(req);delete req;++fixture::async_completions;return ESP_OK;
+}
+int httpd_req_to_sockfd(httpd_req_t*){return -1;}
+int httpd_req_recv(httpd_req_t*,char* data,size_t n){
+ ++fixture::upload_reads;
+ if(fixture::upload_expire_at==static_cast<int>(fixture::upload_reads))fixture::now=300000;
+ if(fixture::upload_fail_at==static_cast<int>(fixture::upload_reads))return -1;
+ const auto count=std::min({n,fixture::read_limit,fixture::upload_body.size()-fixture::upload_cursor});
+ std::memcpy(data,fixture::upload_body.data()+fixture::upload_cursor,count);
+ fixture::upload_cursor+=count;return static_cast<int>(count);
+}
+esp_err_t httpd_resp_set_type(httpd_req_t*,const char*){return ESP_OK;}
+esp_err_t httpd_resp_set_status(httpd_req_t*,const char* status){fixture::upload_status=status;return ESP_OK;}
+esp_err_t httpd_resp_sendstr(httpd_req_t*,const char* body){fixture::upload_reply=body;return ESP_OK;}
 namespace tk {
 std::size_t ota_recovery_required_bytes(OtaRecoveryUse use) noexcept {
  return ota_recovery_required_bytes_for(use,{fixture::entry_required,fixture::recovery_required});
@@ -333,7 +366,12 @@ std::size_t ota_recovery_required_bytes(OtaRecoveryUse use) noexcept {
 
 void esp_restart(){
  ++fixture::restart_calls;
- CHECK(fixture::terminal_case=="commit"&&fixture::selectors==1&&fixture::ends==1);
+ CHECK((fixture::terminal_case=="commit"||fixture::terminal_case=="upload-commit")&&fixture::selectors==1&&fixture::ends==1);
+ if(fixture::terminal_case=="upload-commit"){
+  CHECK(fixture::async_copies==1&&fixture::async_completions==1);
+  CHECK(fixture::upload_status=="200 OK"&&fixture::upload_reply.find("true")!=std::string::npos);
+  CHECK(fixture::init_calls==0&&fixture::connects==0&&fixture::written_image==fixture::upload_body);
+ }
  CHECK(ota_is_busy()&&s_operation_gate.state()==tk::OtaIdentityGateState::Ota);
  CHECK(ota_get_state()==OtaState::Done);
  // Exits only the disposable terminal-effect fixture; this is not a task-lifetime/LSan claim.
@@ -372,6 +410,11 @@ void check_effect_admission(){
  CHECK(selectors==1&&ends==1&&restart_calls==0&&ota_is_busy());
  CHECK(s_operation_gate.state()==tk::OtaIdentityGateState::Ota&&ota_get_state()==OtaState::Error);
  CHECK(s_operation.load()&&!s_operation.load()->coordinator.writer_lease_released());
+ if(terminal_case=="upload-uncertain"){
+  CHECK(async_copies==1&&async_completions==1&&init_calls==0);
+  CHECK(upload_reply.find("\"outcome\":\"unknown\"")!=std::string::npos);
+  CHECK(ota_get_status().message=="upload outcome is uncertain; do not retry");
+ }
  std::cout<<"OTA uncertain selection parked with owner retained; checks "<<checks<<'\n'<<std::flush;
  std::_Exit(0); // Separate irreversible-effect fixture, not leak/task-reclamation proof.
 }
@@ -404,8 +447,61 @@ void reset(std::initializer_list<size_t> samples={65536}){
  manifest="{\"version\":\"1.6.3\"}";changelog="{\"version\":\"1.6.3\",\"changelog\":\"A change\"}";
  std::snprintf(running_description.version,sizeof(running_description.version),"1.6.2");
  ota_set_channel(tk::OtaChannel::Release);
+ async_copy_ok=true;async_copies=async_completions=upload_reads=0;upload_cursor=0;upload_fail_at=-1;
+ upload_expire_at=-1;upload_expire_on_end=false;
+ upload_body.clear();upload_reply.clear();upload_status.clear();written_image.clear();
 }
 void run_selected(){CHECK(selected_task);auto task=selected_task;auto* arg=selected_argument;selected_task=nullptr;task(arg);}
+void upload_checks(){
+ using R=tk::OtaStartResult;
+ reset();httpd_req_t req{&http_server_marker,1024};bool handed=false;
+ CHECK(ota_upload_start(&req,handed)==R::Unavailable&&!handed&&queries==0);
+ for(const auto state:{ESP_OTA_IMG_PENDING_VERIFY,ESP_OTA_IMG_INVALID}){
+  reset();ota_set_channel(tk::OtaChannel::Dev);sdk_state=state;
+  CHECK(ota_upload_start(&req,handed)!=R::Started&&!handed&&async_copies==0);
+  CHECK(!ota_is_busy()&&begins==0);
+ }
+ reset();ota_set_channel(tk::OtaChannel::Dev);entry_largest=1;
+ CHECK(ota_upload_start(&req,handed)==R::NoMemory&&!handed&&!ota_is_busy());
+ reset();ota_set_channel(tk::OtaChannel::Dev);async_copy_ok=false;
+ CHECK(ota_upload_start(&req,handed)==R::NoMemory&&!handed&&!ota_is_busy()&&async_copies==0);
+ reset();ota_set_channel(tk::OtaChannel::Dev);create_ok=false;
+ CHECK(ota_upload_start(&req,handed)==R::InternalError&&handed&&!ota_is_busy());
+ CHECK(async_copies==1&&async_completions==1&&begins==0);
+ CHECK(upload_status=="500 Internal Server Error");
+ for(int scenario=0;scenario<11;++scenario){
+  reset();ota_set_channel(tk::OtaChannel::Dev);upload_body=image_body();
+  if(scenario==0)upload_body[0]=0; // invalid image before the first flash effect
+  if(scenario==1)raw_end_error=ESP_ERR_OTA_VALIDATE_FAILED; // invalid signature
+  if(scenario==2)upload_fail_at=10; // interrupted after a live raw handle
+  if(scenario==3)upload_body.resize(700); // Content-Length exceeds received bytes
+  if(scenario==4){image_version="1.5.0";upload_body=image_body();}
+  if(scenario==5)inactive.address=0x9000; // NVS is never a writable upload target
+  if(scenario==8)upload_expire_at=15; // The final read cannot renew the original deadline.
+  if(scenario==9)upload_expire_on_end=true; // Expiry during verification cannot select boot.
+  if(scenario==10){ // A trusted signer does not make a different project eligible.
+   esp_app_desc_t desc{};const size_t offset=sizeof(esp_image_header_t)+sizeof(esp_image_segment_header_t);
+   std::memcpy(&desc,upload_body.data()+offset,sizeof(desc));
+   std::snprintf(desc.project_name,sizeof(desc.project_name),"other-project");
+   std::memcpy(upload_body.data()+offset,&desc,sizeof(desc));
+  }
+  CHECK(ota_upload_start(&req,handed)==R::Started&&handed&&ota_is_updating());
+  bool other=false;CHECK(ota_upload_start(&req,other)==R::Busy&&!other);
+  CHECK(ota_start(0)==R::Busy&&ota_check_start(0)==R::Busy);
+  if(scenario==6)ota_set_channel(tk::OtaChannel::Release);
+  if(scenario==7)ota_request_heap_abort();
+  run_selected();
+  CHECK(!ota_is_busy()&&!raw_handle_live&&async_completions==1);
+  CHECK(selectors==0&&restart_calls==0&&init_calls==0&&connects==0);
+  CHECK(upload_status=="400 Bad Request"&&ota_get_state()==OtaState::Error);
+  if(scenario==0||scenario==4||scenario==5||scenario==6||scenario==7)CHECK(begins==0);
+  if(scenario==1)CHECK(ends==1&&aborts==0);
+  if(scenario==2||scenario==3)CHECK(aborts==1);
+  if(scenario==8)CHECK(aborts==1&&ends==0);
+  if(scenario==9)CHECK(aborts==0&&ends==1);
+  if(scenario==10)CHECK(begins==0);
+ }
+}
 void run_queued_http(){
  CHECK(queued_http_work);auto work=queued_http_work;void* argument=queued_http_argument;
  queued_http_work=nullptr;queued_http_argument=nullptr;work(argument);
@@ -803,6 +899,15 @@ int main(int argc,char** argv){
  if(terminal_case=="commit"){
   reset();CHECK(ota_start(0)==tk::OtaStartResult::Started);run_selected();CHECK(false);
  }
+ if(terminal_case=="upload-commit"||terminal_case=="upload-uncertain"){
+  reset();ota_set_channel(tk::OtaChannel::Dev);upload_body=image_body();
+  // Repeating the same app version is intentional for local build iterations.
+  std::snprintf(running_description.version,sizeof(running_description.version),"1.6.3");
+  if(terminal_case=="upload-uncertain")raw_select_error=ESP_FAIL;
+  httpd_req_t request{&http_server_marker,upload_body.size()};bool handed=false;
+  CHECK(ota_upload_start(&request,handed)==tk::OtaStartResult::Started&&handed);
+  run_selected();CHECK(false);
+ }
  if(terminal_case=="uncertain"){
   reset();raw_select_error=ESP_FAIL;CHECK(ota_start(0)==tk::OtaStartResult::Started);run_selected();CHECK(false);
  }
@@ -826,6 +931,7 @@ int main(int argc,char** argv){
  else {
   CHECK(terminal_case=="normal");
   deferred_http_checks();memory_checks();manifest_lifetime_checks();recovery_policy_checks();entry_recovery_checks();parser_checks();admission_checks();quarantine_checks();image_checks();raw_memory_checks();
+  upload_checks();
   checkpoint_semantics_checks();
   control_rmw_concurrency_checks();
  }

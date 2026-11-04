@@ -55,6 +55,12 @@ tk::OtaStartResult ota_check_start_after_http(unsigned pr_number, void* server) 
 // creating a worker or starting HTTPS; inspect the SDK state under the operation gate.
 tk::OtaStartResult ota_start(unsigned pr_number = 0);
 
+struct httpd_req;
+// HTTP-handler-only signed app upload. A successful async copy sets handed_off before
+// task creation; from then on the worker/start-failure path owns response and socket cleanup.
+// The caller must skip its ordinary body-retirement/response path when handed_off is true.
+tk::OtaStartResult ota_upload_start(httpd_req* request, bool& handed_off) noexcept;
+
 // State-only snapshot for cosmetic indicators; no OtaStatus/string materialization.
 // The shared status mutex may be created on first use. Unavailable locking reports Error.
 OtaState ota_get_state();

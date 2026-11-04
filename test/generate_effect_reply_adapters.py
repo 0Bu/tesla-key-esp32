@@ -91,7 +91,7 @@ for name in ("send_json", "send_effect_json", "send_effect_exception", "run_effe
     parts.append(function("http_common.cpp", name))
 for name in ("apply_mqtt_submission_", "apply_syslog_submission_", "save_wifi_submission_", "apply_wifi_submission_", "handle_gen_keys", "handle_set_time", "handle_set_vin", "handle_set_mqtt", "handle_set_syslog", "handle_set_wifi", "handle_set_ota"):
     parts.append(function("http_config.cpp", name))
-for name in ("apply_browser_time_query_", "parse_pr_param_", "handle_ota_check", "handle_ota_update"):
+for name in ("apply_browser_time_query_", "parse_pr_param_", "handle_ota_check", "handle_ota_update", "handle_ota_upload"):
     parts.append(function("http_ota.cpp", name))
 for name in ("coredump_error", "coredump_erase_reply", "handle_coredump", "handle_crash_dismiss"):
     parts.append(function("http_status.cpp", name))

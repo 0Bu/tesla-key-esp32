@@ -421,7 +421,24 @@ coordinator and raw-writer TUs. Passive SDK counters cover fragmented INTERNAL h
 context refusal, null context, body reserve OOM and explicit raw SDK NoMemory versus generic
 failure. Prefix/payload write refusal must abort a live handle once; final-verification refusal
 must preserve NoMemory without aborting its already consumed handle. These doubles exercise no
-actual TLS, network or flash. [The shared OTA recovery policy](../main/logic/ota_recovery_memory.hpp)
+actual TLS, network or flash.
+
+Direct-upload cases execute the same extracted application family and actual coordinator/writer:
+Release-channel refusal, probation, memory/startup/copy failure, busy admission, malformed/older
+images, forbidden partitions, interrupted/short uploads, heap abort, final-read and final-verification
+deadline expiry, and SDK signature failure. Separate `upload-commit`/`upload-uncertain` processes
+assert byte identity, no TLS/feed call, exactly-once async completion and retained terminal owner.
+They use passive SDK doubles; they do not verify a physical flash or real signature implementation.
+The effect-reply fixture also executes the actual upload HTTP handler and outer retirement guard,
+checking header/size/query intake and that only an async handoff skips synchronous RX shutdown.
+`test_dev_ota_upload.py` exercises the actual maintainer uploader with isolated Git/source
+fixtures, disposable RSA images and passive process/transport doubles. It checks complete
+untracked-source binding, failed/missing/edited receipts, actual read-only reviewer invocation,
+signature/chip/image identity, private board/channel admission, one consumed attempt, timeout,
+reboot/health/retention acceptance and separate changed-behavior evidence. These are offline
+controls; no production board, signing key, vehicle or actual model review is used by the test.
+
+[The shared OTA recovery policy](../main/logic/ota_recovery_memory.hpp)
 owns the common nonzero INTERNAL-largest comparison and phase requirements. Production uses its
 shared operation-entry/image-confirmation selector and separate TLS record-capacity screen; these
 are operating-point policies, not universal allocation guarantees. Native fixtures replace only

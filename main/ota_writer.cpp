@@ -22,23 +22,36 @@ Effect RawWriter::prefix(void* p,const std::uint8_t* data,std::size_t n) noexcep
     auto& s = self(p);
     if (!data || n != kPrefixBytes || s.handle_ || s.uncertain_) return Effect::Failed;
     esp_image_header_t image{};
-    esp_app_desc_t description{};
     std::memcpy(&image,data,sizeof(image));
-    std::memcpy(&description,data+sizeof(image)+sizeof(esp_image_segment_header_t),sizeof(description));
+    const auto* descriptor = data + sizeof(image) + sizeof(esp_image_segment_header_t);
+    uint32_t magic{};
+    char version[sizeof(esp_app_desc_t{}.version)]{};
+    std::memcpy(&magic,descriptor + offsetof(esp_app_desc_t,magic_word),sizeof(magic));
+    std::memcpy(version,descriptor + offsetof(esp_app_desc_t,version),sizeof(version));
     const esp_app_desc_t* spi_description = nullptr;
 #if defined(CONFIG_ESP_HTTPS_OTA_VERIFY_SPI_MODE) && CONFIG_ESP_HTTPS_OTA_VERIFY_SPI_MODE
+    // Only this SDK option needs the complete descriptor. Ordinary admission copies the
+    // bounded fields it consumes instead of reserving 256 bytes on the coordinator stack.
+    esp_app_desc_t description{};
+    std::memcpy(&description,descriptor,sizeof(description));
     spi_description = &description;
 #endif
-    if (image.magic != ESP_IMAGE_HEADER_MAGIC || description.magic_word != ESP_APP_DESC_MAGIC_WORD ||
+    if (image.magic != ESP_IMAGE_HEADER_MAGIC || magic != ESP_APP_DESC_MAGIC_WORD ||
+        std::memcmp(descriptor + offsetof(esp_app_desc_t,project_name),"tesla-key-esp32",sizeof("tesla-key-esp32")) != 0 ||
         esp_ota_check_image_validity(ESP_PARTITION_TYPE_APP,&image,spi_description) != ESP_OK)
         return Effect::Failed;
-    const auto available = tk::bounded_c_string_view(description.version);
+    const auto available = tk::bounded_c_string_view(version);
     const auto expected = tk::bounded_c_string_view(s.policy_.expected);
     const auto current = tk::bounded_c_string_view(s.policy_.current);
-    if (!tk::canonical_ota_version(available) || !tk::canonical_ota_version(expected) ||
-        !tk::canonical_ota_version(current) || available != expected ||
-        !tk::is_ota_update_available(available,current,s.policy_.target_pr,s.policy_.channel))
-        return Effect::Failed;
+    if (s.policy_.direct_upload) {
+        if (!tk::ota_upload_version_allowed(available,current,s.policy_.channel))
+            return Effect::Failed;
+    } else {
+        if (!tk::canonical_ota_version(available) || !tk::canonical_ota_version(expected) ||
+            !tk::canonical_ota_version(current) || available != expected ||
+            !tk::is_ota_update_available(available,current,s.policy_.target_pr,s.policy_.channel))
+            return Effect::Failed;
+    }
     s.partition_ = esp_ota_get_next_update_partition(nullptr);
     const auto* running = esp_ota_get_running_partition();
     if (!s.partition_ || s.partition_ == running || s.partition_->type != ESP_PARTITION_TYPE_APP ||

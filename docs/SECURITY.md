@@ -150,6 +150,28 @@ authenticate bytes, not freshness; app-descriptor/channel checks enforce version
 No eFuse anti-rollback is burned. Pending images retain rollback until runtime health is proven;
 [Architecture](ARCHITECTURE.md#ota-self-update) owns confirmation rules and allowed channel transitions.
 
+In `dev`, a LAN peer can also supply a raw signed app through `POST /ota/upload` without
+publishing it to a feed. This uses the same trusted RSA signature, target/slot validation,
+operation exclusion, probation and health/rollback checks. It accepts an equal/newer canonical
+version core, including same-version and PR/local builds; ordinary feed rules are unchanged.
+Release-channel uploads are refused. The channel is an operator opt-in, not authentication:
+the existing unauthenticated `/set_ota` API can select `dev`. Possession of LAN access alone
+still does not authorize unsigned or foreign-key firmware. HTTP does not bind uploaded bytes
+to a Git source SHA or attest PR gates; the operator must select an eligible signed artifact.
+The direct route does not provision a signing key, modify CI/publication policy or relax NVS,
+key/session preservation. See the [upload contract](API.md#direct-signed-firmware-upload).
+
+The maintainer's global `$ota` workflow uses `scripts/dev-ota-upload.py` for local, uncommitted
+source tests. Its private source inventory includes new non-ignored files. Executed test/build
+logs, a separate reviewer process with enforced read-only sandbox, signed-image SHA-256 and
+production RSA authority are bound through a private local journal. This detects accidental
+receipt edits and stale candidates; it is not external attestation against a malicious
+same-user operator. The journal, approved production inventory and signing configuration stay
+outside Git. No private key enters the helper. The helper requires an already saved `dev`
+channel and fixed IP/MAC/project/chip, consumes one attempt before POST even on timeout, and
+checks a distinct boot and full ELF identity plus passive runtime/retention evidence. It cannot
+prove vehicle behavior or all NVS contents, and does not authorize commands, retries or publication.
+
 The USB installer validates the schema-v2 source SHA's format and the four-target roles/offsets.
 It verifies byte lengths and SHA-256 hashes for the detected chip's four parts **before erasing/writing**;
 otadata activation is last. Downloads stream within each part's declared size, reject redirects and

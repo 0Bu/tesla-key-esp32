@@ -244,6 +244,49 @@ or an already-published image through `$usb-recovery`'s provenance and app-only 
 the implementation on that same board. Device delivery after merge remains a separately requested
 `$ship` operation.
 
+### Local OTA test before merge
+
+The global maintainer skill `$ota` tests the intended local source on an explicitly selected
+production board before merge or feed publication. It routes Tesla and Daikin separately;
+Tesla uses [`scripts/dev-ota-upload.py`](../scripts/dev-ota-upload.py). Read its `--help` and
+the current project instructions. Creating or editing the skill grants no live/signing/upload
+authority. Remote CI, a commit and PR-body gate stamps are not local-test prerequisites; the
+ordinary PR gates remain required at their existing publication/merge boundaries.
+
+`prepare --evidence <absolute-private-directory> --inventory <absolute-private-json>
+--board <approved-id> --version <intended-version>` snapshots the complete intended tree,
+including non-ignored new files. The inventory is mode `0600`, outside Git, with one selected
+production entry's project, supported target, literal IP and hardware MAC. No discovery,
+default board or automatic channel change exists. Keep real inventory/signing details global,
+not in this repository. The chip comes from that explicit hardware binding, never an S3 default.
+
+Run `tests` and `build` with the same `--evidence` directory. They execute the existing local
+host/contract/format checks and the pinned Docker build in a fresh case-specific directory.
+The selected version must fit the running version-core floor. Through a separately authorized
+standalone signer, sign those exact bytes with the existing approved authority; the helper
+never reads a private key. `bind-image --image <absolute-signed-app.bin> --sha256 <signed-file-sha256>`
+checks the signature pin, app project/chip/version/size and correspondence to that unsigned build.
+
+`review` launches an independent Codex process with enforced read-only sandbox and no approvals,
+using the existing reviewer instructions for OTA/heap/security, persistence/NVS/pairing,
+BLE/evcc meaning, documentation and UI. Its actual thread identity, structured findings and
+report/log hashes join the source/image-bound local journal. A manually supplied pass cannot
+replace this process. Missing checks, a failed run, blocking findings or source/artifact edits
+stop readiness; regenerate the affected evidence rather than reusing old proof.
+
+`check` is offline. `preflight` performs live passive reads and requires the selected target/read
+scope. Only an explicitly authorized board test permits `execute --execute --case-id <case-id>`.
+The board must already be on saved `dev`, with stable verification and adequate memory.
+Before its sole POST the helper rechecks all evidence and consumes its exclusive attempt marker.
+No timeout/refusal/lost response grants a retry, channel change or different delivery path.
+
+Acceptance needs a distinct boot nonce, full expected ELF/version/project/chip, unchanged
+hardware identity and observable retention, plus healthy stable runtime. It records changed
+behavior as **not run** until the separately authorized concrete functional test is performed.
+No vehicle command or live evcc/cluster call is inferred. Report these boundaries separately;
+HTTP success, local host fixtures and a compiled image cannot prove the real hardware/function.
+See [API](API.md#direct-signed-firmware-upload) and [security](SECURITY.md#ota-self-update).
+
 ### Served Pages acceptance
 
 Stable and Dev acceptance first observe the latest Pages build with up to eight status reads and

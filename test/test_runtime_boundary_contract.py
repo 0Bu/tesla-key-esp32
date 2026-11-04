@@ -4626,6 +4626,7 @@ HTTP_ROUTE_DISPATCH = {
     "BodyController": "handle_body_controller",
     "OtaCheck": "handle_ota_check",
     "OtaUpdate": "handle_ota_update",
+    "OtaUpload": "handle_ota_upload",
     "OtaStatus": "handle_ota_status",
     "OtaChangelog": "handle_ota_changelog",
     "GenKeys": "handle_gen_keys",

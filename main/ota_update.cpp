@@ -13,6 +13,7 @@
 #include <esp_ota_ops.h>
 #include <esp_timer.h>
 #include <esp_http_server.h>
+#include <lwip/sockets.h>
 #include "ota_writer.hpp"
 #include "logic/ota_lifetime.hpp"
 #include <cJSON.h>
@@ -30,6 +31,7 @@
 #include "rtos_guard.hpp"
 
 #include <atomic>
+#include <algorithm>
 #include <array>
 #include <cstring>
 #include <exception>
@@ -525,6 +527,7 @@ struct OtaOperation {
     const bool image;
     std::atomic<bool> coordinator_done{false};
     NetworkLaunch network_launch{NetworkLaunch::NotAttempted}; // Coordinator-only.
+    httpd_req_t* upload_request{nullptr}; // Exclusive async ownership, never a borrowed request.
 };
 static std::atomic<OtaOperation*> s_operation{nullptr};
 
@@ -896,11 +899,83 @@ private:
     OtaOperation& operation_;
 };
 
+static void finish_upload_request(OtaOperation& operation, bool committed,
+                                  const char* failure_status = "400 Bad Request") noexcept {
+    auto* req = operation.upload_request;
+    if (!req) return;
+    operation.upload_request = nullptr;
+    // Retire RX/TX while the async request still owns the session: no unread body drain,
+    // queued-close/reused-fd race, or per-request heap allocation on any failure path.
+    (void)httpd_resp_set_type(req, "application/json");
+    (void)httpd_resp_set_status(req, committed ? "200 OK" : failure_status);
+    const bool uncertain = operation.coordinator.outcome() == tk::ota::Outcome::WriterUncertain;
+    (void)httpd_resp_sendstr(req, committed
+        ? "{\"result\":true,\"reason\":\"signed update installed; rebooting\"}"
+        : uncertain ? "{\"result\":false,\"outcome\":\"unknown\",\"reason\":\"upload outcome uncertain; do not retry\"}"
+        : "{\"result\":false,\"reason\":\"upload failed; inspect /ota/status\"}");
+    (void)shutdown(httpd_req_to_sockfd(req), SHUT_RDWR);
+    (void)httpd_req_async_handler_complete(req);
+}
+
+static void ota_upload_impl(OtaOperation& operation) {
+    auto* req = operation.upload_request;
+    tk::ota::ImagePolicy policy{};
+    policy.channel = tk::OtaChannel::Dev;
+    policy.direct_upload = true;
+    const auto current = running_version();
+    if (!tk::canonical_ota_version(current) || current.size() >= sizeof(policy.current)) {
+        set_check_error("invalid running firmware version"); return;
+    }
+    std::memcpy(policy.current, current.data(), current.size());
+    if (ota_get_channel() != tk::OtaChannel::Dev || !operation.writer.configure(policy) ||
+        !operation.coordinator.start_upload(req->content_len)) {
+        set_check_error("upload admission failed"); return;
+    }
+    size_t received = 0;
+    while (received < req->content_len) {
+        tk::StackWatchScope f135_ota_chunk_exit(tk::StackWatch::OtaWriter);
+        if (s_heap_abort_requested.load(std::memory_order_acquire) ||
+            ota_get_channel() != tk::OtaChannel::Dev ||
+            !operation.budget.live(operation_now(nullptr))) {
+            operation.coordinator.cancel(tk::ota::Outcome::Deadline);
+            set_check_error("upload aborted or deadline reached"); return;
+        }
+        const size_t want = std::min(operation.job.block.size(), req->content_len - received);
+        const int count = httpd_req_recv(req, reinterpret_cast<char*>(operation.job.block.data()), want);
+        if (count <= 0 || static_cast<size_t>(count) > want) {
+            operation.coordinator.cancel(tk::ota::Outcome::NetworkError);
+            set_check_error("upload interrupted or receive timeout"); return;
+        }
+        if (!operation.coordinator.upload(operation.job.block.data(), static_cast<size_t>(count))) {
+            set_check_error("upload image, memory or deadline validation failed"); return;
+        }
+        received += static_cast<size_t>(count);
+        set_state(OtaState::Downloading, static_cast<int>(received * 100 / req->content_len), "uploading");
+    }
+    if (s_heap_abort_requested.load(std::memory_order_acquire) ||
+        ota_get_channel() != tk::OtaChannel::Dev) {
+        operation.coordinator.cancel(tk::ota::Outcome::Deadline);
+        set_check_error("upload aborted"); return;
+    }
+    operation.coordinator.finish_upload(); // Same SDK signature check and boot selection as pull OTA.
+    if (operation.coordinator.outcome() != tk::ota::Outcome::Committed) {
+        set_check_error(operation.coordinator.outcome() == tk::ota::Outcome::WriterUncertain
+            ? "upload outcome is uncertain; do not retry"
+            : "upload signature, image or boot selection failed"); return;
+    }
+    set_state(OtaState::Done, 100, "upload complete — rebooting");
+    finish_upload_request(operation, true);
+    vTaskDelay(pdMS_TO_TICKS(1200));
+    tk::stack_watch_sample(tk::StackWatch::OtaWriter);
+    esp_restart(); // Committed ownership remains sealed even if restart returns.
+}
+
 static void run_coordinator_task(void* argument, bool image) noexcept {
     auto& operation = *static_cast<OtaOperation*>(argument);
     CoordinatorCompletion completion(operation);
     try {
-        if (!start_network_task(operation)) set_check_error(
+        if (operation.upload_request) ota_upload_impl(operation);
+        else if (!start_network_task(operation)) set_check_error(
             operation.coordinator.outcome() == tk::ota::Outcome::Deadline
                 ? "update deadline reached during setup" : "could not start network task");
         else if (image) ota_task_impl(operation);
@@ -915,6 +990,12 @@ static void run_coordinator_task(void* argument, bool image) noexcept {
     } catch (...) {
         operation.coordinator.cancel(tk::ota::Outcome::NetworkError);
         set_check_error("update operation failed unexpectedly");
+    }
+    if (operation.upload_request) {
+        finish_upload_request(operation, false);
+        acknowledge_no_network_task(operation);
+    } else if (operation.network_launch == NetworkLaunch::NotAttempted) {
+        acknowledge_no_network_task(operation);
     }
     // Completion is the final Operation user, including all exceptional return paths.
 }
@@ -1032,9 +1113,10 @@ static tk::OtaStartResult launch_coordinator(OtaOperation* operation, bool image
         ? xTaskCreate(ota_task, "ota", kOtaTaskStackBytes, operation, tk::kPrioOta, nullptr)
         : xTaskCreate(ota_check_task, "ota_chk", kOtaTaskStackBytes, operation, tk::kPrioOtaCheck, nullptr);
     if (created != pdPASS) {
+        set_check_error("could not start OTA coordinator task");
+        finish_upload_request(*operation, false, "500 Internal Server Error");
         acknowledge_no_network_task(*operation);
         operation->coordinator.cancel(tk::ota::Outcome::NoMemory);
-        set_check_error("could not start OTA coordinator task");
         complete_operation(*operation);
         return tk::OtaStartResult::InternalError;
     }
@@ -1043,6 +1125,30 @@ static tk::OtaStartResult launch_coordinator(OtaOperation* operation, bool image
         return tk::OtaStartResult::InternalError; // No false Ack, delete or owner release.
     }
     return tk::OtaStartResult::Started;
+}
+
+tk::OtaStartResult ota_upload_start(httpd_req_t* request, bool& handed_off) noexcept {
+    using Result = tk::OtaStartResult;
+    const uint64_t origin = operation_now(nullptr);
+    handed_off = false;
+    if (!request || ota_get_channel() != tk::OtaChannel::Dev || !ensure_lock())
+        return Result::Unavailable;
+    OtaOperation* operation = nullptr;
+    const auto admission = reserve_operation(0, true);
+    if (admission != Result::Started) return admission;
+    const auto prepared = prepare_owned_operation(origin, 0, tk::OtaChannel::Dev,
+                                                   true, operation);
+    if (prepared != Result::Started) return prepared;
+    if (ota_get_channel() != tk::OtaChannel::Dev ||
+        httpd_req_async_handler_begin(request, &operation->upload_request) != ESP_OK) {
+        acknowledge_no_network_task(*operation);
+        operation->coordinator.cancel(tk::ota::Outcome::NoMemory);
+        set_check_error("could not reserve async upload request");
+        complete_operation(*operation);
+        return Result::NoMemory;
+    }
+    handed_off = true; // No original request/socket use after the coordinator can run.
+    return launch_coordinator(operation, true);
 }
 
 static tk::OtaStartResult launch_operation(uint64_t origin, unsigned pr, bool image) {

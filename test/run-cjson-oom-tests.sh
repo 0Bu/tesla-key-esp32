@@ -156,7 +156,9 @@ ota_test_flags=(-pthread -DF145_HOST_TEST_HOOKS=1)
 # These disposable process-terminal fixtures assert retained authority before _Exit. They
 # intentionally do not claim post-effect task lifetime/LSan reclamation evidence.
 "$work/test_ota_tls_admission" commit
+"$work/test_ota_tls_admission" upload-commit
 "$work/test_ota_tls_admission" uncertain
+"$work/test_ota_tls_admission" upload-uncertain
 # Failed destroy deliberately retains the allocated quarantine; no LSan reclamation claim.
 "$work/test_ota_tls_admission" cleanup-failed
 "$work/test_ota_tls_admission" deferred-task-uncertain

@@ -59,6 +59,15 @@ spec lets the server pick either representation and this one always answers plai
 | `tools/call` | Tool result (`content` + `isError`) |
 | anything else (`resources/list`, …) | JSON-RPC error `-32601` |
 
+The `initialize` result's `instructions` also advertises the dev-only
+[`POST /ota/upload` workflow](API.md#direct-signed-firmware-upload): raw signed app binary,
+`Content-Type: application/octet-stream`, `Content-Length`, an already selected `dev`
+channel and progress/boot/ELF identity through `GET /ota/status`. A published feed or merge is not
+required. Same-version and PR/local builds retain the trusted signature, chip/slot checks,
+version-core floor and rollback; `release` refuses uploads. There is no new MCP firmware-write
+tool: an agent uses HTTP after explicit authorization for the target board and OTA/reboot.
+Discovery alone grants no write authority, and PR/publication gates continue to apply.
+
 ---
 
 ## Tools
@@ -140,7 +149,7 @@ curl -s http://<ESP32-IP>/mcp \
   "protocolVersion":"2025-06-18",
   "capabilities":{"tools":{}},
   "serverInfo":{"name":"tesla-key-esp32","version":"1.5.0"},
-  "instructions":"BLE-to-HTTP bridge for one Tesla, paired as Charging Manager: charging commands and cached read-only state only. get_vehicle_state never wakes the car; commands block for the BLE round-trip — typically 3-5s after idle, up to 20s when the car is unreachable."}}
+  "instructions":"Tesla BLE Charging Manager bridge. Cached get_vehicle_state never wakes the car; BLE commands may take 20s. Dev-only local OTA: POST /ota/upload, application/octet-stream, Content-Length, raw signed app .bin. GET /ota/status: progress and boot/ELF identity. Repeat/PR builds allowed; older cores refused. Explicit board/OTA approval required; installs then reboots. No feed/merge needed; signature, rollback and PR gates remain."}}
 ```
 
 (`serverInfo.version` is illustrative — the device reports its running firmware version.)

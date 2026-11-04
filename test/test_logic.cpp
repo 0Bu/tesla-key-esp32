@@ -1083,6 +1083,20 @@ static void test_ota_contract() {
     using Order = tk::OtaVersionOrder;
     using Read = tk::BoundedBodyReadResult;
 
+    CHECK(tk::ota_upload_admissible(tk::OtaChannel::Dev, 512, "application/octet-stream"));
+    CHECK(tk::ota_upload_admissible(tk::OtaChannel::Dev, tk::kOtaUploadMaxBytes, "application/octet-stream"));
+    CHECK(!tk::ota_upload_admissible(tk::OtaChannel::Release, 1024, "application/octet-stream"));
+    CHECK(!tk::ota_upload_admissible(tk::OtaChannel::Dev, 511, "application/octet-stream"));
+    CHECK(!tk::ota_upload_admissible(tk::OtaChannel::Dev, tk::kOtaUploadMaxBytes + 1, "application/octet-stream"));
+    CHECK(!tk::ota_upload_admissible(tk::OtaChannel::Dev, 1024, "multipart/form-data"));
+    for (const auto version : {"1.6.3", "1.6.3-PR-999", "1.6.3-dev.1", "1.6.4-local"}) {
+        CHECK(tk::ota_upload_version_allowed(version, "1.6.3-dev.99", tk::OtaChannel::Dev));
+        CHECK(!tk::ota_upload_version_allowed(version, "1.6.3-dev.99", tk::OtaChannel::Release));
+    }
+    CHECK(!tk::ota_upload_version_allowed("1.6.2-local", "1.6.3", tk::OtaChannel::Dev));
+    CHECK(!tk::ota_upload_version_allowed("broken", "1.6.3", tk::OtaChannel::Dev));
+    CHECK(!tk::ota_upload_version_allowed("1.6.3", "", tk::OtaChannel::Dev));
+
     static_assert(tk::ota_https_url("https://example.test/manifest.json"));
     static_assert(!tk::ota_https_url("http://example.test/manifest.json"));
     for (const auto url : {"https://example.test/manifest.json", "https://example.test:8443/"})
@@ -5776,7 +5790,7 @@ static void test_http_route() {
     using tk::HttpRoute;
     using tk::HttpVerb;
 
-    static_assert(tk::kFixedHttpRoutes.size() == 25,
+    static_assert(tk::kFixedHttpRoutes.size() == 26,
                   "extend the complete fixed-route matrix when a route is added");
     for (const tk::FixedHttpRoute& fixed : tk::kFixedHttpRoutes) {
         CHECK(tk::classify_http_route(fixed.verb, fixed.path) == fixed.route);
@@ -5892,13 +5906,14 @@ static void test_http_route() {
         CHECK(static_cast<int>(tk::http_route_ota_conflict(route)) == 503);
     }
 
-    constexpr std::array<HttpRoute, 18> ota_allowed{{
+    constexpr std::array<HttpRoute, 19> ota_allowed{{
         HttpRoute::NotFound,
         HttpRoute::Command,
         HttpRoute::VehicleData,
         HttpRoute::BodyController,
         HttpRoute::OtaCheck,
         HttpRoute::OtaUpdate,
+        HttpRoute::OtaUpload,
         HttpRoute::OtaStatus,
         HttpRoute::OtaChangelog,
         HttpRoute::Scan,

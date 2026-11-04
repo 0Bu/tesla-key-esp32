@@ -92,10 +92,11 @@ static esp_err_t handle_initialize_(httpd_req_t* req, const tk::mcp_json::RpcId&
     json.string(info, "name", "tesla-key-esp32");
     json.string(info, "version", esp_app_get_description()->version);
     json.string(json.root(), "instructions",
-        "BLE-to-HTTP bridge for one Tesla, paired as Charging Manager: charging commands "
-        "and cached read-only state only. get_vehicle_state never wakes the car; commands "
-        "block for the BLE round-trip — typically 3-5s after idle, up to 20s when the car "
-        "is unreachable.");
+        "Tesla BLE Charging Manager bridge. Cached get_vehicle_state never wakes the car; "
+        "BLE commands may take 20s. Dev-only local OTA: POST /ota/upload, application/octet-stream, "
+        "Content-Length, raw signed app .bin. GET /ota/status: progress and boot/ELF identity. "
+        "Repeat/PR builds allowed; older cores refused. Explicit board/OTA approval required; "
+        "installs then reboots. No feed/merge needed; signature, rollback and PR gates remain.");
     return send_rpc_result_(req, id, json.finish());
 }
 
