@@ -27,9 +27,8 @@ rerun admission when they change. This uses normal CMake timestamp and inventory
 independent fresh rebuilds establish delivery provenance.
 
 Host gates use `scripts/with-host-python.sh` to resolve Python ≥3.11 for tomllib. It re-execs once,
-not a hidden source change. Native Codex adapters are checked/generated with
-`node tools/agent-config/sync-codex.mjs --check` / `--write`; keep reviewed primary-checkout hook
-registration/trust in sync in linked worktrees. Adapter parity does not prove runtime enforcement.
+not a hidden source change. [AGENTS.md](../AGENTS.md#documentation) owns native adapter
+generation, linked-worktree hook setup and trust; adapter parity does not prove runtime enforcement.
 
 Optional build acceleration: `IDF_FAST_BUILD=1` uses a container-native volume;
 `scripts/idf-docker.sh daemon start` keeps a warm container, and `daemon stop` releases it.
@@ -203,7 +202,7 @@ and frames over 4096 B; they do not prove call depth or runtime stack margin.
 
 An approved toolchain migration must update the image tag and digest in `esp-idf-toolchain.txt`,
 the dependency verifier's IDF/Mbed TLS pins, all four lockfiles, the harness `MBEDTLS_REF`,
-the workflow's independent-rebuild image literal, both resource baselines' toolchain identities,
+the workflow's `logic-harness` version assertion, both resource baselines' toolchain identities,
 the SDK-default and build-semantic version literals, and the compiled X509 bundle hash.
 Review the PSA patch and canonical postimages, then rerun the protocol vectors and complete
 four-target contract. CI action inputs must still use the toolchain output, and both target
@@ -214,7 +213,7 @@ not authorization to change any pin.
 
 The default-off [configuration recovery](CONFIG_RECOVERY.md#default-off-build-and-artifact-boundary)
 owner describes its separate project identity, unsigned four-target source/reproduction driver,
-resource gates and unqualified physical procedure. Its non-OTA apps never enter the normal16parts;
+resource gates and unqualified physical procedure. Its non-OTA apps never enter the normal 16 parts;
 ordinary source/compiler/partition/signature authority is not relaxed. Do not enable its config in
 an application build or treat its presence as a flashable or physically tested recovery product.
 
@@ -244,6 +243,18 @@ or an already-published image through `$usb-recovery`'s provenance and app-only 
 the implementation on that same board. Device delivery after merge remains a separately requested
 `$ship` operation.
 
+### Served Pages acceptance
+
+Stable and Dev acceptance first observe the latest Pages build with up to eight status reads and
+exponential delays capped at 60 seconds (310 seconds of default waiting). Queued/building, failed
+builds and unavailable status have distinct diagnostics before byte acceptance starts. This latest
+build observation is a readiness hint, not provenance for a particular firmware snapshot.
+Post-publication byte acceptance then retries the complete manifest, all 16 Pages parts and changelog with
+exponential delays capped at 60 seconds (190 seconds of default waiting). Each attempt uses a fresh
+cache key and must independently pass all
+identity, size, hash and byte-binding checks. Results from incomplete attempts are never combined.
+Invalid staged Dev bytes, expected changelog or immutable Release metadata/assets fail before Pages polling. This
+handles delayed CDN propagation; it does not establish an atomic CDN snapshot.
 Pages acceptance requires a bounded, validated expected `changelog.json` and exact served bytes
 within the same complete attempt as the manifest and 16 firmware parts. The root checker takes
 `--expected-changelog-file`; staged Dev checks derive it from the candidate directory, while live
