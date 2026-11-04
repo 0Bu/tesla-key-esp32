@@ -265,12 +265,13 @@ the corresponding versioned merged asset attached to the bound GitHub Release.
 ### 4. (Optional — live board) confirm a real device agrees
 
 Only with explicit user approval to contact a device on the trusted LAN (no auth). `IP` = the
-board's address or `tesla-key-esp32.local`. `POST /ota/check` starts a channel check and changes the
-reported OTA-check state, so it is outside the default public-channel read and still never
-authorizes `POST /ota/update`.
+approved board's address. Every board requests the same mDNS name, so `tesla-key-esp32.local` can
+reach another board. `POST /ota/check` starts a channel check and changes the reported OTA-check
+state, so it is outside the default public-channel read and still never authorizes
+`POST /ota/update`.
 
 ```bash
-IP=tesla-key-esp32.local
+: "${IP:?set IP to the approved board address}"
 # running version + chip. proxy .version carries the fixed "-esp32" suffix for ALL targets;
 # the real chip is in .platform (ESP32/ESP32-S3/ESP32-C3/ESP32-C6).
 curl -s "http://$IP/api/proxy/1/version"           # {"version":"X.Y.Z-esp32","platform":"ESP32-S3"}
@@ -294,15 +295,17 @@ describes the failure symptom; use the table below to investigate before retryin
 | Symptom | Where it shows | What it means | Fix |
 |---------|----------------|---------------|-----|
 | Pages API is not `legacy` + `gh-pages:/` | step 2 before download | the repository no longer has the single branch-backed root + `PR/<N>/` serving authority | do not OTA; restore the repository Pages source contract and rerun from a fresh snapshot |
-| Any of the 16 fixed Pages files returns **≠ 200** | step 2 (or device `"could not start download"` for an app) | incomplete/old Pages snapshot — a manifest-bound URL does not exist | reconcile Pages from the exact Release commit; confirm `build-pages.sh` copied and manifest-bound all four parts for every target |
+| Any of the 16 fixed Pages files returns **≠ 200** | step 2 (or device `"download or image validation failed"` for an app) | incomplete/old Pages snapshot — a manifest-bound URL does not exist | reconcile Pages from the exact Release commit; confirm `build-pages.sh` copied and manifest-bound all four parts for every target |
 | manifest lacks layout v2 fields, or `sourceSha` ≠ the Release tag commit | step 2 | legacy, stale, or non-Release republish; regex-valid provenance alone is insufficient | do not OTA; reconcile Pages from the exact Release commit, then rerun this check |
 | manifest length/SHA-256 differs from any downloaded part | step 2 | partial branch publication, cache race, or bytes changed underneath the manifest | do not OTA; let branch-backed Pages settle or republish, then rerun from a fresh snapshot |
 | Pages part differs from its byte range in the Release merged asset | step 2 | same-version/source manifest was regenerated around bytes that were not attached to the bound GitHub Release | do not OTA; republish Pages exclusively from the signed Release staging tree and rerun |
 | an app's embedded target/version differs from its manifest family/Release | step 2/3 | stale or cross-target app was published under the expected basename | do not OTA; rebuild/sign/publish the exact Release and verify all four descriptors |
-| `/ota/status` `message:"downloaded image is invalid"` | step 4, `state:"error"` | image validation failed; a TOFU trust-anchor mismatch is one possible cause, not proven by this message | verify candidate chip/revision, integrity and signature evidence; only after establishing the cause, propose separately authorized [`$usb-recovery`](../usb-recovery/SKILL.md) if appropriate; see [`docs/SECURITY.md`](../../../docs/SECURITY.md) "Trust anchor (trust-on-first-use)" |
-| `/ota/status` `message:"no newer version available"` | step 4, `state:"error"` | **version eligibility gate** — the candidate fails the selected channel/PR policy (for ordinary stable updates, an equal or older version; intentional return/preview exceptions still apply) | benign if the device already runs the release; otherwise verify candidate identity and the selected channel/PR → check step 2 |
+| `/ota/status` `state:"idle"`, `message:"up to date"`, `update_available:false` | step 4 | the candidate is not eligible on the selected channel/PR | benign if the device already runs the release; otherwise verify candidate identity and the selected channel/PR → check step 2 |
+| `/ota/status` `state:"error"`, `message:"could not reach update server"` or `"invalid update manifest"` | step 4 | the check itself failed, so no offer was evaluated | check the device's network and the step 2 manifest, then retry |
+| `/ota/status` `message:"download or image validation failed"` | `GET /ota/status` after a separately authorized `POST /ota/update`, `state:"error"`; step 4 cannot produce it and its `POST /ota/check` overwrites it, so read the status first | the download or the image validation failed; this message does not separate them, and a TOFU trust-anchor mismatch is one possible cause, not proven by it | rule out transport and the step 2 URL and byte checks, then verify candidate chip/revision, integrity and signature evidence; only after establishing the cause, propose separately authorized [`$usb-recovery`](../usb-recovery/SKILL.md) if appropriate; see [`docs/SECURITY.md`](../../../docs/SECURITY.md) "Trust anchor (trust-on-first-use)" |
+| `/ota/status` `message:"no newer version available"` | `GET /ota/status` after a separately authorized `POST /ota/update`, `state:"error"`; step 4 cannot produce it and its `POST /ota/check` overwrites it, so read the status first | **version eligibility gate** — the candidate fails the selected channel/PR policy (for ordinary stable updates, an equal or older version; intentional return/preview exceptions still apply) | benign if the device already runs the release; otherwise verify candidate identity and the selected channel/PR → check step 2 |
 | manifest `version` ≠ latest Release tag, or repeated "update available" with no version change | step 2 / step 4 `current` vs `available` | verify Release/Pages/candidate identity; floor-vs-stamped drift is one possible cause of a version mismatch. Repeated checks only report an offer and do not prove a stamping defect or perform an update | compare the selected Release, manifest and embedded version; if stamping drift is confirmed, inspect "Stamp firmware version" in [`.github/workflows/build.yml`](../../../.github/workflows/build.yml) and `steps.stamp.outputs.disp` |
-| fewer than 4 builds / wrong chipFamily set / wrong part offset | step 2 | a target failed to stage, or the suffix/offset maps drifted | reconcile `image_suffix()`/`boot_offset()` across `ci-sign-artifacts.sh`, `build-pages.sh`, `ota_update.cpp`, `target.hpp` |
+| fewer than 4 builds / wrong chipFamily set / wrong part offset | step 2 | a target failed to stage, or the suffix/offset maps drifted | reconcile `image_suffix()` and `boot_offset()` in `ci-sign-artifacts.sh` and `build-pages.sh`, and `image_suffix()` in `target.hpp`, which `ota_update.cpp` asserts against |
 
 ## See also
 
@@ -310,7 +313,7 @@ describes the failure symptom; use the table below to investigate before retryin
   image. A merge publishes only the Dev channel; this skill verifies the stable Release channel
   that a separately authorized `release: true` run leaves behind.
 - [`$usb-recovery`](../usb-recovery/SKILL.md) — no-build USB reflash of the published signed image
-  + otadata erase, the recovery a "signature bad" device needs.
+  + otadata erase, the recovery for an evidenced signing-authority mismatch.
 - [`docs/SECURITY.md`](../../../docs/SECURITY.md) — signing key lifecycle, TOFU trust anchor, and
   the USB-reflash recovery for a device off the current key.
 

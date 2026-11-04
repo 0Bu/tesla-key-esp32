@@ -90,9 +90,11 @@ gate_is_renovate_maintenance() {
 
 # gate_vehicle_command_relevant
 #   Reads repo-relative changed paths on stdin and succeeds when vehicle command dispatch,
-#   BLE protocol client, command registry, or pinned tesla-ble dependencies can have moved.
+#   BLE protocol client, command registry, pinned tesla-ble dependencies, or the BLE stack
+#   configuration can have moved. Every root-level sdkconfig.defaults file counts: the BLE roles live in the
+#   root file and the controller features and pools in the per-target files.
 gate_vehicle_command_relevant() {
-  grep -Eq '^(main/(command_exec\.cpp|vehicle_commands\.cpp|vehicle_ctrl\.(cpp|hpp)|vehicle_ctrl_internal\.hpp|vehicle_telemetry\.cpp|vehicle_pairing\.cpp|ble_client\.(cpp|hpp)|logic/(command_registry|command_runner|ble_dispatcher|rx_framing|session_state|command_result|key_rotation|ble_chunk|ble_deferred_event|wake_poll|active_window|telemetry_poll)\.hpp|idf_component\.yml)|patches/tesla-ble/|\.agents/skills/vehicle-command-audit/|test/test_tesla_ble_harness\.cpp|scripts/test-tesla-ble-harness\.sh|scripts/(apply-tesla-ble-patches\.(sh|py)|tesla-ble-patch-state\.json|check-dependency-contract\.py)$|docs/adr/0005-tesla-ble-seam\.md)'
+  grep -Eq '^(sdkconfig\.defaults($|\.)|main/(command_exec\.cpp|vehicle_commands\.cpp|vehicle_ctrl\.(cpp|hpp)|vehicle_ctrl_internal\.hpp|vehicle_telemetry\.cpp|vehicle_pairing\.cpp|ble_client\.(cpp|hpp)|logic/(command_registry|command_runner|ble_dispatcher|rx_framing|session_state|command_result|key_rotation|ble_chunk|ble_deferred_event|wake_poll|active_window|telemetry_poll)\.hpp|idf_component\.yml)|patches/tesla-ble/|\.agents/skills/vehicle-command-audit/|test/test_tesla_ble_harness\.cpp|scripts/test-tesla-ble-harness\.sh|scripts/(apply-tesla-ble-patches\.(sh|py)|tesla-ble-patch-state\.json|check-dependency-contract\.py)$|docs/adr/0005-tesla-ble-seam\.md)'
 }
 
 # gate_firmware_size_relevant
@@ -617,7 +619,8 @@ PY
 
 # gate_git_alias_kind <git-subcommand>
 #   Resolve only the exact repository's configured alias chain. A regular alias that reaches push
-#   is reported as push; a shell alias is opaque and therefore unsafe for every guarded action.
+#   is reported as push; a shell alias, or one that starts with a global option such as `-c`, is
+#   opaque and therefore unsafe for every guarded action.
 gate_git_alias_kind() {
   local command_name="$1" expansion first depth=0 seen=" "
   printf '%s' "$command_name" | grep -Eq '^[A-Za-z0-9_.-]+$' || return 1
@@ -641,7 +644,7 @@ PY
     )" || { printf 'opaque\n'; return 0; }
     case "$first" in
       push) printf 'push\n'; return 0 ;;
-      '') printf 'opaque\n'; return 0 ;;
+      ''|-*) printf 'opaque\n'; return 0 ;;
       *) command_name="$first" ;;
     esac
     depth=$((depth + 1))
@@ -652,6 +655,8 @@ PY
 # gate_gh_alias_kind <gh-command>
 #   gh aliases are local config and require no network. A regular alias is lexed as `gh <value>`;
 #   shell aliases are opaque because they may invoke git/gh through arbitrary shell expansion.
+#   `gh alias list` prints YAML, so a value with special characters arrives single-quoted; any
+#   other quoting or a block scalar is opaque.
 gate_gh_alias_kind() {
   local command_name="$1" aliases expansion kind
   command -v gh >/dev/null 2>&1 || return 1
@@ -660,6 +665,10 @@ gate_gh_alias_kind() {
   expansion="$(printf '%s\n' "$aliases" \
     | awk -F ': ' -v name="$command_name" '$1 == name { sub(/^[^:]*: /, ""); print; found++ }
       END { if (found != 1) exit 1 }')" || return 1
+  case "$expansion" in
+    *"''"*|\"*|\|*|\>*) printf 'opaque\n'; return 0 ;;
+    "'"*"'") expansion="${expansion#?}"; expansion="${expansion%?}" ;;
+  esac
   case "$expansion" in !*) printf 'opaque\n'; return 0 ;; esac
   kind="$(gate_lex_guarded_action "gh $expansion" 2>/dev/null || true)"
   case "$kind" in
