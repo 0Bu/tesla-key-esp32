@@ -75,7 +75,8 @@ inline LedPattern led_pattern(const UiSnapshot& s, const LedAlerts& a) {
     // 5. BLE link up but no session — waiting for the NFC-card pairing to complete.
     if (s.ble_connected && !s.paired)       return {LedColor::Magenta, LedAnim::Pulse,   false};
     // 6. Charging needs the awake charge presentation. A retained flag cannot override
-    //    Asleep, Unknown, Unreachable or missing SoC. This is not a charge-domain age proof.
+    //    Asleep, Unknown, Unreachable or missing SoC. The producer also requires a charge
+    //    sample at most 30 seconds old when it gathers this snapshot.
     if (s.charging && s.have_soc && s.link_state == LinkState::Awake)
         return {LedColor::Green, LedAnim::Breathe, false};
     // 7. Provably asleep — go dark (user choice: off when asleep). Debounced upstream, so a

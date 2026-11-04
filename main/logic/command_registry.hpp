@@ -3,8 +3,8 @@
 // ONE command table for BOTH HTTP command surfaces — the evcc-facing REST route
 // (POST /api/1/vehicles/{VIN}/command/{CMD}, http_api.cpp) and the MCP tools
 // (tools/list + tools/call, mcp_server.cpp). Each row carries the REST name, the MCP
-// tool name (nullptr = deliberately not a tool: the car refuses these for the
-// Charging-Manager key role, and advertising them would only mislead a calling model),
+// tool name (nullptr = deliberately omitted from the Charging-Manager tool subset;
+// exposure does not establish per-vehicle role acceptance),
 // and the argument specs. An argument's REST key and MCP key may differ
 // (TeslaBleHttpProxy compat says "charging_amps"; the MCP tool says "amps") but its
 // {lo,hi} bounds are ONE pair of struct members read by REST/MCP validation
@@ -38,7 +38,7 @@ enum class CmdKind {
     SetChargeLimit,
     SetScheduledCharging,
     // REST-only from here: accepted for TeslaBleHttpProxy API compatibility, but the
-    // Charging-Manager key's role can't run them (car answers "authentication failed").
+    // Charging-Manager role is expected to deny them; exact refusal text is not guaranteed.
     DoorLock,
     DoorUnlock,
     FlashLights,

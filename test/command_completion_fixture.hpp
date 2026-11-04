@@ -15,7 +15,11 @@ public:
     static constexpr int kCmdFailDropStreak = 3;
     tk::CompletionTimeoutState completion_timeout_{};
     SemaphoreHandle_t vehicle_mutex_{xSemaphoreCreateMutex()}, result_mutex_{xSemaphoreCreateMutex()};
-    struct Link { unsigned disconnects{0}; void disconnect() { ++disconnects; } } link;
+    struct Link {
+        unsigned disconnects{0};
+        bool throw_disconnect{false};
+        void disconnect() { ++disconnects; if (throw_disconnect) throw 1; }
+    } link;
     Link* ble_{&link};
     std::array<std::function<void()>, tk::CommandRunner::kMaxQueueSize> command_builders_{};
     std::string last_error_;
@@ -29,7 +33,7 @@ public:
     static TickType_t ticks_until_(uint32_t deadline) { return deadline > native_ticks ? deadline - native_ticks : 0; }
     void note_completion_timeout_(const char*, tk::CompletionTimeoutPolicy) { ++timeouts; }
     void publish_command_outcome_(const CommandOutcome&);
-    void invalidate_and_flush_(uint32_t generation);
+    void invalidate_and_flush_(uint32_t generation) noexcept;
     CommandOutcome await_completion_(const std::shared_ptr<CommandCompletion>&, uint32_t, uint32_t, const char*, tk::CompletionTimeoutPolicy);
     ResultCb make_result_cb_(const std::shared_ptr<CommandCompletion>&, uint32_t, bool = false, bool = true);
 };
@@ -43,6 +47,8 @@ static void check_native_command_completion() {
     using Controller = CompletionController;
     using Severity = tk::CommandError::Severity;
     using Outcome = tk::CommandError::Outcome;
+    static_assert(noexcept(std::declval<Controller&>().invalidate_and_flush_(1)),
+                  "completion cleanup must preserve the original exception");
     for (unsigned scenario = 0; scenario < 7; ++scenario) {
         Controller c;
         auto completion = std::make_shared<Controller::CommandCompletion>();
@@ -90,6 +96,41 @@ static void check_native_command_completion() {
                "HTTP and MCP shared reason exposes native outcome", "public reason discarded native outcome");
         expect(c.vehicle_mutex_->available || c.vehicle_mutex_->fail,
                "completion leaves Vehicle mutex released", "completion leaked Vehicle mutex");
+    }
+    for (bool signalled : {false, true}) for (bool persistent : {false, true}) {
+        Controller c;
+        auto completion = std::make_shared<Controller::CommandCompletion>();
+        auto cb = c.make_result_cb_(completion, 1);
+#include "completion-on-done.inc"
+        completion->command_id = c.command_runner_.enqueue("mutation", tk::BleDomain::Infotainment,
+            tk::WakePolicy::NoWakeFail, 60000, native_ticks, {}, on_done);
+        c.command_runner_.set_command_effect(completion->command_id, tk::CommandEffect::Mutating);
+        c.command_runner_.notify_tx_started(tk::TxAction::SendCommandPayload);
+        if (signalled) c.command_runner_.complete_current_command(false,
+            "long diagnostic that cannot fit any supported standard library short string");
+        // The real cancellation delegate allocates an error before its stale-generation check.
+        const auto queued = c.command_runner_.enqueue("queued", tk::BleDomain::Infotainment,
+            tk::WakePolicy::NoWakeFail, 60000, native_ticks, {}, on_done);
+        c.command_builders_[queued % tk::CommandRunner::kMaxQueueSize] = [] {};
+        c.link.throw_disconnect = true;
+        fail_cpp_allocations = persistent;
+        fail_next_cpp_allocation = true;
+        bool threw = false;
+        Controller::CommandOutcome out;
+        try {
+            out = c.await_completion_(completion, 1, native_ticks + 100, "oom",
+                                     tk::CompletionTimeoutPolicy::ForegroundWarn);
+        } catch (const std::bad_alloc&) { threw = true; }
+        fail_cpp_allocations = fail_next_cpp_allocation = false;
+        expect(threw == (signalled || persistent) && !c.command_runner_.current_command() &&
+               c.command_generation_.load() == 2 && c.retirements == 1 && c.link.disconnects == 1 &&
+               c.ble_fault_.load() && c.vehicle_mutex_->available &&
+               !c.command_builders_[queued % tk::CommandRunner::kMaxQueueSize],
+               "actual completion and timeout OOM always retire the FIFO, even through cancellation/disconnect faults",
+               "completion diagnostic or cleanup exception stranded a request or replaced the original exception");
+        if (!threw) expect(!out.success && tk::execution_uncertain(out.failure),
+                          "timeout retains submission uncertainty after allocation-free cleanup",
+                          "cleanup lost the call-owned failure state");
     }
     {
         Controller c; auto completion = std::make_shared<Controller::CommandCompletion>();

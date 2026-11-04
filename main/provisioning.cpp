@@ -521,10 +521,10 @@ static SetupPortal portal_open(NvsStorageAdapter& config_store, bool keep_statio
 }
 
 // Stop advertising the setup AP: captive DNS, the form's HTTP server, then the AP interface. The
-// station keeps running, so background retries continue and the normal web server can start.
+// station keeps running for background retries; an AP-only driver is stopped and released.
 // Returns false while the AP is still up; the caller reports it with tk::portal_close_failed() and
 // retries after the backoff (idempotent).
-static bool portal_close_ap(SetupPortal& portal) {
+static bool portal_close_ap(SetupPortal& portal, bool keep_station) {
     s_dns_stop.store(true);
     for (int i = 0; i < 30 && s_dns_running.load(); ++i) vTaskDelay(pdMS_TO_TICKS(100));
     if (portal.server) {
@@ -537,11 +537,26 @@ static bool portal_close_ap(SetupPortal& portal) {
         }
         portal.server = nullptr;
     }
-    const esp_err_t mode_err = esp_wifi_set_mode(WIFI_MODE_STA);
-    if (mode_err != ESP_OK) {
-        // The AP still runs on this netif; destroying it under the driver is worse than keeping it.
-        ESP_LOGW(TAG, "setup AP not switched off: %s", esp_err_to_name(mode_err));
-        return false;
+    if (keep_station) {
+        const esp_err_t mode_err = esp_wifi_set_mode(WIFI_MODE_STA);
+        if (mode_err != ESP_OK) {
+            // Retain the netif until the AP has stopped.
+            ESP_LOGW(TAG, "setup AP not switched off: %s", esp_err_to_name(mode_err));
+            return false;
+        }
+    } else {
+        // This AP owns the whole WiFi driver. Keep Ethernet's event loop/netif substrate alive,
+        // but release the radio and its heap before normal wired boot continues.
+        const esp_err_t stop_wifi = esp_wifi_stop();
+        if (stop_wifi != ESP_OK && stop_wifi != ESP_ERR_WIFI_NOT_STARTED) {
+            ESP_LOGW(TAG, "setup WiFi not stopped: %s", esp_err_to_name(stop_wifi));
+            return false;
+        }
+        const esp_err_t deinit_wifi = esp_wifi_deinit();
+        if (deinit_wifi != ESP_OK) {
+            ESP_LOGW(TAG, "setup WiFi not released: %s", esp_err_to_name(deinit_wifi));
+            return false;
+        }
     }
     // The mode switch posts WIFI_EVENT_AP_STOP; its default handler stops the DHCP server through
     // this netif. Give the event task (higher priority) the chance to run it before the netif is
@@ -571,15 +586,15 @@ void provisioning_run(NvsStorageAdapter& config_store) {
 }
 
 void provisioning_run_with_retry(NvsStorageAdapter& config_store) {
-    if (!tk::net_wifi_station_started()) {
-        // net_start_wifi() rejected the stored credentials before the driver existed (legacy or
-        // build-time values that skipped validation). Retrying them is pointless and APSTA needs
-        // a running station, so this is the terminal first-time portal.
+    const bool retry_station = tk::net_wifi_station_started();
+    if (!retry_station && !tk::net_eth_started()) {
+        // Physical Ethernet detection alone survives failed driver construction. Only a running
+        // station or successfully started wired driver can recover without the setup form.
         ESP_LOGW(TAG, "stored WiFi credentials unusable — setup portal without retry");
         provisioning_run(config_store);
     }
-    SetupPortal portal = portal_open(config_store, /*keep_station=*/true);
-    ESP_LOGW(TAG, "setup portal open; retrying the stored WiFi network in the background");
+    SetupPortal portal = portal_open(config_store, retry_station);
+    ESP_LOGW(TAG, "setup portal open; waiting for network recovery");
     // The host-tested logic/setup_portal.hpp defers its attempts under an AP client before the cap;
     // station-event retries remain independent. Close requests at idle/open-time limits use backoff
     // on failure. This loop samples inputs once a second using the 64-bit timer.
@@ -591,7 +606,7 @@ void provisioning_run_with_retry(NvsStorageAdapter& config_store) {
         vTaskDelay(pdMS_TO_TICKS(1000));
         const uint32_t now_s = static_cast<uint32_t>((esp_timer_get_time() - opened_us) / 1000000);
         const uint32_t clients = ap_open ? portal_ap_clients() : 0;
-        switch (tk::portal_step(state, {tk::net_is_up(), ap_open, clients, now_s})) {
+        switch (tk::portal_step(state, {tk::net_is_up(), ap_open, clients, now_s, retry_station})) {
             case tk::PortalAction::AttemptStation:
                 ESP_LOGI(TAG, "retrying the stored WiFi network (attempt %u)", (unsigned)state.attempts);
                 tk::net_wifi_retry_station();
@@ -600,13 +615,13 @@ void provisioning_run_with_retry(NvsStorageAdapter& config_store) {
                 ESP_LOGW(TAG, "closing the open setup AP (open %u s, idle %u s); retries continue, "
                               "and a power cycle reopens it", (unsigned)now_s,
                          (unsigned)(now_s - state.idle_since_s));
-                if (portal_close_ap(portal)) ap_open = false;
+                if (portal_close_ap(portal, retry_station)) ap_open = false;
                 else tk::portal_close_failed(state, now_s);
                 break;
             case tk::PortalAction::Leave:
                 // Fail closed: the boot continues (normal web server, BLE) only once the open AP
                 // is down; a failed close is retried with backoff (logic/setup_portal.hpp).
-                if (ap_open && !portal_close_ap(portal)) {
+                if (ap_open && !portal_close_ap(portal, retry_station)) {
                     tk::portal_close_failed(state, now_s);
                     break;
                 }

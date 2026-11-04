@@ -72,6 +72,9 @@ The architecture is implemented according to the reference specifications:
 ### 2. Platform-Forced Departures and Reference Deviations
 
 The reference is written in Go, relying on goroutines, runtime-managed channels, garbage collection, and dynamic heap allocation. On ESP32 with FreeRTOS and tight memory constraints (10240 B `vehicle_loop` stack), the following deliberate or inherited adaptations and departures from `vehicle-command` are made:
+
+#### Admission and session policy
+
 - **Response replay window (64 vs 32)**: The pinned `Peer`/`SlidingWindow` and native dispatcher retain 64 response counters, while the reference `internal/authentication/crypto.go` selects 32. Authentication still precedes either local replay admission; a wider retained window is not reference equivalence.
 - **SessionInfo age and tag length**: The reference BLE connector allows 4 s handshake latency and the dispatcher rejects older responses. Native admission instead uses the transmitted request's phase/command deadlines, with 5 s step and 7 s response timeout constants; it does not implement a separate 4 s age check. Pinned `Client::verify_session_info_tag` also accepts a matching 16-byte HMAC prefix, in addition to the reference's full 32-byte tag. These inherited library/orchestration choices are retained here; no crypto or timeout change is implied.
 - **Advertisement admission**: Named target adverts can start a connection even when their connectable flag is false. The reference rejects that flag as a connection-limit signal. Local failure classification uses the flag, but that diagnostic is not a scan-admission guard.
@@ -81,7 +84,9 @@ The reference is written in Go, relying on goroutines, runtime-managed channels,
 
 The entries above were checked against [vehicle-command `83baa078`](https://github.com/teslamotors/vehicle-command/tree/83baa078e81d08982dd997b8c8e4644e33a046a8), pinned tesla-ble v6.3.0 and the native adapter. They document current departures, not hardware acceptance or fixes to them.
 
-- **No goroutines / channels**: Replaced by a fixed byte-packing `logic/ble_deferred_queue.hpp` mailbox under its own short critical section and the single `vehicle_loop` execution thread. Adjacent RX bytes coalesce only within the same generation and a3s arrival window; first/last arrival times survive splitting and delayed consumption. The framer tests the preceding gap at first arrival and renews expiry at last arrival. Timestamp/enqueue and empty-queue/expiry-clock observations share the mailbox mux. Link records remain ordered barriers; pop slices stay at20 bytes. This changes local storage, not ATT framing, MTU, subscriptions, crypto, command authority or key/session format.
+#### Native execution, framing and session reuse
+
+- **No goroutines / channels**: Replaced by a fixed byte-packing `logic/ble_deferred_queue.hpp` mailbox under its own short critical section and the single `vehicle_loop` execution thread. Adjacent RX bytes coalesce only within the same generation and a 3 s arrival window; first/last arrival times survive splitting and delayed consumption. The framer tests the preceding gap at first arrival and renews expiry at last arrival. Timestamp/enqueue and empty-queue/expiry-clock observations share the mailbox mux. Link records remain ordered barriers; pop slices stay at 20 bytes. This changes local storage, not ATT framing, MTU, subscriptions, crypto, command authority or key/session format.
 - **Bounded vector buffers**: `tk::RxFramer` limits frame payloads to 2048 bytes and buffered-data admission to 2562 bytes (payload + 2-byte header + 512-byte chunk headroom). This bounds buffered size, not the exact allocated capacity of its `std::vector<uint8_t>`.
 - **Max frame length (2048 vs 1024 B)**: `ble.go:21` defines `maxBLEMessageSize = 1024`. tesla-ble's own reassembly used `Vehicle::MAX_MESSAGE_SIZE = 2048` (in the `Vehicle` class this firmware no longer calls), while a `UniversalMessage_RoutableMessage` is at most 741 B. `kMaxFrameLength = 2048` keeps that historical tesla-ble limit.
 - **Inter-chunk timeout (3000 ms vs 1 s)**: `ble.go` drops a partial frame when the next chunk arrives more than `rxTimeout` = 1 s later. `tk::CommandRunner` configures `tk::RxFramer` with `kDefaultRxInterChunkTimeoutMs = 3000` (#320); `tk::RxFramer` itself still defaults to 1000 ms. A partial frame therefore survives notification gaps of up to 3 s, at the cost of holding a torn frame for up to 3 s before the buffer is cleared.
@@ -90,11 +95,17 @@ The entries above were checked against [vehicle-command `83baa078`](https://gith
 - **Request-scoped VCSEC routing**: As in `vehicle-command` (`dispatcher.go:400-409`), each newly serialized routable VCSEC attempt gets a fresh nonzero 16-byte reply address. `logic/vcsec_response.hpp` captures its actual frame metadata without allocating another message buffer and binds generation, command, attempt, kind and deadlines. Only a successful BLE write activates the context. Timeouts, failed builds/writes, retries, flushes and link loss retire it. Auth and the Infotainment wake prerequisite admit their correlated proactive SessionInfo/fault replies without allowing them to acknowledge the payload. Infotainment retains a stable ordinary address, restored after every temporary VCSEC builder scope. Raw WhitelistAdd remains a non-routable transmit-only request. This routing match is attribution, not authentication of plaintext replies.
 - **Charge-port command domain**: The reference uses Infotainment CarServer open/close actions; this firmware uses VCSEC `ClosureMoveRequest.chargePort`. Both builders exist at v6.3.0. This preserves the existing local policy; static conformance evidence does not establish role acceptance or hardware behavior.
 - **One-plaintext-response rule**: Unlike `vehicle-command` (which applies no replay check to plaintext, `dispatcher.go:301-308`), this firmware's `BleDispatcher` enforces a strict one-unauthenticated-response rule where foreign-UUID responses are dropped before reaching telemetry callbacks.
-- **Wake completion on transmission (N1)**: The runner's explicit `Wake` request completes when its RKE frame is transmitted, whereas `vehicle-command` waits for a reply (`pkg/vehicle/vcsec.go`, `readUntil`). Public `wake_up()` separately requires fresh Infotainment evidence. A definite send failure returns immediately; possible submission preserves its original uncertainty while waiting within the same deadline, without another wake. TX-only success never stamps vehicle reachability. The runner's own wake prerequisite (`TxAction::SendWake`) waits for VCSEC confirmation rather than completing on transmission (see R1).
-- **Sleep state evaluation vs wake advancement (R1)**: The raw `vehicleSleepStatus` from VCSEC determines the reported sleep state (`vcsec_sleep_state_`). A VCSEC `AWAKE`, or a `VehicleStatus` carrying `closureStatuses`, that arrives while a command waits for its wake confirms that wake for the command (`CommandRequest::wake_confirmed`). `VehicleSleepStatus_E` is three-valued (`UNKNOWN`, `AWAKE`, `ASLEEP`): a frame reporting `UNKNOWN` (without `closureStatuses`) stores `SleepState::Unknown`, resets the ASLEEP debounce clock and confirms no wake, whereas upstream v5.2.0 treats every value except `ASLEEP` as awake (`tk::sleep_state_from_vcsec`, `tk::vcsec_status_confirms_wake`). Unlike PR #322 where `wake_confirmed` was unconditionally sticky across all retries, on step timeout, link loss, or auth failure `wake_confirmed` is reset to false to re-evaluate sleep; however, on a safe read-only payload response-timeout retry, `wake_confirmed` is preserved so the query uses backoff rather than regressing into `SendWake`. A possibly submitted mutation ends instead of retrying.
-- **VCSEC operation status handling (F3)**: `protocol.md` advises discarding legacy `CommandStatus OPERATIONSTATUS_ERROR` while waiting for a specific error; the Go `pkg/vehicle/vcsec.go` parser also has terminal error cases. This adapter retains terminal handling for an attributed current-request ERROR. Only a known authenticated current-payload rejection makes failure definite; plaintext or unknown inner values retain execution uncertainty. WAIT remains in progress and OK may complete the matching request. This legacy-error departure is retained rather than presented as exact protocol equivalence.
+- **Wake completion on transmission**: The runner's explicit `Wake` request completes when its RKE
+  frame is transmitted, whereas `vehicle-command` waits for a reply (`pkg/vehicle/vcsec.go`,
+  `readUntil`). Public `wake_up()` separately requires fresh Infotainment evidence. A definite
+  send failure returns immediately; possible submission preserves its original uncertainty while
+  waiting within the same deadline, without another wake. TX-only success never stamps vehicle
+  reachability. The runner's wake prerequisite (`TxAction::SendWake`) instead waits for VCSEC
+  confirmation, as described by sleep-state evaluation and wake advancement below.
+- **Sleep state evaluation vs wake advancement**: The raw `vehicleSleepStatus` from VCSEC determines the reported sleep state (`vcsec_sleep_state_`). A VCSEC `AWAKE`, or a `VehicleStatus` carrying `closureStatuses`, that arrives while a command waits for its wake confirms that wake for the command (`CommandRequest::wake_confirmed`). `VehicleSleepStatus_E` is three-valued (`UNKNOWN`, `AWAKE`, `ASLEEP`): a frame reporting `UNKNOWN` (without `closureStatuses`) stores `SleepState::Unknown`, resets the ASLEEP debounce clock and confirms no wake, whereas upstream v5.2.0 treats every value except `ASLEEP` as awake (`tk::sleep_state_from_vcsec`, `tk::vcsec_status_confirms_wake`). Unlike PR #322 where `wake_confirmed` was unconditionally sticky across all retries, on step timeout, link loss, or auth failure `wake_confirmed` is reset to false to re-evaluate sleep; however, on a safe read-only payload response-timeout retry, `wake_confirmed` is preserved so the query uses backoff rather than regressing into `SendWake`. A possibly submitted mutation ends instead of retrying.
+- **VCSEC operation status handling**: `protocol.md` advises discarding legacy `CommandStatus OPERATIONSTATUS_ERROR` while waiting for a specific error; the Go `pkg/vehicle/vcsec.go` parser also has terminal error cases. This adapter retains terminal handling for an attributed current-request ERROR. Only a known authenticated current-payload rejection makes failure definite; plaintext or unknown inner values retain execution uncertainty. WAIT remains in progress and OK may complete the matching request. This legacy-error departure is retained rather than presented as exact protocol equivalence.
 - **Ordinary Infotainment reply address**: The [reference dispatcher](https://github.com/teslamotors/vehicle-command/blob/d6239bf377b8a5859e8f5c9d64409df2a057934a/internal/dispatcher/dispatcher.go#L262) requires a matching destination routing address for every reply. Ordinary CarServer replies locally use domain/request-UUID matching and, when encrypted, GCM/replay validation, but do not separately compare `to_destination.routing_address`. SessionInfo/fault handling has the explicit current-context address check described below. This existing attribution departure is not evidence of cross-request cryptographic replay or a cause of observed RX failures.
-- **Dispatcher-bypass protection and passive telemetry (F2)**: SessionInfo and signed-fault
+- **Dispatcher-bypass protection and passive telemetry**: SessionInfo and signed-fault
   handling first require the current transmitted request's routing address, phase and deadline.
   VCSEC also checks its captured generation and optional response UUID; Infotainment requires its
   current request UUID. Completion callbacks check generation before publishing. Foreign or
@@ -105,14 +116,20 @@ The entries above were checked against [vehicle-command `83baa078`](https://gith
   replies accept valid non-error payloads, including empty replies; malformed protobuf, unrelated
   universal payloads, SessionInfo and signed errors cannot become empty success. Encrypted empty
   replies require tag verification and zero-inclusive replay checks.
-- **Signed-fault recovery hint (R3)**: When a signed message fault carries a proactive `session_info` payload (`dispatcher.go:295-299`), it is applied inline. Selected universal-message key faults can set a volatile recovery hint in `on_vehicle_message_`; that advisory does not prove vehicle-side key deletion and cannot erase persisted sessions or replace the key. The automatic pairing policy may retry enrollment with that same key after status probes and bounded backoff. The periodic VCSEC `GET_STATUS` health request is a separate plaintext path: the pinned Client builder disables payload encryption, matching the reference `AuthMethodNone` request in `pkg/vehicle/vcsec.go` and `state.go`. Establishing a session first does not authenticate this request or its response; a successful status response can clear only the advisory hint.
+- **Signed-fault recovery hint**: When a signed message fault carries a proactive `session_info` payload (`dispatcher.go:295-299`), it is applied inline. Selected universal-message key faults can set a volatile recovery hint in `on_vehicle_message_`; that advisory does not prove vehicle-side key deletion and cannot erase persisted sessions or replace the key. The automatic pairing policy may retry enrollment with that same key after status probes and bounded backoff. The periodic VCSEC `GET_STATUS` health request is a separate plaintext path: the pinned Client builder disables payload encryption, matching the reference `AuthMethodNone` request in `pkg/vehicle/vcsec.go` and `state.go`. Establishing a session first does not authenticate this request or its response; a successful status response can clear only the advisory hint.
+
+#### Cryptographic bindings and output cleanup
+
 - **Key fingerprint (`key_fingerprint()`)**: Retained natively in `main/vehicle_pairing.cpp`: Mbed TLS PK parses the stored PEM, the key moves into a volatile PSA key, and PSA SHA-1 over the exported public point gives `SHA1(pubkey_bytes)[:4]`, keeping it decoupled from `tesla-ble` internals. The function itself is IDF code; the host harness checks a mirror of it against tesla-ble's key id.
 - **Crypto bindings on PSA (patch 0006)**: Upstream tesla-ble v6.3.0 still binds the legacy Mbed TLS 3 crypto API, which ESP-IDF 6's Mbed TLS 4 removed. `0006-port-crypto-bindings-to-psa.patch` re-binds the same operations to PSA Crypto (ADR-0002, "Execution"). ECDH X-coordinate byte order and `SHA1(X)[:16]`, the "session info" HMAC-SHA256, AES-128-GCM with a 12-byte nonce, AAD = `SHA256(metadata)` and a 16-byte tag, the VIN BLE name and the SEC1 PEM key format are unchanged, and the host harness's V1 part proves them against the protocol.md vectors. A failed RNG read for a nonce now fails `Peer::encrypt`; upstream only logged it and encrypted under an unfilled nonce.
 - **Response authentication and explicit response AAD (patch 0006)**: v5.3.0 now verifies the AES-GCM response tag and uses the response-carried counter upstream, matching `vehicle-command`'s `Signer.Decrypt`. The PSA rebase preserves this behavior with `psa_aead_verify` and plaintext wiping on authentication failure. It retains the separate `construct_response_ad_buffer` helper and makes the request-only `construct_ad_buffer` reject response signatures; upstream instead overloads one metadata helper with an optional counter. All response callers pass `AES_GCM_Response_data.counter`. V1 proves a response whose counter differs from the request counter, rejects request-counter AAD and rejects tampered tags. The unverified-tag/request-counter defects described in the September execution of ADR-0002 were present in v5.2.0 and are fixed upstream in v5.3.0.
 - **Failed-decrypt cleanup and library logging**: Patch 0006 wipes the full caller-provided output capacity after an AEAD-operation failure, including bytes a failing driver may write without reporting. Successful crypto and key formats are unchanged. The component and native harness compile at INFO (`TESLA_BLE_LOG_LEVEL=2`), excluding DEBUG/VERBOSE argument evaluation and formatting. Known public-key/packet log formats also have a redacted-export guard. `test/test_dependency_guards.py` compiles the actual patched method with synthetic write-before-error drivers and the upstream logging macros/formatter, including removed-fix controls; the separate V1 vectors own real crypto answers. These checks do not establish an ESP-driver leak, physical key reuse or hardware acceptance.
+
+#### Command execution and response admission
+
 - **Serialized command execution**: Protected by `command_mutex_` to prevent BLE radio contention and preserve FreeRTOS task high-water mark.
 - **Encrypted VCSEC admission**: An AES-GCM-declared response requires an initialized VCSEC peer and a non-empty request hash before decryption. Missing context, a failed tag check or a repeated response-carried counter (including zero) drops it before protobuf decoding, sleep updates or status callbacks; it cannot fall through as plaintext. `Peer::validate_response_counter()` supplies the per-request window reset by `Client` when signing a new request, following `vehicle-command`'s decryption-context and counter handling. Intentional passive plaintext `VehicleStatus` broadcasts remain accepted by the separate status path.
-- **Contextual application no-ops (F033)**: upstream
+- **Contextual application no-ops**: upstream
   [`getCarServerResponse`](https://github.com/teslamotors/vehicle-command/blob/fc5a1910ad45c42921d541089e3e366d0b897f52/pkg/vehicle/infotainment.go)
   returns a NominalError for an application ERROR; that error is not universal success. This
   firmware deliberately accepts only the command/reason pairs owned by [API](../API.md#commands),
@@ -154,6 +171,9 @@ The entries above were checked against [vehicle-command `83baa078`](https://gith
   - *Owner and evidence*: `main/http_api.cpp` (`send_command_result`) chooses 200 or 502, `main/mcp_server.cpp` sets `isError`, and `main/logic/command_result.hpp` supplies the exact no-op policies and result text; `main/logic/command_runner.hpp` binds contextual acceptance to the authenticated current reply. Evidence status: static source reading of the firmware, `vehicle-command` at `a4b43c1` and evcc at `2778b8a` (`templates/definition/vehicle/tesla-ble.yaml`, `plugin/http.go`, `util/request/functions.go`, `core/loadpoint.go`, `charger/vehicle-api.go`).
 - **Explicit identity cleanup**: Key rotation resets both RAM peers, runner sessions, pending commands and dispatcher state even when session persistence failed and no link is ready. The RX owner receives a deferred reset request. A failed lock or cleanup erase keeps signing gated and the durable rotation journal armed; the journal is removed last. The host harness compiles the native cleanup methods with the real Client/Peer and command runner, using only simulated storage, locks and cache sinks. This does not establish the cause of a historical device key change or replace hardware NVS-retention evidence.
 - **CarServer response counters**: A shared read-only dispatcher match rejects foreign UUIDs before parsing or consuming replay state. The AES-GCM response signature variant identifies an authenticated response, including counter zero. After the library verifies the tag, the native adapter applies both the peer and outstanding-request replay windows before command completion or telemetry delivery. Plaintext remains separate. The host harness compiles this adapter directly with the real patched library and public protocol test keys; it checks zero, duplicates, bad tags, nonzero/out-of-order replies, plaintext and foreign UUIDs followed by their correctly addressed replies. No wire or key format changes.
+
+#### ATT and link-layer departures
+
 - **SMP channel (NimBLE Security Manager compiled out)**: The reference client (`vehicle-command` on
   Linux, which pins go-ble `8c5522f54333`) has no SMP implementation. Its stub `handleSMP` reads
   `p[0]` of the whole L2CAP PDU, which is the low byte of the L2CAP length and not the SMP opcode
@@ -178,7 +198,7 @@ The entries above were checked against [vehicle-command `83baa078`](https://gith
   chunk the vehicle's ATT layer discards (for example with Insufficient Authentication 0x05 or
   Insufficient Encryption 0x0F) raises no error. The command then fails only through
   `tk::CommandRunner`'s 7 s response or 5 s step timeout and its retries, which looks the same as
-  radio loss, and the transmit-completed `Wake` (N1) carries no vehicle-side acceptance at all. The
+  radio loss, and the transmit-completed `Wake` request carries no vehicle-side acceptance. The
   vehicle accepts 20-byte Write Commands in field operation, but Tesla documents no support for
   them. Longer Write Commands after the MTU exchange (see the MTU exchange entry below, #437) have
   no hardware evidence yet.
@@ -277,7 +297,9 @@ The entries above were checked against [vehicle-command `83baa078`](https://gith
   of the effective configuration and the pinned NimBLE; whether the vehicle ever sends an ATT
   request to this firmware has not been measured.
 
-### 2.1 Framing Edge Cases and Protocol Deviations (F8)
+<a id="21-framing-edge-cases-and-protocol-deviations-f8"></a>
+
+### 2.1 Framing edge cases
 
 The native `tk::RxFramer` reassembly implementation covers the critical framing boundary conditions identified during v5.1.4 analysis and verified in `test/test_logic.cpp`:
 - **Case 2 (Split frame across multiple notifications)**: Frames fragmented across several BLE notifications are reassembled cleanly without premature completion or state corruption.
@@ -388,15 +410,6 @@ PEM/NVS formats, pairing identity and session policy remain unchanged.
 The existing vehicle-command comparisons and V1 crypto vectors still apply to these unchanged
 protocol sources. Host tests and pinned builds do not establish hardware or live vehicle acceptance.
 
-## Consequences
-
-- **Framing Robustness**: Eliminates buffer-recovery heuristics and log storms. BLE stream reassembly matches Tesla reference behavior.
-- **Security & Anti-Replay**: Eliminates the plaintext CarServer replay window. Response attribution is strictly bound by request UUID.
-- **NVS & Key Preservation**: Zero modification to durable NVS schemas, key formats, or session storage. Existing paired vehicles survive update without re-pairing.
-- **Memory evidence**: Pure decisions in `main/logic/` have host tests. Compiler frames and runtime stack minima are separate checks under the [concurrency contract](../ARCHITECTURE.md#concurrency-normative-contract); neither establishes a universal bound on composed call depth or heap demand.
-- **Dependency Contract**: Upstream `yoziru/tesla-ble` dependency pin (v6.3.0) and four firmware targets remain explicit; upstream also declares esp32c5.
-
-
 ## Established-session continuity (2026-10-23)
 
 Patch 0008 corrects an inherited refresh difference from
@@ -422,3 +435,11 @@ also retains its existing trust/age limits above. No new key rotation or storage
 The ordinary real-library harness checks both domains, valid refresh, temporary invalidity and
 state-preserving refusal. Synthetic driver checks additionally pin secret selection and removed
 checks; they do not prove HMAC correctness or radio/vehicle behavior. No real compromise is inferred.
+
+## Consequences
+
+- **Framing Robustness**: Eliminates buffer-recovery heuristics and log storms. BLE stream reassembly matches Tesla reference behavior.
+- **Security & Anti-Replay**: Eliminates the plaintext CarServer replay window. Response attribution is strictly bound by request UUID.
+- **NVS & Key Preservation**: Zero modification to durable NVS schemas, key formats, or session storage. Existing paired vehicles survive update without re-pairing.
+- **Memory evidence**: Pure decisions in `main/logic/` have host tests. Compiler frames and runtime stack minima are separate checks under the [concurrency contract](../ARCHITECTURE.md#concurrency-normative-contract); neither establishes a universal bound on composed call depth or heap demand.
+- **Dependency Contract**: Upstream `yoziru/tesla-ble` dependency pin (v6.3.0) and four firmware targets remain explicit; upstream also declares esp32c5.
