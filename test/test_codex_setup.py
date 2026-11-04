@@ -60,6 +60,12 @@ with tempfile.TemporaryDirectory(prefix='codex-source-canary-', dir=ROOT) as dir
     command = f'gh pr create --body-file {body}'
     assert run('PreToolUse', tool('exec_command', {'cmd': command, 'workdir': str(ordinary)})) == {}
     assert denied(run('PreToolUse', tool('exec_command', {'cmd': command, 'workdir': str(nested)})))
+    subprocess.run(['git', '-C', str(nested), 'config', 'core.worktree', str(ROOT)],
+                   check=True, capture_output=True)
+    aliased_top = subprocess.check_output(['git', 'rev-parse', '--show-toplevel'],
+                                          cwd=nested, text=True).strip()
+    assert aliased_top == str(ROOT)
+    assert denied(run('PreToolUse', tool('exec_command', {'cmd': command, 'workdir': str(nested)})))
 
 # Literal jq/search syntax must remain data through both independent guards. These
 # payloads are inspected only; no GitHub, device, partition or shell command runs.

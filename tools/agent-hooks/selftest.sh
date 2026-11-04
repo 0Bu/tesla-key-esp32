@@ -637,6 +637,10 @@ git -C "$nested_repo" remote add origin https://github.com/example/unreviewed.gi
 [ "$(git -C "$nested_repo" rev-parse HEAD)" != "$sha" ] || fail_case 'nested repository fixture must have a different HEAD'
 payload exec_command cmd "gh pr create --body-file $tmp/create.md" "$nested_repo" >"$tmp/independent-create.json"
 expect_rc 2 'independent nested Git repository cannot borrow outer publication records' "$gate" --project-dir "$root" --payload-file "$tmp/independent-create.json"
+git -C "$nested_repo" config core.worktree "$root"
+[ "$(git -C "$nested_repo" rev-parse --show-toplevel)" = "$root" ] \
+  || fail_case 'stored core.worktree fixture must alias the outer top-level'
+expect_rc 2 'nested Git metadata cannot borrow approval through stored core.worktree' "$gate" --project-dir "$root" --payload-file "$tmp/independent-create.json"
 push_body="$(printf '%s\n' '- [x] $skill-audit clean — PR create/push gate @ '"$sha" '- [x] $pr-hygiene clean — content gate @ '"$sha")"
 # Pull-request checkouts are detached in Actions. Prove that production behavior still rejects
 # detached HEAD, then inject a branch only through the isolated git test double for the allow case.
