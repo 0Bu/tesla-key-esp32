@@ -599,7 +599,8 @@ association that never answers therefore stays unrecovered rather than inheritin
 
 ## Sleep / link-state (the single source of truth)
 
-`VehicleController::link_state()` supplies UI, status, MQTT and the unreachable override of the REST `charging_state`:
+`VehicleController::link_state()` supplies the web UI, `/status`, MCP, MQTT, the display and LED, the
+`wake_up` decision and the unreachable override of the REST `charging_state`:
 
 | State | Proof |
 |---|---|
