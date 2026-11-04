@@ -1,7 +1,9 @@
 # Feature catalog
 
 Find a mechanism, its implementation and the failure it prevents. Each section links its owning
-contract; this catalog is not a second narrative. `logic/` paths are under `main/`.
+contract; this catalog is not a second narrative. `logic/` paths are under `main/`. The
+[ESP-IDF matrix](ESP_IDF_MATRIX.md) inventories ESP-IDF components, configuration and adoption
+decisions.
 
 ## 1. Boot, crash forensics and recovery
 
@@ -158,6 +160,7 @@ unresolved material findings prevent a clean verdict.
 | Four-target signed candidate admission before Pages writes | `.github/workflows/build.yml`, `scripts/check-workflow-policy.py`, `test/test_deploy_candidate.py` | A downloaded candidate bypassing production-authority verification, skipping a chip or continuing after a failed signature check. |
 | Linux-only browser execution, trusted keyboard and bounded startup | `test/web_ui_browser_gate.py`, `test/browser_cdp.py`, their policy/transport tests, `scripts/run-browser-tests-linux.sh`, `tools/browser/Dockerfile`, `scripts/run-mock-tests.sh` | Native macOS browser startup crashes, claiming DOM coverage from mocked or skipped tests, cold starts exceeding the outer deadline, or losing native Tab/Enter/Space behavior and populated three-width layout checks. |
 | Repository/workflow lint with mutation canaries | `scripts/repo-lint.sh`, `check-workflow-policy.py`, `check-host-gate-contract.py`, `check-markdown-links.py` | Malformed or unsafe workflows, broken links, invalid ownership and fail-open Stop hooks. |
+| ESP-IDF matrix audit | `scripts/check-esp-idf-matrix.py` (via `repo-lint.sh`); [ESP-IDF matrix](ESP_IDF_MATRIX.md#what-the-gate-proves) | A component, dependency, sdkconfig assignment, IDF header or IDF pin change merging with a stale inventory. |
 | Fail-closed Web Serial installer with installed-firmware check | `docs/index.html`, `installer-bootstrap.mjs`, `web-installer.mjs`, `test/web_installer.test.mjs`; [NVS retention](SECURITY.md#nvs-retention) | An unconfirmed erase; keeping NVS over detected foreign firmware, a moved NVS or a ROM-loader block erase; chip, size or pre-ECO3 mismatches that flash but never boot; corrupt or mixed downloads; a board left in download mode or a reboot loop after a check. |
 | Vendored installer runtime and source verification | `docs/vendor/`, `scripts/verify-vendored-esptool-js.sh`, `build.yml` host gate; [third-party notices](THIRD_PARTY.md) | Executing mutable CDN JavaScript inside the USB firmware trust boundary, shipping changed upstream bytes, or distributing the bundle without its license notices. |
 | Single-open serial-port ownership | `docs/index.html`, `serial-port-release.mjs`, `web-installer.mjs`, `test/web_installer.test.mjs`, `test/serial_port_release.test.mjs`, `scripts/build-pages.sh` | Repeated open/close cycles locking a USB-Serial/JTAG link until a power cycle, an operation racing a still-pending native call, or a port staying "paired" after Disconnect. |

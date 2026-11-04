@@ -51,6 +51,7 @@ echo "repo-lint: YAML parsed by offline Psych; GitHub semantics use mutation-tes
 
 python3 scripts/check-workflow-policy.py --self-test
 python3 scripts/check-markdown-links.py --self-test
+python3 scripts/check-esp-idf-matrix.py --self-test
 python3 scripts/check-logic-test-ownership.py --self-test
 python3 scripts/check-nvs-contract.py --self-test
 python3 scripts/check-host-gate-contract.py --self-test
@@ -60,4 +61,4 @@ git diff --check
 git diff --cached --check
 git show --check --format= HEAD >/dev/null
 
-echo "repo-lint: PASS (shell, Python, Node, JSON, TOML, workflows, links, ownership, diff)"
+echo "repo-lint: PASS (shell, Python, Node, JSON, TOML, workflows, links, ESP-IDF matrix, ownership, diff)"
