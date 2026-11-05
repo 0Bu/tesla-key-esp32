@@ -126,6 +126,13 @@ protocol, repository/agent gates and Linux sanitizers, using the pinned Docker i
 on macOS. It performs no publication, real-key signing, device or vehicle operation. Standalone
 commands below remain available for focused iteration.
 
+The host runner reports elapsed time for each gate. Contract parsers reuse bounded immutable
+results for identical complete source strings within one process; changed fixture text is parsed
+again, and returned inventories are independent copies. Every mutation and failure-propagation
+case still runs. Shared dependency, otadata and Release-acceptance self-tests have one owner in
+`test-build-contracts.sh`; the full host wrapper does not repeat them. Main and trusted preview
+acceptance still execute the complete remote contract before signing, without local receipts.
+
 For repeated local host checks, use:
 
 ```bash

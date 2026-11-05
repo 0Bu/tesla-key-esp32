@@ -56,8 +56,10 @@ run_gate() {
     if [ "$PROFILE" != full ] && [ "$gate_group" != shared ] && [ "$PROFILE" != "$gate_group" ]; then
         return 0
     fi
+    local started=$SECONDS
     if [ "$REQUIRE_ALL" = 1 ]; then
         if python3 "$TIMEOUT_RUNNER" "$seconds" "$@"; then
+            printf 'host-gate: PASS [%ss] %s\n' "$((SECONDS - started))" "$label"
             return 0
         else
             local rc=$?
@@ -66,6 +68,7 @@ run_gate() {
         fi
     else
         "$@"
+        printf 'host-gate: PASS [%ss] %s\n' "$((SECONDS - started))" "$label"
     fi
 }
 
@@ -335,10 +338,6 @@ if command -v python3 >/dev/null 2>&1; then
     run_gate "release relevance and publication selectors" 120 scripts/release-relevance.sh --self-test
     run_gate "build and manifest contract tests" 120 scripts/test-build-contracts.sh --build-and-manifest
     run_gate "retained bootloader compatibility and USB consumers" 120 python3 test/test_bootloader_preflight.py
-    run_gate "exact pinned dependency contract" 120 \
-        python3 scripts/check-dependency-contract.py --self-test
-    run_gate "erased initial otadata contract" 120 \
-        python3 scripts/check-otadata-contract.py --self-test
     run_gate "tesla-ble patch applicability" 120 scripts/apply-tesla-ble-patches.sh --self-test
     run_gate "tesla-ble incremental source admission" 120 python3 test/test_patch_incremental.py
 run_gate "exact dependency source admission" 120 python3 test/test_dependency_sources.py
@@ -352,12 +351,6 @@ run_gate "dependency query process lifetime" 120 python3 test/test_dependency_pr
     gate_group=policy
     run_gate "bench acceptance validator contract" 120 \
         python3 scripts/check-bench-acceptance.py --self-test
-    run_gate "published Release asset contract" 120 \
-        python3 scripts/check-release-assets.py --self-test
-    run_gate "immutable Release reuse staging contract" 120 \
-        python3 scripts/prepare-reused-release.py --self-test
-    run_gate "deployed Release and Pages byte contract" 120 \
-        python3 scripts/check-published-release.py --self-test
     gate_group=runtime
     run_gate "pure-logic test ownership and standalone headers" 120 \
         python3 scripts/check-logic-test-ownership.py --compile --self-test
