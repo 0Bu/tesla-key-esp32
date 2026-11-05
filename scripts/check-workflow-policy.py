@@ -211,8 +211,8 @@ SIGNING_ENVIRONMENT_JOBS = {
 # Signing, publication, preview eligibility and cleanup bodies are reviewed as complete units.
 # Scalar/step semantics below remain explanatory; exact bodies also close narrow-scanner gaps.
 EXPECTED_PRIVILEGED_JOB_SHA256 = {
-    ('build.yml', 'publish'): "3d8071b2e6361b0d013b5a07e6f598ff5152245e64eda83f4f031ba2f4850180",
-    ('build.yml', 'deploy'): "415caf4c6a5be8ac9f31711193bd0a47b13b4e47562ecf67b95bf779022b7bad",
+    ('build.yml', 'publish'): "68ff37c2955715396fd0df6e79018025b1132a212c796a6f77652d482b07db31",
+    ('build.yml', 'deploy'): "c0c682f2ad561332c6184726c704753d3fa15962b964d0a9b22cda62befe6952",
     ('signed-pr-preview.yml', 'sign-preview'): "2222beed0b8590b49bf7299032e20ce763342a31846e7824b93bef07b191d761",
     ('signed-pr-preview.yml', 'validate'): "369bfeafebd5ee6667301a590741051df63b0e9d84f8ad0ddc68c9c07c336309",
     ('pr-preview-cleanup.yml', 'cleanup-event'): "c36a5602067c24346a24d2c431e4bec2860de35cc0101ee0d11113b30367890b",
@@ -436,6 +436,33 @@ done
             and names.index("Download exact signed Release and Pages candidate") < matches[0][0]
             < min(names.index("Deploy root site to gh-pages"), names.index("Deploy dev site to gh-pages")),
             "build.yml:deploy production-pin consumer must precede both branch writes")
+
+
+def validate_signing_image_prefetch(steps: list[dict]) -> None:
+    """The asynchronous operation may warm one pinned image, never cross the key boundary."""
+    names = [step.get("name") for step in steps]
+    start_name = "Start pinned Dev signing image pull"
+    wait_name = "Require pinned Dev signing image before key provisioning"
+    require(names.count(start_name) == names.count(wait_name) == 1,
+            "Dev signing image prefetch must have one start and one required wait")
+    start, wait = steps[names.index(start_name)], steps[names.index(wait_name)]
+    command = 'bash scripts/prefetch-idf-image.sh {} "$RUNNER_TEMP/dev-signing-image"'
+    require(start == {"name": start_name, "if": "needs.build.outputs.mode == 'dev'",
+                      "run": command.format("start")},
+            "Dev signing image prefetch start must be exact, key-free and Dev-only")
+    require(wait == {"name": wait_name, "if": "steps.release-mode.outputs.mode == 'dev'",
+                     "env": {"DISPLAY_VERSION": "${{ needs.build.outputs.display-version }}",
+                             "SOURCE_SHA": "${{ github.sha }}"},
+                     "run": command.format("wait") + '\n'
+                            './scripts/select-release-version.sh --require-release-candidate "$SOURCE_SHA" "$DISPLAY_VERSION"\n'},
+            "Dev signing image prefetch wait must fail closed and refresh source authority")
+    order = ["Bind publish job to current main", start_name, "Download unsigned build",
+             "Validate build provenance", "Classify first publication or immutable reuse",
+             wait_name, "Provision OTA signing key", "Sign and stage release artifacts",
+             "Remove OTA signing key"]
+    require(all(names.count(name) == 1 for name in order)
+            and [names.index(name) for name in order] == sorted(names.index(name) for name in order),
+            "Dev signing image prefetch must complete before key provisioning, after provenance")
 
 
 def validate(root: Path) -> None:
@@ -824,6 +851,8 @@ def validate(root: Path) -> None:
         "build.yml:publish must fail-closed between first publication and immutable reuse",
     )
     publication = build["publish"]
+    publish_steps = workflow_model(root / ".github/workflows/build.yml", contents["build.yml"])["jobs"]["publish"]["steps"]
+    validate_signing_image_prefetch(publish_steps)
     required_publication_markers = (
         "Classify first publication or immutable reuse",
         "Reuse and stage exact immutable Release bytes",
@@ -903,7 +932,7 @@ def validate(root: Path) -> None:
     signed_upload = "- name: Upload signed firmware artifacts"
     production_key_gate = "Verify production signing authority for all staged apps"
     require(
-        build["publish"].count(candidate_check) == 7
+        build["publish"].count(candidate_check) == 8
         and build["publish"].count("--expected-public-key-digest") == 3
         and build["publish"].count("scripts/ota-signing-public-key.sha256") == 3
         and production_key_gate in build["publish"]
@@ -1829,6 +1858,18 @@ def self_test(root: Path) -> None:
          "        run: ./scripts/publish-pages-branch.sh dev ./_deploy-input/_site",
          "        run: ./scripts/publish-pages-branch.sh dev ./_deploy-input/_site",
          "every dev publisher retry"),
+        ("prefetch-start-disabled", "build.yml",
+         "      - name: Start pinned Dev signing image pull\n        if: needs.build.outputs.mode == 'dev'\n",
+         "      - name: Start pinned Dev signing image pull\n        if: false\n",
+         "prefetch start must be exact"),
+        ("prefetch-wait-tolerated", "build.yml",
+         'bash scripts/prefetch-idf-image.sh wait "$RUNNER_TEMP/dev-signing-image"\n',
+         'bash scripts/prefetch-idf-image.sh wait "$RUNNER_TEMP/dev-signing-image" || true\n',
+         "prefetch wait must fail closed"),
+        ("prefetch-wait-disabled", "build.yml",
+         "      - name: Require pinned Dev signing image before key provisioning\n        if: steps.release-mode.outputs.mode == 'dev'\n",
+         "      - name: Require pinned Dev signing image before key provisioning\n        if: false\n",
+         "prefetch wait must fail closed"),
         ("privileged-extra-step", "build.yml",
          "      - name: Provision OTA signing key\n",
          "      - name: Unexpected privileged run\n"

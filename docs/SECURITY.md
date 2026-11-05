@@ -244,6 +244,10 @@ check, and GitHub treats a check skipped because a need failed as passed, so `bu
 
 `prepare` performs cumulative relevance classification once for scheduling. It does not grant
 publication authority; current-source and Pages/Release checks remain at every mutation boundary.
+Dev publication overlaps the same pinned image download with key-free input checks on the signing
+runner. A successful pull, exact-image availability and fresh source/version admission are required
+before provisioning the key. This warmup grants no signing authority and changes no signing inputs,
+container limits or post-signing acceptance. Stable creation and immutable reuse are unchanged.
 Signed previews similarly resolve a trusted version, rebuild four targets on separate read-only
 runners, then join their complete inventory before the protected compare/sign stage.
 Selected PR feedback cannot authorize signing: eligible previews require additional complete
