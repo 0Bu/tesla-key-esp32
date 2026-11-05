@@ -1198,6 +1198,7 @@ function otaSchedule(fn,delay){
   otaFail(otaPhase==='check'?'check timed out':'update timed out');
 }
 function otaVersion(v){return typeof v==='string'&&v.length<=31&&/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?$/.test(v)}
+function otaBootId(v){return typeof v==='string'&&/^[0-9a-f]{16}$/.test(v)}
 
 
 function otaStatus(){
@@ -1205,7 +1206,9 @@ function otaStatus(){
     var valid=o&&['idle','checking','downloading','done','error'].indexOf(o.state)>=0&&
       typeof o.update_available==='boolean'&&typeof o.progress==='number'&&isFinite(o.progress)&&o.progress>=0&&o.progress<=100&&
       typeof o.message==='string'&&typeof o.available==='string'&&typeof o.current==='string';
-    if(valid&&(o.update_available||o.state==='downloading'||o.state==='done')) valid=otaVersion(o.available);
+    if(valid&&o.upload!==undefined) valid=typeof o.upload==='boolean';
+    if(valid&&o.upload===true) valid=!o.update_available&&o.available===''&&(o.pr==null||o.pr===0);
+    else if(valid&&(o.update_available||o.state==='downloading'||o.state==='done')) valid=otaVersion(o.available);
     if(!valid) throw new Error('invalid OTA status response');
     return o;
   });
@@ -1282,7 +1285,7 @@ function setChannel(chan){
     if(!res.ok){
       var rj = res.json && res.json.response;
       var err = new Error('HTTP ' + res.status);
-      err.http = true;   // the device answered and refused
+      err.http = true;
       err.reason = (rj && typeof rj.reason === 'string') ? rj.reason : '';
       throw err;
     }
@@ -1328,12 +1331,15 @@ function openFwUpdate(){
   if(isOtaFlowBusy()) return Promise.resolve();
   var curVer = (state && state.version) || '?';
   if(otaAvail){
-    var ver = otaAvail;                 // the prompt outlives any later change of the global
+    var ver = otaAvail;
+    var token=otaFlowToken;
     otaPrompting = true; fwFocusId = 'fwCheckBtn';
     if(typeof syncOtaUi === 'function') syncOtaUi();
     return loadOtaChangelog().then(function(notes){
+      if(otaFlowToken!==token) return false;
       return askOtaInstall({ current: curVer, available: ver, pr: Number(otaPrSelection()), channel: otaChannel }, notes);
     }).then(function(installed){
+      if(otaFlowToken!==token) return;
       if(installed){
         return startOtaUpdate(ver);
       } else {
@@ -1341,7 +1347,7 @@ function openFwUpdate(){
         if(state) render(state);
         otaReset();
       }
-    }).catch(function(){ otaReset(); });
+    }).catch(function(){ if(otaFlowToken===token) otaReset(); });
   }
   return otaCheck();
 }
@@ -1516,7 +1522,7 @@ function otaPrSelection(){
   return '';
 }
 function otaCheck(){
-  if(isOtaFlowBusy()) return Promise.resolve();          // a check/update/prompt is already running
+  if(isOtaFlowBusy()) return Promise.resolve();
   if(!fwFocusId) fwFocusId = 'fwCheckBtn';
   otaBusy=true;
   otaBegin('check',OTA_CHECK_TIMEOUT_MS);
@@ -1535,8 +1541,10 @@ function otaCheck(){
   }).catch(function(err){ if(otaFlowToken===token) otaFail((err && err.message) || 'check failed'); });
 }
 function otaCheckPoll(){
+  var token=otaFlowToken;
   clearTimeout(otaTimer);
   return otaStatus().then(function(o){
+    if(otaFlowToken!==token) return;
     if(o.state==='checking'){ otaSchedule(otaCheckPoll,1200); return; }
     if(o.state==='downloading'||o.state==='done'){
       otaExpectedVersion=o.available||null; otaBegin('update',OTA_UPDATE_TIMEOUT_MS); otaProgress(o); return;
@@ -1546,13 +1554,15 @@ function otaCheckPoll(){
     if(o.update_available){
       otaBusy=false;
       otaPhase=null;
-      otaPrompting=true;          // stay locked while the changelog loads and the dialog is open
+      otaPrompting=true;
       if(typeof syncOtaUi === 'function') syncOtaUi();
       otaAvail=o.available||''; if(state)render(state); otaBarProgress();
       toast('Update available: v' + o.available, 'ok', 'ota');
       return loadOtaChangelog().then(function(notes){
+        if(otaFlowToken!==token) return false;
         return askOtaInstall(o, notes);
       }).then(function(installed){
+        if(otaFlowToken!==token) return;
         if(installed){
           return startOtaUpdate(o.available);
         } else {
@@ -1565,7 +1575,7 @@ function otaCheckPoll(){
       if(typeof closeOtaModal === 'function') closeOtaModal(false);
       toast('Firmware is up to date', 'ok', 'ota');
     }
-  }).catch(function(err){ otaFail((err && err.message) || 'check failed'); });
+  }).catch(function(err){ if(otaFlowToken===token) otaFail((err && err.message) || 'check failed'); });
 }
 function otaPoll(){
   clearTimeout(otaTimer);
@@ -1573,6 +1583,9 @@ function otaPoll(){
   return otaStatus().then(otaProgress).catch(function(){ otaSchedule(otaPoll,1500); });
 }
 function otaProgress(o){
+  var upload=o.upload===true||(otaPollState&&otaPollState.upload===true&&o.state==='idle'&&otaPhase==='update');
+  var bootId=upload&&(otaPollState&&otaPollState.upload===true?otaPollState.boot_id:o.boot_id);
+  if(upload){ otaAvail=null; otaExpectedVersion=null; otaPrompting=false; renderVerLink(); }
   otaBusy=true;
   otaPollState=o;
   if(typeof syncOtaUi === 'function') syncOtaUi();
@@ -1581,17 +1594,17 @@ function otaProgress(o){
     var milestone=Math.floor(p/10)*10;
     if(otaLastToastMilestone===null || milestone>otaLastToastMilestone){
       otaLastToastMilestone=milestone;
-      toast('Downloading update… ' + milestone + '%', 'load', 'ota');
+      toast((upload?'Uploading firmware… ':'Downloading update… ') + milestone + '%', 'load', 'ota');
     }
     otaBarProgress(p);
     otaSchedule(otaPoll,800);
   }
   else if(o.state==='done'){
-    if(!otaVersion(otaExpectedVersion)){ otaFail('update target version is missing'); return; }
+    if(upload?!otaBootId(bootId):!otaVersion(otaExpectedVersion)){ otaFail('update target identity is missing'); return; }
     clearTimeout(otaTimer); otaPhase='reboot';
     toast('Verifying & rebooting…', 'load', 'ota');
     otaBarProgress(100);
-    setTimeout(function(){waitReboot(otaExpectedVersion)},1200);
+    setTimeout(function(){waitReboot(otaExpectedVersion,upload?bootId:null)},1200);
   }
   else if(o.state==='error'){
     if(typeof closeOtaModal === 'function') closeOtaModal(false);
@@ -1600,11 +1613,11 @@ function otaProgress(o){
   else if(o.state==='idle'&&otaPhase==='update'){
     // The 1.2 s "done" state can be missed in a background tab. Verify the target version instead
     // of polling a fresh boot's idle state forever or treating idle as success.
-    if(!otaVersion(otaExpectedVersion)){ otaFail('update target version is missing'); return; }
+    if(upload?!otaBootId(bootId):!otaVersion(otaExpectedVersion)){ otaFail('update target identity is missing'); return; }
     otaPhase='reboot';
     toast('Verifying & rebooting…', 'load', 'ota');
     otaBarProgress(100);
-    waitReboot(otaExpectedVersion);
+    waitReboot(otaExpectedVersion,upload?bootId:null);
   }
   else if(o.state==='checking'){ otaSchedule(otaPoll,1000); }
   else { otaFail('update entered an unexpected state'); }
@@ -1616,17 +1629,19 @@ function resumeOta(){
     }
   }).catch(function(){});
 }
-// After reboot, reload only on the exact target version, within request and overall deadlines.
-function waitReboot(expectedVer){
-  if(!otaVersion(expectedVer)){ otaFail('update target version is missing'); return; }
+// Feed updates verify their target version. A raw upload has no advertised target;
+// observe a new boot without claiming that the uploaded image passed acceptance.
+function waitReboot(expectedVer,bootId){
+  var upload=bootId!=null;
+  if(upload?!otaBootId(bootId):!otaVersion(expectedVer)){ otaFail('update target identity is missing'); return; }
   var started=Date.now();
   toast('Rebooting… waiting for device', 'load', 'ota');
   (function probe(){
-    requestJsonWithTimeout('/status?ms='+Date.now(),{cache:'no-store'},3000)
+    requestJsonWithTimeout(upload?'/ota/status':'/status?ms='+Date.now(),{cache:'no-store'},3000)
       .then(function(o){
-        if(!o||typeof o.version!=='string') throw new Error('invalid status response');
-        if(o.version===expectedVer){
-          toast('Updated to v' + expectedVer, 'ok', 'ota');
+        if(!o||(upload?!otaBootId(o.boot_id):typeof o.version!=='string')) throw new Error('invalid status response');
+        if(upload?o.boot_id!==bootId:o.version===expectedVer){
+          toast(upload?'Device restarted':'Updated to v' + expectedVer, 'ok', 'ota');
           setTimeout(function(){ location.reload(); }, 1200);
           return;
         }
@@ -1634,7 +1649,7 @@ function waitReboot(expectedVer){
       })
       .catch(next);
     function next(){
-      if(Date.now()-started>90000){ otaFail('update rebooted but the expected version was not verified'); return; }
+      if(Date.now()-started>90000){ otaFail('update restart identity was not verified'); return; }
       setTimeout(probe,1000);
     }
   })();

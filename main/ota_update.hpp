@@ -19,6 +19,7 @@ struct OtaStatus {
     std::string message;
     std::string available;         // latest version seen by the last check (if any)
     bool        update_available;  // last check found a newer version
+    bool        upload{false};     // raw upload; no feed offer or target version is implied
     std::string current;           // running version at the last check
     std::string channel;           // active update channel ("release" or "dev")
     unsigned    target_pr{0};      // 0 for main channel, >0 if PR preview channel
@@ -54,6 +55,12 @@ tk::OtaStartResult ota_check_start_after_http(unsigned pr_number, void* server) 
 // Kick off a background download+install task. Refuse pending/unknown image verification before
 // creating a worker or starting HTTPS; inspect the SDK state under the operation gate.
 tk::OtaStartResult ota_start(unsigned pr_number = 0);
+
+struct httpd_req;
+// HTTP-handler-only signed app upload. A successful async copy sets handed_off before
+// task creation; from then on the worker/start-failure path owns response and socket cleanup.
+// The caller must skip its ordinary body-retirement/response path when handed_off is true.
+tk::OtaStartResult ota_upload_start(httpd_req* request, bool& handed_off) noexcept;
 
 // State-only snapshot for cosmetic indicators; no OtaStatus/string materialization.
 // The shared status mutex may be created on first use. Unavailable locking reports Error.

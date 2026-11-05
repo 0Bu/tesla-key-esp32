@@ -14,6 +14,7 @@ enum class HttpRoute {
     BodyController,
     OtaCheck,
     OtaUpdate,
+    OtaUpload,
     OtaStatus,
     OtaChangelog,
     GenKeys,
@@ -41,10 +42,11 @@ struct FixedHttpRoute {
     HttpRoute route;
 };
 
-inline constexpr std::array<FixedHttpRoute, 25> kFixedHttpRoutes{{
+inline constexpr std::array<FixedHttpRoute, 26> kFixedHttpRoutes{{
     {HttpVerb::Get,  "/ota/check",           HttpRoute::OtaCheck},
     {HttpVerb::Post, "/ota/check",           HttpRoute::OtaCheck},
     {HttpVerb::Post, "/ota/update",          HttpRoute::OtaUpdate},
+    {HttpVerb::Post, "/ota/upload",          HttpRoute::OtaUpload},
     {HttpVerb::Get,  "/ota/status",          HttpRoute::OtaStatus},
     {HttpVerb::Get,  "/ota/changelog",       HttpRoute::OtaChangelog},
     {HttpVerb::Post, "/gen_keys",            HttpRoute::GenKeys},
@@ -150,6 +152,7 @@ inline constexpr bool http_route_requires_vehicle_runtime(HttpRoute route) noexc
         case HttpRoute::NotFound:
         case HttpRoute::OtaCheck:
         case HttpRoute::OtaUpdate:
+        case HttpRoute::OtaUpload:
         case HttpRoute::OtaStatus:
         case HttpRoute::OtaChangelog:
         case HttpRoute::SetTime:

@@ -92,6 +92,41 @@ pinned ESP-TLS and `http_parser` components provide transport and incremental HT
 `esp_http_client` and `esp_https_ota` are not used by this OTA path. Authentication/publication
 remain in [Security](SECURITY.md#signed-ota-images).
 
+### Direct signed app upload
+
+`POST /ota/upload` streams an app-only binary while the configured OTA channel is `dev`.
+The wildcard handler applies its normal browser-origin checks, validates the bounded binary
+content type/length, reserves the same operation/probation/memory gate, and obtains an SDK
+async request copy. `HttpGuardContext.async_owned` transfers response and connection retirement
+to the existing `ota` coordinator task before it can run. The synchronous wildcard must not
+shut down RX after this transfer. Startup failure completes the owned request; the worker
+completes it on every other success/failure path. Shutdown occurs before async ownership is
+released so no later close can affect a reused socket.
+
+No network worker, TLS connection or manifest is started. The operation's existing 1024-byte
+mailbox buffer feeds `Coordinator::start_upload/upload/finish_upload`, which reuse the same
+prefix, inactive-slot writer, full SDK signature validation and boot-selection path. The
+nonrenewable operation budget starts at upload entry and tightens to Content-Length; every
+receive and flash boundary remains budgeted. Socket timeouts and heap-abort requests stop
+the transfer. Dev is checked at admission, in the receive loop and before final verification;
+normal configuration routes remain excluded while the operation is updating.
+
+Upload admission publishes `upload=true` and clears the old feed offer, PR and notes under the
+status mutex. Consumers can display progress without assigning a manifest target version.
+
+The upload-specific image policy accepts a canonical equal/newer version core without a feed
+version or suffix requirement, enabling repeat tests of signed local/PR builds. Ordinary feed
+eligibility is unchanged. The operation retains ownership after committed or uncertain boot
+selection, and aborts/reclaims only after actual writer quiescence on other failures. Success
+is returned after boot selection, followed by the usual restart and health/rollback policy.
+MCP `initialize.instructions` describes this HTTP workflow without adding a firmware-write
+tool or changing the vehicle tool set. [API usage and responses](API.md#direct-signed-firmware-upload)
+and [trust boundary](SECURITY.md#ota-self-update) own the external contract.
+`/ota/status` also publishes the running descriptor's complete ELF SHA-256, project/target,
+a once-per-boot random nonce, cached verification, actual busy flag and existing recovery
+threshold. No storage/vehicle query is added. These let a local caller distinguish a reboot
+into the selected image from an HTTP acknowledgement or a repeated version string.
+
 ### Browser scheduling and metadata capture
 
 The browser waits for an in-flight general `/status` request to finish or time out, including
@@ -444,8 +479,8 @@ a dismissed report is not replayed later. Syslog is best-effort and
 
 The ring lock covers bounded copies and sink snapshot only; invoke sinks after unlock. Chunked
 exports bind append count and clear epoch, stop on generation changes, discard a wrapped first line
-and redact overlong logical lines as a whole. Recognized complete V1 library records flatten
-embedded line breaks in the ring copy. A boot-installed sink replaces known credential-bearing MQTT
+and redact overlong logical lines as a whole. Recognized complete V1 library records and application records containing a known identifier
+marker flatten embedded line breaks in the ring copy. A boot-installed sink replaces known credential-bearing MQTT
 URI parse errors before every output even if the ring mutex fails; other raw Serial/Syslog records
 retain their bytes. The boot owner publishes mutex and previous-sink handles atomically; each
 consumer snapshots its handle once. Export limits live in
@@ -862,6 +897,8 @@ on early route/Origin/admission rejection or exceptions. Bodyless requests keep 
 captive preflight failures return ESP_FAIL to reject unread input.
 
 `read_body_result()` distinguishes empty, oversize, OOM and receive failure (normal cap 2 KiB).
+The dev-only binary `/ota/upload` has a separate streamed slot-size bound and async owner;
+it does not raise the JSON/MCP cap or use the shared allocating body reader.
 
 | Case | REST | MCP |
 |---|---|---|

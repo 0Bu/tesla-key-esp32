@@ -236,6 +236,16 @@ inline const char* ota_channel_name(OtaChannel c) {
     return c == OtaChannel::Dev ? "dev" : "release";
 }
 
+inline constexpr std::size_t kOtaUploadMaxBytes = 0x1f0000;
+
+// Direct uploads remain a deliberately selected dev-channel operation. Ordinary JSON
+// requests retain their separate 2-KiB bound; this body is streamed to the inactive slot.
+inline constexpr bool ota_upload_admissible(OtaChannel channel, std::size_t bytes,
+                                            std::string_view content_type) noexcept {
+    return channel == OtaChannel::Dev && bytes >= 512 && bytes <= kOtaUploadMaxBytes &&
+           content_type == "application/octet-stream";
+}
+
 // Accepts only the two names /status and POST /set_ota document. Anything else is REFUSED.
 inline bool ota_channel_valid(std::string_view s) {
     return s == "release" || s == "dev";
@@ -360,6 +370,15 @@ inline OtaVersionOrder compare_ota_versions(std::string_view candidate,
         if (order != 0) return order > 0 ? OtaVersionOrder::Newer : OtaVersionOrder::Older;
     }
     return OtaVersionOrder::Equal;
+}
+
+// A direct signed upload can repeat a version or install a PR/local build of the same
+// core without a published feed. It cannot downgrade the version core or run in release.
+inline bool ota_upload_version_allowed(std::string_view candidate, std::string_view current,
+                                        OtaChannel channel) {
+    const auto order = compare_ota_versions(candidate, current);
+    return channel == OtaChannel::Dev &&
+           (order == OtaVersionOrder::Equal || order == OtaVersionOrder::Newer);
 }
 
 // Evaluates whether candidate firmware is eligible for OTA update given the running version,

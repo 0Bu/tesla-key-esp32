@@ -177,6 +177,7 @@ static esp_err_t handle_all_dispatch(GuardedReq rq) {
         case tk::HttpRoute::BodyController: return handle_body_controller(rq);
         case tk::HttpRoute::OtaCheck:       return handle_ota_check(rq);
         case tk::HttpRoute::OtaUpdate:      return handle_ota_update(rq);
+        case tk::HttpRoute::OtaUpload:      return handle_ota_upload(rq);
         case tk::HttpRoute::OtaStatus:      return handle_ota_status(rq);
         case tk::HttpRoute::OtaChangelog:   return handle_ota_changelog(rq);
         case tk::HttpRoute::GenKeys:        return handle_gen_keys(rq);
@@ -223,10 +224,12 @@ static esp_err_t handle_all(httpd_req_t* req) {
         // the response, while cleanup cannot restart a slow peer's RX budget.
         struct RetireBodyConnection {
             httpd_req_t* req;
+            const bool& async_owned;
             ~RetireBodyConnection() noexcept {
-                if (req->content_len > 0) (void)shutdown(httpd_req_to_sockfd(req), SHUT_RD);
+                if (!async_owned && req->content_len > 0)
+                    (void)shutdown(httpd_req_to_sockfd(req), SHUT_RD);
             }
-        } retire_body_connection{req};
+        } retire_body_connection{req, context.async_owned};
         if (req->content_len > 0) {
             result = httpd_resp_set_hdr(req, "Connection", "close");
             if (result != ESP_OK) return result; // refuse before dispatch; no effect was attempted

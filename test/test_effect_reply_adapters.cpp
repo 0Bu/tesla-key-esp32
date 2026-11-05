@@ -26,6 +26,7 @@
 #include "logic/heap_watchdog.hpp"
 #include <cJSON.h>
 #include <atomic>
+#include <array>
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
@@ -50,9 +51,11 @@ extern "C" unsigned uxTaskGetStackHighWaterMark(void* task) {
 }
 using esp_err_t = int;
 constexpr int ESP_OK=0, ESP_FAIL=-1, ESP_ERR_NOT_FOUND=-2, HTTPD_400_BAD_REQUEST=400;
+constexpr int HTTPD_403_FORBIDDEN=403;
 static constexpr char TAG[]="offline-effect-adapter";
 static int fake_http_server;
-struct httpd_req_t { const char* uri{"/offline"}; int content_len{}; const char* input{"{}"}; void* handle{&fake_http_server}; };
+struct httpd_req_t { const char* uri{"/offline"}; size_t content_len{}; const char* input{"{}"}; void* handle{&fake_http_server}; };
+#include "ota_status.generated.hpp"
 #include "config_commit_owner.generated.hpp"
 #include "effect_reply_context.generated.hpp"
 using Handler = esp_err_t(*)(GuardedReq);
@@ -68,6 +71,10 @@ static int immediate_check_starts, deferred_check_starts;
 static void* deferred_check_server;
 static unsigned last_ota_pr;
 static tk::OtaStartResult ota_result;
+static tk::OtaChannel upload_channel=tk::OtaChannel::Release;
+static std::string upload_content_type,upload_transfer_encoding;
+static OtaStatus ota_payload{};
+static unsigned upload_starts=0,body_retirements=0;
 static std::string query;
 static char wire[4096]; static size_t wire_size;
 static tk::KeyRotationResult rotation;
@@ -88,12 +95,16 @@ template<typename... Args> void offline_log(Args...) noexcept {}
 #define ESP_LOGW(...) offline_log(__VA_ARGS__)
 #define ESP_LOGE(...) offline_log(__VA_ARGS__)
 #define CONFIG_TESLA_MQTT_USERNAME ""
+#define CONFIG_IDF_TARGET "esp32"
+struct esp_app_desc_t { char project_name[32]{"tesla-key-esp32"}; uint8_t app_elf_sha256[32]{}; };
+static const esp_app_desc_t* esp_app_get_description() { static const esp_app_desc_t description; return &description; }
+static uint32_t esp_random() { static uint32_t calls=0; return ++calls; }
 #define pdMS_TO_TICKS(x) (x)
 constexpr int SHUT_RD=0;
 static void vTaskDelay(int) noexcept {}
 static void esp_restart();
 static int httpd_req_to_sockfd(httpd_req_t*) noexcept { return 0; }
-static int shutdown(int,int) noexcept { return 0; }
+static int shutdown(int,int) noexcept { ++body_retirements; return 0; }
 static tk::OtaIdentityOperationGate s_operation_gate;
 // This reply-effect fixture has no previous OTA operation. Keep the complete generated
 // production query; config spies and the OTA application family cover non-null traversal.
@@ -203,7 +214,7 @@ static int httpd_resp_send_chunk(httpd_req_t*,const char* body,size_t size) {
     wire_size+=size; wire[wire_size]='\0'; return result;
 }
 static int httpd_resp_sendstr(httpd_req_t* req,const char* body) { return httpd_resp_send_chunk(req,body,std::strlen(body)); }
-static int httpd_resp_send_err(httpd_req_t*,int,const char*) { return -4; }
+static int httpd_resp_send_err(httpd_req_t*,int status,const char*) { response_status=status; return -4; }
 static constexpr size_t kQueryBufBytes=128;
 static int validate_query_string(httpd_req_t*) { return 0; }
 static bool query_param_is(httpd_req_t*,const char*,const char*) { return true; }
@@ -218,6 +229,11 @@ BrowserClockResult apply_browser_clock_sample(tk::ClockSample) noexcept {
 }
 BrowserClockResult apply_browser_clock(double) noexcept { return apply_browser_clock_sample({}); }
 static size_t httpd_req_get_url_query_len(httpd_req_t*) { return query.size(); }
+static size_t httpd_req_get_hdr_value_len(httpd_req_t*,const char*) { return upload_transfer_encoding.size(); }
+static int httpd_req_get_hdr_value_str(httpd_req_t*,const char*,char* out,size_t n) {
+    if (upload_content_type.empty()||upload_content_type.size()>=n) return ESP_FAIL;
+    std::snprintf(out,n,"%s",upload_content_type.c_str()); return ESP_OK;
+}
 static int httpd_req_get_url_query_str(httpd_req_t*,char* out,size_t size) {
     if (query_read_error) return query_read_error;
     if (query.empty()) return ESP_ERR_NOT_FOUND;
@@ -229,6 +245,13 @@ static bool ota_is_updating() { return updating; }
 [[maybe_unused]] static tk::OtaStartResult ota_check_start_after_http(unsigned pr, void* server) { ++deferred_check_starts; deferred_check_server=server; ++check_starts; last_ota_pr=pr; if (ota_result==tk::OtaStartResult::Started) effect_done(); return ota_result; }
 static tk::OtaStartResult ota_start(unsigned pr) { ++update_starts; last_ota_pr=pr; if (ota_result==tk::OtaStartResult::Started) effect_done(); return ota_result; }
 static void ota_set_channel(tk::OtaChannel) { effect_done(); }
+static tk::OtaChannel ota_get_channel() { return upload_channel; }
+static OtaStatus ota_get_status() { return ota_payload; }
+static bool ota_is_busy() { return updating; }
+static tk::OtaVerificationState ota_cached_verification_state() { return tk::OtaVerificationState::Stable; }
+static tk::OtaStartResult ota_upload_start(httpd_req_t*,bool& handed) noexcept {
+    ++upload_starts; handed=ota_result==tk::OtaStartResult::Started; return ota_result;
+}
 struct OtaIdentityMutationGuard {
     explicit OtaIdentityMutationGuard(tk::IdentityMutationEntry) {}
     explicit operator bool() const { return guard_ok; }
@@ -313,6 +336,9 @@ static esp_err_t handle_all_dispatch(GuardedReq rq) { return selected(rq); }
 #include "effect_reply_adapters.generated.hpp"
 
 static void reset(Handler handler) {
+    ota_payload={};
+    upload_channel=tk::OtaChannel::Release; upload_content_type="application/octet-stream";
+    upload_transfer_encoding.clear(); upload_starts=body_retirements=0;
     runner_reply_enabled=false; runner_success=false; runner_error.clear();
     CHECK(s_operation_gate.state()==tk::OtaIdentityGateState::Idle);
     crash_erase_result=tk::CrashEraseResult::Erased; crash_open_result=tk::CoredumpOpenResult::Ready;
@@ -434,6 +460,56 @@ static void test_nominal_charge_reply_adapters() {
 int main() {
     CHECK(!tk::stack_watch_min_free_bytes(tk::StackWatch::Httpd).has_value());
     cJSON_Hooks hooks{gate_malloc,gate_free}; cJSON_InitHooks(&hooks);
+    // Serialize the actual typed upload snapshot through the shipped HTTP status handler.
+    for(bool upload:{false,true}){
+        reset(handle_ota_status);
+        ota_payload={OtaState::Downloading,37,"uploading",upload?"":"1.6.4",!upload,upload,"1.6.3","dev",0};
+        httpd_req_t req;
+        CHECK(handle_all(&req)==ESP_OK);
+        const auto json=reply_json();CHECK(json);
+        CHECK(bool(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(json.get(),"upload")))==upload);
+        const auto* available=cJSON_GetObjectItemCaseSensitive(json.get(),"available");
+        CHECK(cJSON_IsString(available)&&std::strcmp(available->valuestring,upload?"":"1.6.4")==0);
+        CHECK(cJSON_GetObjectItemCaseSensitive(json.get(),"pr")==nullptr);
+    }
+    reset(handle_ota_status);ota_payload.upload=true;
+    httpd_req_t empty_req;CHECK(handle_all(&empty_req)==ESP_OK);
+    allocation_fault_armed=true;effect_allocations=0;allocation_fault_index=0;
+    CHECK(handle_all(&empty_req)==ESP_OK);
+    const int status_allocations=effect_allocations;
+    for(int nth=1;nth<=status_allocations;++nth){
+        reset(handle_ota_status);ota_payload.upload=true;
+        allocation_fault_armed=true;allocation_fault_index=nth;
+        CHECK(handle_all(&empty_req)==ESP_OK&&response_status==503);
+        const auto json=reply_json();CHECK(json);
+        CHECK(cJSON_GetObjectItemCaseSensitive(json.get(),"upload")==nullptr);
+    }
+    // Execute the actual upload admission handler and the outer request-retirement guard.
+    httpd_req_t binary_request; binary_request.content_len=1024;
+    reset(handle_ota_upload); query.clear();
+    CHECK(handle_all(&binary_request)==-4&&response_status==403&&upload_starts==0);
+    CHECK(body_retirements==1);
+    for(int scenario=0;scenario<6;++scenario){
+        reset(handle_ota_upload); query.clear();upload_channel=tk::OtaChannel::Dev;
+        binary_request.content_len=1024;
+        if(scenario==0)binary_request.content_len=0;
+        if(scenario==1)upload_content_type="multipart/form-data";
+        if(scenario==2)upload_transfer_encoding="chunked";
+        if(scenario==3)query="url=https://example.test/app.bin";
+        if(scenario==4)binary_request.content_len=tk::kOtaUploadMaxBytes+1;
+        if(scenario==5)upload_content_type.clear();
+        (void)handle_all(&binary_request);
+        CHECK(response_status==(scenario==4?413:400)&&upload_starts==0);
+        CHECK(body_retirements==unsigned(binary_request.content_len>0));
+    }
+    binary_request.content_len=1024;
+    for(const auto admission:{tk::OtaStartResult::Started,tk::OtaStartResult::Busy,tk::OtaStartResult::NoMemory}){
+        reset(handle_ota_upload); query.clear();upload_channel=tk::OtaChannel::Dev;ota_result=admission;
+        CHECK(handle_all(&binary_request)==ESP_OK&&upload_starts==1);
+        CHECK(body_retirements==unsigned(admission!=tk::OtaStartResult::Started));
+        if(admission==tk::OtaStartResult::Started)CHECK(response_attempts==0&&wire_size==0);
+        else CHECK(response_status==tk::ota_start_http_status(admission));
+    }
     // Execute the shipped HTTP handler: it must reserve a deferred check using the copied
     // server handle, rather than sample admission while this request still owns SDK scratch.
     reset(handle_ota_check); ntp_synced=true;

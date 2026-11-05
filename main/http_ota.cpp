@@ -1,12 +1,34 @@
 // OTA self-update endpoints:
 //   GET  /ota/check[?ms=<epoch>]  (start a background manifest check)
 //   POST /ota/update              (start the background download+install)
+//   POST /ota/upload              (dev-only signed app binary upload)
 //   GET  /ota/status              (poll progress)
 // Dispatched from handle_all in http_server.cpp (inside its try/catch OOM guard).
 
 #include "http_handlers.hpp"
 #include "ota_update.hpp"
 #include "logic/ota_contract.hpp"
+#include "ota_recovery_memory.hpp"
+#include <esp_app_desc.h>
+#include <esp_random.h>
+#include <sdkconfig.h>
+
+// Per-boot diagnostic nonce, independent of version/uptime, for same-version OTA acceptance.
+// It carries no credentials and is generated once without storage, BLE or a shared leaf lock.
+static const std::array<char, 17>& ota_boot_id_() {
+    static const auto id = [] {
+        std::array<char, 17> text{};
+        constexpr char hex[] = "0123456789abcdef";
+        uint32_t value = 0;
+        for (size_t i = 0; i < 16; ++i) {
+            if ((i & 7) == 0) value = esp_random();
+            text[i] = hex[value & 15];
+            value >>= 4;
+        }
+        return text;
+    }();
+    return id;
+}
 
 static const char* ota_state_str(OtaState s) {
     switch (s) {
@@ -124,6 +146,31 @@ esp_err_t handle_ota_update(GuardedReq rq) {
     return send_effect_json(rq, tk::ota_start_http_status(result), json.release());
 }
 
+// POST /ota/upload — raw signed app, with Content-Length; no multipart or URL fetch.
+// Header/browser-origin guards run in handle_all before this handler, just as for pull OTA.
+esp_err_t handle_ota_upload(GuardedReq rq) {
+    auto* req = rq.req();
+    if (ota_get_channel() != tk::OtaChannel::Dev)
+        return httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "OTA channel dev required");
+    if (req->content_len > tk::kOtaUploadMaxBytes) {
+        httpd_resp_set_status(req, "413 Payload Too Large");
+        return httpd_resp_sendstr(req, "OTA slot exceeded");
+    }
+    char type[32]{};
+    if (httpd_req_get_url_query_len(req) != 0 ||
+        httpd_req_get_hdr_value_len(req, "Transfer-Encoding") != 0 ||
+        httpd_req_get_hdr_value_str(req, "Content-Type", type, sizeof(type)) != ESP_OK ||
+        !tk::ota_upload_admissible(ota_get_channel(), req->content_len, type))
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                  "signed app, Content-Length and application/octet-stream required");
+    const auto result = ota_upload_start(req, rq.context->async_owned);
+    if (rq.context->async_owned) return ESP_OK; // Async owner handles every success/failure reply.
+    tk::JsonBuilder json;
+    json.boolean(json.root(), "result", false);
+    json.string(json.root(), "reason", tk::ota_start_reason(result, false));
+    return send_json(req, tk::ota_start_http_status(result), json.release());
+}
+
 // GET /ota/status — poll download progress.
 esp_err_t handle_ota_status(GuardedReq rq) {
     httpd_req_t* req = rq.req();
@@ -134,8 +181,26 @@ esp_err_t handle_ota_status(GuardedReq rq) {
     json.string(json.root(), "message", s.message.c_str());
     json.string(json.root(), "available", s.available.c_str());
     json.boolean(json.root(), "update_available", s.update_available);
+    json.boolean(json.root(), "upload", s.upload);
     json.string(json.root(), "current", s.current.c_str());
     json.string(json.root(), "channel", s.channel.c_str());
+    json.boolean(json.root(), "busy", ota_is_busy());
+    json.string(json.root(), "verification", tk::ota_verification_name(ota_cached_verification_state()));
+    json.number(json.root(), "recovery_required_bytes",
+                tk::ota_recovery_required_bytes(tk::OtaRecoveryUse::OperationEntry));
+    const auto* description = esp_app_get_description();
+    json.string(json.root(), "project", description ? description->project_name : "unavailable");
+    json.string(json.root(), "target", CONFIG_IDF_TARGET);
+    json.string(json.root(), "boot_id", ota_boot_id_().data());
+    if (description) {
+        char elf[65]{};
+        constexpr char hex[] = "0123456789abcdef";
+        for (size_t i = 0; i < 32; ++i) {
+            elf[i * 2] = hex[description->app_elf_sha256[i] >> 4];
+            elf[i * 2 + 1] = hex[description->app_elf_sha256[i] & 15];
+        }
+        json.string(json.root(), "elf_sha256", elf);
+    }
     if (s.target_pr > 0) {
         json.number(json.root(), "pr", s.target_pr);
     }

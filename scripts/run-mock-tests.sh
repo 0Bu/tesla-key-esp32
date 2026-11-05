@@ -113,6 +113,8 @@ if [ "$REQUIRE_ALL" = 1 ]; then
         test/ota_operation_contract.py \
         test/generate_ota_tls_adapter.py \
         test/test_ota_tls_admission.cpp \
+        scripts/dev-ota-upload.py \
+        test/test_dev_ota_upload.py \
         test/ota_http_parser/provenance.json \
         test/ota_http_parser/http_parser.c \
         test/ota_http_parser/http_parser.h \
@@ -299,6 +301,7 @@ if command -v python3 >/dev/null 2>&1; then
     run_gate "optional LED driver decisions and GPIO" 120 python3 test/test_led_driver_contract.py
     run_gate "cached identity recovery and actual restart owner" 120 python3 test/test_identity_recovery_contract.py
     run_gate "locked cJSON intake and OOM" 120 bash test/run-cjson-oom-tests.sh
+    run_gate "local OTA source, review, image and one-upload binding" 120 python3 test/test_dev_ota_upload.py
     run_gate "maintenance actual backend source contract" 120 python3 scripts/check-config-repair-backend-contract.py
     run_gate "maintenance actual backend and console" 120 bash test/run-config-repair-backend.sh
     run_gate "native Codex hook payload contract" 120 python3 test/test_codex_setup.py
