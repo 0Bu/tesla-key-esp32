@@ -595,7 +595,7 @@ test("device probing times out without closing or releasing a still-running nati
   assert.equal(serialPortLease(port).phase, "probe", "the pending startup keeps the port reserved");
 });
 
-// esptool-js 0.7.0's connect loop: up to seven attempts, each pulsing the reset lines through the
+// esptool-js 0.7.1's connect loop: up to seven attempts, each pulsing the reset lines through the
 // transport (IO0 low: download mode) and then waiting for a sync answer whose failure it swallows.
 function connectLoopEsptool() {
   const calls = [];
@@ -831,14 +831,19 @@ test("a cancellation racing the completed OTA-selector write still settles as in
   assert.deepEqual(writesOf(fake.calls), [[0], [0x8000], [0x20000], [0xf000]]);
 });
 
-test("a flash timeout aborts the active Web Serial writer and rejects later writes", async () => {
+test("a flash timeout aborts the active Web Serial writer and rejects later writes", async (t) => {
   const fixture = firmwareFixture();
   const offer = await fixture.load();
   const fake = fakeEsptool();
   const pendingWrite = deferred();
+  const writeStarted = deferred();
   let writerCount = 0;
   const writer = {
-    write(bytes) { fake.calls.push(["wire-write", Array.from(bytes)]); return pendingWrite.promise; },
+    write(bytes) {
+      fake.calls.push(["wire-write", Array.from(bytes)]);
+      writeStarted.resolve();
+      return pendingWrite.promise;
+    },
     abort(reason) { fake.calls.push("writer-abort"); pendingWrite.reject(reason); return Promise.resolve(); },
     releaseLock() { fake.calls.push("release-lock"); }
   };
@@ -857,10 +862,17 @@ test("a flash timeout aborts the active Web Serial writer and rejects later writ
     }
   };
   let operation;
-  await assert.rejects(flashDevice({
+  // Let native download/hash work reach the writer before advancing the operation deadline.
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const rejected = assert.rejects(flashDevice({
     port, offer, eraseFirst: false, TransportCtor: fake.Transport, ESPLoaderCtor: fake.Loader, fetchImpl: fixture.fetch,
     timeoutMs: 20, cleanupTimeoutMs: 100, delay: noDelay, onOwnership: (state) => { operation = state; }
   }), { name: "FlashTimeoutError" });
+  await writeStarted.promise;
+  t.mock.timers.tick(19);
+  assert.ok(!fake.calls.includes("writer-abort"), "the writer stays active before the deadline");
+  t.mock.timers.tick(1);
+  await rejected;
   await operation.settled;
   assert.equal(writerCount, 1);
   assert.equal(fake.calls.filter((call) => Array.isArray(call) && call[0] === "wire-write").length, 1);
@@ -2217,17 +2229,17 @@ test("the published page keeps one card, one always visible log and the Tesla st
 
 test("the bootstrap loads the vendored esptool-js, honours ?trace and reconnects a paired port", () => {
   const bootstrap = fs.readFileSync(new URL("../docs/installer-bootstrap.mjs", import.meta.url), "utf8");
-  assert.match(bootstrap, /from "\.\/vendor\/esptool-js-0\.7\.0\.bundle\.js"/);
+  assert.match(bootstrap, /from "\.\/vendor\/esptool-js-0\.7\.1\.bundle\.js"/);
   assert.match(bootstrap, /trace: new URLSearchParams\(locationImpl\.search\)\.has\("trace"\)/);
   assert.match(bootstrap, /controller\.ready\.then\(\(\) => controller\.reconnectPaired\(\)\);/);
-  for (const name of ["esptool-js-0.7.0.bundle.js", "esptool-js-0.7.0.LICENSE"]) {
+  for (const name of ["esptool-js-0.7.1.bundle.js", "esptool-js-0.7.1.LICENSE"]) {
     assert.ok(fs.existsSync(new URL(`../docs/vendor/${name}`, import.meta.url)), name);
   }
   assert.deepEqual(fs.readdirSync(new URL("../docs/vendor/", import.meta.url)).sort(),
-    ["esptool-js-0.7.0.LICENSE", "esptool-js-0.7.0.bundle.js", "pako-2.1.0.LICENSE", "pako-2.1.0.zlib.README"],
+    ["esptool-js-0.7.1.LICENSE", "esptool-js-0.7.1.bundle.js", "pako-2.1.0.LICENSE", "pako-2.1.0.zlib.README"],
     "only the pinned runtime and its notices are served");
   const notices = fs.readFileSync(new URL("../docs/THIRD_PARTY.md", import.meta.url), "utf8");
-  assert.match(notices, /\[Apache-2\.0\]\(vendor\/esptool-js-0\.7\.0\.LICENSE\)/);
+  assert.match(notices, /\[Apache-2\.0\]\(vendor\/esptool-js-0\.7\.1\.LICENSE\)/);
   assert.doesNotMatch(notices, /0\.6\.1/);
 });
 

@@ -3,10 +3,10 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-version=0.7.0
+version=0.7.1
 tarball_url="https://registry.npmjs.org/esptool-js/-/esptool-js-${version}.tgz"
-expected_sri='sha512-9wHuW/s9t4Vs6HKcr3pra3gbRVWwaN0eabMWodWH4KEJHEYZxgmWwZ3s0F4xcWVCZOc/L98bGZ4uWoZvR8KBKA=='
-expected_bundle_sha256=00ebe6fb0b202976d3e2a3c6b9a6bd438c26a81d2af6739c95ac276a64c1a84e
+expected_sri='sha512-vw1isT5ROHgpRmMG3y6B81dceeZ7O1WhF1x05qFbAlH8N0N/pOQqODzJLA+36lCbOXCw06iA4CWctyrQQ7VeSA=='
+expected_bundle_sha256=d6a4b0b7c9b747a7370cfa976164a962f56332d5faa7c3b45cdb95a2a8b1d456
 expected_license_sha256=1c25f29242785d63e9adb0be7fdc137551dfbbc0756b622fcd26d9cd7de3a4f3
 expected_pako_license_sha256=a04665b3b2de56c66730c1f720f528175739e4104f79073614aa611da1e85539
 expected_pako_zlib_sha256=d8b499598e43d755ea8918448128259ff01820c50d94d5a48c8883d0a594ddb1
