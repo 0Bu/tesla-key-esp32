@@ -181,7 +181,7 @@ otadata activation is last. Downloads stream within each part's declared size, r
 stop after 60 seconds. The manifest is unsigned: the browser does not authenticate its claimed
 source commit or inspect the other three chips' application bytes. These checks detect
 mixed/corrupt downloads, but USB still trusts the chosen Pages origin. Vendored hash-pinned
-`esptool-js@0.7.0` runs under `script-src 'self'`, with no CDN execution. Which installer action
+`esptool-js@0.7.1` runs under `script-src 'self'`, with no CDN execution. Which installer action
 keeps NVS is owned by [NVS retention](#nvs-retention).
 
 ## Signed OTA images
