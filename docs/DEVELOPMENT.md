@@ -170,11 +170,15 @@ The effective-build validator closes every C/C++ compilation unit to reviewed so
 pinned compilers/includes. It verifies generated producers, Ninja commands/dependencies, archive
 objects, linker response files and the exact ELF-to-image chain. One literal main-component `SRCS`
 registration is permitted; hidden attachment, escaped sources or forced includes fail.
-The gate checks that every main-component unit compiles with `-Og` and emits `-fstack-usage`;
-the other components are covered by the checked `CONFIG_COMPILER_OPTIMIZATION_DEBUG=y` Kconfig
-value, Mbed TLS/TF-PSA-Crypto `-Os` is checked as the effective Kconfig value, and the bootloader,
-which builds with size optimization, is compared only between independent builds. Main privately
-enforces C++17 and return-value/format warnings.
+The gate checks effective optimization tokens for every application C/C++ unit. Main and ordinary
+components require exactly `-Og`; main also requires one `-fstack-usage`. Closed source/owner rules
+preserve the pinned SDK's private Mbed TLS/TF-PSA-Crypto `-Og -Os`, its two PQCP units at `-Og`,
+and the six C3/C6 libc primitives at `-Og -O2` only when the SDK's optimized-misaligned-access
+selector is enabled. The generated project anchor retains its exact SDK recipe without an
+optimization flag. The validator owns the admitted paths and object owners; missing, duplicate,
+reordered or overriding optimization tokens fail. These checks preserve the existing compiler
+behavior. The separate size-optimized bootloader is compared between independent builds. Main
+privately enforces C++17 and return-value/format warnings.
 The Tesla BLE component privately selects `TESLA_BLE_LOG_LEVEL=2`; effective commands must
 contain that single definition. Its host harness uses the same level and keys object reuse to
 the patch-state digest. DEBUG/VERBOSE arguments and formatting are excluded; INFO remains.
