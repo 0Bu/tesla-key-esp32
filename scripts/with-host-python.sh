@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Run a host check with Python >= 3.11 without changing the user's installation or PATH.
 set -euo pipefail
+unset OTA_SIGNING_KEY OTA_SIGNING_KEY_FILE
 
 [ "$#" -gt 0 ] || { echo "with-host-python: command required" >&2; exit 2; }
 supports_host_checks() {

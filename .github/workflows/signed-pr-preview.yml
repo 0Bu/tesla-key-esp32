@@ -38,6 +38,7 @@ jobs:
           # Use the associated PR head explicitly; workflow_run.head_sha can describe the tested
           # merge ref depending on how the source workflow was created.
           RUN_HEAD_SHA: ${{ github.event.workflow_run.pull_requests[0].head.sha }}
+          SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
         run: |
           set -euo pipefail
           test "$PR_NUMBER" -gt 0
@@ -46,9 +47,11 @@ jobs:
           state="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq .state)"
           labelled="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" \
             --jq 'any(.labels[]; .name == "signed-preview")')"
+          has_firmware="$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID/artifacts" \
+            --jq 'any(.[].artifacts[]; .name == "firmware-unsigned" and .expired == false)')"
           eligible=false
           if [ "$state" = open ] && [ "$head_repo" = "$GITHUB_REPOSITORY" ] \
-             && [ "$current_sha" = "$RUN_HEAD_SHA" ] && [ "$labelled" = true ]; then
+             && [ "$current_sha" = "$RUN_HEAD_SHA" ] && [ "$labelled" = true ] && [ "$has_firmware" = true ]; then
             eligible=true
           fi
           echo "eligible=$eligible" >> "$GITHUB_OUTPUT"
@@ -56,26 +59,23 @@ jobs:
           echo "head-sha=$current_sha" >> "$GITHUB_OUTPUT"
           echo "signed preview eligible: $eligible"
 
-  trusted-rebuild:
-    # This job is defined by the default-branch workflow_run file, not by the PR-controlled build
-    # workflow. It may execute the exact PR source, but has no repository/Environment secret, write
-    # permission, Environment, restored cache or producer-artifact access. Its only token is read-only.
+  preview-version:
+    # Resolve one trusted version for all target legs. A racing stable Release is still checked
+    # again by sign-preview before the key boundary.
     needs: validate
     if: needs.validate.outputs.eligible == 'true'
     runs-on: ubuntu-26.04
-    timeout-minutes: 60
+    timeout-minutes: 5
     permissions:
       contents: read
+    outputs:
+      version: ${{ steps.trusted-version.outputs.version }}
     steps:
-      - name: Check out trusted default-branch gates
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # workflow_run's github.sha is the exact trusted default-branch commit whose workflow
-          # definition is executing; do not follow a moving branch name mid-run.
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
-
       - name: Select complete immutable stable preview base
         id: trusted-version
         env:
@@ -90,8 +90,68 @@ jobs:
           (( ${#version} <= 31 ))
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      # Switch the same checkout root to the exact PR only after all trusted policy inputs have
-      # been captured. Matching the producer's root path avoids path-dependent ELF/map drift.
+  trusted-host:
+    # A selected PR feedback run is insufficient for signing. Complete both host suites in
+    # parallel with the independent target legs, without keys, caches or write permissions.
+    needs: validate
+    if: needs.validate.outputs.eligible == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [logic, protocol]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate.outputs.head-sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Complete strict host acceptance before signing
+        if: matrix.suite == 'logic'
+        run: |
+          ./tools/agent-config/selftest.sh
+          ./scripts/repo-lint.sh
+          ./scripts/verify-vendored-esptool-js.sh --source
+          ./scripts/run-mock-tests.sh --require-all
+      - name: Complete protocol and sanitizer acceptance before signing
+        if: matrix.suite == 'protocol'
+        run: |
+          ./scripts/test-tesla-ble-harness.sh --require-all
+          ./scripts/run-sanitizer-tests.sh --self-test
+          ./scripts/run-sanitizer-tests.sh
+
+          ./scripts/ci-build-all.sh --self-test
+          ./scripts/select-release-version.sh --self-test
+          python3 scripts/check-sdkconfig-defaults.py --self-test
+          python3 scripts/report-firmware-size.py --self-test
+          python3 scripts/check-dev-pages.py --self-test
+          python3 scripts/wait-pages-build.py --self-test
+          python3 scripts/generate-ota-changelog.py --self-test
+          python3 scripts/check-build-gate-contract.py --self-test
+          python3 tools/agent-hooks/agent_hook.py build-efficiency --self-test
+          test "$(./scripts/idf-version.sh)" = v6.1
+
+          ./scripts/test-pr-gates.sh
+
+  trusted-rebuild-target:
+    # This job is defined by the default-branch workflow_run file, not by the PR-controlled build
+    # workflow. It may execute the exact PR source, but has no repository/Environment secret, write
+    # permission, Environment, restored cache or producer-artifact access. Its only token is read-only.
+    needs: [validate, preview-version]
+    if: needs.validate.outputs.eligible == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [esp32, esp32s3, esp32c3, esp32c6]
+    steps:
+      # Matching the producer's checkout root avoids path-dependent ELF/map drift.
       - name: Check out exact PR head for isolated rebuild
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -107,7 +167,7 @@ jobs:
 
       - name: Apply trusted exact preview-version stamp
         env:
-          DISPLAY_VERSION: ${{ steps.trusted-version.outputs.version }}
+          DISPLAY_VERSION: ${{ needs.preview-version.outputs.version }}
         run: printf '%s\n' "$DISPLAY_VERSION" > version.txt
 
       - name: Independently rebuild exact PR head on the trusted workflow runner
@@ -117,9 +177,54 @@ jobs:
           target: esp32
           command: >-
             ./scripts/ci-build-all.sh
-            "${{ steps.trusted-version.outputs.version }}"
+            --target "${{ matrix.target }}"
+            "${{ needs.preview-version.outputs.version }}"
             "${{ needs.validate.outputs.head-sha }}"
 
+      - name: Upload trusted independent target evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: trusted-preview-target-${{ matrix.target }}-${{ needs.validate.outputs.head-sha }}
+          if-no-files-found: error
+          retention-days: 1
+          path: |
+            _unsigned/${{ matrix.target }}/
+            dist/${{ matrix.target }}/
+
+  trusted-rebuild:
+    # Assemble only the independent legs from this default-owned workflow. No producer artifact,
+    # cache, write token, Environment or signing key enters this unprivileged join.
+    needs: [validate, preview-version, trusted-rebuild-target]
+    if: needs.validate.outputs.eligible == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate.outputs.head-sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: trusted-preview-target-*-${{ needs.validate.outputs.head-sha }}
+          merge-multiple: true
+          path: .
+      - name: Bind all independent targets to the exact source and trusted version
+        env:
+          DISPLAY_VERSION: ${{ needs.preview-version.outputs.version }}
+          SOURCE_SHA: ${{ needs.validate.outputs.head-sha }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$DISPLAY_VERSION" > version.txt
+          {
+            printf 'head_sha=%s\n' "$SOURCE_SHA"
+            printf 'display_version=%s\n' "$DISPLAY_VERSION"
+          } > dist/build-metadata.txt
+          python3 scripts/check-build-artifact-inventory.py \
+            --write --artifact-root . --source-root . \
+            --expected-source-sha "$SOURCE_SHA" --version "$DISPLAY_VERSION"
       - name: Upload trusted independent rebuild evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -131,7 +236,7 @@ jobs:
             dist/
 
   sign-preview:
-    needs: [validate, trusted-rebuild]
+    needs: [validate, trusted-rebuild, trusted-host]
     if: needs.validate.outputs.eligible == 'true'
     runs-on: ubuntu-26.04
     timeout-minutes: 20

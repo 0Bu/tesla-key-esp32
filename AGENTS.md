@@ -75,6 +75,10 @@ compilation; host tests do not compile the ESP/NimBLE/NVS/FreeRTOS shells.
 
 Use the narrowest relevant checks, then the full contract before handoff:
 
+`scripts/check-local.sh --firmware` orchestrates the full local handoff below, protocol harness and
+Linux sanitizers (pinned Docker on macOS). Omit `--firmware` only when firmware build evidence is
+not applicable. Standalone entries remain available for diagnosis and focused iteration.
+
 ```bash
 scripts/run-mock-tests.sh
 scripts/run-mock-tests.sh --require-all
@@ -132,9 +136,13 @@ capable host Python for gates. Hooks are lexical defense in depth, not authoriza
 
 ## PR and review
 
-- `$skill-audit` is required before PR creation or push. `$project-review` is required before every
-  merge and always assesses documentation quality; unresolved material `DOC-QUALITY` findings
-  prevent clean. `$pr-hygiene` is required at PR creation, every push, and every merge. It checks
+- `$skill-audit` is required before PR creation or push; assess the changed contracts and every
+  affected skill/reviewer against the accepted baseline. `$project-review` is required before every
+  merge; review the diff, all affected consumers and documentation quality. Use full project/skill
+  audits for an explicit whole-project review, cross-cutting migrations, target/dependency or trust
+  boundary changes, and unknown/unverified baselines. Each report names baseline, scope, exclusions
+  and evidence. Focused review never implies whole-project certification. Material `DOC-QUALITY`
+  findings in scope prevent clean. `$pr-hygiene` is required at PR creation, every push, and every merge. It checks
   privacy and English independently of the other reviews.
 - `$feature-docs` is required when its cataloged surface changes, including native `.codex/` adapters
   and `scripts/with-host-python.sh`. `$vehicle-command-audit` is
@@ -146,6 +154,10 @@ capable host Python for gates. Hooks are lexical defense in depth, not authoriza
   advisory records; server-side enforcement needs the required `pr-policy / current-head-records`
   check. Report findings with severity, path/line, cause, impact and evidence; resolve P1/P2 and
   rerun the affected independent review.
+- Local handoff requires the complete applicable checks. PR CI may select documentation, runtime
+  or browser feedback from the exact diff; unknown changes or combined runtime/browser code select full coverage. Main and
+  manual publication runs always execute the full host/protocol/sanitizer contract before signing,
+  alongside independent four-target rebuilds. Local receipts cannot satisfy these remote gates.
 - The only accepted, separately authorized merge shape is:
 
   ```text

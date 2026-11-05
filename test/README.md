@@ -10,6 +10,8 @@ for the real Linux browser check. No host check requires USB or a vehicle. Firmw
 ```bash
 scripts/run-mock-tests.sh               # available local checks, reports missing capabilities
 scripts/run-mock-tests.sh --require-all # fail closed: CI/Stop prerequisites are mandatory
+scripts/with-host-python.sh python3 scripts/run-local-checks.py --require-all # reuse identical local host evidence
+scripts/check-local.sh --firmware     # complete local handoff, including pinned four-target contracts
 ```
 
 Normal mode needs C11 and C++17 compilers, using CMake when present or equivalent direct compilation.
@@ -20,6 +22,17 @@ Strict mode requires Git, Python, Node, Ruby, jq, CMake, compiler and every gate
 Missing tooling is failure, not reduced coverage reported green. A failed check fails its binary:
 the pure-logic suite and the tesla-ble harness report every failed check before exiting 1, while the
 NVS, runtime-boundary, cJSON OOM and MQTT JSON binaries and the fuzz smoke stop at the first failure.
+
+The full wrapper executes `runtime_boundary_contract`, `eth_startup_cleanup_controls` and
+`f137_task_host_contract` once through its direct Python gates. They remain registered for standalone
+CTest and are excluded only from the wrapper's CTest invocation. The compiler fallback retains the
+same direct gates. `test_local_checks.py` covers reuse, source/runtime invalidation, partial-staging
+cache refusal, failures, concurrent consumers and bounded-process cancellation. The
+[local coordinator](../docs/DEVELOPMENT.md#validate-a-change) retains no remote CI or review state.
+Selected strict `--profile runtime` and `--profile browser` runs provide PR feedback only; shared
+native/browser parity runs in both. Local handoff, main/manual runs and eligible preview acceptance
+remain complete. `test_change_scope.py` drives the actual shell profiles and both lint modes with
+passive tools, including selected failures, unknown inputs and the default full mode.
 
 ### Focused checks and sanitizers
 

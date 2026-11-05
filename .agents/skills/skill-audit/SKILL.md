@@ -5,10 +5,20 @@ description: Read-only drift audit of every canonical skill under .agents/skills
 
 # Skill audit
 
-Invoke `$skill-audit`. Read [AGENTS.md](../../../AGENTS.md). This is one read-only pass through all
-canonical skills and `.agents/subagents.json`: discover → verify → report → stop. No fixes, stamps,
+Invoke `$skill-audit`. Read [AGENTS.md](../../../AGENTS.md). This is one read-only pass through affected
+canonical skills and reviewers (all in full scope): discover → verify → report → stop. No fixes, stamps,
 commits, publication or live device/vehicle contact. Independent later audit verifies an authorized
 implementation. This workflow establishes only its own gate; whole-project review may cover both.
+
+## Scope
+
+For a bounded change against an accepted baseline, discover the canonical inventory and inspect
+all skills/reviewers whose facts, commands, prerequisites or permissions the diff can affect.
+Follow driven scripts and owning documents through their consumers. Report inherited/unaffected
+areas explicitly; do not mark them newly verified. Use the complete inventory for explicit full
+audits, cross-cutting migrations, target/dependency or trust-boundary changes, and unknown baselines.
+A current-head record certifies the complete declared scope. It never replaces independent review,
+CI, hardware evidence or publication authorization.
 
 ## Audit
 
@@ -33,12 +43,12 @@ implementation. This workflow establishes only its own gate; whole-project revie
 3. Name a contradicting fact for every `SKILL-DRIFT` finding. Prose preference alone is not drift;
    whole-document quality is assessed by `$project-review`. Audit its mandatory material
    `DOC-QUALITY` blocker too.
-4. Give every discovered skill/reviewer a coverage verdict and proposed correction; apply none.
+4. Give every affected skill/reviewer a coverage verdict and proposed correction; list unaffected exclusions. Full scope covers every discovered entry. Apply no corrections.
    Only a contradiction-free complete audit may provide the exact record for separate PR editing.
 
 ## Per-target checklist
 
-Read each canonical SKILL.md **in full**, every reviewer prompt, and their driven scripts/validators
+Read each in-scope canonical SKILL.md **in full**, its reviewer prompts and driven scripts/validators
 and owning documents. Audit **all** prerequisites, authorization, required validations, failure/stop
 conditions, commands, outputs and evidence contracts. The bullets below focus coverage; they do not
 replace or relax any workflow requirement.
@@ -46,7 +56,7 @@ replace or relax any workflow requirement.
 This is the single per-sibling checklist. `$project-review` uses it by reference. Read current
 workflow scripts and [deep document owners](../../../docs/README.md), not historical skill verdicts.
 
-- **`$project-review`**: whole-tree coverage, current invariants/consumer map, documentation-quality
+- **`$project-review`**: declared focused/full coverage, current invariants/consumer map, documentation-quality
   criteria and clean blocker, evidence bounds and exact records; check its self-coverage too.
 - **`$flash-esp32`**: pinned compile-only path, explicit development key versus signed preview,
   exact PR/head artifact and metadata version, signature/pin, chip/port/size and app→otadata ordering.
@@ -142,6 +152,6 @@ records. main/master/gh-pages, tags and other namespaces remain prohibited.
 
 ## Report
 
-State SHA/scope, discovered skill/reviewer counts and coverage for **every** entry. Findings name
+State SHA/scope, discovered skill/reviewer counts and coverage for every in-scope entry and explicit unaffected exclusions (every entry in full scope). Findings name
 skill/agent path/line, contradictory ground-truth path/line, impact and exact proposed edit.
 Conclude readiness record or withheld reason. No self-invocation, correction or publication in audit.

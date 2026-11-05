@@ -87,7 +87,7 @@ check_handler_list(
 )
 check_handler_list(
     agents["stop-tests"].get("Stop"),
-    [(f"{py} stop-logic-tests", 600)],
+    [(f"{py} stop-logic-tests", 1300)],
     label="Antigravity Stop",
 )
 pre_tools = agents["pre-tool-guards"].get("PreToolUse")

@@ -67,7 +67,7 @@ green and its current records are satisfied.
 
 ## Merge the exact reviewed head
 
-Before every merge, complete [$project-review](../project-review/SKILL.md), including documentation
+Before every merge, complete [$project-review](../project-review/SKILL.md) in its declared focused/full scope, including documentation
 quality, and a fresh `$pr-hygiene` review. Require `$feature-docs` and
 [$vehicle-command-audit](../vehicle-command-audit/SKILL.md) when the actual diff classifier applies.
 Resolve material findings and update only earned records under the existing PR-update authorization.

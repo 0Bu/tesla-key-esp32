@@ -9,7 +9,7 @@ docker info >/dev/null 2>&1 || { echo "Linux browser gate requires a running Doc
 work="$(mktemp -d "${TMPDIR:-/tmp}/tesla-browser-linux.XXXXXX")"
 trap 'rm -rf -- "$work"' EXIT
 
-docker build --iidfile "$work/image-id" --file "$root/tools/browser/Dockerfile" "$root/tools/browser"
+docker build --tag "tesla-key-esp32-host-browser:local" --iidfile "$work/image-id" --file "$root/tools/browser/Dockerfile" "$root/tools/browser"
 browser_image="$(cat "$work/image-id")"
 [[ "$browser_image" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "Docker returned an invalid browser image ID" >&2; exit 2; }
 printf 'Linux browser image: %s\n' "$browser_image"

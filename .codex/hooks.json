@@ -58,7 +58,7 @@
           {
             "type": "command",
             "command": "bash \"$(git rev-parse --show-toplevel)/scripts/with-host-python.sh\" python3 \"$(git rev-parse --show-toplevel)/tools/agent-config/codex_hook.py\" Stop || { echo \"Project Codex Stop bootstrap failed; verification is blocked.\" >&2; exit 2; }",
-            "timeout": 600,
+            "timeout": 1300,
             "statusMessage": "Running changed host logic tests"
           }
         ]
