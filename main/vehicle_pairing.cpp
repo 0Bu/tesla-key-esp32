@@ -249,6 +249,7 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
             // countdown the moment the probe actually gets to run (Connecting outranks
             // Waiting). idle_until_next_health_poll_ re-arms it for the next cycle.
             int  streak_before = self->auth_fail_streak_;
+            const bool hint_before = self->pairing_recovery_hint_.load();
             bool ok            = self->health_probe_();
 
             if (ok) {
@@ -260,7 +261,8 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
                 self->repair_notice_.store(false);
                 tk::periodic_log_reset(recovery_notice);
                 self->idle_until_next_health_poll_();
-            } else if (self->auth_fail_streak_ > streak_before) {
+            } else if (self->auth_fail_streak_ > streak_before ||
+                       (!hint_before && self->pairing_recovery_hint_.load())) {
                 // A rejected or ambiguous response is only a hint. Never issue an immediate
                 // confirmation burst or mutate identity; retry at the bounded normal cadence.
                 self->repair_notice_.store(true);
@@ -269,7 +271,7 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
                         static_cast<uint64_t>(esp_timer_get_time()) / 1000ULL,
                         tk::kAutoPairNoticeRepeatMs)) {
                     ESP_LOGW(TAG, "auto-pair: vehicle authorization could not be verified (auth hint %d/2) — preserving key; retrying at the normal interval",
-                             (int)self->auth_fail_streak_);
+                             self->pairing_recovery_hint_.load() ? 2 : (int)self->auth_fail_streak_);
                 }
                 self->idle_until_next_health_poll_();
             } else {
@@ -793,9 +795,9 @@ bool VehicleController::health_probe_(int timeout_ms) {
     // volatile recovery hint, but cannot prove that a key was deleted or authorize identity
     // replacement. A successful response clears only the hint; plaintext VehicleStatus can
     // also complete this request and does not prove that the stored session remains usable.
-    // NO_WAKE_FAIL preserves the background no-wake policy. NO_WAKE_SKIP would suppress
-    // asleep sampling, which would blind the connection-health hint and VCSEC sleep tracking.
-    return send_vcsec_("VCSEC Health Poll", [](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
+    // VCSEC GET_STATUS bypasses Infotainment wake-policy decisions; neither NoWakeFail nor
+    // NoWakeSkip adds a wake or suppresses this VCSEC sleep/status sampling.
+    return send_vcsec_("VCSEC Health Poll", +[](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
         return c->build_vcsec_information_request_message(
             VCSEC_InformationRequestType_INFORMATION_REQUEST_TYPE_GET_STATUS, b, l);
     }, WakePolicy::NoWakeFail, timeout_ms, tk::ConnectOrigin::Background,

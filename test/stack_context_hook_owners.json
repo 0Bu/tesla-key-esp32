@@ -108,7 +108,7 @@
       "entry": "led_task",
       "context": "Led",
       "entrySample": true,
-      "iteration": "for (int frame = 0;; ++frame) {",
+      "iteration": "for (uint32_t frame = 0;; frame = (frame + 1) % kSampleEveryFrames) {",
       "boundaryScope": true,
       "terminalDeleteExplicit": true
     },

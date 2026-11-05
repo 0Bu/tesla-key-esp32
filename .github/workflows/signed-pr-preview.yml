@@ -48,7 +48,7 @@ jobs:
           labelled="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" \
             --jq 'any(.labels[]; .name == "signed-preview")')"
           has_firmware="$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID/artifacts" \
-            --jq 'any(.[].artifacts[]; .name == "firmware-unsigned" and .expired == false)')"
+            | jq -r 'any(.[].artifacts[]; .name == "firmware-unsigned" and .expired == false)')"
           eligible=false
           if [ "$state" = open ] && [ "$head_repo" = "$GITHUB_REPOSITORY" ] \
              && [ "$current_sha" = "$RUN_HEAD_SHA" ] && [ "$labelled" = true ] && [ "$has_firmware" = true ]; then

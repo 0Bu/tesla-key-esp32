@@ -4527,6 +4527,17 @@ static void test_mqtt_state_lifecycle() {
     using tk::mqtt::DomainPublishAction;
     using tk::mqtt::DomainPublishState;
     using tk::mqtt::decide_domain_publish;
+    CHECK(tk::mqtt::domain_after_reconnect(DomainPublishState::Cleared) == DomainPublishState::Unknown);
+    CHECK(tk::mqtt::domain_after_reconnect(DomainPublishState::Unknown) == DomainPublishState::Unknown);
+    CHECK(tk::mqtt::domain_after_reconnect(DomainPublishState::Published) == DomainPublishState::Published);
+    auto reconnected = tk::mqtt::domain_after_reconnect(DomainPublishState::Cleared);
+    for (int cycle = 0; cycle < 40; ++cycle) {
+        const auto decision = decide_domain_publish(false, reconnected);
+        CHECK(decision.action == (cycle == 0 ? DomainPublishAction::PublishClear : DomainPublishAction::Skip));
+        reconnected = decision.next;
+    }
+    CHECK(decide_domain_publish(false, tk::mqtt::domain_after_reconnect(reconnected)).action ==
+          DomainPublishAction::PublishClear);
 
     // A valid cache always publishes, whatever was published before.
     for (const DomainPublishState prev : {DomainPublishState::Unknown, DomainPublishState::Published,
@@ -4572,6 +4583,32 @@ static void test_mqtt_state_lifecycle() {
 // ── Active-window gate (logic/active_window.hpp) — the stale-charging-window fix ───────────────
 static void test_active_window() {
     using namespace tk;
+    CHECK(command_is_recent(0xfffffff0u, 0x10u, 33));
+    CHECK(!command_is_recent(0xfffffff0u, 0x10u, 32));
+    CHECK(!command_is_recent(0, 1, 100));
+    CHECK(command_is_recent(101, 102, 100));
+    CHECK(!command_is_recent(1, 101, 100));
+    CHECK(wifi_retry_action(true, false, false, 100, 10) == WifiRetryAction::PauseForEthernet);
+    CHECK(wifi_retry_action(false, false, false, 10, 10) == WifiRetryAction::Exhausted);
+    CHECK(wifi_retry_action(false, true, false, 100, 10) == WifiRetryAction::Retry);
+    CHECK(wifi_retry_action(false, false, true, 100, 10) == WifiRetryAction::Retry);
+    CHECK(wifi_trial_can_commit(true, false));
+    CHECK(!wifi_trial_can_commit(false, false));
+    CHECK(!wifi_trial_can_commit(true, true));
+    CHECK(!wifi_trial_can_commit(false, true));
+    CHECK(mcp_integer_syntax(99));
+    CHECK(mcp_integer_syntax(1e100));
+    CHECK(!mcp_integer_syntax(1.5));
+    CHECK(!mcp_integer_syntax(std::numeric_limits<double>::infinity()));
+    CHECK(mqtt_probe_http_status(MqttProbeResult::TlsFailed) == 502);
+    CHECK(std::strstr(mqtt_probe_reason(MqttProbeResult::TlsFailed), "TLS") != nullptr);
+    for (auto animation : {LedAnim::Breathe, LedAnim::Pulse, LedAnim::Blink}) {
+        const uint64_t period = animation == LedAnim::Breathe ? 2600000ULL :
+                                animation == LedAnim::Pulse ? 1100000ULL : 900000ULL;
+        CHECK_NEAR(led_animation_seconds(animation, period * 100000000ULL + 123456ULL),
+                   led_animation_seconds(animation, 123456ULL));
+        CHECK_NEAR(led_animation_seconds(animation, period), 0.0);
+    }
     // A recent command opens the window regardless of charging/contact.
     CHECK(active_window_open({/*recent_cmd*/true, false, false, 0}) == true);
     CHECK(active_window_open({true, false, true, 999999}) == true);
@@ -6410,7 +6447,7 @@ static void test_http_origin() {
               (entry.verb == tk::HttpVerb::Get && diagnostic));
     }
     CHECK(!tk::http_route_requires_owned_host(tk::HttpVerb::Get, tk::HttpRoute::VehicleData));
-    CHECK(!tk::http_route_requires_owned_host(tk::HttpVerb::Get, tk::HttpRoute::BodyController));
+    CHECK(tk::http_route_requires_owned_host(tk::HttpVerb::Get, tk::HttpRoute::BodyController));
     CHECK(!tk::http_route_requires_owned_host(tk::HttpVerb::Post, tk::HttpRoute::Command));
     // evcc/curl do not send browser-origin metadata and retain the documented trusted-LAN API.
     CHECK(tk::mutation_origin_allowed("", "", "", ""));
@@ -11294,6 +11331,13 @@ static void test_shared_unhealthy_restart_ledger() {
 
 static void test_stack_context_logic() {
     namespace sc = tk::stack_sample;
+    constexpr const char* expected_names[] = {
+        "httpd", "vehicle", "auto_pair", "mqtt", "main", "heap_supervisor", "display", "led",
+        "ota_check", "ota_writer", "ota_gate", "net_watchdog", "syslog", "captive_dns", "captive_http",
+        "wifi_event", "eth_event", "mqtt_event", "mqtt_probe_event", "nimble_host", "ble_scan_timer",
+        "diag_log_callback", "sntp_sync", "ping_net", "ping_syslog", "ota_network", "ota_parser",
+    };
+    static_assert(sizeof(expected_names) / sizeof(expected_names[0]) == 27);
     CHECK(tk::kStackContextCount == 27 && sizeof(sc::Snapshot) == 24);
     CHECK(sc::kQuantumBytes == 256 && sc::kSaturationBytes == 15872);
     CHECK(!sc::decode(0).sampled && !sc::decode(64).sampled);
@@ -11301,6 +11345,7 @@ static void test_stack_context_logic() {
     CHECK(sc::decode(63).lower_bound_bytes == 15872 && sc::decode(63).saturated);
     sc::Snapshot bank{};
     for (unsigned slot = 0; slot != tk::kStackContextCount; ++slot) {
+        CHECK(std::string(tk::stack_context_name(static_cast<tk::StackContext>(slot))) == expected_names[slot]);
         CHECK(!sc::read(bank, slot).sampled);
         bank[slot / 5] = sc::merge(bank[slot / 5], slot % 5, slot * 256 + 255);
         CHECK(sc::read(bank, slot).sampled && sc::read(bank, slot).lower_bound_bytes == slot * 256);
@@ -11312,6 +11357,11 @@ static void test_stack_context_logic() {
     char refused[tk::kStackMetricKeyBytes] = "keep";
     CHECK(!tk::stack_context_metric_key(tk::StackContext::Count, refused));
     CHECK(std::string(refused) == "keep" && tk::stack_context_name(tk::StackContext::Count) == nullptr);
+    for (unsigned slot = tk::kStackContextCount; slot < 256; ++slot) {
+        CHECK(tk::stack_context_name(static_cast<tk::StackContext>(slot)) == nullptr);
+        CHECK(!tk::stack_context_metric_key(static_cast<tk::StackContext>(slot), refused));
+        CHECK(std::string(refused) == "keep");
+    }
 }
 
 static void test_ota_lifetime() {

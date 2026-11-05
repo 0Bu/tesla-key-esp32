@@ -72,7 +72,8 @@ latest_valid_tag() {
 #   numeric base: using the raw newest v* tag would let v1.5.0-rc.1 outrank released v1.4.76 and
 #   produce a 1.5.0-rc.1-PR-N image that the firmware later considers numerically equal to 1.5.0.
 latest_published_stable_version() {
-  local repo_root="$1" repository release_json tag version tag_sha
+  local repo_root="$1" optional="${2:-false}" repository release_json tag version tag_sha
+  local response status attempt rc
   command -v gh >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 || {
     echo "gh and jq are required to select the latest published stable Release" >&2
     return 2
@@ -82,13 +83,49 @@ latest_published_stable_version() {
     echo "invalid or missing GITHUB_REPOSITORY" >&2
     return 2
   }
-  release_json="$(gh api "repos/$repository/releases/latest" 2>/dev/null)" || return 2
+  response="$(mktemp "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/tesla-latest-release.XXXXXX")" || return 2
+  for attempt in 1 2 3; do
+    rc=0
+    gh api "repos/$repository/releases/latest" --include > "$response" 2>/dev/null || rc=$?
+    status="$(awk '/^HTTP\// {code=$2} END {gsub(/\r/, "", code); print code}' "$response")"
+    if [ "$rc" = 0 ]; then break; fi
+    if [ "$status" = 404 ]; then
+      rm -f -- "$response"
+      [ "$optional" = true ] && return 0
+      echo "no published stable Release is available" >&2
+      return 2
+    fi
+    case "$status" in 401|403|400|422) break ;; esac
+    if [ "$attempt" != 3 ]; then sleep "$attempt"; fi
+  done
+  if [ "$rc" != 0 ]; then
+    rm -f -- "$response"
+    echo "latest stable Release API read failed after bounded retries" >&2
+    return 2
+  fi
+  # --include has one HTTP header block. Plain JSON remains usable by offline API fixtures.
+  if [ -n "$status" ]; then
+    release_json="$(awk 'body {print} /^\r?$/ {body=1}' "$response")"
+  else
+    release_json="$(cat "$response")"
+  fi
+  rm -f -- "$response"
+  printf '%s' "$release_json" | jq -e '
+    type == "object" and (.draft | type == "boolean") and
+    (.prerelease | type == "boolean") and (.tag_name | type == "string")
+  ' >/dev/null 2>&1 || {
+    echo "malformed latest stable Release API response" >&2; return 2;
+  }
   tag="$(printf '%s' "$release_json" | jq -er '
     select(.draft == false and .prerelease == false and .immutable == true and
            (.tag_name | type == "string" and
             test("^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"))) |
     .tag_name
-  ' 2>/dev/null)" || return 2
+  ' 2>/dev/null)" || {
+    [ "$optional" = true ] && return 0
+    echo "latest Release is not an eligible immutable stable Release" >&2
+    return 2
+  }
   valid_stable_tag "$tag" || return 2
   version="${tag#v}"
   tag_sha="$(git -C "$repo_root" rev-parse "${tag}^{commit}" 2>/dev/null)" || return 2
@@ -349,6 +386,12 @@ self_test() {
   fake_latest_newer="$tmp/fake-latest-newer.json"
   mkdir -p "$fakebin"
   printf '%s\n' '#!/usr/bin/env bash' 'set -eu' \
+    'case "${GH_FAKE_API_MODE:-normal}" in' \
+    ' absent) printf "HTTP/2.0 404 Not Found\r\n\r\n{}\n"; exit 1 ;;' \
+    ' malformed) printf "{broken\n"; exit 0 ;;' \
+    ' transient) n=0; [ ! -f "$GH_FAKE_COUNT" ] || n=$(cat "$GH_FAKE_COUNT"); n=$((n+1)); printf "%s" "$n" > "$GH_FAKE_COUNT"; if [ "$n" -lt 3 ]; then printf "HTTP/2.0 503 Unavailable\r\n\r\n{}\n"; exit 1; fi ;;' \
+    ' denied) printf "HTTP/2.0 403 Forbidden\r\n\r\n{}\n"; exit 1 ;;' \
+    'esac' \
     'case "$2" in */releases/latest) cat "$GH_FAKE_LATEST" ;; *) cat "$GH_FAKE_RELEASE" ;; esac' \
     > "$fakebin/gh"
   chmod +x "$fakebin/gh"
@@ -413,7 +456,30 @@ PY
       echo "mutable/missing-immutable latest GitHub Release was accepted" >&2
       return 1
     fi
+    got="$(PATH="$fakebin:$PATH" GITHUB_REPOSITORY=owner/repo \
+      GH_FAKE_LATEST="$invalid" latest_published_stable_version "$tmp" true)"
+    [[ -z "$got" ]] || { echo "ineligible optional base did not remain empty" >&2; return 1; }
   done
+
+  got="$(PATH="$fakebin:$PATH" GITHUB_REPOSITORY=owner/repo GH_FAKE_API_MODE=absent \
+    latest_published_stable_version "$tmp" true)"
+  [[ -z "$got" ]] || return 1
+  for api_mode in absent denied malformed; do
+    if PATH="$fakebin:$PATH" GITHUB_REPOSITORY=owner/repo GH_FAKE_API_MODE="$api_mode" \
+        latest_published_stable_version "$tmp" >/dev/null 2>&1; then
+      echo "hard/strict latest-base refusal was accepted: $api_mode" >&2; return 1
+    fi
+    if [ "$api_mode" != absent ] && PATH="$fakebin:$PATH" GITHUB_REPOSITORY=owner/repo \
+        GH_FAKE_API_MODE="$api_mode" latest_published_stable_version "$tmp" true >/dev/null 2>&1; then
+      echo "optional selection swallowed a hard API error: $api_mode" >&2; return 1
+    fi
+  done
+  got="$(PATH="$fakebin:$PATH" GITHUB_REPOSITORY=owner/repo GH_FAKE_API_MODE=transient \
+    GH_FAKE_COUNT="$tmp/latest-count" GH_FAKE_LATEST="$fake_release" \
+    latest_published_stable_version "$tmp" true)"
+  [[ "$got" = 1.2.1 && "$(cat "$tmp/latest-count")" = 3 ]] || {
+    echo "bounded transient latest-base retry failed" >&2; return 1;
+  }
   git -C "$tmp" tag not-a-release "$sha_a"
   got="$(select_version "$tmp" "$sha_b" "$sha_b")"
   [[ "$got" == 1.2.1 ]] || { echo "non-v tag changed selection: $got" >&2; return 1; }
@@ -520,6 +586,11 @@ case "${1:-}" in
     [[ $# -eq 1 ]] || { echo "usage: $0 --latest-published-stable" >&2; exit 2; }
     fetch_tags "$repo_root" || exit
     latest_published_stable_version "$repo_root"
+    ;;
+  --latest-published-stable-optional)
+    [[ $# -eq 1 ]] || exit 2
+    fetch_tags "$repo_root" || exit
+    latest_published_stable_version "$repo_root" true
     ;;
   --select-main)
     [ "$#" -ge 2 ] || { echo "usage: $0 --select-main SOURCE_SHA [BUMP_OR_EXACT...]" >&2; exit 2; }

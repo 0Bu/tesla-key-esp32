@@ -361,6 +361,36 @@ for ble_config_input in sdkconfig.defaults sdkconfig.defaults.esp32 sdkconfig.de
     fail_case "BLE stack configuration requires protocol review: $ble_config_input"
   fi
 done
+for protocol_owner in vcsec_response command_fault ble_deferred_queue; do
+  if printf '%s\n' "main/logic/$protocol_owner.hpp" | gate_vehicle_command_relevant; then
+    pass_case "protocol owner requires vehicle-command review: $protocol_owner"
+  else
+    fail_case "protocol owner requires vehicle-command review: $protocol_owner"
+  fi
+done
+check_adr_protocol_owners() {
+  python3 - "$1" <<'PY' | while IFS= read -r owner; do
+import pathlib, re, sys
+owners = sorted(set(re.findall(r'(?:main/)?logic/[a-zA-Z0-9_]+\.hpp', pathlib.Path(sys.argv[1]).read_text())))
+if not owners:
+    raise SystemExit(2)
+for owner in owners:
+    print(owner if owner.startswith('main/') else 'main/' + owner)
+PY
+    printf '%s\n' "$owner" | gate_vehicle_command_relevant || return 1
+  done
+}
+expect_rc 0 'all ADR-0005 logic owners require protocol review' check_adr_protocol_owners "$root/docs/adr/0005-tesla-ble-seam.md"
+cp "$root/docs/adr/0005-tesla-ble-seam.md" "$tmp/protocol-owners.md"
+printf '\n`logic/new_protocol_owner.hpp`\n' >> "$tmp/protocol-owners.md"
+expect_rc 1 'new uncovered ADR protocol owner fails relevance coverage' check_adr_protocol_owners "$tmp/protocol-owners.md"
+for dependency_input in cmake/admit-dependency-sources.cmake scripts/dependency_source.py scripts/nanopb-source.json; do
+  if printf '%s\n' "$dependency_input" | gate_firmware_size_relevant; then
+    pass_case "dependency source requires size review: $dependency_input"
+  else
+    fail_case "dependency source requires size review: $dependency_input"
+  fi
+done
 if printf '%s\n' 'docs/README.md' | gate_vehicle_command_relevant \
    || printf '%s\n' 'main/display.cpp' | gate_vehicle_command_relevant \
    || printf '%s\n' 'sdkconfig' | gate_vehicle_command_relevant \
@@ -1048,8 +1078,19 @@ expect_create_lib_block 'library is incomplete (gate_vehicle_command_relevant)' 
 sed 's/^GATE_PR_LIB_API=3$/GATE_PR_LIB_API=2/' "$lib_src" > "$create_lib_canary/pr-gate-lib.sh"
 expect_create_lib_block 'library is incomplete (' 'wrong PR gate library API version blocks PR actions'
 
+check_shell_syntax() {
+  local file
+  for file in "$@"; do
+    bash -n "$file" || return
+  done
+}
+printf '#!/bin/bash\ntrue\n' > "$tmp/syntax-first.sh"
+printf '#!/bin/bash\nif then\n' > "$tmp/syntax-second.sh"
+expect_rc 2 'broken second Bash file is rejected' check_shell_syntax "$tmp/syntax-first.sh" "$tmp/syntax-second.sh"
+printf '#!/bin/bash\ntrue\n' > "$tmp/syntax-second.sh"
+expect_rc 0 'restored second Bash file passes' check_shell_syntax "$tmp/syntax-first.sh" "$tmp/syntax-second.sh"
 if python3 -m py_compile "$hook" "$parser" "$runner" \
-  && bash -n "$root/tools/agent-hooks/"*.sh \
+  && check_shell_syntax "$root/tools/agent-hooks/"*.sh \
   && python3 -m json.tool "$root/.agents/hooks.json" >/dev/null; then pass_case 'Python, Bash, JSON syntax'; else fail_case 'syntax'; fi
 
 printf '\nagent hook self-test: %s passed, %s failed\n' "$pass" "$fail"

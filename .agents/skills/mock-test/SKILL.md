@@ -19,7 +19,9 @@ a real Linux browser: on macOS it delegates that gate to Docker, never native Ch
      - NVS storage adapter: `scripts/run-fast-tests.sh --nvs`
      - Runtime boundary & log mutex: `scripts/run-fast-tests.sh --boundary`
      - Linux sanitizers: `scripts/run-fast-tests.sh --sanitizers`
-     - All host units: `scripts/run-fast-tests.sh --all`
+     - Portable logic, NVS and native runtime families: `scripts/run-fast-tests.sh --all`
+     - `--self-test` checks only compiler availability. The complete mock suite requires CMake;
+       `--all` does not run Linux sanitizers, which retain their separate mandatory handoff gate.
 
 2. **Full Host Suite (`scripts/run-mock-tests.sh`)**:
    - Runs CMake host tests, display simulator parity check, and JS protocol vectors:

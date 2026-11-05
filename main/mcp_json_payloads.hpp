@@ -143,7 +143,7 @@ inline JsonOwner build_error_envelope(const RpcId& id, int code, const char* mes
     return json.finish();
 }
 
-inline JsonOwner build_tool_result(const char* text, bool is_error) noexcept {
+inline JsonOwner build_tool_result(const char* text, bool is_error, const char* no_op = nullptr) noexcept {
     if (!text) return {};
     JsonBuilder json;
     cJSON* content = json.array(json.root(), "content");
@@ -151,6 +151,10 @@ inline JsonOwner build_tool_result(const char* text, bool is_error) noexcept {
     json.string(block, "type", "text");
     json.string(block, "text", text);
     json.boolean(json.root(), "isError", is_error);
+    if (!is_error && no_op) {
+        cJSON* structured = json.object(json.root(), "structuredContent");
+        json.string(structured, "noop", no_op);
+    }
     return json.finish();
 }
 

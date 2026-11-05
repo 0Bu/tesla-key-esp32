@@ -23,8 +23,11 @@
 //              test/tesla_protocol_vectors.test.mjs pins the same vectors independently of the
 //              library; this part proves the patched library reproduces them.
 
-#include <client.h>
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-parameter"
 #include <adapters.h>
+#pragma GCC diagnostic pop
+#include <client.h>
 #include <crypto_context.h>
 #include <peer.h>
 #include <vin_utils.h>
@@ -248,11 +251,13 @@ public:
     void process_rx_frame_(const uint8_t* data, size_t size);
     void drive_command_runner_();
 };
-#define ESP_LOGE(...) (native_require_unlocked(), ++native_errors)
-#define ESP_LOGW(...) (native_require_unlocked(), ++native_warnings)
-#define ESP_LOGD(...) (native_require_unlocked())
-#define ESP_LOGI(...) (native_require_unlocked())
+template <typename... Args> static void native_log_arguments(const Args&...) noexcept {}
+#define ESP_LOGE(tag,format,...) (native_require_unlocked(), ++native_errors, native_log_arguments(__VA_ARGS__))
+#define ESP_LOGW(tag,format,...) (native_require_unlocked(), ++native_warnings, native_log_arguments(__VA_ARGS__))
+#define ESP_LOGD(tag,format,...) (native_require_unlocked(), native_log_arguments(__VA_ARGS__))
+#define ESP_LOGI(tag,format,...) (native_require_unlocked(), native_log_arguments(__VA_ARGS__))
 #define xTaskGetTickCount() (native_ticks)
+#undef pdTICKS_TO_MS
 #define pdTICKS_TO_MS(value) (value)
 #include "carserver-handler.inc"
 // Only the native routing-address RNG call can be fault-injected. Its normal path delegates

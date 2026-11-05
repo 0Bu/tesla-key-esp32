@@ -10,8 +10,8 @@ additional authorization. Canonical skills live under `.agents/skills/`; hooks e
 
 This project's local verification loop lives in [`test/`](../../../test/): IDF-free decision and
 conversion cores live in [`main/logic/`](../../../main/logic/), the firmware **delegates** to them,
-and [`test/test_logic.cpp`](../../../test/test_logic.cpp) exercises them with a plain host compiler
-in seconds — no ESP-IDF, no Docker, no board. CI's `logic-test` job gates the firmware build on it,
+and [`test/test_logic.cpp`](../../../test/test_logic.cpp) exercises them with a plain host compiler.
+Strict macOS browser coverage uses Linux Docker. CI's `logic-test` job gates the firmware build on it,
 and the `Stop` handler in [`tools/agent-hooks/agent_hook.py`](../../../tools/agent-hooks/agent_hook.py)
 gates the end of a turn on it. This skill walks the exact
 steps to add a new unit without breaking those invariants.
@@ -132,8 +132,9 @@ scripts/run-mock-tests.sh
 ```
 
 The runner builds the C++ binaries through `cmake -S test -B build_mock && cmake --build
-build_mock && ctest --test-dir build_mock --output-on-failure`, or direct g++/clang++ compilation
-when CMake is unavailable. Compilation uses `-Wall -Wextra -Werror`, so warnings fail too.
+build_mock && ctest --test-dir build_mock --output-on-failure`. CMake is required for the complete
+suite; `scripts/run-fast-tests.sh --logic` remains the portable direct-compiler iteration loop.
+Compilation uses `-Wall -Wextra -Werror`, so warnings fail too.
 These commands alone do not replace the runner's additional contract, parity and browser checks.
 A red result blocks the Stop hook — fix it before claiming done.
 

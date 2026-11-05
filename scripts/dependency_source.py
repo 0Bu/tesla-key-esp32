@@ -171,7 +171,9 @@ def stop_owned_group(child: subprocess.Popen[bytes], *, atomic: bool = False) ->
             return
         except OSError as error:
             raise SourceError("cannot signal the owned exact-source query group") from error
-        deadline = time.monotonic() + 1
+        # Container init may need more than a second to reap killed orphan descendants.
+        # Keep the observation bounded and accept only ESRCH, never EPERM or a zombie guess.
+        deadline = time.monotonic() + 2
         while True:
             child.poll()  # Reap the leader even when a descendant keeps the group alive.
             try:

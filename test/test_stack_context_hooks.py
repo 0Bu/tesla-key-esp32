@@ -25,7 +25,7 @@ TASKS = {
     'auto_pair_task_fn_': ('main/vehicle_pairing.cpp', 'AutoPair', 'while (true) {'),
     'display_task': ('main/display.cpp', 'Display', 'for (;;) {'),
     'net_watchdog_task': ('main/net.cpp', 'NetWatchdog', 'for (;;) {'),
-    'led_task': ('main/led_status.cpp', 'Led', 'for (int frame = 0;; ++frame) {'),
+    'led_task': ('main/led_status.cpp', 'Led', 'for (uint32_t frame = 0;; frame = (frame + 1) % kSampleEveryFrames) {'),
     'nimble_host_task': ('main/ble_client.cpp', 'NimbleHost', None),
     'ota_network_task': ('main/ota_transport.cpp', 'OtaNetwork', None),
 }

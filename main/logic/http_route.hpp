@@ -130,6 +130,7 @@ inline constexpr bool http_route_requires_owned_host(HttpVerb verb, HttpRoute ro
         case HttpRoute::Coredump:
         case HttpRoute::OtaStatus:
         case HttpRoute::OtaChangelog:
+        case HttpRoute::BodyController:
             return true;
         default:
             return false;

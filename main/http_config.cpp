@@ -132,7 +132,10 @@ esp_err_t send_config_unreadable_(httpd_req_t* req, const char* command, const c
 esp_err_t handle_gen_keys(GuardedReq rq) {
     httpd_req_t* req = rq.req();
     if (validate_query_string(req) != ESP_OK) {
-        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid query string");
+        tk::JsonBuilder json;
+        json.boolean(json.root(), "result", false);
+        json.string(json.root(), "reason", "invalid query string");
+        return send_json(req, 400, json.release());
     }
     OtaIdentityMutationGuard identity_guard(tk::IdentityMutationEntry::HttpGenerateKey);
     if (!identity_guard) {
@@ -245,6 +248,7 @@ esp_err_t handle_set_time(GuardedReq rq) {
     }
     if (result.status == BrowserClockStatus::SetFailed)
         return send_effect_json(rq, 500, make_response(false, "set_time", "", "clock set failed"));
+    rq.reply()->state.succeeded();
     ESP_LOGI(TAG, "temporary clock set from browser: %lld", (long long)result.seconds);
     return send_effect_json(rq, 200, make_response(true, "set_time", "", "clock set"));
 }
@@ -386,7 +390,8 @@ esp_err_t handle_set_vin(GuardedReq rq) {
                     : recovery_pending
                         ? "VIN change incomplete — rebooting for recovery"
                         : "VIN change staging failed — rebooting fail-closed";
-    esp_err_t r = send_effect_json(rq, ok ? 200 : recovery_blocked ? 409 : 500,
+    esp_err_t r = send_effect_json(rq, ok ? 200 : recovery_blocked ? 409 :
+                            reset.state == A::IdentityUnverified ? 503 : 500,
                             make_response(ok, "set_vin", vin.c_str(), reason));
     run_effect_continuation(rq);
     return r;
@@ -450,9 +455,13 @@ static void on_mqtt_probe(void* handler_args, esp_event_base_t, int32_t id, void
             // "your credentials are wrong" (their input, 400), the other "nothing answered"
             // (the network, 502). Collapsing them into one message is what makes a broker
             // outage look like a typo.
-            ctx->result = (e->error_handle->error_type == MQTT_ERROR_TYPE_TCP_TRANSPORT)
-                              ? tk::MqttProbeResult::Unreachable
-                              : tk::MqttProbeResult::Refused;
+            if (e->error_handle->error_type == MQTT_ERROR_TYPE_TCP_TRANSPORT) {
+                ctx->result = (e->error_handle->esp_tls_stack_err != 0 ||
+                               e->error_handle->esp_tls_cert_verify_flags != 0)
+                    ? tk::MqttProbeResult::TlsFailed : tk::MqttProbeResult::Unreachable;
+            } else {
+                ctx->result = tk::MqttProbeResult::Refused;
+            }
         }
         // Wake the request thread now, with the precise cause, rather than waiting for the
         // DISCONNECTED that usually — but not always — follows: a late one past the timeout

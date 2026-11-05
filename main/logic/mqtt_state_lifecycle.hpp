@@ -34,6 +34,11 @@ struct DomainPublishDecision {
     DomainPublishState next;  // adopt only after the publish was accepted
 };
 
+// Outbox admission is not PUBACK. An invalid-cache clear must be resent on each new connection.
+inline constexpr DomainPublishState domain_after_reconnect(DomainPublishState previous) noexcept {
+    return previous == DomainPublishState::Published ? previous : DomainPublishState::Unknown;
+}
+
 inline constexpr DomainPublishDecision decide_domain_publish(bool cache_valid,
                                                              DomainPublishState previous) noexcept {
     if (cache_valid) return {DomainPublishAction::Publish, DomainPublishState::Published};

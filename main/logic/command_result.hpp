@@ -29,6 +29,35 @@ enum class CommandOutcomePolicy : uint8_t {
     ChargeStop,
 };
 
+enum class CommandNoOp : uint8_t { None, AlreadySet, Complete, IsCharging, NotCharging };
+inline const char* command_noop_code(CommandNoOp value) noexcept {
+    switch (value) {
+        case CommandNoOp::AlreadySet: return "already_set";
+        case CommandNoOp::Complete: return "complete";
+        case CommandNoOp::IsCharging: return "is_charging";
+        case CommandNoOp::NotCharging: return "not_charging";
+        case CommandNoOp::None: return nullptr;
+    }
+    return nullptr;
+}
+inline const char* command_noop_text(CommandNoOp value) noexcept {
+    switch (value) {
+        case CommandNoOp::Complete: return "Charging is already complete";
+        case CommandNoOp::IsCharging: return "Vehicle is already charging";
+        case CommandNoOp::NotCharging: return "Vehicle is already not charging";
+        default: return "command executed successfully";
+    }
+}
+
+// Call only after the runner has authenticated and routed the nominal current-request reply.
+inline CommandNoOp admitted_command_noop(std::string_view reason) noexcept {
+    constexpr std::string_view prefix = "Infotainment action failed: ";
+    if (reason.substr(0, prefix.size()) == prefix) reason.remove_prefix(prefix.size());
+    return reason == "complete" ? CommandNoOp::Complete
+        : reason == "is_charging" ? CommandNoOp::IsCharging
+        : reason == "not_charging" ? CommandNoOp::NotCharging : CommandNoOp::AlreadySet;
+}
+
 // Only an authenticated current-request Infotainment rejection may use this decision.
 // The runner owns that admission. REST/MCP consume its completed result, never arbitrary
 // reason text. A successful no-op does not assert physical charging or refresh telemetry.
@@ -112,8 +141,10 @@ private:
 
 class OperationResult {
 public:
-    static OperationResult success() {
-        return OperationResult(true, nullptr);
+    static OperationResult success(CommandNoOp no_op = CommandNoOp::None) {
+        OperationResult result(true, nullptr);
+        result.no_op_ = no_op;
+        return result;
     }
 
     static OperationResult failure(std::unique_ptr<CommandError> error) {
@@ -125,6 +156,7 @@ public:
     }
 
     bool compatible_success() const noexcept { return success_; }
+    CommandNoOp no_op() const noexcept { return no_op_; }
     bool is_success() const noexcept { return success_; }
     bool is_failure() const noexcept { return !success_; }
     const CommandError* error() const noexcept { return error_.get(); }
@@ -140,6 +172,7 @@ private:
         : success_(ok), error_(std::move(err)) {}
 
     bool success_{false};
+    CommandNoOp no_op_{CommandNoOp::None};
     std::unique_ptr<CommandError> error_;
 };
 

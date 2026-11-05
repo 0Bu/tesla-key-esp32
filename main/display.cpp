@@ -46,8 +46,8 @@
 
 static const char* TAG = "display";
 
-// The network seam (net.hpp). The display task is created (display_start) BEFORE the link
-// comes up and at higher priority than app_main, so it MUST NOT read esp_wifi itself: the
+// The network seam (net.hpp). The display starts after network and BLE initialization, but
+// subsequent reconnects still race its higher-priority reads, so it MUST NOT read esp_wifi itself: the
 // station record has transiently-null fields while associating and a concurrent read there
 // faults (LoadProhibited, EXCVADDR=0x1). tk::net_wifi_signal() owns that gate. No link →
 // the centre network-search animation is shown instead (the correct state anyway).
@@ -724,8 +724,8 @@ void display_start(VehicleController& vehicle) {
 
     // Framebuffer: PSRAM first, internal SRAM second. The shipped esp32s3 build enables no
     // PSRAM (sdkconfig.defaults.esp32s3 — a generic S3 may have none), so in practice the
-    // fallback is what runs: ~25 KB of internal SRAM, allocated once here at boot before
-    // WiFi/BLE fragment the heap — the proven pre-#98 path. The SPIRAM attempt is kept ahead of
+    // fallback is what runs: ~25 KB of internal SRAM, allocated once after WiFi/BLE/HTTP/MQTT
+    // startup. Allocation failure disables only the display. The SPIRAM attempt is kept ahead of
     // it because it costs one failed allocation and is strictly better on a board that does have
     // PSRAM, where 25 KB of contiguous internal SRAM is the scarcer resource by far.
     s_fb = (uint16_t*)heap_caps_malloc(FB_PX * sizeof(uint16_t), MALLOC_CAP_SPIRAM);

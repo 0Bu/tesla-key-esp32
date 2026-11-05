@@ -125,6 +125,7 @@ inline constexpr bool mqtt_probe_affordable(size_t largest_free_b, bool tls) {
 enum class MqttProbeResult {
     Ok,             // CONNECT accepted (and authenticated, where credentials were sent)
     Unreachable,    // DNS or TCP never got there
+    TlsFailed,      // TLS handshake or certificate verification failed; never retry plaintext
     Refused,        // the broker answered and rejected us — bad credentials, or not authorised
     Timeout,        // it neither accepted nor refused within the window
     NoHeap,         // the probe could not be afforded (see above) — nothing was attempted
@@ -146,6 +147,7 @@ inline const char* mqtt_probe_reason(MqttProbeResult r) {
     switch (r) {
         case MqttProbeResult::Ok:          return "broker reachable";
         case MqttProbeResult::Unreachable: return "broker unreachable (DNS or TCP failed) — not saved";
+        case MqttProbeResult::TlsFailed:   return "broker TLS handshake or certificate verification failed — not saved";
         case MqttProbeResult::Refused:     return "broker refused the connection (credentials or "
                                                   "authorisation) — not saved";
         case MqttProbeResult::Timeout:     return "broker did not answer in time — not saved";

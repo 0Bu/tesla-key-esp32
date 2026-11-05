@@ -66,6 +66,10 @@ dispatch; the same rule applies to vehicle-data routes.
   accepted already-finished no-op, not proof that charging started. Inverse pairs, `requested`,
   unrelated commands and uncertain replies remain failures. This local compatibility policy
   changes neither cached charge telemetry nor the existing exact `already_set` behavior.
+  Complete charge-start/stop replies carry `response.noop` (`complete`, `is_charging`,
+  `not_charging` or `already_set`) only for a successful no-op. The request-owned result also
+  supplies a specific human-readable reason. Ordinary success omits `noop`; a degraded reply may
+  omit this detail. No-op success does not assert a physical charging transition.
 
 - **Uncertain execution:** after possible payload submission, an unconfirmed failure reports
   `command outcome unknown; command may have executed`. The firmware does not automatically send
@@ -176,6 +180,9 @@ This foreground read may connect and establish VCSEC context before requesting `
 it sends no explicit wake command. It uses the default 20-second shared transaction budget.
 [HTTP queueing](ARCHITECTURE.md#http-request-serialization) can add delay, so this is not a hard
 wall-time bound. A completed retrieval attempt returns `200`; check `response.result` for failure.
+The GET requires a device-owned Host. evcc clients without Origin/Referer headers remain supported.
+This blocks a foreign Host/DNS-rebinding request, but a cross-site
+request to a known device address can still trigger this foreground read. See [security](SECURITY.md).
 
 ```json
 { "response": { "result": true, "vin": "<VIN>", "data": {
@@ -224,7 +231,7 @@ unconfirmed/uncertain outcome; `provision.py` preserves that warning.
 All of `/set_time`, `/set_mqtt`, `/set_syslog`, `/set_wifi` and `/set_ota` return
 `409` while an OTA update is downloading or flashing ([ARCHITECTURE](ARCHITECTURE.md#http-request-body-and-allocator-failure-contract)).
 
-`/gen_keys` also returns `409` during a pending VIN transition, `503` when existing-key storage
+`/gen_keys` also returns `409` during a pending VIN transition. Both identity routes return `503` when existing-key storage
 cannot be verified, and `500` when rotation is incomplete. Not-committed or ambiguous commits
 trigger a recovery reboot; a committed key with pending cleanup uses the supervisor retry path.
 `/ota/check`, `/ota/update` and `/ota/upload` return `409` while another device operation owns their shared gate,
@@ -317,6 +324,10 @@ does not establish whether boot selection succeeded. NVS, keys, sessions, partit
 and the existing publication/PR gates are preserved.
 
 ### Response classes
+
+Invalid query strings on `/gen_keys`, `/status`, `/diag` and the JSON OTA routes return JSON
+errors with the route's flat or wrapped envelope. Successful `/diag` exports remain text.
+`/ota/changelog` sends `Cache-Control: no-store` for both its text response and an empty `204`.
 
 | Route class | Status and envelope |
 |---|---|
@@ -415,7 +426,7 @@ VIN/MQTT/Syslog/WiFi/channel mutations return `503` when the complete existing c
 cannot be read; they preserve the unreadable state instead of saving defaults over it.
 
 `/set_mqtt` connects to a changed non-empty broker before saving: refusal/credentials return `400`,
-unreachable/no answer `502`, insufficient contiguous memory `503`. Failure neither persists nor
+unreachable/no answer or TLS/certificate verification failure `502`, insufficient contiguous memory `503`. Failure neither persists nor
 reboots; an empty broker disables MQTT. A failed durable configuration save returns `500`.
 Without an explicit scheme, a configured username or URI userinfo selects `mqtts://`; an
 unauthenticated broker selects `mqtt://`. Explicit schemes are honored. TLS verifies bundled CA

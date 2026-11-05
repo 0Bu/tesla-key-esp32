@@ -192,6 +192,8 @@ elif name == "compiler" and "-o" in args:
         repair = work / "test/run-config-repair-backend.sh"
         repair.parent.mkdir()
         repair.write_text('#!/bin/sh\n[ "${CONFIG_REPAIR_SANITIZE-}" = 1 ] || exit 38\nprintf \'%s\\n\' \'["__repair_backend__"]\' >> "$TESLA_FLOW_TRACE"\n[ "${TESLA_FLOW_FAIL_REPAIR-0}" = 0 ] || exit 41\n')
+        mqtt = work / "test/run-mqtt-json-publish-tests.sh"
+        mqtt.write_text('#!/bin/sh\n[ "${MQTT_JSON_SANITIZE-}" = 1 ] || exit 38\nprintf \'%s\\n\' \'["__mqtt_json__"]\' >> "$TESLA_FLOW_TRACE"\n[ "${TESLA_FLOW_FAIL_MQTT-0}" = 0 ] || exit 43\n')
         env = os.environ.copy()
         for name in list(env):
             if name in ("OTA_SIGNING_KEY", "OTA_SIGNING_KEY_FILE", "ENV", "BASH_ENV") or name.startswith("BASH_FUNC_"):
@@ -199,17 +201,19 @@ elif name == "compiler" and "-o" in args:
         env.update(PATH=str(binaries) + os.pathsep + env.get("PATH", os.defpath),
                    CC=str(binaries / "compiler"), CXX=str(binaries / "compiler"),
                    TMPDIR=str(scratch), TESLA_FLOW_TRACE=str(trace), TESLA_FLOW_WATCHED_TARGET=watched_target)
-        for fail in ("none", "heap", "f137", "identity", "repair"):
+        for fail in ("none", "heap", "mqtt", "f137", "identity", "repair"):
             trace.unlink(missing_ok=True)
             try:
                 result = subprocess.run(["/bin/bash", str(script)],
-                                        env={**env, "TESLA_FLOW_FAIL_HEAP": str(int(fail == "heap")), "F137_FLOW_FAIL": str(int(fail == "f137")), "TESLA_FLOW_FAIL_IDENTITY": str(int(fail == "identity")), "TESLA_FLOW_FAIL_REPAIR": str(int(fail == "repair"))},
+                                        env={**env, "TESLA_FLOW_FAIL_HEAP": str(int(fail == "heap")), "TESLA_FLOW_FAIL_MQTT": str(int(fail == "mqtt")), "F137_FLOW_FAIL": str(int(fail == "f137")), "TESLA_FLOW_FAIL_IDENTITY": str(int(fail == "identity")), "TESLA_FLOW_FAIL_REPAIR": str(int(fail == "repair"))},
                                         cwd=work, capture_output=True, text=True, timeout=10)
             except subprocess.TimeoutExpired as exc:
                 raise ContractError("sanitizer invocation flow timed out") from exc
             calls = [json.loads(line) for line in trace.read_text().splitlines()] if trace.exists() else []
             expected = [["__native__", watched_target]]
             if fail != "heap":
+                expected += [["__mqtt_json__"]]
+            if fail not in ("heap", "mqtt"):
                 expected += [["test/test_led_driver_contract.py", "--sanitize"],
                              ["test/test_display_parity_contract.py", "--render-only", "--sanitize"],
                              ["test/test_f137_host.py", "--source", ".", "--sanitize", "--execute-controlled-host-only"]]
@@ -219,7 +223,7 @@ elif name == "compiler" and "-o" in args:
                         expected += [["__repair_backend__"]]
                         if fail != "repair":
                             expected += [["__identity_flow_after__"]]
-            expected_exit = 41 if fail == "repair" else 0 if fail == "none" else 37
+            expected_exit = 43 if fail == "mqtt" else 41 if fail == "repair" else 0 if fail == "none" else 37
             require(result.returncode == expected_exit and calls == expected,
                     "sanitizer invocation flow must execute the watched native target, F137, identity recovery and maintenance backend once and propagate failure before later probes")
 
@@ -298,7 +302,7 @@ printf '#!/bin/sh\nexit 0\n' > "$output"
 fi
 chmod 700 "$output"
 '''
-        for name in ("python3", "compiler"):
+        for name in ("python3", "compiler", "cmake", "ruby", "jq", "rsync"):
             tool = tools / name; tool.write_text(stub); tool.chmod(0o700)
         env = {k: v for k, v in os.environ.items() if k not in
                ("ENV", "BASH_ENV", "OTA_SIGNING_KEY", "OTA_SIGNING_KEY_FILE", "GH_TOKEN", "GITHUB_TOKEN")
@@ -349,7 +353,7 @@ def probe_browser_invocations(source: str) -> None:
             # An explicit `command python3` must fail rather than bypass the recorder.
             python.write_text("#!/bin/sh\nexit 98\n")
             python.chmod(0o700)
-            for name in ("cmake", "node", "ruby", "jq"):
+            for name in ("cmake", "node", "ruby", "jq", "rsync"):
                 file = binaries / name
                 file.write_text("#!/bin/sh\nexit 0\n")
                 file.chmod(0o700)
@@ -369,6 +373,9 @@ def probe_browser_invocations(source: str) -> None:
                         prefix + ["python3", "test/test_eth_startup_cleanup.py"],
                         prefix + ["scripts/release-relevance.sh", "--self-test"],
                         prefix + ["scripts/test-build-contracts.sh", "--build-and-manifest"],
+                        prefix + ["python3", "test/test_release_pages_recovery.py"],
+                        prefix + ["python3", "test/test_ble_lifecycle.py"],
+                        prefix + ["bash", "test/run-mqtt-json-publish-tests.sh"],
                         prefix + ["python3", "test/test_dependency_sources.py"],
                         prefix + ["python3", "test/test_dependency_cmake.py"],
                         prefix + ["python3", "test/test_dependency_harness.py"],
@@ -583,6 +590,12 @@ def validate(root: Path) -> None:
     build_gate = 'run_gate "build and manifest contract tests" 120 scripts/test-build-contracts.sh --build-and-manifest'
     require(run_mock.count(relevance_gate) == 1 and run_mock.count(build_gate) == 1,
             "strict browser invocation flow: release/build profile gates or exact arguments are missing")
+    for command in (
+        'run_gate "immutable Release Pages recovery" 120 python3 test/test_release_pages_recovery.py',
+        'run_gate "BLE lifecycle retirement and deferred intent" 120 python3 test/test_ble_lifecycle.py',
+        'run_gate "retained MQTT JSON and discovery registry" 120 bash test/run-mqtt-json-publish-tests.sh',
+    ):
+        require(run_mock.count(command) == 1, "strict browser invocation flow: issue-450 owner gate missing")
     probe_build_contract_modes(publication_gate)
     require('        test/test_deploy_candidate.py \\\n' in run_mock,
             "actual signed deploy consumer tests are missing from the mandatory host gate")
@@ -624,7 +637,7 @@ def validate(root: Path) -> None:
             "strict host must exercise local check invalidation")
     require("--require-all" in run_mock and 'REQUIRE_ALL=1' in run_mock,
             "run-mock-tests.sh has no strict mode")
-    for tool in ("python3", "node", "cmake", "ruby", "jq"):
+    for tool in ("python3", "node", "cmake", "ruby", "jq", "rsync"):
         require(f"need_tool {tool}" in run_mock,
                 f"run-mock-tests.sh strict mode does not require {tool}")
     require("tools/agent-hooks/run_with_timeout.py" in run_mock and "run_gate" in run_mock,
@@ -633,6 +646,9 @@ def validate(root: Path) -> None:
     require(inventory is not None, "strict host inventory loop is missing")
     strict_inputs = set(shlex.split(inventory.group(1).replace("\\\n", " ")))
     for path in (
+        "scripts/recover-release-pages.py",
+        "test/test_release_pages_recovery.py",
+        "test/test_ble_lifecycle.py",
         "test/tesla_protocol_vectors.test.mjs",
         "test/test_runtime_boundary_contract.py",
         "test/test_evcc_vehicle.rb",
@@ -1460,6 +1476,15 @@ def self_test(root: Path) -> None:
     for command in (relevance_gate, build_gate):
         for changed in ('# ' + command, '    if false; then\n' + command + '\n    fi',
                         '    exit 0\n' + command, '    (' + command.strip() + ') || true', command + ' &'):
+            mutations.append(("scripts/run-mock-tests.sh", command, changed, "strict browser invocation flow"))
+    for command in (
+        '    run_gate "immutable Release Pages recovery" 120 python3 test/test_release_pages_recovery.py',
+        '    run_gate "BLE lifecycle retirement and deferred intent" 120 python3 test/test_ble_lifecycle.py',
+        '    run_gate "retained MQTT JSON and discovery registry" 120 bash test/run-mqtt-json-publish-tests.sh',
+    ):
+        # run_gate explicitly exits on failure; an outer `|| true` cannot suppress that exit.
+        # Actual gate failures are injected independently by probe_browser_invocations.
+        for changed in ('# ' + command, '    if false; then\n' + command + '\n    fi'):
             mutations.append(("scripts/run-mock-tests.sh", command, changed, "strict browser invocation flow"))
     mutations.extend([
         ("scripts/run-mock-tests.sh", relevance_gate + '\n' + build_gate,

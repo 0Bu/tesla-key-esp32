@@ -29,6 +29,8 @@ class ChangeScope(unittest.TestCase):
             (["main/http_api.cpp", "main/www/app.js"], "full"),
             (["AGENTS.md"], "full"), (["main/AGENTS.md"], "full"),
             ([".agents/skills/mock-test/SKILL.md"], "full"),
+            ([".github/PULL_REQUEST_TEMPLATE.md"], "full"),
+            (["docs/FEATURES.md"], "full"), (["docs/THIRD_PARTY.md"], "full"),
             (["main/idf_component.yml"], "full"), (["sdkconfig.defaults"], "full"),
             (["test/test_logic.cpp"], "full"), (["scripts/new-check.py"], "full"),
             (["partitions.csv"], "full"), (["../outside.md"], "full"), ([], "full"),
@@ -70,7 +72,7 @@ raise SystemExit(37 if os.environ.get('PROFILE_FAIL') in args else 0)
             python = binaries / "python3"
             python.write_text(fake)
             python.chmod(0o755)
-            for name in ("cmake", "ctest", "node", "ruby", "jq"):
+            for name in ("cmake", "ctest", "node", "ruby", "jq", "rsync"):
                 file = binaries / name
                 file.write_text("#!/bin/sh\nexit 0\n")
                 file.chmod(0o755)
@@ -95,8 +97,8 @@ raise SystemExit(37 if os.environ.get('PROFILE_FAIL') in args else 0)
         for profile, present, absent in (
             (None, (runtime, browser, policy), ()),
             ("full", (runtime, browser, policy), ()),
-            ("runtime", (runtime, "test/test_f137_host.py", "scripts/check-ble-row-parity.sh"), (browser, policy)),
-            ("browser", (browser, "test/web_ui_http.test.mjs"), (runtime, policy)),
+            ("runtime", (runtime, "test/test_f137_host.py", "scripts/check-ble-row-parity.sh", "test/tesla_protocol_vectors.test.mjs", "test/run-mqtt-json-publish-tests.sh"), (browser, policy)),
+            ("browser", (browser, "test/web_ui_http.test.mjs", "test/tesla_protocol_vectors.test.mjs"), (runtime, policy)),
         ):
             with self.subTest(profile=profile):
                 code, calls = self.run_profile(profile)
@@ -105,6 +107,9 @@ raise SystemExit(37 if os.environ.get('PROFILE_FAIL') in args else 0)
                 self.assertTrue(set(present) <= values, (present, values))
                 self.assertTrue(not set(absent) & values, (absent, values))
                 self.assertEqual(self.run_profile(profile, present[0])[0], 1)
+                self.assertEqual(self.run_profile(profile, "test/tesla_protocol_vectors.test.mjs")[0], 1)
+                if profile != "browser":
+                    self.assertEqual(self.run_profile(profile, "test/run-mqtt-json-publish-tests.sh")[0], 1)
         self.assertEqual(self.run_profile("unknown")[0], 2)
 
     def test_actual_bash_lint_modes_keep_validators_and_propagate_failure(self):

@@ -104,7 +104,7 @@ void led_task(void* arg) {
     const int64_t t0 = esp_timer_get_time();
     tk::IterationFaultLog fault_log{};
 
-    for (int frame = 0;; ++frame) {
+    for (uint32_t frame = 0;; frame = (frame + 1) % kSampleEveryFrames) {
         tk::StackWatchScope f135_iteration_exit(tk::StackWatch::Led);
       // ui_snapshot() and durable-session probes can fail under heap pressure. The OTA read
       // copies only its state enum; it does not materialize status strings. This is a cosmetic
@@ -118,7 +118,7 @@ void led_task(void* arg) {
         }
 
         const tk::LedPattern p = tk::led_pattern(snap, alerts);
-        const float t = (now - t0) / 1e6f;
+        const float t = tk::led_animation_seconds(p.anim, static_cast<uint64_t>(now - t0));
         const tk::LedRgb color = tk::led_frame_rgb(p, snap.soc, t);
         apa_show(color.r, color.g, color.b);
 

@@ -13,6 +13,28 @@ F=ROOT/'scripts/dependency_source.py'
 spec=importlib.util.spec_from_file_location('f088_query_v2',F);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
 rows=[];real_mono=time.monotonic;real_killpg=os.killpg;real_popen=subprocess.Popen
 
+# Execute the real cleanup observer with a slow-reaping init and a never-reaped negative control.
+for disappears in (True, False):
+ class OwnedChild:
+  pid=12345
+  def poll(self): return None
+  def wait(self,timeout): return 0
+ ticks=[0.0];signals=[]
+ def controlled_clock():
+  ticks[0]+=.1
+  return ticks[0]
+ def controlled_signal(pid,requested):
+  assert pid==12345
+  signals.append(requested)
+  if requested==0 and disappears and ticks[0]>=1.3:raise ProcessLookupError()
+ with patch.object(m.time,'monotonic',controlled_clock),patch.object(m.time,'sleep',lambda _:None),patch.object(m.os,'killpg',controlled_signal):
+  try:m.stop_owned_group(OwnedChild())
+  except m.SourceError:
+   assert not disappears
+  else:assert disappears
+ assert ticks[0]<5 and signal.SIGTERM in signals
+ rows.append({'case':'slow-reaper' if disappears else 'never-reaped','result':'PASS'})
+
 def publish_fixture_record(path, data):
  # Existence is a readiness signal: never let a cancellation observe a partial JSON record.
  temporary=path.with_name(path.name+'.tmp')

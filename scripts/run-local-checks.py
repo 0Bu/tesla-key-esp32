@@ -21,7 +21,7 @@ import time
 
 
 TOOLS = ("git", "bash", "python3", "cmake", "ctest", "cc", "c++", "g++", "clang++",
-         "gcc", "clang", "node", "ruby", "jq", "docker", "google-chrome",
+         "gcc", "clang", "node", "ruby", "jq", "rsync", "docker", "google-chrome",
          "google-chrome-stable", "chromium", "chromium-browser")
 TRANSIENT_RUNNER_ENVIRONMENT = {"CODEX_TOOL_CALL_ID"}
 VOLATILE_ENVIRONMENT = {"_", "SHLVL", "PWD", "OLDPWD", "TESLA_LOCAL_CHECK_LOCK_FD"} | TRANSIENT_RUNNER_ENVIRONMENT

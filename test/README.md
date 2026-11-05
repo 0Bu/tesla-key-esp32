@@ -19,7 +19,8 @@ scripts/with-host-python.sh python3 scripts/run-local-checks.py --require-all # 
 scripts/check-local.sh --firmware     # complete local handoff, including pinned four-target contracts
 ```
 
-Normal mode needs C11 and C++17 compilers, using CMake when present or equivalent direct compilation.
+The complete runner needs CMake, Python 3.11+, C11 and C++17 compilers, Ruby, jq and rsync.
+The portable direct native loop is `run-fast-tests.sh`; it does not certify the full contract suite.
 The evcc example check uses Ruby's standard YAML parser and `jq` to execute the shipped status
 expression, verify explicit setter deadlines and reject the historical `Starting` mapping.
 The separate real v6.3.0 tesla-ble/PSA harness requires C++20; pure firmware logic remains C++17.
@@ -30,8 +31,9 @@ NVS, runtime-boundary, cJSON OOM and MQTT JSON binaries and the fuzz smoke stop 
 
 The full wrapper executes `runtime_boundary_contract`, `eth_startup_cleanup_controls` and
 `f137_task_host_contract` once through its direct Python gates. They remain registered for standalone
-CTest and are excluded only from the wrapper's CTest invocation. The compiler fallback retains the
-same direct gates. `test_local_checks.py` covers reuse, source/runtime invalidation, partial-staging
+CTest and are excluded only from the wrapper's CTest invocation. The retained direct-compiler
+branch is tested by passive wiring fixtures; it is not a supported complete no-CMake runner.
+`test_local_checks.py` covers reuse, source/runtime invalidation, partial-staging
 cache refusal, failures, concurrent consumers and bounded-process cancellation. The
 [local coordinator](../docs/DEVELOPMENT.md#validate-a-change) retains no remote CI or review state.
 Selected strict `--profile runtime` and `--profile browser` runs provide PR feedback only; shared
@@ -44,7 +46,8 @@ passive tools, including selected failures, unknown inputs and the default full 
 ```bash
 scripts/run-fast-tests.sh --logic    # pure decisions
 scripts/run-fast-tests.sh --boundary # native runtime boundaries
-scripts/run-fast-tests.sh --all      # all native host units
+scripts/run-fast-tests.sh --all      # portable logic, NVS and native runtime families
+scripts/run-fast-tests.sh --self-test # compiler prerequisite only, no test execution
 ```
 
 On Linux, prove the sanitizer detectors and then run the instrumented suite:
@@ -107,8 +110,10 @@ The canonical runner owns the complete invocation list; these groups identify th
 | `test_diagnostic_export_guidance.py` | Actual bug-form diagnostic description, owned export URL, manual/serial sanitation and nine negative wording mutations |
 | HTTP security contract and UI request tests | Actual POST gate ordering, bounded provenance headers, socket/live-mDNS ownership, diagnostic Host checks, redaction selectors, exact UI proof header, no CORS grant and both anti-framing headers; 16 source mutations must fail. IPv6 enablement is rejected; these checks do not establish live network/browser attack behavior. |
 | `test_runtime_boundary_contract.py` | Shipped CMake source closure and actual task/callback registration; contained or mechanically bounded C boundaries; fixed mailbox/completion ownership, no forbidden work under locks, production JSON/OTA/MQTT wiring and closed source/flag surface |
+| `test_ble_lifecycle.py` | Actual BLE scan, deferred termination, pending-service and failed-connect bodies against passive RTOS/NimBLE doubles: mutex contention, generation replacement, retry exhaustion and retired-link repair. This is host interleaving evidence, not a radio or vehicle test. |
+| `test_release_pages_recovery.py` | Authenticated original ZIP, immutable/latest/source/run authority, all four producer and independent targets, full host gates, key-removal/reuse evidence and exact candidate-site bytes. Passive API/Git and publisher controls; no real key, Release or Pages mutation. |
 | `test_charge_presentation.py` | Compiled actual cache/indicator methods with passive RTOS facades: coherent value/stamp, tick zero/wrap, missing sample, lock failure and post-unlock publication. Pure status fixtures independently age charge while common contact stays fresh; browser fixtures verify the retained-data presentation without commands. |
-| `test_command_outcomes.py` | Actual start/stop/default producer bodies and both enqueue helpers feed the real runner with passive RTOS/completion/builders. Matching, inverse, default, missing-counter and unauthenticated outcomes retain one callback and no additional payload. Pure runner tests cover queued-ID policy guards, slot reuse and expired/cancelled/cleared requests; actual REST/MCP emitters print and reparse their completion results. No live command or cryptographic frame is sent. |
+| `test_command_outcomes.py` | Actual start/stop/default producers and enqueue helpers feed the real runner with passive RTOS/completion/builders. All three actual admission blocks reject positive budgets exhausted during mutex acquisition; individual guard omissions restore the invalid enqueue. Matching, inverse, default, missing-counter and unauthenticated outcomes retain one callback and no additional payload. Pure runner tests cover queued-ID policy guards, slot reuse and expired/cancelled/cleared requests; actual REST/MCP emitters print and reparse their completion results. No live command or cryptographic frame is sent. |
 | `test_patch_incremental.py` | Shipped CMake admission block and unchanged validator functions with synthetic digest constants; ordinary incremental input/inventory changes stop before the forced compiler, while valid revalidation proceeds. Does not compile tesla-ble or establish real dependency bytes. |
 | `test_dependency_sources.py` / `test_dependency_harness.py` | Owned local Git/cache admission, exact tracked links, preserved mtimes, maintenance-policy omission, object namespaces and actual optional/strict harness ordering. A subprocess spy verifies full-source flow-cache identity and uncached failures. No network or compiler. |
 | `test_dependency_cmake.py` | Actual root CMake and named passive component/ELF targets in Make/Ninja: same-size/mtime changes, missing warm state, a valid omitted build-admission delegation and restoration. These are ordering fixtures, not IDF/compiler proof. |
@@ -657,6 +662,9 @@ declarations. Final normal-workload stack floors are httpd/vehicle ≥1024 B, MQ
 auto-pair ≥1024 B. Recovery starts/ends with zero boot-failure count, includes ≥4 fault resets to latch
 safe mode, then a distinct non-fault reboot (≥5 planned), with final normal stack evidence. These are
 policy margins, not hardware-derived alarm thresholds.
+The setup portal explicitly reserves 6144 bytes for CaptiveHttp. Compiler frame checks do not
+establish its physical high-water floor; portal-save stack minima and display-enabled T-Dongle-S3
+INTERNAL largest-block margin need separate board evidence.
 
 
 ## Adding to it

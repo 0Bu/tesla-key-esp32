@@ -71,11 +71,17 @@
           "/COMPONENT_MAIN_DIR/net.cpp :: bool tk::net_start_wifi(const char*, const char*, bool)": 416
         },
         "CMakeFiles/__idf_main.dir/nvs_storage.cpp.su": {},
+        "CMakeFiles/__idf_main.dir/ota_coordinator.cpp.su": {},
+        "CMakeFiles/__idf_main.dir/ota_http.cpp.su": {},
+        "CMakeFiles/__idf_main.dir/ota_transport.cpp.su": {
+          "/COMPONENT_MAIN_DIR/ota_transport.cpp :: void tk::ota::run_network_worker(Job&, const NetRuntime&)": 400
+        },
         "CMakeFiles/__idf_main.dir/ota_update.cpp.su": {
           "/COMPONENT_MAIN_DIR/ota_update.cpp :: OtaCheckResult perform_check(OtaOperation&, unsigned int)": 1584,
           "/COMPONENT_MAIN_DIR/ota_update.cpp :: OtaOperation::OtaOperation(uint64_t, unsigned int, tk::OtaChannel, bool)": 256,
           "/COMPONENT_MAIN_DIR/ota_update.cpp :: void ota_task_impl(OtaOperation&)": 336
         },
+        "CMakeFiles/__idf_main.dir/ota_writer.cpp.su": {},
         "CMakeFiles/__idf_main.dir/provisioning.cpp.su": {
           "/COMPONENT_MAIN_DIR/provisioning.cpp :: SetupPortal portal_open(NvsStorageAdapter&, bool)": 544,
           "/COMPONENT_MAIN_DIR/provisioning.cpp :: esp_err_t save_post_impl(httpd_req_t*, PortalSaveContext&)": 1472,
@@ -85,12 +91,13 @@
         "CMakeFiles/__idf_main.dir/safe_mode.cpp.su": {},
         "CMakeFiles/__idf_main.dir/stack_watch.cpp.su": {},
         "CMakeFiles/__idf_main.dir/syslog.cpp.su": {
+          "/COMPONENT_MAIN_DIR/syslog.cpp :: SendResult syslog_sendto(const sockaddr_in&, const char*, size_t, int*, tk::SyslogRecord)": 352,
           "/COMPONENT_MAIN_DIR/syslog.cpp :: bool syslog_start_impl(NvsStorageAdapter&)": 352,
           "/COMPONENT_MAIN_DIR/syslog.cpp :: void syslog_send(const char*, size_t)": 304,
-          "/COMPONENT_MAIN_DIR/syslog.cpp :: void syslog_task(void*)": 480,
-          "/COMPONENT_MAIN_DIR/syslog.cpp :: SendResult syslog_sendto(const sockaddr_in&, const char*, size_t, int*, tk::SyslogRecord)": 352
+          "/COMPONENT_MAIN_DIR/syslog.cpp :: void syslog_task(void*)": 480
         },
         "CMakeFiles/__idf_main.dir/vehicle_commands.cpp.su": {
+          "/COMPONENT_MAIN_DIR/logic/command_runner.hpp :: uint32_t tk::CommandRunner::enqueue(std::string_view, tk::BleDomain, tk::WakePolicy, uint32_t, uint32_t, const tk::BleUuid&, std::function<void(bool, const std::__cxx11::basic_string<char>&, tk::CommandFailureInfo)>, bool, uint32_t, tk::VcsecReplyKind)": 256,
           "/COMPONENT_MAIN_DIR/vehicle_commands.cpp :: bool VehicleController::set_charging_amps(int, int)": 480
         },
         "CMakeFiles/__idf_main.dir/vehicle_ctrl.cpp.su": {},
@@ -99,21 +106,17 @@
           "/COMPONENT_MAIN_DIR/vehicle_pairing.cpp :: std::string VehicleController::compute_key_fingerprint_()": 816
         },
         "CMakeFiles/__idf_main.dir/vehicle_telemetry.cpp.su": {
+          "/COMPONENT_MAIN_DIR/logic/command_runner.hpp :: uint32_t tk::CommandRunner::enqueue(std::string_view, tk::BleDomain, tk::WakePolicy, uint32_t, uint32_t, const tk::BleUuid&, std::function<void(bool, const std::__cxx11::basic_string<char>&, tk::CommandFailureInfo)>, bool, uint32_t, tk::VcsecReplyKind)": 256,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: VehicleController::load_nvs_sessions_()::<lambda(UniversalMessage_Domain, const char*, tk::BleDomain)>": 336,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: bool VehicleController::get_vehicle_status(VehicleStatusResult&, tk::ConnectOrigin, int)": 272,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: static void VehicleController::loop_task_fn_(void*)": 704,
+          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::enqueue_telemetry_round_(tk::TelemetryPollState&)": 256,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::handle_carserver_frame_(const UniversalMessage_RoutableMessage&)": 2048,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::handle_session_info_frame_(const UniversalMessage_RoutableMessage&)": 304,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::handle_vcsec_frame_(const UniversalMessage_RoutableMessage&)": 816,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::process_pending_telemetry_()": 1440,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::process_rx_frame_(const uint8_t*, size_t)": 800
-        },
-        "CMakeFiles/__idf_main.dir/ota_coordinator.cpp.su": {},
-        "CMakeFiles/__idf_main.dir/ota_http.cpp.su": {},
-        "CMakeFiles/__idf_main.dir/ota_transport.cpp.su": {
-          "/COMPONENT_MAIN_DIR/ota_transport.cpp :: void tk::ota::run_network_worker(Job&, const NetRuntime&)": 400
-        },
-        "CMakeFiles/__idf_main.dir/ota_writer.cpp.su": {}
+        }
       }
     },
     "esp32s3": {
@@ -183,11 +186,17 @@
           "/COMPONENT_MAIN_DIR/net.cpp :: bool tk::net_start_wifi(const char*, const char*, bool)": 416
         },
         "CMakeFiles/__idf_main.dir/nvs_storage.cpp.su": {},
+        "CMakeFiles/__idf_main.dir/ota_coordinator.cpp.su": {},
+        "CMakeFiles/__idf_main.dir/ota_http.cpp.su": {},
+        "CMakeFiles/__idf_main.dir/ota_transport.cpp.su": {
+          "/COMPONENT_MAIN_DIR/ota_transport.cpp :: void tk::ota::run_network_worker(Job&, const NetRuntime&)": 400
+        },
         "CMakeFiles/__idf_main.dir/ota_update.cpp.su": {
           "/COMPONENT_MAIN_DIR/ota_update.cpp :: OtaCheckResult perform_check(OtaOperation&, unsigned int)": 1584,
           "/COMPONENT_MAIN_DIR/ota_update.cpp :: OtaOperation::OtaOperation(uint64_t, unsigned int, tk::OtaChannel, bool)": 256,
           "/COMPONENT_MAIN_DIR/ota_update.cpp :: void ota_task_impl(OtaOperation&)": 336
         },
+        "CMakeFiles/__idf_main.dir/ota_writer.cpp.su": {},
         "CMakeFiles/__idf_main.dir/provisioning.cpp.su": {
           "/COMPONENT_MAIN_DIR/provisioning.cpp :: SetupPortal portal_open(NvsStorageAdapter&, bool)": 544,
           "/COMPONENT_MAIN_DIR/provisioning.cpp :: esp_err_t save_post_impl(httpd_req_t*, PortalSaveContext&)": 1472,
@@ -197,12 +206,13 @@
         "CMakeFiles/__idf_main.dir/safe_mode.cpp.su": {},
         "CMakeFiles/__idf_main.dir/stack_watch.cpp.su": {},
         "CMakeFiles/__idf_main.dir/syslog.cpp.su": {
+          "/COMPONENT_MAIN_DIR/syslog.cpp :: SendResult syslog_sendto(const sockaddr_in&, const char*, size_t, int*, tk::SyslogRecord)": 352,
           "/COMPONENT_MAIN_DIR/syslog.cpp :: bool syslog_start_impl(NvsStorageAdapter&)": 352,
           "/COMPONENT_MAIN_DIR/syslog.cpp :: void syslog_send(const char*, size_t)": 304,
-          "/COMPONENT_MAIN_DIR/syslog.cpp :: void syslog_task(void*)": 480,
-          "/COMPONENT_MAIN_DIR/syslog.cpp :: SendResult syslog_sendto(const sockaddr_in&, const char*, size_t, int*, tk::SyslogRecord)": 352
+          "/COMPONENT_MAIN_DIR/syslog.cpp :: void syslog_task(void*)": 480
         },
         "CMakeFiles/__idf_main.dir/vehicle_commands.cpp.su": {
+          "/COMPONENT_MAIN_DIR/logic/command_runner.hpp :: uint32_t tk::CommandRunner::enqueue(std::string_view, tk::BleDomain, tk::WakePolicy, uint32_t, uint32_t, const tk::BleUuid&, std::function<void(bool, const std::__cxx11::basic_string<char>&, tk::CommandFailureInfo)>, bool, uint32_t, tk::VcsecReplyKind)": 256,
           "/COMPONENT_MAIN_DIR/vehicle_commands.cpp :: bool VehicleController::set_charging_amps(int, int)": 480
         },
         "CMakeFiles/__idf_main.dir/vehicle_ctrl.cpp.su": {},
@@ -211,21 +221,17 @@
           "/COMPONENT_MAIN_DIR/vehicle_pairing.cpp :: std::string VehicleController::compute_key_fingerprint_()": 816
         },
         "CMakeFiles/__idf_main.dir/vehicle_telemetry.cpp.su": {
+          "/COMPONENT_MAIN_DIR/logic/command_runner.hpp :: uint32_t tk::CommandRunner::enqueue(std::string_view, tk::BleDomain, tk::WakePolicy, uint32_t, uint32_t, const tk::BleUuid&, std::function<void(bool, const std::__cxx11::basic_string<char>&, tk::CommandFailureInfo)>, bool, uint32_t, tk::VcsecReplyKind)": 256,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: VehicleController::load_nvs_sessions_()::<lambda(UniversalMessage_Domain, const char*, tk::BleDomain)>": 336,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: bool VehicleController::get_vehicle_status(VehicleStatusResult&, tk::ConnectOrigin, int)": 272,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: static void VehicleController::loop_task_fn_(void*)": 704,
+          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::enqueue_telemetry_round_(tk::TelemetryPollState&)": 256,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::handle_carserver_frame_(const UniversalMessage_RoutableMessage&)": 2048,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::handle_session_info_frame_(const UniversalMessage_RoutableMessage&)": 304,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::handle_vcsec_frame_(const UniversalMessage_RoutableMessage&)": 816,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::process_pending_telemetry_()": 1440,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::process_rx_frame_(const uint8_t*, size_t)": 800
-        },
-        "CMakeFiles/__idf_main.dir/ota_coordinator.cpp.su": {},
-        "CMakeFiles/__idf_main.dir/ota_http.cpp.su": {},
-        "CMakeFiles/__idf_main.dir/ota_transport.cpp.su": {
-          "/COMPONENT_MAIN_DIR/ota_transport.cpp :: void tk::ota::run_network_worker(Job&, const NetRuntime&)": 400
-        },
-        "CMakeFiles/__idf_main.dir/ota_writer.cpp.su": {}
+        }
       }
     },
     "esp32c3": {
@@ -291,11 +297,17 @@
           "/COMPONENT_MAIN_DIR/net.cpp :: bool tk::net_start_wifi(const char*, const char*, bool)": 384
         },
         "CMakeFiles/__idf_main.dir/nvs_storage.cpp.su": {},
+        "CMakeFiles/__idf_main.dir/ota_coordinator.cpp.su": {},
+        "CMakeFiles/__idf_main.dir/ota_http.cpp.su": {},
+        "CMakeFiles/__idf_main.dir/ota_transport.cpp.su": {
+          "/COMPONENT_MAIN_DIR/ota_transport.cpp :: void tk::ota::run_network_worker(Job&, const NetRuntime&)": 400
+        },
         "CMakeFiles/__idf_main.dir/ota_update.cpp.su": {
           "/COMPONENT_MAIN_DIR/ota_update.cpp :: OtaCheckResult perform_check(OtaOperation&, unsigned int)": 1456,
           "/COMPONENT_MAIN_DIR/ota_update.cpp :: OtaOperation::OtaOperation(uint64_t, unsigned int, tk::OtaChannel, bool)": 256,
           "/COMPONENT_MAIN_DIR/ota_update.cpp :: void ota_task_impl(OtaOperation&)": 320
         },
+        "CMakeFiles/__idf_main.dir/ota_writer.cpp.su": {},
         "CMakeFiles/__idf_main.dir/provisioning.cpp.su": {
           "/COMPONENT_MAIN_DIR/provisioning.cpp :: SetupPortal portal_open(NvsStorageAdapter&, bool)": 528,
           "/COMPONENT_MAIN_DIR/provisioning.cpp :: esp_err_t save_post_impl(httpd_req_t*, PortalSaveContext&)": 1376,
@@ -305,10 +317,10 @@
         "CMakeFiles/__idf_main.dir/safe_mode.cpp.su": {},
         "CMakeFiles/__idf_main.dir/stack_watch.cpp.su": {},
         "CMakeFiles/__idf_main.dir/syslog.cpp.su": {
+          "/COMPONENT_MAIN_DIR/syslog.cpp :: SendResult syslog_sendto(const sockaddr_in&, const char*, size_t, int*, tk::SyslogRecord)": 352,
           "/COMPONENT_MAIN_DIR/syslog.cpp :: bool syslog_start_impl(NvsStorageAdapter&)": 320,
           "/COMPONENT_MAIN_DIR/syslog.cpp :: void syslog_send(const char*, size_t)": 288,
-          "/COMPONENT_MAIN_DIR/syslog.cpp :: void syslog_task(void*)": 464,
-          "/COMPONENT_MAIN_DIR/syslog.cpp :: SendResult syslog_sendto(const sockaddr_in&, const char*, size_t, int*, tk::SyslogRecord)": 352
+          "/COMPONENT_MAIN_DIR/syslog.cpp :: void syslog_task(void*)": 464
         },
         "CMakeFiles/__idf_main.dir/vehicle_commands.cpp.su": {
           "/COMPONENT_MAIN_DIR/vehicle_commands.cpp :: bool VehicleController::set_charging_amps(int, int)": 480
@@ -321,18 +333,13 @@
         "CMakeFiles/__idf_main.dir/vehicle_telemetry.cpp.su": {
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: VehicleController::load_nvs_sessions_()::<lambda(UniversalMessage_Domain, const char*, tk::BleDomain)>": 304,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: static void VehicleController::loop_task_fn_(void*)": 688,
+          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::enqueue_telemetry_round_(tk::TelemetryPollState&)": 256,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::handle_carserver_frame_(const UniversalMessage_RoutableMessage&)": 2048,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::handle_session_info_frame_(const UniversalMessage_RoutableMessage&)": 272,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::handle_vcsec_frame_(const UniversalMessage_RoutableMessage&)": 816,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::process_pending_telemetry_()": 1408,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::process_rx_frame_(const uint8_t*, size_t)": 800
-        },
-        "CMakeFiles/__idf_main.dir/ota_coordinator.cpp.su": {},
-        "CMakeFiles/__idf_main.dir/ota_http.cpp.su": {},
-        "CMakeFiles/__idf_main.dir/ota_transport.cpp.su": {
-          "/COMPONENT_MAIN_DIR/ota_transport.cpp :: void tk::ota::run_network_worker(Job&, const NetRuntime&)": 400
-        },
-        "CMakeFiles/__idf_main.dir/ota_writer.cpp.su": {}
+        }
       }
     },
     "esp32c6": {
@@ -399,11 +406,17 @@
           "/COMPONENT_MAIN_DIR/net.cpp :: bool tk::net_start_wifi(const char*, const char*, bool)": 400
         },
         "CMakeFiles/__idf_main.dir/nvs_storage.cpp.su": {},
+        "CMakeFiles/__idf_main.dir/ota_coordinator.cpp.su": {},
+        "CMakeFiles/__idf_main.dir/ota_http.cpp.su": {},
+        "CMakeFiles/__idf_main.dir/ota_transport.cpp.su": {
+          "/COMPONENT_MAIN_DIR/ota_transport.cpp :: void tk::ota::run_network_worker(Job&, const NetRuntime&)": 400
+        },
         "CMakeFiles/__idf_main.dir/ota_update.cpp.su": {
           "/COMPONENT_MAIN_DIR/ota_update.cpp :: OtaCheckResult perform_check(OtaOperation&, unsigned int)": 1568,
           "/COMPONENT_MAIN_DIR/ota_update.cpp :: OtaOperation::OtaOperation(uint64_t, unsigned int, tk::OtaChannel, bool)": 256,
           "/COMPONENT_MAIN_DIR/ota_update.cpp :: void ota_task_impl(OtaOperation&)": 320
         },
+        "CMakeFiles/__idf_main.dir/ota_writer.cpp.su": {},
         "CMakeFiles/__idf_main.dir/provisioning.cpp.su": {
           "/COMPONENT_MAIN_DIR/provisioning.cpp :: SetupPortal portal_open(NvsStorageAdapter&, bool)": 528,
           "/COMPONENT_MAIN_DIR/provisioning.cpp :: esp_err_t save_post_impl(httpd_req_t*, PortalSaveContext&)": 1456,
@@ -413,10 +426,10 @@
         "CMakeFiles/__idf_main.dir/safe_mode.cpp.su": {},
         "CMakeFiles/__idf_main.dir/stack_watch.cpp.su": {},
         "CMakeFiles/__idf_main.dir/syslog.cpp.su": {
+          "/COMPONENT_MAIN_DIR/syslog.cpp :: SendResult syslog_sendto(const sockaddr_in&, const char*, size_t, int*, tk::SyslogRecord)": 352,
           "/COMPONENT_MAIN_DIR/syslog.cpp :: bool syslog_start_impl(NvsStorageAdapter&)": 320,
           "/COMPONENT_MAIN_DIR/syslog.cpp :: void syslog_send(const char*, size_t)": 288,
-          "/COMPONENT_MAIN_DIR/syslog.cpp :: void syslog_task(void*)": 464,
-          "/COMPONENT_MAIN_DIR/syslog.cpp :: SendResult syslog_sendto(const sockaddr_in&, const char*, size_t, int*, tk::SyslogRecord)": 352
+          "/COMPONENT_MAIN_DIR/syslog.cpp :: void syslog_task(void*)": 464
         },
         "CMakeFiles/__idf_main.dir/vehicle_commands.cpp.su": {
           "/COMPONENT_MAIN_DIR/vehicle_commands.cpp :: bool VehicleController::set_charging_amps(int, int)": 480
@@ -430,18 +443,13 @@
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: VehicleController::load_nvs_sessions_()::<lambda(UniversalMessage_Domain, const char*, tk::BleDomain)>": 304,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: bool VehicleController::get_vehicle_status(VehicleStatusResult&, tk::ConnectOrigin, int)": 256,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: static void VehicleController::loop_task_fn_(void*)": 704,
+          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::enqueue_telemetry_round_(tk::TelemetryPollState&)": 256,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::handle_carserver_frame_(const UniversalMessage_RoutableMessage&)": 2048,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::handle_session_info_frame_(const UniversalMessage_RoutableMessage&)": 272,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::handle_vcsec_frame_(const UniversalMessage_RoutableMessage&)": 816,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::process_pending_telemetry_()": 1408,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::process_rx_frame_(const uint8_t*, size_t)": 800
-        },
-        "CMakeFiles/__idf_main.dir/ota_coordinator.cpp.su": {},
-        "CMakeFiles/__idf_main.dir/ota_http.cpp.su": {},
-        "CMakeFiles/__idf_main.dir/ota_transport.cpp.su": {
-          "/COMPONENT_MAIN_DIR/ota_transport.cpp :: void tk::ota::run_network_worker(Job&, const NetRuntime&)": 400
-        },
-        "CMakeFiles/__idf_main.dir/ota_writer.cpp.su": {}
+        }
       }
     }
   }

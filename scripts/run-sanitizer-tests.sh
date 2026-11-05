@@ -178,6 +178,9 @@ ASAN_OPTIONS="$asan_options" UBSAN_OPTIONS="$ubsan_options" \
     --seed 0x5445534c414b4559 --iterations 20000
 
 ASAN_OPTIONS="$asan_options" UBSAN_OPTIONS="$ubsan_options" \
+    LSAN_OPTIONS="$lsan_options" CC="$CC" CXX="$CXX" MQTT_JSON_SANITIZE=1 bash test/run-mqtt-json-publish-tests.sh
+
+ASAN_OPTIONS="$asan_options" UBSAN_OPTIONS="$ubsan_options" \
     LSAN_OPTIONS="$lsan_options" CXX="$CXX" python3 test/test_led_driver_contract.py --sanitize
 
 ASAN_OPTIONS="$asan_options" UBSAN_OPTIONS="$ubsan_options" \
