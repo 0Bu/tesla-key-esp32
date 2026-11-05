@@ -54,6 +54,247 @@ NANOPB_GENERATED_SOURCES = {
     "_deps/nanopb-src/" + name: digest
     for name, digest in NANOPB_PROVENANCE["files"].items() if name.endswith(".c")
 }
+# Closed ESP-IDF v6.1 C/C++ optimisation exceptions. Each filename is relative to
+# components/mbedtls and is bound to its exact SDK CMake object owner. These are
+# application objects, not bootloader policy. Unknown SDK crypto sources fail closed.
+SDK_CRYPTO_SIZE_RELATIVE_OBJECTS = {
+    **{
+        "" + name: "esp-idf/mbedtls/CMakeFiles/__idf_mbedtls.dir/" + name + ".obj"
+        for name in (
+            "esp_crt_bundle/esp_crt_bundle.c",
+            "port/esp_mem.c",
+            "port/psa_crypto_storage/esp_psa_key_file.c",
+        )
+    },
+    **{
+        "mbedtls/tf-psa-crypto/drivers/everest/" + name: "esp-idf/mbedtls/mbedtls/tf-psa-crypto/drivers/everest/CMakeFiles/everest.dir/" + name + ".obj"
+        for name in (
+            "library/Hacl_Curve25519_joined.c",
+            "library/x25519.c",
+        )
+    },
+    **{
+        "mbedtls/tf-psa-crypto/drivers/p256-m/" + name: "esp-idf/mbedtls/mbedtls/tf-psa-crypto/drivers/p256-m/CMakeFiles/p256-m.dir/" + name + ".obj"
+        for name in (
+            "p256-m/p256-m.c",
+            "p256-m_driver_entrypoints.c",
+        )
+    },
+    **{
+        "mbedtls/tf-psa-crypto/drivers/builtin/" + name: "esp-idf/mbedtls/mbedtls/tf-psa-crypto/drivers/builtin/CMakeFiles/builtin.dir/" + name + ".obj"
+        for name in (
+            "src/aes.c",
+            "src/aesce.c",
+            "src/aesni.c",
+            "src/aria.c",
+            "src/bignum.c",
+            "src/bignum_core.c",
+            "src/bignum_mod.c",
+            "src/bignum_mod_raw.c",
+            "src/block_cipher.c",
+            "src/camellia.c",
+            "src/ccm.c",
+            "src/chacha20.c",
+            "src/chacha20_neon.c",
+            "src/chachapoly.c",
+            "src/cipher.c",
+            "src/cipher_wrap.c",
+            "src/cmac.c",
+            "src/ctr_drbg.c",
+            "src/ecdsa.c",
+            "src/ecjpake.c",
+            "src/ecp.c",
+            "src/ecp_curves.c",
+            "src/ecp_curves_new.c",
+            "src/entropy.c",
+            "src/entropy_poll.c",
+            "src/gcm.c",
+            "src/hmac_drbg.c",
+            "src/md5.c",
+            "src/poly1305.c",
+            "src/psa_crypto_aead.c",
+            "src/psa_crypto_cipher.c",
+            "src/psa_crypto_ecp.c",
+            "src/psa_crypto_ffdh.c",
+            "src/psa_crypto_hash.c",
+            "src/psa_crypto_mac.c",
+            "src/psa_crypto_pake.c",
+            "src/psa_crypto_rsa.c",
+            "src/psa_crypto_xof.c",
+            "src/psa_util_internal.c",
+            "src/ripemd160.c",
+            "src/rsa.c",
+            "src/rsa_alt_helpers.c",
+            "src/sha1.c",
+            "src/sha256.c",
+            "src/sha3.c",
+            "src/sha512.c",
+        )
+    },
+    **{
+        "mbedtls/tf-psa-crypto/extras/" + name: "esp-idf/mbedtls/mbedtls/tf-psa-crypto/extras/CMakeFiles/extras.dir/" + name + ".obj"
+        for name in (
+            "lmots.c",
+            "lms.c",
+            "md.c",
+            "nist_kw.c",
+            "pk.c",
+            "pk_ecc.c",
+            "pk_rsa.c",
+            "pk_wrap.c",
+            "pkparse.c",
+            "pkwrite.c",
+        )
+    },
+    **{
+        "mbedtls/tf-psa-crypto/platform/" + name: "esp-idf/mbedtls/mbedtls/tf-psa-crypto/platform/CMakeFiles/platform.dir/" + name + ".obj"
+        for name in (
+            "memory_buffer_alloc.c",
+            "platform.c",
+            "platform_util.c",
+            "threading.c",
+        )
+    },
+    **{
+        "mbedtls/tf-psa-crypto/utilities/" + name: "esp-idf/mbedtls/mbedtls/tf-psa-crypto/utilities/CMakeFiles/utilities.dir/" + name + ".obj"
+        for name in (
+            "asn1parse.c",
+            "asn1write.c",
+            "base64.c",
+            "constant_time.c",
+            "oid.c",
+            "pem.c",
+            "pkcs5.c",
+        )
+    },
+    **{
+        "mbedtls/tf-psa-crypto/core/" + name: "esp-idf/mbedtls/mbedtls/tf-psa-crypto/core/CMakeFiles/tfpsacrypto.dir/" + name + ".obj"
+        for name in (
+            "psa_crypto.c",
+            "psa_crypto_client.c",
+            "psa_crypto_driver_wrappers_no_static.c",
+            "psa_crypto_random.c",
+            "psa_crypto_slot_management.c",
+            "psa_crypto_storage.c",
+            "psa_its_file.c",
+            "psa_util.c",
+            "tf_psa_crypto_config.c",
+            "tf_psa_crypto_version.c",
+        )
+    },
+    **{
+        "mbedtls/library/" + name: "esp-idf/mbedtls/mbedtls/library/CMakeFiles/mbedx509.dir/" + name + ".obj"
+        for name in (
+            "error.c",
+            "mbedtls_config.c",
+            "pkcs7.c",
+            "x509.c",
+            "x509_create.c",
+            "x509_crl.c",
+            "x509_crt.c",
+            "x509_csr.c",
+            "x509_oid.c",
+            "x509write.c",
+            "x509write_crt.c",
+            "x509write_csr.c",
+        )
+    },
+    **{
+        "mbedtls/library/" + name: "esp-idf/mbedtls/mbedtls/library/CMakeFiles/mbedtls.dir/" + name + ".obj"
+        for name in (
+            "debug.c",
+            "mps_reader.c",
+            "mps_trace.c",
+            "ssl_cache.c",
+            "ssl_ciphersuites.c",
+            "ssl_client.c",
+            "ssl_cookie.c",
+            "ssl_debug_helpers_generated.c",
+            "ssl_msg.c",
+            "ssl_ticket.c",
+            "ssl_tls.c",
+            "ssl_tls12_client.c",
+            "ssl_tls12_server.c",
+            "ssl_tls13_client.c",
+            "ssl_tls13_generic.c",
+            "ssl_tls13_keys.c",
+            "ssl_tls13_server.c",
+            "timing.c",
+            "version.c",
+            "version_features.c",
+        )
+    },
+}
+# SDK port files are added from absolute paths to upstream targets by IDF CMake.
+# CMake embeds that exact absolute SDK source path in these object suffixes.
+SDK_CRYPTO_SIZE_ABSOLUTE_OWNERS = {
+    **{
+        name: "esp-idf/mbedtls/mbedtls/tf-psa-crypto/core/CMakeFiles/tfpsacrypto.dir/"
+        for name in (
+            "port/aes/dma/esp_aes_dma_core.c",
+            "port/aes/dma/esp_aes_gdma_impl.c",
+            "port/aes/esp_aes.c",
+            "port/aes/esp_aes_common.c",
+            "port/aes/esp_aes_gcm.c",
+            "port/aes/esp_aes_xts.c",
+            "port/bignum/bignum_alt.c",
+            "port/bignum/esp_bignum.c",
+            "port/crypto_shared_gdma/esp_crypto_shared_gdma.c",
+            "port/esp_hardware.c",
+            "port/esp_hmac_pbkdf2.c",
+            "port/psa_crypto_storage/esp_psa_its.c",
+            "port/psa_driver/esp_aes/psa_crypto_driver_esp_aes.c",
+            "port/psa_driver/esp_aes/psa_crypto_driver_esp_aes_gcm.c",
+            "port/psa_driver/esp_mac/psa_crypto_driver_esp_cmac.c",
+            "port/psa_driver/esp_mac/psa_crypto_driver_esp_hmac_opaque.c",
+            "port/psa_driver/esp_mac/psa_crypto_driver_esp_hmac_transparent.c",
+            "port/psa_driver/esp_md/psa_crypto_driver_esp_md5.c",
+            "port/psa_driver/esp_rsa_ds/psa_crypto_driver_esp_rsa_ds.c",
+            "port/psa_driver/esp_rsa_ds/psa_crypto_driver_esp_rsa_ds_utilities.c",
+            "port/psa_driver/esp_sha/core/psa_crypto_driver_esp_sha1.c",
+            "port/psa_driver/esp_sha/core/psa_crypto_driver_esp_sha256.c",
+            "port/psa_driver/esp_sha/core/psa_crypto_driver_esp_sha512.c",
+            "port/psa_driver/esp_sha/parallel_engine/psa_crypto_driver_esp_sha1.c",
+            "port/psa_driver/esp_sha/parallel_engine/psa_crypto_driver_esp_sha256.c",
+            "port/psa_driver/esp_sha/parallel_engine/psa_crypto_driver_esp_sha512.c",
+            "port/psa_driver/esp_sha/psa_crypto_driver_esp_sha.c",
+            "port/sha/core/esp_sha_gdma_impl.c",
+            "port/sha/core/sha.c",
+            "port/sha/esp_sha.c",
+            "port/sha/parallel_engine/sha.c",
+        )
+    },
+    **{
+        name: "esp-idf/mbedtls/mbedtls/library/CMakeFiles/mbedtls.dir/"
+        for name in (
+            "port/esp_platform_time.c",
+            "port/esp_psa_crypto_init.c",
+            "port/esp_timing.c",
+            "port/mbedtls_debug.c",
+            "port/net_sockets.c",
+        )
+    },
+    **{
+        name: "esp-idf/mbedtls/mbedtls/tf-psa-crypto/drivers/builtin/CMakeFiles/builtin.dir/"
+        for name in (
+            "port/ecc/ecc_alt.c",
+            "port/ecc/esp_ecc.c",
+        )
+    },
+}
+# PQCP is absent from IDF v6.1 mbedtls_compile_targets and retains the global -Og.
+SDK_CRYPTO_DEBUG_RELATIVE_OBJECTS = {
+    "mbedtls/tf-psa-crypto/drivers/pqcp/src/" + name:
+        "esp-idf/mbedtls/mbedtls/tf-psa-crypto/drivers/pqcp/"
+        "CMakeFiles/pqcp.dir/src/" + name + ".obj"
+    for name in ("psa_crypto_mldsa.c", "wrap_mldsa_native.c")
+}
+SDK_RISCV_LIBC_PERFORMANCE_SOURCES = {
+    "src/port/riscv/memcpy.c", "src/port/riscv/memmove.c",
+    "src/port/riscv/strcpy.c", "src/string/memcmp.c",
+    "src/string/strncmp.c", "src/string/strncpy.c",
+}
+
 # ESP-IDF v6.1 default full bundle: gen_crt_bundle.py over its cacrt_all.pem + cacrt_local.pem.
 X509_BUNDLE_SHA256 = "b3e27ad072b398df1404c73493e6441ef4929e523f944cc37423e0e4b86c6fb0"
 FORBIDDEN_FIRMWARE_FLAG_PREFIXES = (
@@ -1010,6 +1251,63 @@ def validate_local_non_main_source(
             f"repository-local firmware source is outside main/ and reviewed dependencies: {file_name}"
         )
     raise SemanticsError(f"untrusted external firmware source: {file_name}")
+
+
+def validate_effective_optimization(
+    file_name: str,
+    source: Path,
+    output: str,
+    tokens: list[str],
+    target: str,
+    config: dict[str, str],
+    build_root: Path,
+    idf_root: Path | None,
+    project_name: str,
+) -> None:
+    """Check every application C/C++ vector, with closed SDK source/owner exceptions."""
+    expected = ["-Og"]
+    anchor = f"project_elf_src_{target}.c"
+    sdk_relative = relative_to(source, idf_root / "components") if idf_root else None
+    if relative_to(source, build_root) == Path(anchor):
+        # The existing source/output, empty-byte and producer checks admit only this anchor.
+        if output != f"CMakeFiles/{project_name}.elf.dir/{anchor}.obj":
+            raise SemanticsError(f"generated project ELF source has unexpected output: {file_name}")
+        expected = []
+    elif sdk_relative is not None and sdk_relative.parts[0] == "mbedtls":
+        crypto_source = sdk_relative.relative_to("mbedtls").as_posix()
+        owner = SDK_CRYPTO_SIZE_ABSOLUTE_OWNERS.get(crypto_source)
+        expected_output = SDK_CRYPTO_SIZE_RELATIVE_OBJECTS.get(crypto_source)
+        if owner is not None:
+            expected_output = owner + source.as_posix().lstrip("/") + ".obj"
+        if expected_output is not None:
+            expected = ["-Og", "-Os"]
+        else:
+            expected_output = SDK_CRYPTO_DEBUG_RELATIVE_OBJECTS.get(crypto_source)
+        if expected_output is None:
+            raise SemanticsError(f"unreviewed SDK crypto optimisation source: {file_name}")
+        if output != expected_output:
+            raise SemanticsError(f"SDK crypto source has unexpected output owner: {file_name}")
+    elif output.startswith("esp-idf/mbedtls/"):
+        raise SemanticsError(f"crypto optimisation owner lacks its exact SDK source: {file_name}")
+    elif (
+        sdk_relative is not None and sdk_relative.parts[0] == "esp_libc"
+        and sdk_relative.relative_to("esp_libc").as_posix() in SDK_RISCV_LIBC_PERFORMANCE_SOURCES
+    ):
+        if target not in ("esp32c3", "esp32c6") or config.get("CONFIG_LIBC_OPTIMIZED_MISALIGNED_ACCESS") != "y":
+            raise SemanticsError(f"SDK libc performance source has unexpected target/configuration: {file_name}")
+        expected_output = (
+            "esp-idf/esp_libc/CMakeFiles/__idf_esp_libc.dir/"
+            + sdk_relative.relative_to("esp_libc").as_posix() + ".obj"
+        )
+        if output != expected_output:
+            raise SemanticsError(f"SDK libc performance source has unexpected output owner: {file_name}")
+        expected = ["-Og", "-O2"]
+    optimisation = [token for token in tokens if token.startswith("-O")]
+    if optimisation != expected:
+        raise SemanticsError(
+            f"{file_name} effective optimisation must be exactly {' '.join(expected) or '(none)'}, "
+            f"got {optimisation!r}"
+        )
 
 
 def pinned_tool(path_text: str, root: Path, expected_name: str, label: str) -> Path:
@@ -2021,15 +2319,14 @@ def validate(
         firmware_outputs[output] = source
         firmware_compile_commands[output] = tuple(raw_tokens)
 
+        if source.suffix.lower() in MAIN_SOURCE_SUFFIXES:
+            validate_effective_optimization(
+                file_name, source, output, tokens, target, config, build_root, idf_root, project_name
+            )
         if not is_literal_main_source:
             continue
         if source.suffix.lower() not in MAIN_SOURCE_SUFFIXES:
             raise SemanticsError(f"literal main source is not C/C++: {file_name}")
-        optimisation = [token for token in tokens if token.startswith("-O")]
-        if optimisation != ["-Og"]:
-            raise SemanticsError(
-                f"{file_name} effective optimisation must be exactly -Og, got {optimisation!r}"
-            )
         if tokens.count("-fstack-usage") != 1:
             raise SemanticsError(
                 f"{file_name} must be compiled exactly once with -fstack-usage"
@@ -2733,6 +3030,189 @@ def self_test_fast_paths() -> None:
             raise AssertionError("duplicate header dependency was accepted after path caching")
 
 
+def self_test_optimization_contract() -> None:
+    """Exercise validate() with matching compile-database and mocked actual Ninja vectors."""
+    with tempfile.TemporaryDirectory() as directory:
+        work = Path(directory).resolve()
+        root, build, sdk = work / "source", work / "build", work / "sdk"
+        (root / "main").mkdir(parents=True)
+        (root / "test").mkdir()
+        (build / "config").mkdir(parents=True)
+        (sdk / "components").mkdir(parents=True)
+        main_source = root / "main/sample.cpp"
+        main_source.write_text("int sample;\n", encoding="utf-8")
+        (root / "main/CMakeLists.txt").write_text(
+            'idf_component_register(\n    SRCS\n        "sample.cpp"\n'
+            '    INCLUDE_DIRS\n        "."\n)\n', encoding="utf-8"
+        )
+        (root / "test/test_runtime_boundary_contract.py").write_text(
+            "REVIEWED_LOCAL_CODE_SUFFIXES = ('.h', '.hpp', '.inc', '.inl')\n", encoding="utf-8"
+        )
+        commands, sdkconfig = build / "compile_commands.json", work / "sdkconfig"
+        main_output = "esp-idf/main/CMakeFiles/__idf_main.dir/sample.cpp.obj"
+
+        def sdk_source(relative: str) -> Path:
+            path = sdk / "components" / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("int fixture;\n", encoding="utf-8")
+            return path
+
+        def check(
+            target: str, rows: list[tuple[Path, str, list[str]]], *,
+            error: str | None = None, libc_selector: str | None = "y",
+        ) -> None:
+            config = (
+                f'CONFIG_IDF_TARGET="{target}"\nCONFIG_COMPILER_OPTIMIZATION_DEBUG=y\n'
+                "CONFIG_MBEDTLS_COMPILER_OPTIMIZATION_SIZE=y\n"
+            )
+            if libc_selector == "y":
+                config += "CONFIG_LIBC_OPTIMIZED_MISALIGNED_ACCESS=y\n"
+            elif libc_selector == "n":
+                config += "# CONFIG_LIBC_OPTIMIZED_MISALIGNED_ACCESS is not set\n"
+            sdkconfig.write_text(config, encoding="utf-8")
+            (build / "config/sdkconfig.h").write_text(
+                "#pragma once\n" + "".join(
+                    f"#define {name} {('1' if value == 'y' else value)}\n"
+                    for line in config.splitlines() if not line.startswith("#")
+                    for name, value in (line.split("=", 1),)
+                ), encoding="utf-8",
+            )
+            database = []
+            for source, output, flags in [
+                (main_source, main_output, ["-Og", "-fstack-usage"]), *rows
+            ]:
+                compiler = (
+                    EXPECTED_CXX_COMPILER[target] if source.suffix == ".cpp"
+                    else EXPECTED_C_COMPILER[target]
+                )
+                database.append({
+                    "directory": str(build), "file": str(source), "output": output,
+                    "arguments": [f"/opt/esp/tools/fixture/bin/{compiler}", *flags,
+                                  "-o", output, "-c", str(source)],
+                })
+            commands.write_text(json.dumps(database), encoding="utf-8")
+            raw_commands = {entry["output"]: tuple(entry["arguments"]) for entry in database}
+            ninja = {output: expected_ninja_command(output, tokens)
+                     for output, tokens in raw_commands.items()}
+            # Negative flag cases must have the same actual command, not fail due to DB drift.
+            validate_actual_compile_commands(ninja, raw_commands)
+
+            def actual_loader(_build: Path, outputs: tuple[str, ...]):
+                return {output: ninja[output] for output in outputs}
+
+            def dependencies(_build: Path, outputs: tuple[str, ...]):
+                sources = {entry["output"]: Path(entry["file"]) for entry in database}
+                return {output: (sources[output], build / "config/sdkconfig.h") for output in outputs}
+
+            try:
+                count = validate(
+                    target, sdkconfig, commands, root, dependency_loader=dependencies,
+                    command_loader=actual_loader, graph_validator=None,
+                )
+            except SemanticsError as exc:
+                assert error is not None and error in str(exc), (target, rows, error, str(exc))
+            else:
+                assert error is None and count == 1, (target, rows, error, count)
+
+        old_idf = os.environ.get("IDF_PATH")
+        os.environ["IDF_PATH"] = str(sdk)
+        try:
+            ordinary = sdk_source("esp_system/ordinary.c")
+            ordinary_owner = "esp-idf/esp_system/CMakeFiles/__idf_esp_system.dir/ordinary.c.obj"
+            crypto_rows = [
+                (sdk_source("mbedtls/port/esp_mem.c"),
+                 "esp-idf/mbedtls/CMakeFiles/__idf_mbedtls.dir/port/esp_mem.c.obj", ["-Og", "-Os"]),
+                (sdk_source("mbedtls/mbedtls/library/ssl_tls.c"),
+                 "esp-idf/mbedtls/mbedtls/library/CMakeFiles/mbedtls.dir/ssl_tls.c.obj", ["-Og", "-Os"]),
+                (sdk_source("mbedtls/mbedtls/library/x509.c"),
+                 "esp-idf/mbedtls/mbedtls/library/CMakeFiles/mbedx509.dir/x509.c.obj", ["-Og", "-Os"]),
+                (sdk_source("mbedtls/mbedtls/tf-psa-crypto/core/psa_crypto.c"),
+                 "esp-idf/mbedtls/mbedtls/tf-psa-crypto/core/CMakeFiles/tfpsacrypto.dir/psa_crypto.c.obj",
+                 ["-Og", "-Os"]),
+                (sdk_source("mbedtls/mbedtls/tf-psa-crypto/drivers/builtin/src/aes.c"),
+                 "esp-idf/mbedtls/mbedtls/tf-psa-crypto/drivers/builtin/"
+                 "CMakeFiles/builtin.dir/src/aes.c.obj", ["-Og", "-Os"]),
+            ]
+            port = sdk_source("mbedtls/port/aes/esp_aes.c")
+            crypto_rows.append((
+                port, "esp-idf/mbedtls/mbedtls/tf-psa-crypto/core/CMakeFiles/tfpsacrypto.dir/"
+                + port.as_posix().lstrip("/") + ".obj", ["-Og", "-Os"],
+            ))
+            pqcp_rows = [
+                (sdk_source("mbedtls/mbedtls/tf-psa-crypto/drivers/pqcp/src/" + name),
+                 "esp-idf/mbedtls/mbedtls/tf-psa-crypto/drivers/pqcp/"
+                 "CMakeFiles/pqcp.dir/src/" + name + ".obj", ["-Og"])
+                for name in ("psa_crypto_mldsa.c", "wrap_mldsa_native.c")
+            ]
+            libc_rows = [
+                (sdk_source("esp_libc/" + name),
+                 "esp-idf/esp_libc/CMakeFiles/__idf_esp_libc.dir/" + name + ".obj", ["-Og", "-O2"])
+                for name in (
+                    "src/port/riscv/memcpy.c", "src/port/riscv/memmove.c", "src/port/riscv/strcpy.c",
+                    "src/string/memcmp.c", "src/string/strncmp.c", "src/string/strncpy.c",
+                )
+            ]
+            for target in TARGETS:
+                anchor = build / f"project_elf_src_{target}.c"
+                anchor.write_bytes(b"")
+                owner = f"CMakeFiles/tesla-key-esp32.elf.dir/{anchor.name}.obj"
+                check(target, [(ordinary, ordinary_owner, ["-Og"]), *crypto_rows, *pqcp_rows,
+                               (anchor, owner, [])], libc_selector=None)
+                check(target, [(anchor, owner, ["-Og"])], error="effective optimisation")
+                repair_owner = f"CMakeFiles/tesla-key-config-repair.elf.dir/{anchor.name}.obj"
+                check(target, [(anchor, repair_owner, [])], error="unexpected output")
+                for flags in ([], ["-Os"], ["-Og", "-O2"], ["-Og", "-Og"]):
+                    check(target, [(ordinary, ordinary_owner, flags)], error="effective optimisation")
+                for source, output, _ in crypto_rows:
+                    for flags in (["-Og"], ["-Os"], ["-Os", "-Og"], ["-Og", "-Os", "-Os"],
+                                  ["-Og", "-O3", "-Os"], ["-Og", "-Og", "-Os"]):
+                        check(target, [(source, output, flags)], error="effective optimisation")
+                    check(target, [(source, "evil/" + output, ["-Og", "-Os"])],
+                          error="unexpected output owner")
+                for source, output, _ in pqcp_rows:
+                    for flags in (["-Og", "-Os"], ["-Os"], ["-Og", "-Og"], []):
+                        check(target, [(source, output, flags)], error="effective optimisation")
+                    check(target, [(source, ordinary_owner, ["-Og"])], error="unexpected output owner")
+                for source, output, flags in libc_rows:
+                    if target not in ("esp32c3", "esp32c6"):
+                        check(target, [(source, output, flags)], error="unexpected target/configuration")
+                        continue
+                    check(target, [(source, output, flags)])
+                    for selector in (None, "n"):
+                        check(target, [(source, output, flags)], libc_selector=selector,
+                              error="unexpected target/configuration")
+                    for bad in (["-Og"], ["-O2"], ["-O2", "-Og"], ["-Og", "-O2", "-O2"],
+                                ["-Og", "-Os", "-O2"]):
+                        check(target, [(source, output, bad)], error="effective optimisation")
+                    check(target, [(source, "evil/" + output, flags)], error="unexpected output owner")
+
+            crypto_source, crypto_owner, crypto_flags = crypto_rows[0]
+            fake_sdk = work / "sdk-fake/components/mbedtls/port/esp_mem.c"
+            fake_sdk.parent.mkdir(parents=True)
+            fake_sdk.write_text("int fake;\n", encoding="utf-8")
+            check("esp32c3", [(fake_sdk, crypto_owner, crypto_flags)], error="untrusted external source")
+            fake_local = root / "managed_components/espressif__cjson/mbedtls/port/esp_mem.c"
+            fake_local.parent.mkdir(parents=True)
+            fake_local.write_text("int fake;\n", encoding="utf-8")
+            check("esp32c3", [(fake_local, crypto_owner, crypto_flags)], error="unexpected output owner")
+            for flags in (["-Og"], ["-Og", "-Os"]):
+                unknown = sdk_source("mbedtls/mbedtls/tf-psa-crypto/drivers/pqcp/src/unknown.c")
+                check("esp32c3", [(unknown, pqcp_rows[0][1], flags)], error="unreviewed SDK crypto")
+            check("esp32c3", [(ordinary, pqcp_rows[0][1], ["-Og"])], error="lacks its exact SDK source")
+            unknown_libc = sdk_source("esp_libc/src/string/not_memcpy.c")
+            check("esp32c3", [(unknown_libc, libc_rows[0][1], ["-Og", "-O2"])],
+                  error="effective optimisation")
+            wrong_anchor = build / "project_elf_src_other.c"
+            wrong_anchor.write_bytes(b"")
+            check("esp32c3", [(wrong_anchor, "CMakeFiles/tesla-key-esp32.elf.dir/"
+                              "project_elf_src_other.c.obj", [])], error="unreviewed build-generated")
+        finally:
+            if old_idf is None:
+                os.environ.pop("IDF_PATH", None)
+            else:
+                os.environ["IDF_PATH"] = old_idf
+
+
 def self_test() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
@@ -3431,7 +3911,7 @@ def self_test() -> None:
                             "project_elf_src_esp32c3.c.obj"
                         ),
                         "arguments": [
-                            sample_c_compiler, "-Og", "-o",
+                            sample_c_compiler, "-o",
                             "CMakeFiles/tesla-key-esp32.elf.dir/"
                             "project_elf_src_esp32c3.c.obj",
                             "-c", str(generated),
@@ -3545,6 +4025,7 @@ def self_test() -> None:
         else:
             raise AssertionError("wrong effective target was accepted")
     self_test_fast_paths()
+    self_test_optimization_contract()
     print("effective build semantics self-test: PASS")
 
 

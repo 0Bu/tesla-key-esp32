@@ -29,8 +29,35 @@ bool Coordinator::start(const char* url,HttpLimits limits,bool image,
 bool Coordinator::receive(void* context,const std::uint8_t* bytes,std::size_t n) noexcept {
     return static_cast<Coordinator*>(context)->body(bytes,n);
 }
+bool Coordinator::start_upload(std::uint64_t bytes) noexcept {
+    if (!slot_.owns(job_) || lease_released_ || outcome_ != Outcome::Idle || !alive() ||
+        budget_.started() != job_.started_ms || budget_.deadline() > job_.deadline_ms ||
+        bytes < effects_.prefix_bytes || bytes > 0x1f0000 ||
+        !effects_.prefix_bytes || effects_.prefix_bytes > prefix_.size() ||
+        !effects_.check_prefix || !effects_.begin || !effects_.write || !effects_.end ||
+        !effects_.select_boot || !effects_.abort || !effects_.quiescent ||
+        !effects_.release_lease || !budget_.tighten(bytes)) return false;
+    image_ = true;
+    upload_expected_ = bytes;
+    outcome_ = Outcome::Working;
+    return true;
+}
+bool Coordinator::upload(const std::uint8_t* data, std::size_t n) noexcept {
+    if (!upload_expected_ || outcome_ != Outcome::Working) return false;
+    if (!data || !n || n > kBlockBytes || n > upload_expected_ - upload_received_) {
+        fail(Outcome::ProtocolError); return false;
+    }
+    if (!body(data,n)) return false;
+    upload_received_ += n;
+    return true;
+}
+void Coordinator::finish_upload() noexcept {
+    if (!upload_expected_ || outcome_ != Outcome::Working) return;
+    if (upload_received_ != upload_expected_) { fail(Outcome::ProtocolError); return; }
+    finish_image();
+}
 bool Coordinator::body(const std::uint8_t* bytes,std::size_t n) noexcept {
-    if (image_ && framing_->has_declared_size() && !tightened_) {
+    if (image_ && framing_ && framing_->has_declared_size() && !tightened_) {
         tightened_ = true;
         if (!budget_.tighten(framing_->declared_size() + image_budget_overhead_)) { fail(Outcome::ProtocolError); return false; }
     }

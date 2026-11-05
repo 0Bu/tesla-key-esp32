@@ -58,6 +58,8 @@ static void diag_append_(const char* data, size_t len) {
     const auto mtx = s_mtx.load(std::memory_order_acquire);
     if (len == 0) return;
     if (!mtx) { s_dropped_lines.fetch_add(1, std::memory_order_relaxed); return; }
+    // Qualify existing application markers and library formats before taking the ring lock.
+    // Only this copied ring stream is normalized; Serial/Syslog still use the original bytes.
     const size_t library_end = tk::diag_library_capture_content_end({data, len});
     tk::SemGuard g(mtx, 0);  // capture is best-effort; never wait in a producer's log callback
     if (!g) { s_dropped_lines.fetch_add(1, std::memory_order_relaxed); return; }

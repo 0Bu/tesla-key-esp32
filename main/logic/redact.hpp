@@ -236,11 +236,22 @@ inline bool diag_library_identifier_line(std::string_view line) noexcept {
     return false;
 }
 
+// Reuse the export policy's application markers, including matches after an injected
+// newline. A separate format/owner table could drift and leave a known private value
+// outside capture protection. Marker-free multiline records retain their original framing.
+inline bool diag_application_identifier_line(std::string_view record) noexcept {
+    for (const auto& rule : kDiagRedactions) {
+        if (record.find(rule.marker) != std::string_view::npos) return true;
+    }
+    return false;
+}
+
 // A qualified V1 log callback contains the entire formatted record. Keep embedded value
 // newlines from becoming separate, markerless ring lines. The original callback buffer still
 // feeds private Serial/Syslog; only copied ring bytes change, with no additional storage.
+// The historical helper name now covers application markers as well as library formats.
 inline std::size_t diag_library_capture_content_end(std::string_view record) noexcept {
-    if (!diag_library_identifier_line(record)) return 0;
+    if (!diag_library_identifier_line(record) && !diag_application_identifier_line(record)) return 0;
     std::size_t end = record.size();
     while (end != 0 && (record[end - 1] == '\r' || record[end - 1] == '\n')) --end;
     return end;

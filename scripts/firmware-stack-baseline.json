@@ -113,9 +113,7 @@
         "CMakeFiles/__idf_main.dir/ota_transport.cpp.su": {
           "/COMPONENT_MAIN_DIR/ota_transport.cpp :: void tk::ota::run_network_worker(Job&, const NetRuntime&)": 400
         },
-        "CMakeFiles/__idf_main.dir/ota_writer.cpp.su": {
-          "/COMPONENT_MAIN_DIR/ota_writer.cpp :: static tk::ota::Effect tk::ota::RawWriter::prefix(void*, const uint8_t*, std::size_t)": 336
-        }
+        "CMakeFiles/__idf_main.dir/ota_writer.cpp.su": {}
       }
     },
     "esp32s3": {
@@ -227,9 +225,7 @@
         "CMakeFiles/__idf_main.dir/ota_transport.cpp.su": {
           "/COMPONENT_MAIN_DIR/ota_transport.cpp :: void tk::ota::run_network_worker(Job&, const NetRuntime&)": 400
         },
-        "CMakeFiles/__idf_main.dir/ota_writer.cpp.su": {
-          "/COMPONENT_MAIN_DIR/ota_writer.cpp :: static tk::ota::Effect tk::ota::RawWriter::prefix(void*, const uint8_t*, std::size_t)": 336
-        }
+        "CMakeFiles/__idf_main.dir/ota_writer.cpp.su": {}
       }
     },
     "esp32c3": {
@@ -336,9 +332,7 @@
         "CMakeFiles/__idf_main.dir/ota_transport.cpp.su": {
           "/COMPONENT_MAIN_DIR/ota_transport.cpp :: void tk::ota::run_network_worker(Job&, const NetRuntime&)": 400
         },
-        "CMakeFiles/__idf_main.dir/ota_writer.cpp.su": {
-          "/COMPONENT_MAIN_DIR/ota_writer.cpp :: static tk::ota::Effect tk::ota::RawWriter::prefix(void*, const uint8_t*, std::size_t)": 320
-        }
+        "CMakeFiles/__idf_main.dir/ota_writer.cpp.su": {}
       }
     },
     "esp32c6": {
@@ -447,9 +441,7 @@
         "CMakeFiles/__idf_main.dir/ota_transport.cpp.su": {
           "/COMPONENT_MAIN_DIR/ota_transport.cpp :: void tk::ota::run_network_worker(Job&, const NetRuntime&)": 400
         },
-        "CMakeFiles/__idf_main.dir/ota_writer.cpp.su": {
-          "/COMPONENT_MAIN_DIR/ota_writer.cpp :: static tk::ota::Effect tk::ota::RawWriter::prefix(void*, const uint8_t*, std::size_t)": 320
-        }
+        "CMakeFiles/__idf_main.dir/ota_writer.cpp.su": {}
       }
     }
   }

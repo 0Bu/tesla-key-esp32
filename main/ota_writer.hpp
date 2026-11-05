@@ -11,6 +11,7 @@ struct ImagePolicy {
     char expected[32]{}, current[32]{};
     unsigned target_pr{0};
     tk::OtaChannel channel{tk::OtaChannel::Release};
+    bool direct_upload{false};
 };
 // Actual raw-OTA adapter. Only the application coordinator receives its Effects table.
 // The caller supplies the existing owner-checked Ota-lease callback, never the network worker.

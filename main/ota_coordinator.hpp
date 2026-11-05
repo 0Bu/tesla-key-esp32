@@ -36,6 +36,11 @@ public:
                BodyCallback metadata_sink = nullptr, void* sink_context = nullptr,
                bool optional_metadata = false) noexcept;
     Outcome poll() noexcept; // Caller runs it independently of the network worker.
+    // HTTP upload uses the same bounded prefix/raw writer/final verification path,
+    // without a TLS worker or a manifest. The caller owns the async request exclusively.
+    bool start_upload(std::uint64_t bytes) noexcept;
+    bool upload(const std::uint8_t*, std::size_t) noexcept;
+    void finish_upload() noexcept;
     void cancel(Outcome reason = Outcome::Deadline) noexcept;
     void finish_metadata_operation() noexcept;
     Outcome outcome() const noexcept { return outcome_; }
@@ -69,5 +74,6 @@ private:
     bool redirect_wait_{false}, tightened_{false};
     bool optional_metadata_{false}, metadata_failed_{false};
     const std::uint64_t image_budget_overhead_;
+    std::uint64_t upload_expected_{0}, upload_received_{0};
 };
 } // namespace tk::ota

@@ -170,11 +170,15 @@ The effective-build validator closes every C/C++ compilation unit to reviewed so
 pinned compilers/includes. It verifies generated producers, Ninja commands/dependencies, archive
 objects, linker response files and the exact ELF-to-image chain. One literal main-component `SRCS`
 registration is permitted; hidden attachment, escaped sources or forced includes fail.
-The gate checks that every main-component unit compiles with `-Og` and emits `-fstack-usage`;
-the other components are covered by the checked `CONFIG_COMPILER_OPTIMIZATION_DEBUG=y` Kconfig
-value, Mbed TLS/TF-PSA-Crypto `-Os` is checked as the effective Kconfig value, and the bootloader,
-which builds with size optimization, is compared only between independent builds. Main privately
-enforces C++17 and return-value/format warnings.
+The gate checks effective optimization tokens for every application C/C++ unit. Main and ordinary
+components require exactly `-Og`; main also requires one `-fstack-usage`. Closed source/owner rules
+preserve the pinned SDK's private Mbed TLS/TF-PSA-Crypto `-Og -Os`, its two PQCP units at `-Og`,
+and the six C3/C6 libc primitives at `-Og -O2` only when the SDK's optimized-misaligned-access
+selector is enabled. The generated project anchor retains its exact SDK recipe without an
+optimization flag. The validator owns the admitted paths and object owners; missing, duplicate,
+reordered or overriding optimization tokens fail. These checks preserve the existing compiler
+behavior. The separate size-optimized bootloader is compared between independent builds. Main
+privately enforces C++17 and return-value/format warnings.
 The Tesla BLE component privately selects `TESLA_BLE_LOG_LEVEL=2`; effective commands must
 contain that single definition. Its host harness uses the same level and keys object reuse to
 the patch-state digest. DEBUG/VERBOSE arguments and formatting are excluded; INFO remains.
@@ -243,6 +247,75 @@ Tesla/Daikin firmware, flashes a signed PR preview or development-key image thro
 or an already-published image through `$usb-recovery`'s provenance and app-only steps, and tests
 the implementation on that same board. Device delivery after merge remains a separately requested
 `$ship` operation.
+
+### Installed-layout proof
+
+Every app-only USB path, including standalone `$usb-recovery`, requires evidence of the selected
+board's installed partition table before writing. A matching chip or signed app does not establish
+its layout. Reuse collected evidence only while its physical-board binding and installed layout
+remain established. Otherwise obtain the missing bounded read scope and collect only the table
+metadata at the established table location (`0x8000`, at most `0x1000` bytes for this project),
+excluding NVS. `$deploy-bench` already authorizes its scoped preflight reads; do not request that
+approval again. Keep per-board evidence outside Git.
+
+Decode the table with the pinned SDK tooling and verify:
+
+- Valid entries and termination, and the format's checksum. A checksum-less historical table needs
+  independently established byte identity with a known compatible table; unknown integrity stops.
+- All regions fit the established physical flash capacity without overlap. The protected NVS range
+  remains `0x9000/0x6000`, and OTA data remains `0xf000/0x2000`.
+- The intended `ota_0` app starts at `0x20000`, has the correct app subtype and can hold the complete
+  verified signed image. Erasing OTA data must select that app, without a factory app taking priority.
+
+Compatible historical tables may omit newer diagnostic partitions or have different remaining
+regions; they need not equal today's table byte-for-byte. Record the actual table checks, selected
+image length/hash and same-board binding rather than a manually asserted pass flag. If evidence is
+missing, unreadable or incompatible, stop the app-only procedure. A broader conversion or
+bootloader/table recovery needs its separately authorized plan; it is not an automatic fallback.
+The retained-bootloader and signature checks remain separate prerequisites.
+
+### Local OTA test before merge
+
+The global maintainer skill `$ota` tests the intended local source on an explicitly selected
+production board before merge or feed publication. It routes Tesla and Daikin separately;
+Tesla uses [`scripts/dev-ota-upload.py`](../scripts/dev-ota-upload.py). Read its `--help` and
+the current project instructions. Creating or editing the skill grants no live/signing/upload
+authority. Remote CI, a commit and PR-body gate stamps are not local-test prerequisites; the
+ordinary PR gates remain required at their existing publication/merge boundaries.
+
+`prepare --evidence <absolute-private-directory> --inventory <absolute-private-json>
+--board <approved-id> --version <intended-version>` snapshots the complete intended tree,
+including non-ignored new files. The inventory is mode `0600`, outside Git, with one selected
+production entry's project, supported target, literal IP and hardware MAC. No discovery,
+default board or automatic channel change exists. Keep real inventory/signing details global,
+not in this repository. The chip comes from that explicit hardware binding, never an S3 default.
+
+Run `tests` and `build` with the same `--evidence` directory. They execute the existing local
+host/contract/format checks and the pinned Docker build in a fresh case-specific directory.
+The selected version must fit the running version-core floor. Through a separately authorized
+standalone signer, sign those exact bytes with the existing approved authority; the helper
+never reads a private key. `bind-image --image <absolute-signed-app.bin> --sha256 <signed-file-sha256>`
+checks the signature pin, app project/chip/version/size and correspondence to that unsigned build.
+
+`review` launches an independent Codex process with enforced read-only sandbox and no approvals,
+using the existing reviewer instructions for OTA/heap/security, persistence/NVS/pairing,
+BLE/evcc meaning, documentation and UI. Its actual thread identity, structured findings and
+report/log hashes join the source/image-bound local journal. A manually supplied pass cannot
+replace this process. Missing checks, a failed run, blocking findings or source/artifact edits
+stop readiness; regenerate the affected evidence rather than reusing old proof.
+
+`check` is offline. `preflight` performs live passive reads and requires the selected target/read
+scope. Only an explicitly authorized board test permits `execute --execute --case-id <case-id>`.
+The board must already be on saved `dev`, with stable verification and adequate memory.
+Before its sole POST the helper rechecks all evidence and consumes its exclusive attempt marker.
+No timeout/refusal/lost response grants a retry, channel change or different delivery path.
+
+Acceptance needs a distinct boot nonce, full expected ELF/version/project/chip, unchanged
+hardware identity and observable retention, plus healthy stable runtime. It records changed
+behavior as **not run** until the separately authorized concrete functional test is performed.
+No vehicle command or live evcc/cluster call is inferred. Report these boundaries separately;
+HTTP success, local host fixtures and a compiled image cannot prove the real hardware/function.
+See [API](API.md#direct-signed-firmware-upload) and [security](SECURITY.md#ota-self-update).
 
 ### Served Pages acceptance
 

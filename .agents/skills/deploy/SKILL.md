@@ -30,17 +30,21 @@ other tasks' worktrees. Stage only this change; do not reset, stash or rewrite h
 requires a bench test before merge, hand the exact candidate to `$deploy-bench` while the PR is
 open and resume only after its required acceptance. A new push invalidates that candidate's evidence.
 
-## Verify and prepare the commit
+## Prepare and verify the candidate
+
+Finish the scoped implementation and relevant checks. Synchronize
+[$feature-docs](../feature-docs/SKILL.md) when relevant, then stage only the intended files and
+commit with a concise English message. Reviews and records below bind that clean committed candidate.
 
 Run the narrow checks for the change and the full applicable contract from
 [AGENTS.md](../../../AGENTS.md#implementation-and-evidence). Firmware integration requires the
 pinned four-target build, size/stack checks and disposable-key signing/reproducibility evidence;
 host tests alone are insufficient. Report unavailable checks as **not run** and stop at an unmet gate.
 
-Run [$skill-audit](../skill-audit/SKILL.md) and [$pr-hygiene](../pr-hygiene/SKILL.md) before PR
-creation or push. Synchronize [$feature-docs](../feature-docs/SKILL.md) when relevant. A validator or
-digest update does not replace an actual review. Fix findings, then stage the intended files and
-commit with a concise English message.
+Run independent [$skill-audit](../skill-audit/SKILL.md) and
+[$pr-hygiene](../pr-hygiene/SKILL.md) reviews of the exact committed candidate before PR creation
+or push. A validator or digest update does not replace an actual review. Fix findings in a new
+commit, then rerun the affected checks and current-head reviews before publication.
 
 ## Push, create the PR and complete CI
 
@@ -55,9 +59,11 @@ skill-audit and hygiene records before push. An authorized PR-body update may pu
 records; do not reuse old-head results.
 
 Monitor CI with `gh pr checks <numeric-pr> --watch` or [$ci-heal](../ci-heal/SKILL.md).
-For each fix, rerun the affected checks and reviews, commit and push, then refresh all expired
-records. CI-heal neither authors fixes nor supplies independent review. Continue until the exact
-head is green and its current records are satisfied.
+For each fix, rerun the affected checks and commit the intended files. Independently review that
+clean commit, refresh its earned pre-push records in the existing PR body, then push. Re-read the
+remote head and CI afterward; refresh the remaining expired records only after their reviews.
+CI-heal neither authors fixes nor supplies independent review. Continue until the exact head is
+green and its current records are satisfied.
 
 ## Merge the exact reviewed head
 
