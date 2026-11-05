@@ -140,6 +140,8 @@ The 20-minute strict suite budget is enclosed by longer core, adapter and hook-r
 deadlines, leaving time for cleanup before an outer timeout can interrupt it.
 `--force` always executes; CI never consumes or writes local receipts. These receipts provide local
 feedback, not review, remote CI, signed-artifact or hardware evidence.
+Pre-commit removes only the leading builtin helper path added by Git before starting tests.
+Custom Git exec paths and unrelated PATH entries remain unchanged and invalidate reuse normally.
 
 Startup files, module search paths and nonliteral compiler overrides disable reuse. On macOS,
 changes to the browser runner's local image also invalidate it; unrelated Docker images do not.

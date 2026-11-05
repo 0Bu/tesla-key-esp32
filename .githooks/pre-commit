@@ -59,11 +59,22 @@ fi
 # 6. Run host logic tests if firmware logic changed
 if ! git diff --cached --quiet -- main/ test/ tools/display_sim.py; then
     echo "[pre-commit] Firmware logic changed; verifying host tests..."
+    # Git prepends its private helper directory when launching a hook. Remove only that
+    # builtin prefix from the test environment; custom exec paths and all other PATH entries
+    # must remain significant. Never derive the builtin directory from GIT_EXEC_PATH.
+    git_builtin_exec_path="$(env -u GIT_EXEC_PATH git --exec-path)"
+    [[ "$git_builtin_exec_path" == /* ]] || exit 1
+    host_test_path="$PATH"
+    while [[ "$host_test_path" == "$git_builtin_exec_path:"* ]]; do
+        host_test_path="${host_test_path#"$git_builtin_exec_path:"}"
+    done
     if command -v cmake >/dev/null 2>&1; then
         env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_PREFIX \
+            PATH="$host_test_path" \
             ./scripts/with-host-python.sh python3 scripts/run-local-checks.py --require-all --staged
     else
-        env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_PREFIX ./scripts/run-mock-tests.sh
+        env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_PREFIX \
+            PATH="$host_test_path" ./scripts/run-mock-tests.sh
     fi
 fi
 
