@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -135,8 +136,13 @@ def verify_local_invariants(root: Path) -> list[str]:
 
     # Check ble_client.hpp for byte-level UUID initializers
     ble_client_file = root / "main/ble_client.hpp"
-    if ble_client_file.exists():
+    try:
+        if not ble_client_file.is_file() or ble_client_file.is_symlink():
+            raise OSError("missing or non-regular owner")
         ble_text = ble_client_file.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        findings.append(f"unreadable required BLE UUID owner: main/ble_client.hpp ({exc})")
+    else:
         svc_uuid = parse_ble_uuid128_bytes(ble_text, "TESLA_SVC_UUID")
         if svc_uuid != PINNED_BLE_SERVICE_UUID:
             findings.append(f"TESLA_SVC_UUID bytes evaluate to {svc_uuid}, expected {PINNED_BLE_SERVICE_UUID}")
@@ -212,7 +218,28 @@ def run_self_test() -> int:
         print("self-test failed: set_charge_limit bounds not correctly extracted", file=sys.stderr)
         return 1
 
-    print("check-vehicle-command-sync: PASS (protocol invariants, byte-level BLE UUIDs, argument bounds, canaries)")
+    # Exercise the complete checker with a valid registry and an absent/restored UUID owner.
+    with tempfile.TemporaryDirectory(prefix="tesla-uuid-owner-") as temporary:
+        root = Path(temporary)
+        registry = root / "main/logic/command_registry.hpp"
+        registry.parent.mkdir(parents=True)
+        registry.write_bytes((ROOT / "main/logic/command_registry.hpp").read_bytes())
+        owner = root / "main/ble_client.hpp"
+        missing = verify_local_invariants(root)
+        if len(missing) != 1 or "required BLE UUID owner" not in missing[0]:
+            print(f"self-test failed: absent UUID owner did not fail: {missing}", file=sys.stderr)
+            return 1
+        owner.write_bytes((ROOT / "main/ble_client.hpp").read_bytes())
+        if verify_local_invariants(root):
+            print("self-test failed: restored UUID owner did not pass", file=sys.stderr)
+            return 1
+        owner.unlink()
+        owner.mkdir()
+        if not verify_local_invariants(root):
+            print("self-test failed: directory UUID owner passed", file=sys.stderr)
+            return 1
+
+    print("check-vehicle-command-sync: PASS (protocol invariants, byte-level BLE UUIDs, argument bounds, required-owner canaries)")
     return 0
 
 

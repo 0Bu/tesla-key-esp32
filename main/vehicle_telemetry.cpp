@@ -692,7 +692,7 @@ bool VehicleController::enqueue_background_poll_(const std::string& name, tk::Bl
             case tk::TelemetryPollDomain::Climate:
                 enqueued = self->enqueue_background_poll_(
                     "Climate State Poll", tk::BleDomain::Infotainment,
-                    [](TeslaBLE::Client* client, uint8_t* buff, size_t* len) {
+                    +[](TeslaBLE::Client* client, uint8_t* buff, size_t* len) {
                         return client->build_car_server_get_vehicle_data_message(
                             buff, len, CarServer_GetVehicleData_getClimateState_tag);
                     });
@@ -704,7 +704,7 @@ bool VehicleController::enqueue_background_poll_(const std::string& name, tk::Bl
             case tk::TelemetryPollDomain::Tires:
                 enqueued = self->enqueue_background_poll_(
                     "Tire Pressure Poll", tk::BleDomain::Infotainment,
-                    [](TeslaBLE::Client* client, uint8_t* buff, size_t* len) {
+                    +[](TeslaBLE::Client* client, uint8_t* buff, size_t* len) {
                         return client->build_car_server_get_vehicle_data_message(
                             buff, len, CarServer_GetVehicleData_getTirePressureState_tag);
                     });
@@ -712,7 +712,7 @@ bool VehicleController::enqueue_background_poll_(const std::string& name, tk::Bl
             case tk::TelemetryPollDomain::Closures:
                 enqueued = self->enqueue_background_poll_(
                     "Closures State Poll", tk::BleDomain::Infotainment,
-                    [](TeslaBLE::Client* client, uint8_t* buff, size_t* len) {
+                    +[](TeslaBLE::Client* client, uint8_t* buff, size_t* len) {
                         return client->build_car_server_get_vehicle_data_message(
                             buff, len, CarServer_GetVehicleData_getClosuresState_tag);
                     });
@@ -1623,6 +1623,7 @@ void VehicleController::loop_task_fn_(void* arg) {
       try {
         // NimBLE callbacks only enqueue fixed POD records. Drain them here, in a normal task with
         // the task-level exception boundary, before pumping the command runner.
+        self->ble_->service_pending();
         self->process_ble_host_events_();
         if (self->ble_fault_.exchange(false)) {
             ESP_LOGW(TAG, "BLE deferred processing fault — dropping link to reset BLE state");
@@ -1752,19 +1753,30 @@ void VehicleController::loop_task_fn_(void* arg) {
         // car answers the ~10 s charge poll, so its contact stays fresh (< kAwakeMaxAgeS). Decision +
         // boundary are host-tested in logic/active_window.hpp; get_charge_state() asks the SAME
         // member so the poll and the cached read can never disagree about the window.
-        bool window = self->active_window_now_(now_ticks, charging_state);
+        bool window = self->active_window_now_(charging_state);
+        bool defer_idle_drop = false;
 
         // Falling edge: window just closed → drop the link once so the car can sleep.
         if (paired && prev_window && !window && self->ble_connected()) {
-            ESP_LOGI(TAG, "idle: dropping link so car can sleep");
-            self->ble_->disconnect();
+            // Foreground commands and the background health probe own this same arbitration.
+            // Recheck recency after acquiring it; retain the edge if its owner is still busy.
+            tk::SemGuard command_guard(self->command_mutex_, 0);
+            if (!command_guard || self->cmd_in_flight_.load()) {
+                defer_idle_drop = true;
+            } else {
+                window = self->active_window_now_(charging_state);
+                if (!window) {
+                    ESP_LOGI(TAG, "idle: dropping link so car can sleep");
+                    self->ble_->disconnect();
+                }
+            }
         }
         // Rising edge: window just opened → refresh the cache promptly (reset throttles).
         if (paired && !prev_window && window) {
             last_poll_ticks = last_connect_ticks = 0;
             telemetry_poll.reset();
         }
-        prev_window = window;
+        prev_window = window || defer_idle_drop;
 
         // Warm-up connect (paired + window): non-blocking, idempotent, throttled.
         if (paired && window && !self->ble_connected()
@@ -1794,7 +1806,7 @@ void VehicleController::loop_task_fn_(void* arg) {
             tk::SemGuard g(self->vehicle_mutex_);
             self->enqueue_background_poll_(
                 "Charge State Poll", tk::BleDomain::Infotainment,
-                [](TeslaBLE::Client* client, uint8_t* buff, size_t* len) {
+                +[](TeslaBLE::Client* client, uint8_t* buff, size_t* len) {
                     return client->build_car_server_get_vehicle_data_message(
                         buff, len, CarServer_GetVehicleData_getChargeState_tag);
                 });
@@ -1842,9 +1854,10 @@ void VehicleController::loop_task_fn_(void* arg) {
 
 // ─── Data queries ─────────────────────────────────────────────────────────────
 
-bool VehicleController::active_window_now_(uint32_t now_ticks, bool charging_state) const {
+bool VehicleController::active_window_now_(bool charging_state) const {
     const uint32_t lc = last_cmd_ticks_.load();
-    const bool recent_cmd = (lc != 0) && ((now_ticks - lc) < pdMS_TO_TICKS(kActiveWindowMs));
+    const uint32_t now_ticks = xTaskGetTickCount();
+    const bool recent_cmd = tk::command_is_recent(lc, now_ticks, pdMS_TO_TICKS(kActiveWindowMs));
     uint32_t contact_age = 0;
     const bool have_contact = seconds_since_contact(contact_age);
     return tk::active_window_open({recent_cmd, charging_state, have_contact, contact_age});
@@ -1878,7 +1891,7 @@ bool VehicleController::get_charge_state(ChargeStateResult& out, int /*timeout_m
     // the cached value is served as the last-known reading instead of being rejected as stale.
     const bool charging = cached.charging_state == "Charging" ||
                           cached.charging_state == "Starting";
-    const bool active_window = active_window_now_(now, charging);
+    const bool active_window = active_window_now_(charging);
 
     // generation is the "have sample" bit so a legitimate callback at FreeRTOS tick 0
     // is not mistaken for "never received".
@@ -1922,7 +1935,7 @@ bool VehicleController::get_vehicle_climate(tk::VehicleClimateData& out) {
                     last_known_charge_.charging_state == "Starting");
     }
     const uint32_t now = xTaskGetTickCount();
-    const bool active_window = active_window_now_(now, charging);
+    const bool active_window = active_window_now_(charging);
     // generation is the "have sample" bit so a callback at FreeRTOS tick 0 is not "never received".
     const bool have_age = generation != 0;
     const uint32_t age_s = have_age ? (now - sample) / configTICK_RATE_HZ : 0;
@@ -2000,9 +2013,10 @@ bool VehicleController::get_vehicle_status(VehicleStatusResult& out, tk::Connect
 
     try {
         tk::SemGuard g(vehicle_mutex_);
-        vehicle_status_callback_ = std::move(callback);
         const uint32_t now_ms = pdTICKS_TO_MS(xTaskGetTickCount());
         const uint32_t timeout_ms = remaining_ms_(deadline);
+        if (timeout_ms == 0) return false;
+        vehicle_status_callback_ = std::move(callback);
         auto on_complete = [completion](bool ok, const std::string& err, tk::CommandFailureInfo) {
             if (!ok && !completion->completed.load()) {
                 completion->error = err;
@@ -2019,7 +2033,7 @@ bool VehicleController::get_vehicle_status(VehicleStatusResult& out, tk::Connect
             return false;
         }
         command_builders_[completion->cmd_id % tk::CommandRunner::kMaxQueueSize] =
-            [](TeslaBLE::Client* client, uint8_t* buff, size_t* len) {
+            +[](TeslaBLE::Client* client, uint8_t* buff, size_t* len) {
                 return client->build_vcsec_information_request_message(
                     VCSEC_InformationRequestType_INFORMATION_REQUEST_TYPE_GET_STATUS, buff, len);
             };

@@ -377,10 +377,10 @@ for child in src.iterdir():
 
     def test_effective_root_only_guard_omission(self):
         source = PUBLISHER.read_text()
-        needle = '  case "$mode" in root|dev) ;; *) return 0 ;; esac'
+        needle = '  case "$mode" in root|root-recovery|dev) ;; *) return 0 ;; esac'
         self.assertEqual(source.count(needle), 1)
         mutant = self.root / "publisher-with-root-guard-omitted.sh"
-        mutant.write_text(source.replace(needle, '  case "$mode" in dev) ;; *) return 0 ;; esac'))
+        mutant.write_text(source.replace(needle, '  case "$mode" in root-recovery|dev) ;; *) return 0 ;; esac'))
         mutant.chmod(0o700)
         victim = PagesPublishTest("test_root_retry_refuses_newer_main")
         victim.setUp()

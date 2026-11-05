@@ -207,7 +207,7 @@ constexpr const char* identity_mutation_entry_name(IdentityMutationEntry entry) 
     return "identity mutation";
 }
 
-// The minimum uptime before even a healthy image commits. Long enough that an image which boots and
+// Minimum observation after the confirmation task starts before a healthy image commits. An image which boots and
 // then dies under load (BLE + HTTP + MQTT + the telemetry poll are all running by then) reboots
 // while still pending, which is what rolls it back.
 inline constexpr uint32_t kHealthGateBaseS = 90;
@@ -222,8 +222,8 @@ static_assert(kHealthGateCapS > kHealthGateBaseS,
               "the hard cap must leave a window in which a healthy image can still commit");
 
 // Decide the verdict for an image running in PENDING_VERIFY.
-//   elapsed_s      seconds this image has been running (monotonic since boot)
-//   base_window_s  minimum uptime before committing even a healthy image
+//   elapsed_s      monotonic seconds since the health-confirmation task began its observation
+//   base_window_s  minimum observation after task start before committing a healthy image
 //   hard_cap_s     stop waiting past this (must exceed base_window_s)
 //   link_expected  the device HAS a configured route (credentials or a wire), so being online is
 //                  the expected state; false means setup mode, where offline is correct

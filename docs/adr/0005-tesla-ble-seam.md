@@ -86,6 +86,13 @@ The entries above were checked against [vehicle-command `83baa078`](https://gith
 
 #### Native execution, framing and session reuse
 
+- **Connection ownership**: Failed GAP connection attempts do not publish LinkDown or erase
+  restored runtime sessions; an established disconnect/reset still invalidates them. Deferred
+  scan/termination work has a vehicle-loop consumer, and termination retains the connection
+  generation captured by its request. It cannot retire a later command's link. Expired caller
+  budgets are refused after the Vehicle-lock wait, before enqueue; zero is never substituted for
+  an expired request's finite budget.
+
 - **No goroutines / channels**: Replaced by a fixed byte-packing `logic/ble_deferred_queue.hpp` mailbox under its own short critical section and the single `vehicle_loop` execution thread. Adjacent RX bytes coalesce only within the same generation and a 3 s arrival window; first/last arrival times survive splitting and delayed consumption. The framer tests the preceding gap at first arrival and renews expiry at last arrival. Timestamp/enqueue and empty-queue/expiry-clock observations share the mailbox mux. Link records remain ordered barriers; pop slices stay at 20 bytes. This changes local storage, not ATT framing, MTU, subscriptions, crypto, command authority or key/session format.
 - **Bounded vector buffers**: `tk::RxFramer` limits frame payloads to 2048 bytes and buffered-data admission to 2562 bytes (payload + 2-byte header + 512-byte chunk headroom). This bounds buffered size, not the exact allocated capacity of its `std::vector<uint8_t>`.
 - **Max frame length (2048 vs 1024 B)**: `ble.go:21` defines `maxBLEMessageSize = 1024`. tesla-ble's own reassembly used `Vehicle::MAX_MESSAGE_SIZE = 2048` (in the `Vehicle` class this firmware no longer calls), while a `UniversalMessage_RoutableMessage` is at most 741 B. `kMaxFrameLength = 2048` keeps that historical tesla-ble limit.
@@ -165,6 +172,9 @@ The entries above were checked against [vehicle-command `83baa078`](https://gith
   independent GCM fixtures and allocation failure injection. These checks do not prove physical
   ATT delivery, pairing, NVS retention, or vehicle acceptance.
 - **Command outcome status (REST/MCP)**:
+  Successful charging no-op identity is carried in a bounded request-owned enum through the native
+  completion and both response surfaces (`response.noop` / `structuredContent.noop`). This is a
+  local API extension; the upstream nominal-error policy below remains the reference.
   - *Reference*: every CarServer refusal (`OPERATIONSTATUS_ERROR`) and every VCSEC nominal error becomes a `protocol.NominalError` (`pkg/vehicle/infotainment.go`, `getCarServerResponse`; `pkg/vehicle/vcsec.go`), which the HTTP proxy answers with HTTP 200 and `result:false` (`pkg/proxy/proxy.go`, `handleVehicleCommand`). Other execution errors get Fleet API codes from `httpStatusCode`: 408 for a vehicle that is not awake, 412 for an unpaired key (`pkg/protocol/error.go`, `GetError` → `ErrKeyNotPaired`) and 500 otherwise; a per-VIN lock timeout is 503. Their body is `{"response":null,"error":"<text>","error_description":""}` and carries no `result`. An error that is itself a Tesla server reply (`inet.HTTPError`, Fleet API path only) passes through with that server's status and body (`writeJSONError`).
   - *Firmware*: in a complete reply, success, exact `already_set` and the contextual charge start/stop no-ops described above are HTTP 200 with `result:true`; the reference has no corresponding success exceptions. Every other failed command, whether the car refused it or the device could not deliver it, is HTTP 502 with `response.result:false` and the reason, and MCP marks it `isError`. Intake and out-of-memory failures before dispatch keep their own codes. If the reply cannot be built after the attempt, the degraded HTTP 200 reply reports `outcome:"succeeded"` only for a successful command, including `already_set` and these no-ops, otherwise `result:false` and `outcome:"unknown"`. [API](../API.md#response-classes) owns these response classes.
   - *Why*: status-only clients such as evcc's `tesla-ble` template retry a 502 instead of accepting an undelivered setpoint (#211). The degraded reply is the exception: its 200 alone does not establish success.

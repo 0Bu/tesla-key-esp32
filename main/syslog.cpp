@@ -55,6 +55,7 @@ static SemaphoreHandle_t s_status_mtx = nullptr;
 static SyslogStatus      s_status;
 // atomic: written in syslog_start (app_main), read by syslog_task and syslog_status (HTTP task).
 static std::atomic<bool> s_configured{false};
+static std::atomic<bool> s_config_error{false};
 static std::string       s_cfg_host;
 static int               s_cfg_port   = 514;
 
@@ -111,6 +112,10 @@ SyslogStatus syslog_status() {
     copy.port        = s_cfg_port;
     copy.resolved    = false;
     copy.reachable   = false;
+    if (s_config_error.load()) {
+        copy.error = "stored configuration is unreadable";
+        return copy;
+    }
     // RAII give — the std::string copies below can throw.
     tk::SemGuard g(s_status_mtx);
     if (g) {
@@ -298,7 +303,9 @@ static void syslog_replay_boot(const struct sockaddr_in& dest, bool& replayed) {
         // forwarding path below owns that classification.
         const auto record = boot_record ? tk::SyslogRecord::Boot : tk::SyslogRecord::Crash;
         boot_record = false;
-        (void)syslog_sendto(dest, l.c_str(), l.size(), &err, record);
+        const auto result = syslog_sendto(dest, l.c_str(), l.size(), &err, record);
+        if (result != SendResult::Ok && result != SendResult::Empty)
+            s_dropped_lines.fetch_add(1, std::memory_order_relaxed);
     }
     ESP_LOGI(TAG, "replayed %u boot records", (unsigned)lines.size());
 }
@@ -410,7 +417,10 @@ static void syslog_task(void* raw_start) {
         if (xQueueReceive(queue, &msg, pdMS_TO_TICKS(500)) == pdTRUE) {
             if (resolved) {
                 int err = 0;
-                switch (syslog_sendto(dest_addr, msg.text, msg.len, &err)) {
+                const auto result = syslog_sendto(dest_addr, msg.text, msg.len, &err);
+                if (result != SendResult::Ok && result != SendResult::Empty)
+                    s_dropped_lines.fetch_add(1, std::memory_order_relaxed);
+                switch (result) {
                     case SendResult::Ok:
                         if (send_failing) {   // first line through after an outage
                             ESP_LOGI(TAG, "forwarding recovered");
@@ -433,6 +443,8 @@ static void syslog_task(void* raw_start) {
                                              have_checked, send_failing);
                         break;
                 }
+            } else if (msg.len != 0) {
+                s_dropped_lines.fetch_add(1, std::memory_order_relaxed);
             }
         }
       } catch (const std::exception& e) {
@@ -452,7 +464,11 @@ static void syslog_task(void* raw_start) {
 
 static bool syslog_start_impl(NvsStorageAdapter& config_store) {
     tk::ConfigBlob cfg;
-    tk::cfg_load(config_store, cfg);
+    if (tk::cfg_load_state(config_store, cfg) == tk::ConfigLoadState::Error) {
+        s_config_error.store(true);
+        ESP_LOGE(TAG, "syslog configuration is unreadable");
+        return false;
+    }
     std::string uri = cfg.syslog_uri;
     // Trim surrounding whitespace (mirrors mqtt_ha_start's broker trim).
     size_t b = uri.find_first_not_of(" \t\r\n");

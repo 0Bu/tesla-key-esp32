@@ -11,6 +11,8 @@ enum class CommandEffect : uint8_t { Mutating, ReadOnly };
 struct CommandFailureInfo {
     CommandError::Severity severity{CommandError::Severity::Unknown};
     CommandError::Outcome outcome{CommandError::Outcome::DefinitelyFailed};
+    // Terminal callback metadata also carries the bounded successful-no-op identity.
+    CommandNoOp no_op{CommandNoOp::None};
 };
 inline constexpr bool execution_uncertain(CommandFailureInfo info) noexcept {
     return info.outcome != CommandError::Outcome::DefinitelyFailed;

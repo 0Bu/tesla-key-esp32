@@ -14,11 +14,13 @@ fi
 # 1. Guard against committing secret or transient files
 while IFS= read -r file; do
     [ -z "$file" ] && continue
-    case "$file" in
+    case "${file##*/}" in
         *.pem|*.key|nvs*.bin|*wake-capture-*.log|secrets.env|sdkconfig.local)
             echo "BLOCKED by pre-commit: cannot commit secret or transient file: $file" >&2
             exit 1
             ;;
+    esac
+    case "$file" in
         partitions.csv)
             if [ "${ALLOW_PARTITION_CHANGE:-0}" != "1" ]; then
                 echo "BLOCKED by pre-commit: partitions.csv is immutable (set ALLOW_PARTITION_CHANGE=1 to override)" >&2
@@ -68,14 +70,9 @@ if ! git diff --cached --quiet -- main/ test/ tools/display_sim.py; then
     while [[ "$host_test_path" == "$git_builtin_exec_path:"* ]]; do
         host_test_path="${host_test_path#"$git_builtin_exec_path:"}"
     done
-    if command -v cmake >/dev/null 2>&1; then
-        env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_PREFIX \
-            PATH="$host_test_path" \
-            ./scripts/with-host-python.sh python3 scripts/run-local-checks.py --require-all --staged
-    else
-        env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_PREFIX \
-            PATH="$host_test_path" ./scripts/run-mock-tests.sh
-    fi
+    env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_PREFIX \
+        PATH="$host_test_path" \
+        ./scripts/with-host-python.sh python3 scripts/run-local-checks.py --require-all --staged
 fi
 
 exit 0

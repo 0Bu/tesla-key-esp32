@@ -505,6 +505,9 @@ static SetupPortal portal_open(NvsStorageAdapter& config_store, bool keep_statio
     ESP_LOGI(TAG, "Setup AP up. Join WiFi '%s' and open %s", AP_SSID, tk::CAPTIVE_PORTAL_URI);
 
     httpd_config_t hcfg   = HTTPD_DEFAULT_CONFIG();
+    // Save parsing, atomic config persistence and logging share this task. Reserve headroom
+    // beyond the SDK's 4096-byte default; the CaptiveHttp runtime mark remains separate evidence.
+    hcfg.stack_size = 6144;
     hcfg.recv_wait_timeout = tk::BODY_RECV_TIMEOUT_SECONDS;
     hcfg.uri_match_fn     = httpd_uri_match_wildcard;
     hcfg.max_uri_handlers = 4;

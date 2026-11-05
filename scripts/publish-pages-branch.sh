@@ -14,6 +14,7 @@
 # so no cross-PR index file is maintained.
 #
 #   root <srcdir>       sync <srcdir> into the gh-pages ROOT, preserving the PR/ preview tree and dev/
+#   root-recovery <srcdir>  key-free recovery of a verified latest immutable Release's original site
 #   dev  <srcdir>       sync <srcdir> into gh-pages dev/, preserving root and PR/
 #   pr   <srcdir> <N>   replace gh-pages PR/<N>/ with <srcdir>   (N = PR number, digits)
 #   rm   <N>            remove gh-pages PR/<N>/
@@ -26,6 +27,10 @@
 # Root and Dev publication require SOURCE_SHA, bound to the manifest and current remote main
 # immediately before each push (including retries) or unchanged-byte build request.
 set -euo pipefail
+
+command -v rsync >/dev/null 2>&1 || {
+  echo "publish-pages-branch: rsync is required" >&2; exit 2;
+}
 
 trigger_pages_build() {
   if ! command -v gh >/dev/null 2>&1; then
@@ -306,7 +311,11 @@ EOF
   rm -f "$fake_git"
 
   # Exercise filesystem and orphan-checkout failures with isolated local remotes.
-  python3 "$(dirname "$0")/../test/test_pages_publish.py" || return 1
+  if ! python3 "$(dirname "$0")/../test/test_pages_publish.py"; then
+    trap - EXIT
+    rm -rf "$tmp"
+    return 1
+  fi
 
   trap - EXIT
   rm -rf "$tmp"
@@ -320,6 +329,13 @@ if [ "${1:-}" = "--self-test" ]; then
 fi
 
 mode="${1:?usage: publish-pages-branch.sh root <srcdir> | dev <srcdir> | pr <srcdir> <N> | rm <N>}"
+if [ "$mode" = root-recovery ]; then
+  [[ "${GH_HOST:-github.com}" = github.com &&
+     "${GITHUB_SERVER_URL:-https://github.com}" = https://github.com &&
+     "${GITHUB_REPOSITORY:-}" = 0Bu/tesla-key-esp32 && -z "${TEST_REMOTE:-}" ]] || {
+    echo "release recovery requires the canonical API and publication remote" >&2; exit 2;
+  }
+fi
 : "${GITHUB_TOKEN:?GITHUB_TOKEN required}"
 : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY required}"
 
@@ -329,7 +345,7 @@ remote="${TEST_REMOTE:-https://x-access-token:${GITHUB_TOKEN}@${server#https://}
 # Parse + validate args per mode up front (fail fast, before touching the remote).
 src=""; num=""
 case "$mode" in
-  root) src="${2:?root needs <srcdir>}" ;;
+  root|root-recovery) src="${2:?root publication needs <srcdir>}" ;;
   dev)  src="${2:?dev needs <srcdir>}" ;;
   pr)   src="${2:?pr needs <srcdir>}"; num="${3:?pr needs <N>}" ;;
   rm)   num="${2:?rm needs <N>}" ;;
@@ -341,13 +357,24 @@ fi
 [ -n "$src" ] && [ ! -d "$src" ] && { echo "source dir '$src' not found" >&2; exit 1; }
 
 validate_channel_candidate() {
-  case "$mode" in root|dev) ;; *) return 0 ;; esac
+  case "$mode" in root|root-recovery|dev) ;; *) return 0 ;; esac
   local work="$1" main_row main_sha manifest
   manifest="$work/manifest.json"
   [ "$mode" != dev ] || manifest="$work/dev/manifest.json"
   if ! [[ "${SOURCE_SHA:-}" =~ ^[0-9a-f]{40}$ ]]; then
     echo "ERROR: $mode publication requires an exact SOURCE_SHA" >&2
     return 1
+  fi
+  if [ "$mode" = root-recovery ]; then
+    local trusted_root
+    trusted_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+    python3 "$trusted_root/scripts/recover-release-pages.py" \
+      --artifact-archive "${RELEASE_RECOVERY_ARCHIVE:?authenticated original artifact archive required}" \
+      --run-id "${RELEASE_RECOVERY_RUN_ID:?original run required}" \
+      --release-id "${RELEASE_RECOVERY_ID:?immutable Release ID required}" \
+      --version "${RELEASE_RECOVERY_VERSION:?Release version required}" \
+      --source-sha "$SOURCE_SHA" --verify-candidate "$work"
+    return
   fi
   if ! python3 - "$manifest" "$SOURCE_SHA" <<'PY'
 import json, sys
@@ -381,7 +408,7 @@ PY
 apply_changes() {
   local work="$1"
   case "$mode" in
-    root)
+    root|root-recovery)
       # Root files only — NEVER delete the PR/ preview tree (PR-owned) or the dev/ channel.
       rsync -a --delete --exclude='.git/' --exclude='PR/' --exclude='dev/' "$src"/ "$work"/ || return 1
       ;;
@@ -413,7 +440,7 @@ apply_changes() {
 
 commit_msg() {
   case "$mode" in
-    root) echo "pages: publish site (root)" ;;
+    root|root-recovery) echo "pages: publish site (root)" ;;
     dev)  echo "pages: publish site (dev channel)" ;;
     pr)   echo "pages: publish PR $num preview" ;;
     rm)   echo "pages: remove PR $num preview" ;;

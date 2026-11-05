@@ -17,7 +17,7 @@ class VehicleController;
 //     car or queue behind a poll in the single BLE FIFO. Same guarantee as the display.
 //   • Independent of MQTT and of the display — needs neither, so it works on a
 //     T-Dongle-S3 that has no panel fitted.
-//   • Tiny + coex-safe: 1 pixel, an ~8-byte bit-banged APA102 frame, no heap
+//   • Tiny + coex-safe: 1 pixel, a 12-byte bit-banged APA102 frame, no heap
 //     allocation, low update rate — no pressure on the contiguous-heap budget or on
 //     WiFi/BLE coexistence (WIFI_PS_MIN_MODEM stays untouched).
 //

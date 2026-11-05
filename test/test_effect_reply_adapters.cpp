@@ -38,6 +38,7 @@
 
 static int checks;
 static bool runner_reply_enabled, runner_success;
+static tk::CommandNoOp runner_noop = tk::CommandNoOp::None;
 static std::string runner_error;
 static bool throw_confirmation;
 static bool allocation_fault_armed;
@@ -50,8 +51,7 @@ extern "C" unsigned uxTaskGetStackHighWaterMark(void* task) {
     CHECK(task == nullptr); ++f135_hwm_queries; return 4096;
 }
 using esp_err_t = int;
-constexpr int ESP_OK=0, ESP_FAIL=-1, ESP_ERR_NOT_FOUND=-2, HTTPD_400_BAD_REQUEST=400;
-constexpr int HTTPD_403_FORBIDDEN=403;
+constexpr int ESP_OK=0, ESP_FAIL=-1, ESP_ERR_NOT_FOUND=-2;
 static constexpr char TAG[]="offline-effect-adapter";
 static int fake_http_server;
 struct httpd_req_t { const char* uri{"/offline"}; size_t content_len{}; const char* input{"{}"}; void* handle{&fake_http_server}; };
@@ -214,7 +214,6 @@ static int httpd_resp_send_chunk(httpd_req_t*,const char* body,size_t size) {
     wire_size+=size; wire[wire_size]='\0'; return result;
 }
 static int httpd_resp_sendstr(httpd_req_t* req,const char* body) { return httpd_resp_send_chunk(req,body,std::strlen(body)); }
-static int httpd_resp_send_err(httpd_req_t*,int status,const char*) { response_status=status; return -4; }
 static constexpr size_t kQueryBufBytes=128;
 static int validate_query_string(httpd_req_t*) { return 0; }
 static bool query_param_is(httpd_req_t*,const char*,const char*) { return true; }
@@ -301,7 +300,7 @@ struct VehicleController {
 };
 static VehicleController vehicle;
 static VehicleController* g_vehicle=&vehicle;
-static bool execute_vehicle_command(VehicleController&,tk::CmdKind,const int*,const bool*) { effect_done(); return runner_reply_enabled ? runner_success : start_ok; }
+static bool execute_vehicle_command(VehicleController&,tk::CmdKind,const int*,const bool*,tk::CommandNoOp* no_op) { if(no_op)*no_op=runner_noop;effect_done(); return runner_reply_enabled ? runner_success : start_ok; }
 static const char* api_command_name="charge_start";
 static const char* api_path_vin="TESTVIN0000000001";
 static const char* api_body=nullptr;
@@ -333,13 +332,14 @@ esp_err_t send_json(httpd_req_t*,int,cJSON*);
 static esp_err_t send_rpc_error_(httpd_req_t* req,const tk::mcp_json::RpcId& id,int code,const char* reason) { return send_json(req,200,tk::mcp_json::build_error_envelope(id,code,reason).release()); }
 static esp_err_t send_rpc_result_(httpd_req_t* req,const tk::mcp_json::RpcId& id,tk::JsonOwner result) { return send_json(req,200,tk::mcp_json::build_result_envelope(id,std::move(result)).release()); }
 static esp_err_t handle_all_dispatch(GuardedReq rq) { return selected(rq); }
+cJSON* make_response(bool,const char*,const char*,const char*,const char* = nullptr);
 #include "effect_reply_adapters.generated.hpp"
 
 static void reset(Handler handler) {
     ota_payload={};
     upload_channel=tk::OtaChannel::Release; upload_content_type="application/octet-stream";
     upload_transfer_encoding.clear(); upload_starts=body_retirements=0;
-    runner_reply_enabled=false; runner_success=false; runner_error.clear();
+    runner_reply_enabled=false; runner_success=false; runner_error.clear(); runner_noop=tk::CommandNoOp::None;
     CHECK(s_operation_gate.state()==tk::OtaIdentityGateState::Idle);
     crash_erase_result=tk::CrashEraseResult::Erased; crash_open_result=tk::CoredumpOpenResult::Ready;
     crash_owned=false; crash_dismissed=false; crash_erase_calls=0; crash_read_calls=0;
@@ -423,9 +423,9 @@ static void test_nominal_charge_reply_adapters() {
         runner.vcsec_session().set_established({1},10,1000);
         runner.info_session().set_established({2},20,1000);
         tk::BleUuid uuid={0x41,0x42,0x43,0x44};
-        unsigned calls=0;bool result=false;std::string error;
+        unsigned calls=0;bool result=false;std::string error;tk::CommandNoOp no_op=tk::CommandNoOp::None;
         const auto id=runner.enqueue("Opaque label",tk::BleDomain::Infotainment,tk::WakePolicy::WakeIfNeeded,
-            20000,1000,uuid,[&](bool ok,const std::string& err,tk::CommandFailureInfo){++calls;result=ok;error=err;});
+            20000,1000,uuid,[&](bool ok,const std::string& err,tk::CommandFailureInfo info){++calls;result=ok;error=err;no_op=info.no_op;});
         CHECK(runner.set_command_effect(id,tk::CommandEffect::Mutating,sample.policy));
         CHECK(runner.tick(1000,true,true)==tk::TxAction::SendCommandPayload);
         runner.notify_tx_complete(tk::TxAction::SendCommandPayload,1010);
@@ -434,7 +434,7 @@ static void test_nominal_charge_reply_adapters() {
         const bool expected=authenticated && has_counter && sample.expected;
         CHECK(calls==1 && result==expected);
         for (auto handler:{handle_command,mcp_named_command}) {
-            reset(handler);runner_reply_enabled=true;runner_success=result;runner_error=error;
+            reset(handler);runner_reply_enabled=true;runner_success=result;runner_error=error;runner_noop=no_op;
             api_command_name=sample.policy==Policy::ChargeStop?"charge_stop":"charge_start";
             httpd_req_t request;
             CHECK(handle_all(&request)==ESP_OK && effects==1);
@@ -444,14 +444,19 @@ static void test_nominal_charge_reply_adapters() {
                 const auto* response=cJSON_GetObjectItemCaseSensitive(json.get(),"response");CHECK(response);
                 CHECK(bool(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(response,"result")))==expected);
                 const auto* reason=cJSON_GetObjectItemCaseSensitive(response,"reason");CHECK(cJSON_IsString(reason));
-                CHECK(std::strcmp(reason->valuestring,expected?"command executed successfully":error.c_str())==0);
+                CHECK(std::strcmp(reason->valuestring,expected?tk::command_noop_text(no_op):error.c_str())==0);
+                const auto* noop=cJSON_GetObjectItemCaseSensitive(response,"noop");
+                CHECK(expected ? cJSON_IsString(noop) && std::strcmp(noop->valuestring,tk::command_noop_code(no_op))==0 : noop==nullptr);
             } else {
                 CHECK(response_status==200);
                 const auto* response=cJSON_GetObjectItemCaseSensitive(json.get(),"result");CHECK(response);
                 CHECK(bool(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(response,"isError")))==!expected);
                 const auto* content=cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(response,"content"),0);CHECK(content);
                 const auto* text=cJSON_GetObjectItemCaseSensitive(content,"text");CHECK(cJSON_IsString(text));
-                CHECK(std::strcmp(text->valuestring,expected?"command executed successfully":error.c_str())==0);
+                CHECK(std::strcmp(text->valuestring,expected?tk::command_noop_text(no_op):error.c_str())==0);
+                const auto* structured=cJSON_GetObjectItemCaseSensitive(response,"structuredContent");
+                const auto* noop=cJSON_GetObjectItemCaseSensitive(structured,"noop");
+                CHECK(expected ? cJSON_IsString(noop) && std::strcmp(noop->valuestring,tk::command_noop_code(no_op))==0 : noop==nullptr);
             }
         }
     }
@@ -487,7 +492,8 @@ int main() {
     // Execute the actual upload admission handler and the outer request-retirement guard.
     httpd_req_t binary_request; binary_request.content_len=1024;
     reset(handle_ota_upload); query.clear();
-    CHECK(handle_all(&binary_request)==-4&&response_status==403&&upload_starts==0);
+    CHECK(handle_all(&binary_request)==ESP_OK&&response_status==403&&upload_starts==0);
+    CHECK(cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(reply_json().get(),"result")));
     CHECK(body_retirements==1);
     for(int scenario=0;scenario<6;++scenario){
         reset(handle_ota_upload); query.clear();upload_channel=tk::OtaChannel::Dev;
@@ -871,7 +877,7 @@ int main() {
     CHECK(handle_all(&req)==0); check_outcome("unknown",false); CHECK(effects==1 && clock_calls==1);
     CHECK(cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(reply_json().get(),"started")));
     reset(handle_set_time); ntp_synced=false; fail_json_after_effect=true; req.input="{\"ms\":1800000000000}";
-    CHECK(handle_all(&req)==0); check_outcome("unknown",false); CHECK(clock_calls==1); CHECK(restarts==0);
+    CHECK(handle_all(&req)==0); check_outcome("succeeded",true); CHECK(clock_calls==1); CHECK(restarts==0);
     reset(handle_set_ota); fail_json_after_effect=true; req.input="{\"channel\":\"dev\"}";
     CHECK(handle_all(&req)==0); check_outcome("succeeded",true); CHECK(saves==1); CHECK(restarts==0);
     for (int failing_call : {1,2,3}) {
@@ -899,8 +905,8 @@ int main() {
             const auto* p=handler==mcp_command?cJSON_GetObjectItemCaseSensitive(json.get(),"result"):payload(json);
             const auto* degraded=cJSON_GetObjectItemCaseSensitive(p,"reply_degraded"); CHECK(cJSON_IsTrue(degraded));
             const auto* outcome=cJSON_GetObjectItemCaseSensitive(p,"outcome"); CHECK(cJSON_IsString(outcome));
-            CHECK(std::strcmp(outcome->valuestring,handler==handle_set_time?"unknown":"succeeded")==0);
-            CHECK(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(p,"result"))==(handler!=handle_set_time));
+            CHECK(std::strcmp(outcome->valuestring,"succeeded")==0);
+            CHECK(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(p,"result")));
             CHECK(restarts==int(handler==handle_set_wifi||handler==handle_set_mqtt||handler==handle_set_syslog||handler==handle_set_vin));
             CHECK(confirms==0);
         }

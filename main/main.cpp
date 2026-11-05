@@ -50,6 +50,7 @@
 #include "logic/heap_watchdog.hpp"
 #include "logic/reset_reason.hpp"
 #include "logic/vin_transition.hpp"
+#include "logic/wifi_rollback.hpp"
 
 #if defined(CONFIG_TESLA_CONFIG_REPAIR_USB) && CONFIG_TESLA_CONFIG_REPAIR_USB
 #include "config_repair.hpp"
@@ -837,9 +838,10 @@ extern "C" void app_main() {
     // Connect to WiFi. With stored credentials, a failure is usually a transient
     // outage (e.g. router rebooting), but if it persists (e.g. wrong password),
     // fallback to the setup portal so the user can reconfigure it.
-    if (!on_wire &&
-        !tk::net_start_wifi(ssid.c_str(), password.c_str(), cfg_blob.wifi_rollback_active)) {
-        bool rollback_unpersisted = false;
+    const bool wifi_proven = !on_wire &&
+        tk::net_start_wifi(ssid.c_str(), password.c_str(), cfg_blob.wifi_rollback_active);
+    bool rollback_unpersisted = false;
+    if (!on_wire && !wifi_proven) {
         if (cfg_blob.wifi_rollback_active) {
             // The credentials from the last /set_wifi did not work and the grace window is spent.
             // Restore the pair that DID work and reboot onto it, rather than dropping into the
@@ -902,9 +904,8 @@ extern "C" void app_main() {
     //
     // NOT on the wired path: coming up on Ethernet proves nothing about the credentials on
     // trial, so consuming the backup there would silently discard the only way back to a working
-    // network the moment the cable is unplugged. Every failure path above disarms the trial in RAM
-    // first, so the portal and the last look never reach this with a trial armed.
-    if (!on_wire && cfg_blob.wifi_rollback_active) {
+    // network the moment the cable is unplugged. Late Ethernet rescue is not WiFi proof either.
+    if (tk::wifi_trial_can_commit(wifi_proven, rollback_unpersisted) && cfg_blob.wifi_rollback_active) {
         cfg_blob.wifi_ssid_backup.clear();
         cfg_blob.wifi_pass_backup.clear();
         cfg_blob.wifi_rollback_active = false;

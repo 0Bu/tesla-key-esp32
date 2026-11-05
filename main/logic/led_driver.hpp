@@ -58,6 +58,12 @@ inline LedRgb led_color_rgb(LedColor color, int soc) {
 }
 
 // The task supplies finite, nonnegative monotonic elapsed seconds.
+inline constexpr float led_animation_seconds(LedAnim animation, uint64_t elapsed_us) {
+    const uint64_t period = animation == LedAnim::Breathe ? 2'600'000ULL
+        : animation == LedAnim::Pulse ? 1'100'000ULL : 900'000ULL;
+    return static_cast<float>(elapsed_us % period) / 1'000'000.0f;
+}
+
 inline float led_animation_factor(LedAnim animation, float seconds) {
     constexpr float two_pi = 6.2831853f;
     switch (animation) {

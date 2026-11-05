@@ -1,5 +1,6 @@
 // UNCOMPILED/UNRUN DRAFT: complete actual publisher + actual helper, passive APIs.
 #include <atomic>
+#include <array>
 #include <cstdint>
 #include <cstdarg>
 #include <cstdio>
@@ -16,6 +17,8 @@
 #include "task_watchdog_subscription.hpp"
 #include "mqtt_publish_sequence.hpp"
 #include "stack_watch.hpp"
+#include "logic/connect_outcome.hpp"
+#include "logic/mqtt_state_lifecycle.hpp"
 
 static unsigned checks;
 #define CHECK(x) do {++checks;if(!(x)){std::fprintf(stderr,"FAIL line %d: %s\n",__LINE__,#x);std::exit(42);}}while(false)
@@ -71,6 +74,10 @@ void log(int level,const char*,const char* format,...){
 static const char* TAG="mqtt";
 static unsigned s_interval_s=5;
 static std::atomic<bool> s_connected{false},s_need_discovery{false};
+static std::atomic<bool> s_reset_domain_state{false};
+static std::atomic<int> s_last_err{0};
+static std::array<tk::mqtt::DomainPublishState, 7> s_domain_state{};
+static std::int64_t esp_timer_get_time(){return static_cast<std::int64_t>(fixture::ticks)*1000;}
 static std::string s_avail="public-test/availability";
 
 esp_err_t esp_task_wdt_add(TaskHandle_t task){

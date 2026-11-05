@@ -142,6 +142,25 @@ class LocalChecks(unittest.TestCase):
     def test_real_precommit_preserves_custom_git_exec_path(self):
         self.exercise_real_precommit(custom_exec=True)
 
+    def test_real_precommit_nested_secret_names(self):
+        # Run the shipped hook in a disposable Git index, with synthetic contents only.
+        hook = ROOT / ".githooks/pre-commit"
+        for name in ("nvs-fixture.bin", "secrets.env", "sdkconfig.local", "fixture.pem", "fixture.key"):
+            file = self.root / "nested" / name
+            file.parent.mkdir(exist_ok=True)
+            file.write_text("synthetic fixture\n")
+            self.git("add", str(file.relative_to(self.root)))
+            result = subprocess.run(["bash", str(hook)], cwd=self.root, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 1, (name, result.stderr))
+            self.assertIn("cannot commit secret or transient file: nested/" + name, result.stderr)
+            self.git("reset", "-q", "HEAD", "--", str(file.relative_to(self.root)))
+            file.unlink()
+        ordinary = self.root / "nested/ordinary.bin"
+        ordinary.write_text("ordinary fixture\n")
+        self.git("add", "nested/ordinary.bin")
+        result = subprocess.run(["bash", str(hook)], cwd=self.root, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_actual_runtime_tracks_browser_environment_and_selected_compiler_bytes(self):
         self.runtime.stop()
         executable = self.root / ".tmp/compiler"
@@ -161,6 +180,19 @@ class LocalChecks(unittest.TestCase):
         with patch.object(checks.platform, "system", return_value="Linux"):
             before = checks.runtime_identity(self.root)
             executable.write_text("#!/bin/sh\nexit 38\n")
+            self.assertNotEqual(checks.runtime_identity(self.root), before)
+
+    def test_actual_runtime_tracks_required_rsync_bytes(self):
+        self.runtime.stop()
+        executable = self.root / ".tmp/rsync"
+        executable.parent.mkdir(exist_ok=True)
+        executable.write_text("#!/bin/sh\nexit 0\n")
+        executable.chmod(0o755)
+        which = checks.shutil.which
+        with patch.object(checks.shutil, "which", side_effect=lambda name: str(executable) if name == "rsync" else which(name)), \
+             patch.object(checks.platform, "system", return_value="Linux"):
+            before = checks.runtime_identity(self.root)
+            executable.write_text("#!/bin/sh\nexit 7\n")
             self.assertNotEqual(checks.runtime_identity(self.root), before)
 
     def test_indirect_environment_never_reused(self):

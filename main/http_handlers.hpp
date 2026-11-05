@@ -74,7 +74,8 @@ void finish_config_save(GuardedReq rq) noexcept;
 // NULL rather than throwing, so it bypasses the handle_all try/catch).
 esp_err_t send_json(httpd_req_t* req, int status, cJSON* root);
 
-cJSON* make_response(bool result, const char* command, const char* vin, const char* reason);
+cJSON* make_response(bool result, const char* command, const char* vin, const char* reason,
+                     const char* no_op = nullptr);
 
 // Read a POST body while preserving the exact failure class.  Persisted configuration handlers
 // MUST use this form so empty/failed/OOM input can never be mistaken for an explicit JSON "" that
@@ -103,7 +104,7 @@ bool query_param_is(httpd_req_t* req, const char* key, const char* want);
 // (command_exec.cpp). ival/bval are the positional value arrays each surface filled
 // against the shared arg specs in logic/command_registry.hpp (tk::kCmdMaxArgs slots).
 bool execute_vehicle_command(VehicleController& v, tk::CmdKind kind,
-                             const int* ival, const bool* bval);
+                             const int* ival, const bool* bval, tk::CommandNoOp* no_op = nullptr);
 
 // ─── Route handlers ───────────────────────────────────────────────────────────
 

@@ -8,6 +8,18 @@
 // plain host toolchain. See test/README.md and the project AGENTS.md.
 namespace tk {
 
+enum class WifiRetryAction : uint8_t { Retry, PauseForEthernet, Exhausted };
+inline constexpr WifiRetryAction wifi_retry_action(bool ethernet_lease, bool wifi_proven,
+        bool rollback_pending, int attempts, int maximum) {
+    if (ethernet_lease) return WifiRetryAction::PauseForEthernet;
+    return !wifi_proven && !rollback_pending && attempts >= maximum
+        ? WifiRetryAction::Exhausted : WifiRetryAction::Retry;
+}
+
+inline constexpr bool wifi_trial_can_commit(bool wifi_proven, bool rollback_unpersisted) {
+    return wifi_proven && !rollback_unpersisted;
+}
+
 // WiFi credential-ROLLBACK policy: on the boot that follows a credential change, when does
 // "still no IP" mean the NEW credentials are WRONG (restore the one-shot backup), and when does
 // it only mean the network is not back YET (keep waiting)?

@@ -123,7 +123,6 @@ expected_production_ble_logs = {
     ("E", "NimBLE host did not acknowledge sync within 5000 ms"),
     ("W", "NimBLE synced after the boot acknowledgement timeout; runtime stays closed"),
     ("I", "NimBLE synced"),
-    ("W", "could not obtain stable BLE handle while disconnecting"),
     ("W", "RX defer queue full — dropping link fail-closed"),
     ("W", "RX notify length %u exceeds fixed host slot — dropping link"),
     ("E", "CCCD subscribed but connected callback is unavailable"),

@@ -15,7 +15,7 @@ import provision  # noqa: E402
 
 
 def firmware_management_reply(ok, command, vin="", reason="test reply"):
-    """Derive the fixture keys from the actual straight-line make_response producer."""
+    """Derive management keys from the actual producer, with no command-only no-op argument."""
     root = pathlib.Path(__file__).resolve().parents[1]
     source = (root / "main/http_common.cpp").read_text(encoding="utf-8")
     match = re.search(r"cJSON\* make_response\([^{}]+\)\s*\{(.*?)^}", source, re.S | re.M)
@@ -30,7 +30,7 @@ def firmware_management_reply(ok, command, vin="", reason="test reply"):
     expected = (f' tk::JsonBuilder json; cJSON* response = json.object(json.root(), "{wrappers[0]}"); '
                 f'json.boolean(response, "{flags[0]}", result); ' +
                 ' '.join(f'json.string(response, "{key}", {value});' for key, value in strings) +
-                ' return json.release(); ')
+                ' if (result && no_op) json.string(response, "noop", no_op); return json.release(); ')
     if re.sub(r"\s+", "", expected) != re.sub(r"\s+", "", body):
         raise AssertionError("management reply producer is no longer the reviewed straight-line shape")
     values = {"command": command, "vin": vin, "reason": reason}

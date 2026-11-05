@@ -134,13 +134,14 @@ esp_err_t send_config_reply(GuardedReq rq, int status, bool ok,
 }
 
 cJSON* make_response(bool result, const char* command,
-                     const char* vin, const char* reason) {
+                     const char* vin, const char* reason, const char* no_op) {
     tk::JsonBuilder json;
     cJSON* response = json.object(json.root(), "response");
     json.boolean(response, "result", result);
     json.string(response, "command", command);
     json.string(response, "vin", vin);
     json.string(response, "reason", reason);
+    if (result && no_op) json.string(response, "noop", no_op);
     return json.release();
 }
 

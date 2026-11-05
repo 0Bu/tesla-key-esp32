@@ -408,7 +408,7 @@ bool VehicleController::vin_is_plausible(const std::string& vin) {
 //                     would wrongly hide the web-UI hero / publish a phantom "UNREACHABLE").
 //                     The idle reachability stamp comes only from auto_pair_task's health
 //                     probe, whose cycle is its 30 s post-probe wait + a VCSEC scan/connect
-//                     (≤10 s, ensure_connected_) + round-trip (≤8 s, health_probe_) ≈ 40-48 s;
+//                     and round-trip sharing one 8 s health_probe_ deadline, at most ~38 s;
 //                     a failed probe on the flaky link to a sleeping car adds another ~30 s
 //                     wait + timeout. 150 s clears two such cycles with margin while a
 //                     genuinely-gone car still flips to Unreachable in ~2.5 min.

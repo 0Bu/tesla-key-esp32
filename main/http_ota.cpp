@@ -74,13 +74,21 @@ static bool parse_pr_param_(httpd_req_t* req, unsigned& pr) {
     return pr != 0;
 }
 
+static esp_err_t send_ota_error_(httpd_req_t* req, int status, const char* reason,
+                                bool check = false) {
+    tk::JsonBuilder json;
+    json.boolean(json.root(), check ? "started" : "result", false);
+    json.string(json.root(), "reason", reason);
+    return send_json(req, status, json.release());
+}
+
 // GET /ota/check[?ms=<epoch>][&pr=<N>] — start a background version check, return at once.
 // Accept one reserved check; memory admission runs after this request's SDK scratch is freed.
 // The slow HTTPS fetch runs in its own task; the UI polls /ota/status for admission/result.
 esp_err_t handle_ota_check(GuardedReq rq) {
     httpd_req_t* req = rq.req();
     if (validate_query_string(req) != ESP_OK) {
-        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid query string");
+        return send_ota_error_(req, 400, "invalid query string", true);
     }
     rq.reply()->state.shape = tk::ReplyShape::OtaCheck;
     unsigned pr = 0;
@@ -125,7 +133,7 @@ esp_err_t handle_ota_check(GuardedReq rq) {
 esp_err_t handle_ota_update(GuardedReq rq) {
     httpd_req_t* req = rq.req();
     if (validate_query_string(req) != ESP_OK) {
-        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid query string");
+        return send_ota_error_(req, 400, "invalid query string");
     }
     rq.reply()->state.shape = tk::ReplyShape::FlatResult;
     unsigned pr = 0;
@@ -151,18 +159,17 @@ esp_err_t handle_ota_update(GuardedReq rq) {
 esp_err_t handle_ota_upload(GuardedReq rq) {
     auto* req = rq.req();
     if (ota_get_channel() != tk::OtaChannel::Dev)
-        return httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "OTA channel dev required");
+        return send_ota_error_(req, 403, "OTA channel dev required");
     if (req->content_len > tk::kOtaUploadMaxBytes) {
-        httpd_resp_set_status(req, "413 Payload Too Large");
-        return httpd_resp_sendstr(req, "OTA slot exceeded");
+        return send_ota_error_(req, 413, "OTA slot exceeded");
     }
     char type[32]{};
     if (httpd_req_get_url_query_len(req) != 0 ||
         httpd_req_get_hdr_value_len(req, "Transfer-Encoding") != 0 ||
         httpd_req_get_hdr_value_str(req, "Content-Type", type, sizeof(type)) != ESP_OK ||
         !tk::ota_upload_admissible(ota_get_channel(), req->content_len, type))
-        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
-                                  "signed app, Content-Length and application/octet-stream required");
+        return send_ota_error_(req, 400,
+                               "signed app, Content-Length and application/octet-stream required");
     const auto result = ota_upload_start(req, rq.context->async_owned);
     if (rq.context->async_owned) return ESP_OK; // Async owner handles every success/failure reply.
     tk::JsonBuilder json;
@@ -213,11 +220,11 @@ esp_err_t handle_ota_changelog(GuardedReq rq) {
     httpd_req_t* req = rq.req();
     char notes[1025];
     size_t len = 0;
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     if (!ota_get_changelog(notes, sizeof(notes), len) || len == 0) {
         httpd_resp_set_status(req, "204 No Content");
         return httpd_resp_send(req, nullptr, 0);
     }
-    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
     return httpd_resp_send(req, notes, len);
 }

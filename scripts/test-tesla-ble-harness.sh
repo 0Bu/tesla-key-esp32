@@ -260,12 +260,10 @@ for result, name in (("void", "publish_command_outcome_"), ("void", "invalidate_
     end = source.index("\n}", start) + 2
     methods.append(source[start:end].replace("VehicleController::", "CompletionController::"))
 (out / "completion-native.inc").write_text("\n\n".join(methods) + "\n")
-marker = "        auto on_done = [cb]("
-parts = source.split(marker)[1:]
-adapters = ["auto on_done = [cb](" + part.split("\n        };", 1)[0] + "\n};" for part in parts]
-if len(adapters) != 2 or adapters[0] != adapters[1]:
-    raise SystemExit("VCSEC and Infotainment must preserve the same typed completion adapter")
-(out / "completion-on-done.inc").write_text(adapters[0] + "\n")
+adapter = "        auto on_done = std::move(cb);"
+if source.count(adapter) != 2:
+    raise SystemExit("VCSEC and Infotainment must transfer the same direct typed completion callback")
+(out / "completion-on-done.inc").write_text(adapter.strip() + "\n")
 methods = []
 for result, name in (("bool", "send_vcsec_"), ("VehicleController::CommandOutcome", "send_vcsec_outcome_"),
                      ("bool", "wake_up")):
