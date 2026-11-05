@@ -19,14 +19,20 @@ balanced = helpers["balanced_end"]
 
 def function(file, name):
     source = (root / "main" / file).read_text()
-    body = body_in(re.sub(r"\[\[.*?\]\]", lambda match: " " * len(match.group()), source), name)
     pattern = (r"^(?:\[\[gnu::noinline\]\] )?(?:static )?"
-               r"(?:esp_err_t|void|unsigned|bool|BrowserClockStatus|const char\*|cJSON\*) " + re.escape(name) + r"\(")
+               r"(?:esp_err_t|void|unsigned|bool|BrowserClockStatus|const char\*|const std::array<char, 17>&|cJSON\*) " + re.escape(name) + r"\(")
     found = list(re.finditer(pattern, source, re.M))
     if len(found) != 1:
         raise AssertionError(f"ambiguous extracted production function: {file}:{name}")
     start = found[0].start()
     opening = source.index("{", found[0].end())
+    if name == "ota_boot_id_":
+        if file != "http_ota.cpp" or source[start:opening] != "static const std::array<char, 17>& ota_boot_id_() ":
+            raise AssertionError("OTA boot-id helper declaration changed")
+        closing = balanced(scrub(source), opening, "{", "}", name)
+        body = source[opening:closing + 1]
+    else:
+        body = body_in(re.sub(r"\[\[.*?\]\]", lambda match: " " * len(match.group()), source), name)
     if not source[opening:].startswith(body):
         raise AssertionError(f"function extraction does not match parsed body: {name}")
     return source[start:opening + len(body)]
@@ -53,6 +59,10 @@ if hashlib.sha256((root / "esp-idf-toolchain.txt").read_bytes()).hexdigest() != 
 
 output = pathlib.Path(sys.argv[1])
 owner = (root / "main/ota_update.hpp").read_text()
+if owner.count("enum class OtaState {") != 1 or owner.count("struct OtaCheckResult {") != 1:
+    raise AssertionError("OTA status type source markers changed")
+output.with_name("ota_status.generated.hpp").write_text(
+    owner[owner.index("enum class OtaState {"):owner.index("struct OtaCheckResult {")])
 owner = owner[owner.index("class OtaHealthCommitGuard {"):]
 output.with_name("config_commit_owner.generated.hpp").write_text(owner)
 runtime = (root / "main/ota_update.cpp").read_text()
@@ -91,7 +101,7 @@ for name in ("send_json", "send_effect_json", "send_effect_exception", "run_effe
     parts.append(function("http_common.cpp", name))
 for name in ("apply_mqtt_submission_", "apply_syslog_submission_", "save_wifi_submission_", "apply_wifi_submission_", "handle_gen_keys", "handle_set_time", "handle_set_vin", "handle_set_mqtt", "handle_set_syslog", "handle_set_wifi", "handle_set_ota"):
     parts.append(function("http_config.cpp", name))
-for name in ("apply_browser_time_query_", "parse_pr_param_", "handle_ota_check", "handle_ota_update", "handle_ota_upload"):
+for name in ("ota_boot_id_", "ota_state_str", "apply_browser_time_query_", "parse_pr_param_", "handle_ota_check", "handle_ota_update", "handle_ota_upload", "handle_ota_status"):
     parts.append(function("http_ota.cpp", name))
 for name in ("coredump_error", "coredump_erase_reply", "handle_coredump", "handle_crash_dismiss"):
     parts.append(function("http_status.cpp", name))

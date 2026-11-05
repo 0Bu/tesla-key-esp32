@@ -149,7 +149,7 @@ curl -s http://<ESP32-IP>/mcp \
   "protocolVersion":"2025-06-18",
   "capabilities":{"tools":{}},
   "serverInfo":{"name":"tesla-key-esp32","version":"1.5.0"},
-  "instructions":"Tesla BLE Charging Manager bridge. Cached get_vehicle_state never wakes the car; BLE commands may take 20s. Dev-only local OTA: POST /ota/upload, application/octet-stream, Content-Length, raw signed app .bin. GET /ota/status: progress and boot/ELF identity. Repeat/PR builds allowed; older cores refused. Explicit board/OTA approval required; installs then reboots. No feed/merge needed; signature, rollback and PR gates remain."}}
+  "instructions":"Cached get_vehicle_state never wakes; BLE commands may take 20s. HTTP OTA (board/OTA approval): POST /ota/upload, saved dev only, Content-Length, application/octet-stream, signed app .bin. GET /ota/status: progress/boot/ELF. No feed/merge; reboots. Signature/rollback/PR gates remain."}}
 ```
 
 (`serverInfo.version` is illustrative — the device reports its running firmware version.)

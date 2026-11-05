@@ -133,7 +133,10 @@ Syslog sends unredacted console logs over cleartext, unauthenticated UDP. VIN, S
 appear; keep raw logs private and use trusted collectors. Known MQTT URI parse-error records
 are replaced before Serial, RAM and Syslog, including when the optional RAM-ring mutex fails.
 This narrow guard does not sanitize arbitrary library or fragmented driver output. `/status?redact=1` and `/diag?redact=1` redact known identifiers,
-but retain the physical board MAC. Inspect before sharing. Overlong/truncated logical log lines
+but retain the physical board MAC. The ring flattens embedded line breaks in recognized
+identifier-bearing records so a value cannot escape per-line redaction. This also changes raw
+RAM-log exports; other Serial/Syslog records keep their original bytes. Inspect before sharing.
+Overlong/truncated logical log lines
 fail closed; do not join partial generations.
 
 Core dumps are unauthenticated downloads. General DRAM capture is off, but task stacks can contain

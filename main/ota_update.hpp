@@ -19,6 +19,7 @@ struct OtaStatus {
     std::string message;
     std::string available;         // latest version seen by the last check (if any)
     bool        update_available;  // last check found a newer version
+    bool        upload{false};     // raw upload; no feed offer or target version is implied
     std::string current;           // running version at the last check
     std::string channel;           // active update channel ("release" or "dev")
     unsigned    target_pr{0};      // 0 for main channel, >0 if PR preview channel

@@ -26,6 +26,7 @@
 #include "logic/heap_watchdog.hpp"
 #include <cJSON.h>
 #include <atomic>
+#include <array>
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
@@ -54,6 +55,7 @@ constexpr int HTTPD_403_FORBIDDEN=403;
 static constexpr char TAG[]="offline-effect-adapter";
 static int fake_http_server;
 struct httpd_req_t { const char* uri{"/offline"}; size_t content_len{}; const char* input{"{}"}; void* handle{&fake_http_server}; };
+#include "ota_status.generated.hpp"
 #include "config_commit_owner.generated.hpp"
 #include "effect_reply_context.generated.hpp"
 using Handler = esp_err_t(*)(GuardedReq);
@@ -71,6 +73,7 @@ static unsigned last_ota_pr;
 static tk::OtaStartResult ota_result;
 static tk::OtaChannel upload_channel=tk::OtaChannel::Release;
 static std::string upload_content_type,upload_transfer_encoding;
+static OtaStatus ota_payload{};
 static unsigned upload_starts=0,body_retirements=0;
 static std::string query;
 static char wire[4096]; static size_t wire_size;
@@ -92,6 +95,10 @@ template<typename... Args> void offline_log(Args...) noexcept {}
 #define ESP_LOGW(...) offline_log(__VA_ARGS__)
 #define ESP_LOGE(...) offline_log(__VA_ARGS__)
 #define CONFIG_TESLA_MQTT_USERNAME ""
+#define CONFIG_IDF_TARGET "esp32"
+struct esp_app_desc_t { char project_name[32]{"tesla-key-esp32"}; uint8_t app_elf_sha256[32]{}; };
+static const esp_app_desc_t* esp_app_get_description() { static const esp_app_desc_t description; return &description; }
+static uint32_t esp_random() { static uint32_t calls=0; return ++calls; }
 #define pdMS_TO_TICKS(x) (x)
 constexpr int SHUT_RD=0;
 static void vTaskDelay(int) noexcept {}
@@ -239,6 +246,9 @@ static bool ota_is_updating() { return updating; }
 static tk::OtaStartResult ota_start(unsigned pr) { ++update_starts; last_ota_pr=pr; if (ota_result==tk::OtaStartResult::Started) effect_done(); return ota_result; }
 static void ota_set_channel(tk::OtaChannel) { effect_done(); }
 static tk::OtaChannel ota_get_channel() { return upload_channel; }
+static OtaStatus ota_get_status() { return ota_payload; }
+static bool ota_is_busy() { return updating; }
+static tk::OtaVerificationState ota_cached_verification_state() { return tk::OtaVerificationState::Stable; }
 static tk::OtaStartResult ota_upload_start(httpd_req_t*,bool& handed) noexcept {
     ++upload_starts; handed=ota_result==tk::OtaStartResult::Started; return ota_result;
 }
@@ -326,6 +336,7 @@ static esp_err_t handle_all_dispatch(GuardedReq rq) { return selected(rq); }
 #include "effect_reply_adapters.generated.hpp"
 
 static void reset(Handler handler) {
+    ota_payload={};
     upload_channel=tk::OtaChannel::Release; upload_content_type="application/octet-stream";
     upload_transfer_encoding.clear(); upload_starts=body_retirements=0;
     runner_reply_enabled=false; runner_success=false; runner_error.clear();
@@ -449,6 +460,30 @@ static void test_nominal_charge_reply_adapters() {
 int main() {
     CHECK(!tk::stack_watch_min_free_bytes(tk::StackWatch::Httpd).has_value());
     cJSON_Hooks hooks{gate_malloc,gate_free}; cJSON_InitHooks(&hooks);
+    // Serialize the actual typed upload snapshot through the shipped HTTP status handler.
+    for(bool upload:{false,true}){
+        reset(handle_ota_status);
+        ota_payload={OtaState::Downloading,37,"uploading",upload?"":"1.6.4",!upload,upload,"1.6.3","dev",0};
+        httpd_req_t req;
+        CHECK(handle_all(&req)==ESP_OK);
+        const auto json=reply_json();CHECK(json);
+        CHECK(bool(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(json.get(),"upload")))==upload);
+        const auto* available=cJSON_GetObjectItemCaseSensitive(json.get(),"available");
+        CHECK(cJSON_IsString(available)&&std::strcmp(available->valuestring,upload?"":"1.6.4")==0);
+        CHECK(cJSON_GetObjectItemCaseSensitive(json.get(),"pr")==nullptr);
+    }
+    reset(handle_ota_status);ota_payload.upload=true;
+    httpd_req_t empty_req;CHECK(handle_all(&empty_req)==ESP_OK);
+    allocation_fault_armed=true;effect_allocations=0;allocation_fault_index=0;
+    CHECK(handle_all(&empty_req)==ESP_OK);
+    const int status_allocations=effect_allocations;
+    for(int nth=1;nth<=status_allocations;++nth){
+        reset(handle_ota_status);ota_payload.upload=true;
+        allocation_fault_armed=true;allocation_fault_index=nth;
+        CHECK(handle_all(&empty_req)==ESP_OK&&response_status==503);
+        const auto json=reply_json();CHECK(json);
+        CHECK(cJSON_GetObjectItemCaseSensitive(json.get(),"upload")==nullptr);
+    }
     // Execute the actual upload admission handler and the outer request-retirement guard.
     httpd_req_t binary_request; binary_request.content_len=1024;
     reset(handle_ota_upload); query.clear();

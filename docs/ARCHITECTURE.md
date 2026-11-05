@@ -111,6 +111,9 @@ receive and flash boundary remains budgeted. Socket timeouts and heap-abort requ
 the transfer. Dev is checked at admission, in the receive loop and before final verification;
 normal configuration routes remain excluded while the operation is updating.
 
+Upload admission publishes `upload=true` and clears the old feed offer, PR and notes under the
+status mutex. Consumers can display progress without assigning a manifest target version.
+
 The upload-specific image policy accepts a canonical equal/newer version core without a feed
 version or suffix requirement, enabling repeat tests of signed local/PR builds. Ordinary feed
 eligibility is unchanged. The operation retains ownership after committed or uncertain boot
@@ -476,8 +479,8 @@ a dismissed report is not replayed later. Syslog is best-effort and
 
 The ring lock covers bounded copies and sink snapshot only; invoke sinks after unlock. Chunked
 exports bind append count and clear epoch, stop on generation changes, discard a wrapped first line
-and redact overlong logical lines as a whole. Recognized complete V1 library records flatten
-embedded line breaks in the ring copy. A boot-installed sink replaces known credential-bearing MQTT
+and redact overlong logical lines as a whole. Recognized complete V1 library records and application records containing a known identifier
+marker flatten embedded line breaks in the ring copy. A boot-installed sink replaces known credential-bearing MQTT
 URI parse errors before every output even if the ring mutex fails; other raw Serial/Syslog records
 retain their bytes. The boot owner publishes mutex and previous-sink handles atomically; each
 consumer snapshots its handle once. Export limits live in

@@ -7256,6 +7256,7 @@ static void test_redact() {
         CHECK(!tk::diag_mqtt_uri_error(record));
     }
     static_assert(noexcept(tk::diag_library_identifier_line({})));
+    static_assert(noexcept(tk::diag_application_identifier_line({})));
     static_assert(noexcept(tk::diag_library_capture_content_end({})));
     static_assert(noexcept(tk::diag_capture_byte('x', 0, 1)));
     const std::string injected = "I wifi:connected with example\nI (0) fake: private-tail\r\n";
@@ -7267,6 +7268,42 @@ static void test_redact() {
     CHECK(tk::diag_capture_byte('x', 10, content_end) == 'x');
     CHECK(tk::diag_library_capture_content_end("I app: multiline\nnot an identifier\n") == 0);
     CHECK(tk::diag_capture_byte('\n', 10, 0) == '\n');
+    // Application capture shares the existing export-marker policy. Embedded SSID bytes
+    // cannot become independent markerless lines, even if they impersonate another logger.
+    for (const char* prefix : {"I (1) net: WiFi connected to '",
+                              "I (1) provisioning: saved config: ssid='"})
+    for (const char* injected_break : {"\n", "\r", "\r\nI (0) fake: "})
+    for (const char* ending : {"", "\n", "\r\n"}) {
+        const std::string ssid = std::string("demo") + injected_break + "private-tail";
+        CHECK(ssid.size() <= 32);
+        const std::string record = std::string(prefix) + ssid + "'" + ending;
+        CHECK(!tk::diag_library_identifier_line(record));
+        CHECK(tk::diag_application_identifier_line(record));
+        const auto end = tk::diag_library_capture_content_end(record);
+        CHECK(end == record.size() - std::strlen(ending));
+        std::string captured(record.size(), '\0');
+        for (size_t i = 0; i < record.size(); ++i)
+            captured[i] = tk::diag_capture_byte(record[i], i, end);
+        std::string expected = record;
+        for (size_t i = 0; i < end; ++i)
+            if (expected[i] == '\r' || expected[i] == '\n') expected[i] = ' ';
+        CHECK(captured == expected);
+        const auto exported = tk::redact_diag_line(captured);
+        CHECK(exported.find("demo") == std::string::npos);
+        CHECK(exported.find("private-tail") == std::string::npos);
+        CHECK(exported.find(tk::kRedacted) != std::string::npos);
+    }
+    const std::string later_marker = "I (1) app: detail\nWiFi connected to 'demo\nprivate-tail'\r\n";
+    CHECK(tk::diag_application_identifier_line(later_marker));
+    CHECK(tk::diag_library_capture_content_end(later_marker) == later_marker.size() - 2);
+    for (const char* record : {"I (1) app: ordinary\nsecond line\n",
+                               "I (1) app: ordinary\r\nsecond line\r\n",
+                               "I (1) net: WiFi credentials missing\nretry later\n"}) {
+        CHECK(!tk::diag_application_identifier_line(record));
+        CHECK(tk::diag_library_capture_content_end(record) == 0);
+        for (size_t i = 0; i < std::strlen(record); ++i)
+            CHECK(tk::diag_capture_byte(record[i], i, 0) == record[i]);
+    }
     static_assert(tk::diag_redacted_capacity(288) == 288 + 18 * tk::kRedactedLength);
     const char* library_lines[] = {
         "V (1) TeslaBLE::Peer: Tesla key data: 04 01 02 03 synthetic-key-canary",

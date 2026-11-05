@@ -3861,7 +3861,7 @@ def require_ota_status_lock_contract(ota_source: str, runtime_tests: str) -> Non
     unavailable = function_body_in(ota_source, "unavailable_status_snapshot")
     if "s_status" in scrub_cpp(unavailable):
         raise AssertionError("OTA unavailable snapshot reads shared status without a lock")
-    if 'return {OtaState::Error, 0, "unavailable", "", false, "", tk::ota_channel_name(ota_get_channel())};' not in unavailable:
+    if 'return {OtaState::Error, 0, "unavailable", "", false, false, "", tk::ota_channel_name(ota_get_channel())};' not in unavailable:
         raise AssertionError("OTA lock failure lost its independent unavailable snapshot")
 
     reader = function_body_in(ota_source, "ota_get_status")
@@ -3874,6 +3874,7 @@ def require_ota_status_lock_contract(ota_source: str, runtime_tests: str) -> Non
         "snapshot = s_status;",
         "snapshot.message.data()",
         "snapshot.available.data()",
+        "snapshot.upload",
         "snapshot.current.data()",
     ):
         if token not in reader:
@@ -3907,16 +3908,17 @@ def require_ota_status_lock_contract(ota_source: str, runtime_tests: str) -> Non
         if token not in ota_source:
             raise AssertionError(f"OTA status fixed snapshot contract missing {token!r}")
 
-    for writer_name in ("set_state", "publish_check_status"):
+    for writer_name in ("set_state", "publish_check_status", "publish_upload_start"):
         writer = function_body_in(ota_source, writer_name)
         first_status = writer.find("s_status")
         if first_status < 0:
             raise AssertionError(f"OTA status writer {writer_name} no longer publishes status")
+        refused = "return false;" if writer_name == "publish_upload_start" else "return;"
         for token in (
             "SemaphoreHandle_t lock = ensure_lock();",
-            "if (!lock) return;",
+            "if (!lock) " + refused,
             "tk::SemGuard g(lock)",
-            "if (!g) return;",
+            "if (!g) " + refused,
         ):
             if token not in writer[:first_status]:
                 raise AssertionError(
@@ -3956,8 +3958,17 @@ def require_ota_status_lock_contract(ota_source: str, runtime_tests: str) -> Non
     if done.count("publish_check_status(candidate);") != 1 or "s_status" in done:
         raise AssertionError("OTA completed check is not one whole-snapshot publication")
     publisher = scrub_cpp(function_body_in(ota_source, "publish_check_status"))
-    if publisher.count("s_status = candidate;") != 1 or re.search(r"s_status\s*\.", publisher):
-        raise AssertionError("OTA completed-check publisher is not one whole-snapshot assignment")
+    # Preserve only the active upload source for an error, inside the same guarded generation.
+    expected_publisher = (
+        "{ SemaphoreHandle_t lock = ensure_lock(); if (!lock) return; "
+        "tk::SemGuard g(lock); if (!g) return; "
+        "const bool upload = keep_upload && s_status.upload; "
+        "s_status = candidate; s_status.upload = upload; }"
+    )
+    if " ".join(publisher.split()) != expected_publisher:
+        raise AssertionError("OTA publisher is not the exact guarded snapshot/source program")
+    if "static void publish_check_status(const OtaStatusPod& candidate, bool keep_upload = false) noexcept" not in ota_source:
+        raise AssertionError("OTA completed-check publication must reset upload source by default")
 
     # set_check_error() is the last-resort path used from exception/OOM catches and task-create
     # failure. It is noexcept by design: keep the entire path fixed-buffer-only and publish one
@@ -3976,7 +3987,7 @@ def require_ota_status_lock_contract(ota_source: str, runtime_tests: str) -> Non
         "copy_status_text(candidate.message, message);",
         "const std::string_view current = running_version();",
         "copy_status_text(candidate.current, current.data());",
-        "publish_check_status(candidate);",
+        "publish_check_status(candidate, true);",
     ):
         if token not in error:
             raise AssertionError(f"OTA check-error fixed snapshot missing {token!r}")
@@ -3986,7 +3997,7 @@ def require_ota_status_lock_contract(ota_source: str, runtime_tests: str) -> Non
         "copy_status_text(candidate.message, message); "
         "const std::string_view current = running_version(); "
         "copy_status_text(candidate.current, current.data()); "
-        "publish_check_status(candidate); }"
+        "publish_check_status(candidate, true); }"
     )
     if " ".join(error.split()) != expected_error:
         raise AssertionError("OTA check-error fallback is not the exact fixed snapshot program")
@@ -7504,6 +7515,33 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
 
     for label, source in (
         (
+            "OTA unavailable snapshot must not claim an upload",
+            ota_source.replace(
+                'return {OtaState::Error, 0, "unavailable", "", false, false, "",',
+                'return {OtaState::Error, 0, "unavailable", "", false, true, "",',
+                1,
+            ),
+        ),
+        (
+            "OTA status reader loses upload source",
+            ota_source.replace("snapshot.update_available, snapshot.upload, snapshot.current.data()",
+                               "snapshot.update_available, false, snapshot.current.data()", 1),
+        ),
+        (
+            "OTA error publisher loses upload source",
+            ota_source.replace("s_status.upload = upload;", "s_status.upload = false;", 1),
+        ),
+        (
+            "OTA feed publisher inherits upload source",
+            ota_source.replace("const bool upload = keep_upload && s_status.upload;",
+                               "const bool upload = s_status.upload;", 1),
+        ),
+        (
+            "OTA error fallback omits source preservation",
+            ota_source.replace("publish_check_status(candidate, true);",
+                               "publish_check_status(candidate);", 1),
+        ),
+        (
             "OTA status reader allocation-failure unlocked read",
             ota_source.replace(
                 "if (!lock) return unavailable_status_snapshot();",
@@ -7540,7 +7578,8 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
     materialize_under_lock = ota_source.replace(
         "    }\n    // Any allocation happens after releasing the status lock.",
         "        return {snapshot.state, snapshot.progress, snapshot.message.data(),\n"
-        "                snapshot.available.data(), snapshot.update_available, snapshot.current.data()};\n"
+        "                snapshot.available.data(), snapshot.update_available, snapshot.upload,\n"
+        "                snapshot.current.data(), tk::ota_channel_name(ota_get_channel()), snapshot.target_pr};\n"
         "    }\n    // Any allocation happens after releasing the status lock.",
         1,
     )
@@ -7594,7 +7633,7 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
     )
 
     partial_check_error = ota_source.replace(
-        "    publish_check_status(candidate);\n}\n\n// ─── Small HTTPS GET",
+        "    publish_check_status(candidate, true);\n}\n\n// ─── Small HTTPS GET",
         "    set_state(OtaState::Error, 0, message);\n}\n\n// ─── Small HTTPS GET",
         1,
     )

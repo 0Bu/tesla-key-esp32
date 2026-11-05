@@ -1154,7 +1154,7 @@ static void test_actual_logger_stack_sampling() {
     capture_log_sinks = false;
     fail_global_allocation = true;
     const auto queries = stack_queries;
-    emit_log("no-allocation diagnostic sample\n");
+    emit_log("I (1) net: WiFi connected to 'demo\nprivate-tail'\r\n");
     fail_global_allocation = false;
     CHECK(stack_queries == queries + 1);
     track_log_stack_queries = false;
@@ -1435,6 +1435,62 @@ int main() {
         CHECK(exported.find("private-tail") == std::string::npos);
         CHECK(exported.find(tk::kRedacted) != std::string::npos);
     }
+    // The application net/provisioning formats use the same capture boundary. Each SSID
+    // is within its 32-byte input limit; added padding exercises callback truncation after
+    // that value. A preceding newline must not hide an otherwise recognized app marker.
+    for (const char* prefix : {"I (1) net: WiFi connected to '",
+                              "I (1) provisioning: saved config: ssid='",
+                              "I (1) app: detail\nI (2) net: WiFi connected to '"})
+    for (const char* injected_break : {"\n", "\r", "\r\nI (0) fake: "})
+    for (const char* ending : {"\n", "\r\n"})
+    for (bool wrapped : {false, true}) for (bool truncated : {false, true}) {
+        diag_log_clear();
+        const std::string ssid = std::string("demo") + injected_break + "private-tail";
+        CHECK(ssid.size() <= 32);
+        std::string record = std::string(prefix) + ssid + "'";
+        if (truncated) record += std::string(240, 'X');
+        record += ending;
+        captured_serial.clear(); captured_syslog.clear(); capture_log_sinks = true;
+        emit_log("%s", record.c_str());
+        capture_log_sinks = false;
+        CHECK(captured_serial == record);
+        CHECK(captured_syslog == record.substr(0, 255));
+        if (truncated) emit_log("\n");
+        if (wrapped) {
+            for (int i = 0; i < 350; ++i) {
+                emit_log("%s", record.c_str());
+                if (truncated) emit_log("\n");
+            }
+        }
+        const std::string after = "I (2) app: after\n";
+        emit_log("%s", after.c_str());
+        std::string raw;
+        CHECK(diag_log_dump_chunks([&](const char* data, size_t len) {
+            CHECK(!last_mutex->held); raw.append(data, len); return true;
+        }, DiagDumpStart::AfterWrappedLineBoundary) == DiagDumpResult::Complete);
+        std::string flattened_prefix = prefix;
+        std::string flattened_ssid = ssid;
+        for (char& byte : flattened_prefix) if (byte == '\r' || byte == '\n') byte = ' ';
+        for (char& byte : flattened_ssid) if (byte == '\r' || byte == '\n') byte = ' ';
+        const std::string protected_value = flattened_prefix + flattened_ssid + "'";
+        CHECK(raw.find(protected_value) != std::string::npos);
+        CHECK(raw.find("\nI (0) fake:") == std::string::npos);
+        if (!truncated) CHECK(raw.find(std::string(ending) + after) != std::string::npos);
+        if (!wrapped) {
+            std::string expected = protected_value;
+            if (truncated) expected += std::string(240, 'X');
+            expected += ending;
+            expected.resize(std::min<size_t>(expected.size(), 255));
+            if (truncated) expected += '\n';
+            CHECK(raw == expected + after);
+        }
+        const std::string exported = export_diag_capture();
+        CHECK(exported.find("demo") == std::string::npos);
+        CHECK(exported.find("private-tail") == std::string::npos);
+        CHECK(exported.find("fake:") == std::string::npos);
+        CHECK(exported.find(tk::kRedacted) != std::string::npos);
+        CHECK(exported.find("app: after") != std::string::npos);
+    }
     for (bool truncated : {false, true}) {
         diag_log_clear();
         std::string record = "E (123) mqtt_client: Error parse uri (non-hexadecimal data after %) = mqtt://example:secret@broker.invalid\nI (0) fake: private-tail";
@@ -1461,26 +1517,35 @@ int main() {
     // No artificial LF: a truncated callback followed directly by an ordinary complete record,
     // or an entirely unterminated wrapped ring, may discard the whole export. It must never
     // emit the markerless value or flush a partial secret as if it were a complete line.
+    for (const char* prefix : {"I (1) wifi:connected with example",
+                              "I (1) net: WiFi connected to 'demo"})
     for (bool wrapped : {false, true}) for (bool next_record : {false, true}) {
         diag_log_clear();
         const std::string long_record =
-            "I (1) wifi:connected with example\nI (0) fake: private-tail" + std::string(240, 'X');
+            std::string(prefix) + "\nI (0) fake: private-tail" + std::string(240, 'X');
         for (unsigned i = 0; i < (wrapped ? 350u : 1u); ++i) emit_log("%s", long_record.c_str());
         if (next_record) emit_log("I (2) app: complete next record\n");
         const auto exported = export_diag_capture();
         CHECK(exported.find("example") == std::string::npos);
+        CHECK(exported.find("demo") == std::string::npos);
         CHECK(exported.find("private-tail") == std::string::npos);
         CHECK(exported.find("fake:") == std::string::npos);
         if (wrapped) CHECK(exported.empty());
     }
     diag_log_clear();
-    const std::string ordinary = "I (3) app: ordinary\nsecond line\n";
-    emit_log("%s", ordinary.c_str());
-    std::string unchanged;
-    CHECK(diag_log_dump_chunks([&](const char* data, size_t len) {
-        unchanged.append(data, len); return true;
-    }) == DiagDumpResult::Complete);
-    CHECK(unchanged == ordinary);
+    for (const char* ordinary : {"I (3) app: ordinary\nsecond line\n",
+                                 "I (3) app: ordinary\r\nsecond line\r\n"}) {
+        diag_log_clear();
+        captured_serial.clear(); captured_syslog.clear(); capture_log_sinks = true;
+        emit_log("%s", ordinary);
+        capture_log_sinks = false;
+        CHECK(captured_serial == ordinary && captured_syslog == ordinary);
+        std::string unchanged;
+        CHECK(diag_log_dump_chunks([&](const char* data, size_t len) {
+            unchanged.append(data, len); return true;
+        }) == DiagDumpResult::Complete);
+        CHECK(unchanged == ordinary);
+    }
     diag_log_clear();
 
     // Temporary MQTT probe ownership is deterministic at every acquire stage. In particular, a

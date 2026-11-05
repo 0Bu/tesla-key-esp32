@@ -371,6 +371,8 @@ void esp_restart(){
   CHECK(fixture::async_copies==1&&fixture::async_completions==1);
   CHECK(fixture::upload_status=="200 OK"&&fixture::upload_reply.find("true")!=std::string::npos);
   CHECK(fixture::init_calls==0&&fixture::connects==0&&fixture::written_image==fixture::upload_body);
+  const auto status=ota_get_status();
+  CHECK(status.upload&&status.available.empty()&&!status.update_available&&status.target_pr==0);
  }
  CHECK(ota_is_busy()&&s_operation_gate.state()==tk::OtaIdentityGateState::Ota);
  CHECK(ota_get_state()==OtaState::Done);
@@ -413,7 +415,7 @@ void check_effect_admission(){
  if(terminal_case=="upload-uncertain"){
   CHECK(async_copies==1&&async_completions==1&&init_calls==0);
   CHECK(upload_reply.find("\"outcome\":\"unknown\"")!=std::string::npos);
-  CHECK(ota_get_status().message=="upload outcome is uncertain; do not retry");
+  CHECK(ota_get_status().message=="upload uncertain; do not retry");
  }
  std::cout<<"OTA uncertain selection parked with owner retained; checks "<<checks<<'\n'<<std::flush;
  std::_Exit(0); // Separate irreversible-effect fixture, not leak/task-reclamation proof.
@@ -469,6 +471,35 @@ void upload_checks(){
  CHECK(ota_upload_start(&req,handed)==R::InternalError&&handed&&!ota_is_busy());
  CHECK(async_copies==1&&async_completions==1&&begins==0);
  CHECK(upload_status=="500 Internal Server Error");
+ CHECK(ota_get_status().upload);
+ // A fresh page and an old checked PR offer must see the same upload-only snapshot.
+ for(bool checked:{false,true}){
+  reset();publish_check_status(OtaStatusPod{});
+  if(checked){
+   manifest="{\"version\":\"1.6.3-PR-42\"}";
+   changelog="{\"version\":\"1.6.3-PR-42\",\"changelog\":\"Old feed notes\"}";
+   const auto result=ota_check(42);join_worker();
+   CHECK(result.ok&&result.update_available);
+   const auto status=ota_get_status();
+   CHECK(!status.upload&&status.update_available&&status.target_pr==42&&!status.available.empty());
+   char notes[64];size_t len=0;CHECK(ota_get_changelog(notes,sizeof(notes),len)&&len>0);
+  }
+  ota_set_channel(tk::OtaChannel::Dev);upload_body=image_body();upload_fail_at=10;
+  const int old_connects=connects.load();
+  CHECK(ota_upload_start(&req,handed)==R::Started&&handed);
+  const auto status=ota_get_status();
+  CHECK(status.upload&&status.state==OtaState::Downloading);
+  CHECK(status.available.empty()&&!status.update_available&&status.target_pr==0);
+  char notes[64];size_t len=99;CHECK(!ota_get_changelog(notes,sizeof(notes),len)&&len==0);
+  run_selected();
+  CHECK(ota_get_status().state==OtaState::Error&&ota_get_status().upload);
+  CHECK(ota_get_status().available.empty()&&!ota_get_status().update_available);
+  CHECK(connects==old_connects&&async_completions==1&&!ota_is_busy());
+  manifest="{\"version\":\"1.6.3\"}";changelog="{\"version\":\"1.6.3\",\"changelog\":\"Feed notes\"}";
+  ota_set_channel(tk::OtaChannel::Release);
+  CHECK(ota_check(0).ok);join_worker();
+  CHECK(!ota_get_status().upload&&ota_get_status().update_available);
+ }
  for(int scenario=0;scenario<11;++scenario){
   reset();ota_set_channel(tk::OtaChannel::Dev);upload_body=image_body();
   if(scenario==0)upload_body[0]=0; // invalid image before the first flash effect

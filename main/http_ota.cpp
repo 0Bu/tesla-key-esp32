@@ -18,9 +18,13 @@
 static const std::array<char, 17>& ota_boot_id_() {
     static const auto id = [] {
         std::array<char, 17> text{};
-        const uint64_t value = (static_cast<uint64_t>(esp_random()) << 32) | esp_random();
         constexpr char hex[] = "0123456789abcdef";
-        for (size_t i = 0; i < 16; ++i) text[i] = hex[(value >> ((15 - i) * 4)) & 15];
+        uint32_t value = 0;
+        for (size_t i = 0; i < 16; ++i) {
+            if ((i & 7) == 0) value = esp_random();
+            text[i] = hex[value & 15];
+            value >>= 4;
+        }
         return text;
     }();
     return id;
@@ -147,10 +151,10 @@ esp_err_t handle_ota_update(GuardedReq rq) {
 esp_err_t handle_ota_upload(GuardedReq rq) {
     auto* req = rq.req();
     if (ota_get_channel() != tk::OtaChannel::Dev)
-        return httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "upload requires OTA channel dev");
+        return httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "OTA channel dev required");
     if (req->content_len > tk::kOtaUploadMaxBytes) {
         httpd_resp_set_status(req, "413 Payload Too Large");
-        return httpd_resp_sendstr(req, "firmware exceeds OTA slot");
+        return httpd_resp_sendstr(req, "OTA slot exceeded");
     }
     char type[32]{};
     if (httpd_req_get_url_query_len(req) != 0 ||
@@ -158,7 +162,7 @@ esp_err_t handle_ota_upload(GuardedReq rq) {
         httpd_req_get_hdr_value_str(req, "Content-Type", type, sizeof(type)) != ESP_OK ||
         !tk::ota_upload_admissible(ota_get_channel(), req->content_len, type))
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
-                                  "signed app binary with Content-Length and application/octet-stream required");
+                                  "signed app, Content-Length and application/octet-stream required");
     const auto result = ota_upload_start(req, rq.context->async_owned);
     if (rq.context->async_owned) return ESP_OK; // Async owner handles every success/failure reply.
     tk::JsonBuilder json;
@@ -177,6 +181,7 @@ esp_err_t handle_ota_status(GuardedReq rq) {
     json.string(json.root(), "message", s.message.c_str());
     json.string(json.root(), "available", s.available.c_str());
     json.boolean(json.root(), "update_available", s.update_available);
+    json.boolean(json.root(), "upload", s.upload);
     json.string(json.root(), "current", s.current.c_str());
     json.string(json.root(), "channel", s.channel.c_str());
     json.boolean(json.root(), "busy", ota_is_busy());

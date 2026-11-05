@@ -204,7 +204,7 @@ wall-time bound. A completed retrieval attempt returns `200`; check `response.re
 | `GET` or `POST /ota/check[?ms=<epoch>][&pr=<N>]` | Start a background update check (then poll `/ota/status`); `pr=<N>` targets that PR's preview build. |
 | `POST /ota/update[?pr=<N>]` | Start the background self-update (downloads, then reboots). |
 | `POST /ota/upload` | Dev-channel-only raw signed app upload; see [direct upload](#direct-signed-firmware-upload). |
-| `GET /ota/status` | Progress/offer plus `busy`, `verification`, `recovery_required_bytes`, `project`, `target`, full `elf_sha256` and per-boot `boot_id`; `pr` only while a PR build is targeted. |
+| `GET /ota/status` | Progress/offer plus `upload`, `busy`, `verification`, `recovery_required_bytes`, `project`, `target`, full `elf_sha256` and per-boot `boot_id`; `pr` only while a PR build is targeted. |
 | `GET /ota/changelog` | Release notes for the offered update: `text/plain`, ≤ 1024 bytes, `no-store`; `204` when none. |
 | `GET /api/proxy/1/version` | `{version, platform}` (`"ESP32"`/`"ESP32-S3"`/`"ESP32-C3"`/`"ESP32-C6"`). |
 | `POST /mcp` | MCP server for AI agents (Streamable HTTP, stateless JSON-RPC 2.0; `GET` → `405`, no SSE): [MCP.md](MCP.md). |
@@ -298,11 +298,17 @@ writer work; a network-cleanup quarantine can still refuse admission with `409` 
 `recovery_required_bytes` advertises the unchanged local operation-entry policy.
 These fields are passive diagnostics, not a fresh flash/health attestation by the status handler.
 
+`upload:true` identifies a direct upload. Accepting one clears the previous feed offer, PR and
+release notes; `available` remains empty because no manifest supplies a target version. The UI
+shows generic upload progress and locks configuration controls during the active flow. After restart,
+a changed boot nonce alone reports a restart; the local test helper additionally checks the
+expected image identity and health. Feed operations use `upload:false`.
+
 The connection stays open during the upload. The existing OTA task streams bounded chunks;
 other HTTP requests and `GET /ota/status` remain available. Admission uses the same operation,
 memory and running-image probation gates as pull OTA (`409`, `503`, or startup failure `500`).
 Channel/config changes are refused while the upload is active. Success returns
-`200 {"result":true,"reason":"signed update installed; rebooting"}` after verification and
+`200 {"result":true,"reason":"installed; rebooting"}` after verification and
 boot selection; the board then reboots with ordinary health confirmation/rollback. Upload,
 image or signature failures return `400 {"result":false,"reason":...}` and publish details
 through `/ota/status`. An uncertain writer/boot-selection effect reports `outcome:"unknown"`
@@ -363,7 +369,8 @@ See [pairing](USER_GUIDE.md#pairing-and-identity) for the NFC card and vehicle c
 `sys.board_mac` remains visible. `/diag?redact=1` substitutes identifiers per line, retains the board
 MAC and discards a wrapped partial first line. Lines over 288 bytes become `"<redacted>"`;
 truncated sensitive values are redacted through the line's end. Known network-identifier formats from
-netif, WiFi (including block-ack `<ba-add>` AP addresses), TLS DNS and MQTT URI parsing become a complete replacement line. For recognized complete V1 log records, the ring copy flattens embedded CR/LF while retaining
+netif, WiFi (including block-ack `<ba-add>` AP addresses), TLS DNS and MQTT URI parsing become a complete replacement line. For recognized complete V1 library records and application records containing a known
+identifier marker, the ring copy flattens embedded CR/LF while retaining
 trailing line endings; this also affects raw `/diag`. Serial and Syslog retain the original bytes except known MQTT URI parse errors, which become
 a fixed credential-free line before any sink, even if optional ring allocation fails.
 Fragmented driver output and other library or serial output may contain identifiers; inspect

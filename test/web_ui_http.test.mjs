@@ -321,6 +321,134 @@ test("OTA versions use the canonical 31-byte firmware descriptor grammar", () =>
   assert.equal(context.otaVersion(`1.4.75-${"x".repeat(25)}`), false);
 });
 
+test("raw-upload resumption clears stale offers, renders progress and locks configuration", async () => {
+  for (const priorOffer of [false, true]) {
+    const { context, element } = loadUi();
+    const requests = [];
+    const messages = [];
+    const upload = { state: "downloading", progress: 37, message: "uploading",
+      available: "", current: "", update_available: false, upload: true,
+      channel: "dev", boot_id: "0123456789abcdef" };
+    context.toast = (msg, kind) => messages.push({ msg, kind });
+    context.fetch = async (url) => {
+      requests.push(url);
+      return { ok: true, json: async () => upload };
+    };
+    context.state = { version: "1.6.3" };
+    if (priorOffer) {
+      context.otaAvail = "1.6.4-PR-42";
+      context.otaExpectedVersion = context.otaAvail;
+      context.renderVerLink();
+      element("otaModal").classList.remove("hide");
+    }
+    await context.resumeOta();
+    assert.deepEqual(requests, ["/ota/status"]);
+    assert.equal(context.otaAvail, null);
+    assert.equal(context.otaExpectedVersion, null);
+    assert.equal(context.isOtaRunning(), true);
+    assert.equal(element("otaFill").style.width, "37%");
+    assert.equal(element("otaBar").classList.contains("hide"), false);
+    assert.match(messages.at(-1).msg, /Uploading firmware.*30%/);
+    for (const id of ["verLink", "fwCheckBtn", "vinBtn", "keyBtn", "mqttBtn", "syslogBtn", "otaInstall"])
+      assert.equal(element(id).disabled, true, id);
+    assert.doesNotMatch(element("fwCheckBtn").title, /1\.6\.4|Install/);
+    assert.equal(element("otaModal").classList.contains("hide"), true);
+    assert.equal(element("paneSettings").classList.contains("ota-busy"), true);
+    context.otaProgress({ ...upload, state: "error", message: "invalid signature" });
+    assert.equal(context.isOtaBusy(), false);
+    assert.equal(context.otaAvail, null);
+    assert.equal(element("mqttBtn").disabled, false);
+  }
+});
+
+test("raw uploads have no feed offer and legacy feed status remains compatible", async () => {
+  const { context } = loadUi();
+  const feed = { state: "downloading", progress: 20, message: "working", available: "1.6.4",
+    current: "1.6.3", update_available: true };
+  let status = feed;
+  context.fetch = async () => ({ ok: true, json: async () => status });
+  assert.equal((await context.otaStatus()).available, "1.6.4");
+  status = { ...feed, upload: false };
+  assert.equal((await context.otaStatus()).upload, false);
+  const upload = { ...feed, upload: true, update_available: false, available: "" };
+  status = upload;
+  assert.equal((await context.otaStatus()).upload, true);
+  for (const invalid of [{ upload: "true" }, { available: "1.6.4" }, { update_available: true }, { pr: 42 }]) {
+    status = { ...upload, ...invalid };
+    await assert.rejects(context.otaStatus(), /invalid OTA status response/);
+  }
+  status = { ...feed, available: "" };
+  await assert.rejects(context.otaStatus(), /invalid OTA status response/);
+});
+
+test("raw upload done and missed-done idle use boot identity without inventing a target version", () => {
+  for (const terminal of ["done", "idle"]) {
+    const { context, element } = loadUi();
+    const scheduled = [];
+    let restart;
+    context.setTimeout = (fn, delay) => { scheduled.push({ fn, delay }); return 1; };
+    context.waitReboot = (version, boot) => { restart = { version, boot }; };
+    context.otaBegin("update", 60000);
+    context.otaProgress({ state: "downloading", progress: 70, upload: true,
+      boot_id: "0123456789abcdef" });
+    context.otaProgress({ state: terminal, progress: 100, upload: terminal === "done",
+      boot_id: terminal === "done" ? "0123456789abcdef" : "fedcba9876543210" });
+    if (terminal === "done") scheduled.find(x => x.delay === 1200).fn();
+    assert.deepEqual(restart, { version: null, boot: "0123456789abcdef" });
+    assert.equal(context.otaPhase, "reboot");
+    assert.equal(element("otaFill").style.width, "100%");
+    assert.equal(element("mqttBtn").disabled, true);
+  }
+});
+
+test("raw upload reboot observation waits for a new boot and claims only a restart", async () => {
+  const { context } = loadUi();
+  const scheduled = [];
+  const messages = [];
+  let boot = "0123456789abcdef";
+  let reloads = 0;
+  context.toast = (msg) => messages.push(msg);
+  context.location.reload = () => { ++reloads; };
+  context.setTimeout = (fn, delay) => { scheduled.push({ fn, delay }); return 1; };
+  context.fetch = async (url) => {
+    assert.equal(url, "/ota/status");
+    return { ok: true, json: async () => ({ boot_id: boot }) };
+  };
+  context.waitReboot(null, boot);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(reloads, 0);
+  assert.equal(messages.some(x => /Updated|restarted/.test(x)), false);
+  boot = "fedcba9876543210";
+  scheduled.find(x => x.delay === 1000).fn();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(messages.at(-1), "Device restarted");
+  scheduled.find(x => x.delay === 1200).fn();
+  assert.equal(reloads, 1);
+});
+
+test("a resumed upload supersedes an already open feed confirmation", async () => {
+  for (const action of ["openFwUpdate", "otaCheck"]) {
+    const { context, element } = loadUi();
+    const upload = { state: "downloading", progress: 20, message: "uploading", available: "",
+      current: "1.6.3", update_available: false, upload: true, boot_id: "0123456789abcdef" };
+    let response = { ...upload, state: "idle", upload: false, update_available: true, available: "1.6.4" };
+    context.state = { version: "1.6.3" };
+    if (action === "openFwUpdate") context.otaAvail = "1.6.4";
+    context.loadOtaChangelog = async () => "A feed change";
+    context.fetch = async url => ({ ok: true, json: async () => url.startsWith("/ota/check") ? { started: true } : response });
+    const pending = context[action]();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(element("otaModal").classList.contains("hide"), false);
+    response = upload;
+    await context.resumeOta();
+    await pending;
+    assert.equal(context.isOtaRunning(), true);
+    assert.equal(context.otaAvail, null);
+    assert.equal(element("mqttBtn").disabled, true);
+    assert.equal(element("otaModal").classList.contains("hide"), true);
+  }
+});
+
 test("device page exposes keyboard and live-region semantics", () => {
   const html = fs.readFileSync(new URL("../main/www/index.html", import.meta.url), "utf8");
   assert.doesNotMatch(html, /<button[^>]+id="verLink"[^>]*aria-label=/, "#verLink is named by its visible version and channel text");

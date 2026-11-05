@@ -394,7 +394,7 @@ even if a producer accidentally leaves its telemetry flags set. Existing pure ca
 cover the active-window age boundary and deliberate idle last-known data.
 
 The diagnostic adapter exercises actual formatted capture, RAM ring, chunk framing and fixed-buffer
-redaction for connection and WiFi block-ack AP addresses, with embedded CR/LF, forged prefixes, wrap
+redaction for application SSIDs, library connection and WiFi block-ack AP addresses, with embedded CR/LF, forged prefixes, wrap
 and truncation. It checks that ordinary raw sinks receive the original bytes and known MQTT URI parser errors
 reach all three sinks only as a fixed replacement, including failed ring allocation and repeated
 initialization. The host log stub maps the early `vprintf` fallback to a named test facade;
