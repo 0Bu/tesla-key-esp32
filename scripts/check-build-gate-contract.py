@@ -473,11 +473,16 @@ def validate(root: Path) -> None:
     require(build_contracts.count(
                 'python3 "$repo_root/scripts/check-signed-root-inventory.py" --self-test') == 1,
             "test-build-contracts.sh: signed root inventory self-test is not wired")
-    require("python3 scripts/check-dependency-contract.py --self-test" in run_mock and
-            "python3 scripts/check-otadata-contract.py --self-test" in run_mock,
-            "run-mock-tests.sh: dependency/otadata gates are not directly wired")
-    require("python3 scripts/prepare-reused-release.py --self-test" in run_mock,
-            "run-mock-tests.sh: immutable Release reuse gate is not directly wired")
+    shared_call = '    run_gate "build and manifest contract tests" 120 scripts/test-build-contracts.sh --build-and-manifest'
+    require(run_mock.splitlines().count(shared_call) == 1,
+            "run-mock-tests.sh: mandatory shared publication gate is not wired")
+    for name in ("check-dependency-contract.py", "check-otadata-contract.py",
+                 "check-release-assets.py", "prepare-reused-release.py", "check-published-release.py"):
+        call = f'python3 "$repo_root/scripts/{name}" --self-test'
+        require(build_contracts.splitlines().count(call) == 1,
+                "test-build-contracts.sh: shared publication self-test owner drifted: " + name)
+        require(f"python3 scripts/{name} --self-test" not in run_mock,
+                "run-mock-tests.sh: duplicate shared publication self-test: " + name)
     require(
         "TARGET_SUFFIXES = (\"\", \"-s3\", \"-c3\", \"-c6\")"
         in signed_root_inventory
@@ -1842,9 +1847,9 @@ def self_test(root: Path) -> None:
          'python3 "$repo_root/scripts/prepare-reused-release.py" --self-test\n', "",
          "immutable Release reuse self-test is not wired"),
         ("release-reuse-host-wiring", "scripts/run-mock-tests.sh",
-         "python3 scripts/prepare-reused-release.py --self-test",
-         "python3 scripts/missing-reused-release.py --self-test",
-         "immutable Release reuse gate is not directly wired"),
+         '    run_gate "build and manifest contract tests" 120 scripts/test-build-contracts.sh --build-and-manifest',
+         '    run_gate "build and manifest contract tests" 120 scripts/missing-build-contracts.sh --build-and-manifest',
+         "mandatory shared publication gate is not wired"),
         ("root-pages-source", ".github/workflows/build.yml", PAGES_SOURCE_CHECK,
          "python3 scripts/check-pages-manifest.py", "use only branch-backed Pages authority"),
         ("dev-pages-validator-removed", ".github/workflows/build.yml",
@@ -1938,6 +1943,11 @@ def self_test(root: Path) -> None:
          'if component_hash(component) != expected:',
          'if False:', "locked-cJSON source"),
     )
+    for name in ("check-release-assets.py", "check-published-release.py"):
+        call = f'python3 "$repo_root/scripts/{name}" --self-test'
+        for replacement in ('# ' + call, call + ' || true', call + '\n' + call):
+            mutations += (("shared-publication-owner-" + name, "scripts/test-build-contracts.sh",
+                           call, replacement, "shared publication self-test owner drifted"),)
     # Keep one disposable baseline rather than copying every contract file for every case.
     # The sole changed file is restored even when an oracle raises; all cases still validate.
     def check_mutation(fixture: Path, label: str, relative: str, old: str,

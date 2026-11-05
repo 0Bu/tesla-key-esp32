@@ -2271,9 +2271,10 @@ def main() -> int:
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
     try:
-        validate(args.root.resolve())
         if args.self_test:
             self_test(args.root.resolve())
+        else:
+            validate(args.root.resolve())
     except (OSError, UnicodeError, PolicyError) as exc:
         print(f"workflow-policy: {exc}", file=sys.stderr)
         return 1

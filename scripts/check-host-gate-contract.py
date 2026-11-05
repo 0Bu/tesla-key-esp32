@@ -75,8 +75,20 @@ def probe_build_contract_modes(source: str) -> None:
 
 
 def probe_deploy_consumer_invocations(source: str) -> None:
+    for relative, arguments in (
+        ("test/test_deploy_candidate.py", ()),
+        ("scripts/check-dependency-contract.py", ("--self-test",)),
+        ("scripts/check-otadata-contract.py", ("--self-test",)),
+        ("scripts/check-release-assets.py", ("--self-test",)),
+        ("scripts/prepare-reused-release.py", ("--self-test",)),
+        ("scripts/check-published-release.py", ("--self-test",)),
+    ):
+        probe_publication_selftest(source, relative, arguments)
+
+
+def probe_publication_selftest(source: str, relative: str, expected_arguments: tuple[str, ...]) -> None:
     """Exercise the shipped shell prefix with inert tools and a failing consumer."""
-    boundary = 'python3 "$repo_root/scripts/prepare-reused-release.py" --self-test'
+    boundary = 'temp="$(mktemp -d)"'
     require(source.count(boundary) == 1, "signed deploy consumer flow boundary is missing")
     prefix = source.split(boundary, 1)[0]
     with tempfile.TemporaryDirectory(prefix="deploy-consumer-flow-") as temporary:
@@ -85,25 +97,26 @@ def probe_deploy_consumer_invocations(source: str) -> None:
         scripts.mkdir(); tools.mkdir()
         # Only this prefix is executed. Direct prerequisite shell commands are inert stubs;
         # Python prerequisites and the embedded entry-point fixture are intercepted below.
-        for name in re.findall(r'^\s*"\$repo_root/(scripts/[A-Za-z0-9_.-]+)"', prefix, re.MULTILINE):
+        for name in set(re.findall(r'"\$repo_root/(scripts/[A-Za-z0-9_.-]+)"', prefix)):
             file = work / name
             file.write_text("#!/bin/sh\nexit 0\n"); file.chmod(0o700)
         trace = work / "trace.bin"
         python = tools / "python3"
-        python.write_text('''#!/bin/sh
-printf '%s\\000' "$@" '' >> "$DEPLOY_FLOW_TRACE"
-case "${1-}" in
-  */test_deploy_candidate.py) if [ "$DEPLOY_FLOW_FAIL" = 1 ]; then exit 37; fi ;;
-esac
-''')
+        python.write_text("#!/bin/sh\nexit 98\n")
         python.chmod(0o700)
+        recorder = '''python3() {
+printf '%s\\000' "$@" '' >> "$DEPLOY_FLOW_TRACE"
+if [ "${1-}" = "$DEPLOY_FLOW_WATCHED" ] && [ "$DEPLOY_FLOW_FAIL" = 1 ]; then return 37; fi
+return 0
+}
+'''
         script = scripts / "test-build-contracts.sh"
-        script.write_text(prefix + 'python3 __deploy_flow_after__\n')
+        script.write_text(recorder + prefix + 'python3 __deploy_flow_after__\n')
         env = {k: v for k, v in os.environ.items() if k not in
                ("ENV", "BASH_ENV", "OTA_SIGNING_KEY", "OTA_SIGNING_KEY_FILE", "GH_TOKEN", "GITHUB_TOKEN")
                and not k.startswith(("BASH_FUNC_", "PYTHON", "LD_", "DYLD_"))}
         env.update(PATH=str(tools) + os.pathsep + env.get("PATH", os.defpath),
-                   DEPLOY_FLOW_TRACE=str(trace))
+                   DEPLOY_FLOW_TRACE=str(trace), DEPLOY_FLOW_WATCHED=str(work / relative))
         for arguments, fail in (([], False), ([], True),
                                 (["--build-and-manifest"], False), (["--build-and-manifest"], True)):
             if trace.exists(): trace.unlink()
@@ -115,11 +128,13 @@ esac
                 raise ContractError("actual signed deploy consumer flow timed out") from error
             calls = [[os.fsdecode(arg) for arg in block.split(b'\0')]
                      for block in trace.read_bytes().split(b'\0\0') if block] if trace.exists() else []
-            target = [str(work / "test/test_deploy_candidate.py")]
+            target = [str(work / relative), *expected_arguments]
             relevant = [args for args in calls if args == target or args == ["__deploy_flow_after__"]]
             require(result.returncode == (37 if fail else 0) and
                     relevant == ([target] if fail else [target, ["__deploy_flow_after__"]]),
-                    "actual signed deploy consumer must run once in order and propagate failure")
+                    ("actual signed deploy consumer" if relative.startswith("test/") else
+                     "shared publication self-test invocation flow") +
+                    " must run once in order and propagate failure")
 
 
 @lru_cache(maxsize=8)
@@ -221,58 +236,88 @@ def probe_heap_suite_invocations(run_mock: str, fast: str, watched_target: str =
     probe_heap_suite_shells(fallback, fast, watched_target)
 
 
-@lru_cache(maxsize=8)
 def probe_heap_suite_shells(fallback: str, fast: str, watched_target: str = "heap_supervisor_tests") -> None:
+    # A changed fallback must not rerun an unchanged fast program, or vice versa.
+    for label, source, arguments in (("fallback", fallback, ()), ("fast", fast, ("--boundary",))):
+        probe_native_suite_program(label, source, arguments, watched_target)
+
+
+@lru_cache(maxsize=128)
+def probe_native_suite_program(label: str, source: str, arguments: tuple[str, ...],
+                               watched_target: str) -> None:
     require(watched_target in ("heap_supervisor_tests", "stack_sample_tests", "eth_startup_cleanup_tests"), "unknown native flow target")
     family = "Ethernet" if watched_target == "eth_startup_cleanup_tests" else "Heap"
-    # Cache only the complete executed texts. Later unrelated mock gates cannot change an
-    # earlier fallback effect; every change to that prefix or the full fast script reruns it.
-    for label, source, arguments in (("fallback", fallback, []), ("fast", fast, ["--boundary"])):
-        with tempfile.TemporaryDirectory(prefix="heap-host-flow-") as directory:
-            work = Path(directory); scripts = work / "scripts"; tools = work / "bin"
-            scripts.mkdir(); tools.mkdir(); trace = work / "trace.jsonl"
-            script = scripts / ("run-mock-tests.sh" if label == "fallback" else "run-fast-tests.sh")
-            script.write_text(source + '\npython3 __heap_flow_after__\n')
-            stub = '''#!PYTHON
-import json,os,sys
-from pathlib import Path
-def note(value):
-    with open(os.environ['TESLA_HEAP_FLOW_TRACE'],'a') as out: out.write(json.dumps(value)+'\\n')
-args=sys.argv[1:]
-if Path(sys.argv[0]).name == 'python3':
-    generators={'heap_supervisor_tests':'test/generate_heap_supervisor_adapter.py','eth_startup_cleanup_tests':'test/generate_eth_startup_adapter.py'}
-    if args and args[0] == generators.get(os.environ['TESLA_FLOW_WATCHED_TARGET']): note(['generate'])
-    if args == ['__heap_flow_after__']: note(['after'])
-elif '-o' in args:
-    output=Path(args[args.index('-o')+1]); output.parent.mkdir(parents=True,exist_ok=True)
-    if output.name == os.environ['TESLA_FLOW_WATCHED_TARGET']:
-        required={'heap_supervisor_tests':{'test/test_heap_supervisor.cpp','main/safe_mode.cpp','main/heap_trend.cpp','main/stack_watch.cpp'},'stack_sample_tests':{'test/test_stack_sample.cpp','-pthread'},'eth_startup_cleanup_tests':{'test/test_eth_startup_cleanup.cpp'}}[os.environ['TESLA_FLOW_WATCHED_TARGET']]
-        if not required <= set(args): raise SystemExit(38)
-        note(['compile'])
-        program="#!"+sys.executable+"\\nimport json,os\\nwith open(os.environ['TESLA_HEAP_FLOW_TRACE'],'a') as out: out.write(json.dumps(['run'])+'\\\\n')\\nraise SystemExit(37 if os.environ['TESLA_HEAP_FLOW_FAIL']=='1' else 0)\\n"
-    else: program='#!/bin/sh\\nexit 0\\n'
-    output.write_text(program); output.chmod(0o700)
-'''.replace("#!PYTHON", "#!" + sys.executable)
-            for name in ("python3", "compiler"):
-                tool = tools / name; tool.write_text(stub); tool.chmod(0o700)
-            env = {k: v for k, v in os.environ.items() if k not in
-                   ("ENV", "BASH_ENV", "OTA_SIGNING_KEY", "OTA_SIGNING_KEY_FILE", "GH_TOKEN", "GITHUB_TOKEN")
-                   and not k.startswith(("BASH_FUNC_", "PYTHON", "LD_", "DYLD_"))}
-            env.update(PATH=str(tools) + os.pathsep + os.defpath,
-                       CXX=str(tools / "compiler"), CC=str(tools / "compiler"),
-                       TESLA_HEAP_FLOW_TRACE=str(trace), TESLA_FLOW_WATCHED_TARGET=watched_target)
-            for fail in (False, True):
-                trace.unlink(missing_ok=True)
-                try:
-                    result = subprocess.run(["/bin/bash", str(script), *arguments], cwd=work,
-                                            env={**env, "TESLA_HEAP_FLOW_FAIL": str(int(fail))},
-                                            capture_output=True, timeout=10)
-                except subprocess.TimeoutExpired as exc:
-                    raise ContractError(family + " " + label + " invocation flow timed out") from exc
-                calls = [json.loads(line) for line in trace.read_text().splitlines()] if trace.exists() else []
-                expected = ([["generate"]] if watched_target != "stack_sample_tests" else []) + [["compile"], ["run"]] + ([] if fail else [["after"]])
-                require(result.returncode == (37 if fail else 0) and calls == expected,
-                        family + " " + label + " invocation flow must generate, compile and execute once and propagate failure")
+    # Each independent fixture is keyed by all of its executed text and semantic inputs.
+    with tempfile.TemporaryDirectory(prefix="heap-host-flow-") as directory:
+        work = Path(directory); scripts = work / "scripts"; tools = work / "bin"
+        scripts.mkdir(); tools.mkdir(); trace = work / "trace.jsonl"
+        script = scripts / ("run-mock-tests.sh" if label == "fallback" else "run-fast-tests.sh")
+        script.write_text(source + '\npython3 __heap_flow_after__\n')
+        # These are passive argv/effect spies, not compilers or Python tests. Shell
+        # spies preserve the same required source/flag and exit-status assertions
+        # without starting Python for every inert generator/compiler call.
+        stub = r'''#!/bin/sh
+set -eu
+note() { printf '%s\n' "$1" >> "$TESLA_HEAP_FLOW_TRACE"; }
+if [ "${0##*/}" = python3 ]; then
+case "$TESLA_FLOW_WATCHED_TARGET:${1-}" in
+    heap_supervisor_tests:test/generate_heap_supervisor_adapter.py|eth_startup_cleanup_tests:test/generate_eth_startup_adapter.py)
+        note '["generate"]' ;;
+esac
+if [ "$#" -eq 1 ] && [ "$1" = __heap_flow_after__ ]; then note '["after"]'; fi
+exit 0
+fi
+output=
+next=0
+for argument in "$@"; do
+if [ "$next" = 1 ]; then output=$argument; break; fi
+if [ "$argument" = -o ]; then next=1; fi
+done
+[ -n "$output" ] || exit 0
+mkdir -p "$(dirname "$output")"
+if [ "${output##*/}" = "$TESLA_FLOW_WATCHED_TARGET" ]; then
+case "$TESLA_FLOW_WATCHED_TARGET" in
+    heap_supervisor_tests) required='test/test_heap_supervisor.cpp main/safe_mode.cpp main/heap_trend.cpp main/stack_watch.cpp' ;;
+    stack_sample_tests) required='test/test_stack_sample.cpp -pthread' ;;
+    eth_startup_cleanup_tests) required='test/test_eth_startup_cleanup.cpp' ;;
+    *) exit 38 ;;
+esac
+for wanted in $required; do
+    found=0
+    for argument in "$@"; do if [ "$argument" = "$wanted" ]; then found=1; fi; done
+    [ "$found" = 1 ] || exit 38
+done
+note '["compile"]'
+cat > "$output" <<'PROGRAM'
+#!/bin/sh
+printf '%s\n' '["run"]' >> "$TESLA_HEAP_FLOW_TRACE"
+[ "$TESLA_HEAP_FLOW_FAIL" = 0 ] || exit 37
+PROGRAM
+else
+printf '#!/bin/sh\nexit 0\n' > "$output"
+fi
+chmod 700 "$output"
+'''
+        for name in ("python3", "compiler"):
+            tool = tools / name; tool.write_text(stub); tool.chmod(0o700)
+        env = {k: v for k, v in os.environ.items() if k not in
+               ("ENV", "BASH_ENV", "OTA_SIGNING_KEY", "OTA_SIGNING_KEY_FILE", "GH_TOKEN", "GITHUB_TOKEN")
+               and not k.startswith(("BASH_FUNC_", "PYTHON", "LD_", "DYLD_"))}
+        env.update(PATH=str(tools) + os.pathsep + os.defpath,
+                   CXX=str(tools / "compiler"), CC=str(tools / "compiler"),
+                   TESLA_HEAP_FLOW_TRACE=str(trace), TESLA_FLOW_WATCHED_TARGET=watched_target)
+        for fail in (False, True):
+            trace.unlink(missing_ok=True)
+            try:
+                result = subprocess.run(["/bin/bash", str(script), *arguments], cwd=work,
+                                        env={**env, "TESLA_HEAP_FLOW_FAIL": str(int(fail))},
+                                        capture_output=True, timeout=10)
+            except subprocess.TimeoutExpired as exc:
+                raise ContractError(family + " " + label + " invocation flow timed out") from exc
+            calls = [json.loads(line) for line in trace.read_text().splitlines()] if trace.exists() else []
+            expected = ([["generate"]] if watched_target != "stack_sample_tests" else []) + [["compile"], ["run"]] + ([] if fail else [["after"]])
+            require(result.returncode == (37 if fail else 0) and calls == expected,
+                    family + " " + label + " invocation flow must generate, compile and execute once and propagate failure")
 
 
 # These isolated passive fixtures depend only on the complete shell text. Reuse a successful
@@ -299,14 +344,10 @@ def probe_browser_invocations(source: str) -> None:
             binaries.mkdir()
             trace = work / "trace.jsonl"
             python = binaries / "python3"
-            python.write_text("#!" + sys.executable + '''
-import json,os,sys
-if sys.argv[1:2] != ['-c']:
-    with open(os.environ['TESLA_BROWSER_FLOW_TRACE'],'a') as out:
-        out.write(json.dumps(sys.argv[1:])+'\\n')
-    if sys.argv[1:] == json.loads(os.environ.get('TESLA_BROWSER_FLOW_FAIL','null')):
-        raise SystemExit(37)
-''')
+            # The passive tool only records argv/status. Do not start a new Python
+            # interpreter for every inert gate in every negative flow fixture.
+            # An explicit `command python3` must fail rather than bypass the recorder.
+            python.write_text("#!/bin/sh\nexit 98\n")
             python.chmod(0o700)
             for name in ("cmake", "node", "ruby", "jq"):
                 file = binaries / name
@@ -340,13 +381,23 @@ if sys.argv[1:2] != ['-c']:
                                   ["python3", "test/web_ui_browser_gate.py", "--require-browser"])]
             for failure in [None, *expected]:
                 trace.unlink(missing_ok=True)
-                env["TESLA_BROWSER_FLOW_FAIL"] = json.dumps(failure)
+                recorder = '''python3() {
+    [ "${1-}" != -c ] || return 0
+    printf '%s\\0' "$@" '' >> "$TESLA_BROWSER_FLOW_TRACE"
+'''
+                if failure is not None:
+                    comparisons = [f'[ "$#" -eq {len(failure)} ]'] + [
+                        f'[ "${{{index}-}}" = {shlex.quote(argument)} ]'
+                        for index, argument in enumerate(failure, 1)]
+                    recorder += "    if " + " && ".join(comparisons) + "; then return 37; fi\n"
+                script.write_text(recorder + "    return 0\n}\n" + source)
                 try:
                     result = subprocess.run(["/bin/bash", str(script), "--require-all"], cwd=work,
                                             env=env, capture_output=True, timeout=10)
                 except subprocess.TimeoutExpired as error:
                     raise ContractError("strict browser invocation flow timed out") from error
-                calls = [json.loads(line) for line in trace.read_text().splitlines()] if trace.exists() else []
+                calls = [[os.fsdecode(arg) for arg in row.split(b'\0')]
+                         for row in trace.read_bytes().split(b'\0\0') if row] if trace.exists() else []
                 if failure is None:
                     relevance_call = prefix + ["scripts/release-relevance.sh", "--self-test"]
                     build_call = prefix + ["scripts/test-build-contracts.sh", "--build-and-manifest"]
@@ -516,6 +567,18 @@ def validate(root: Path) -> None:
             '    test_current_discovery_address();' in mqtt_test,
             "actual MQTT discovery address fixture is missing from the retained JSON gate")
     publication_gate = (root / "scripts/test-build-contracts.sh").read_text()
+    for name, label in (
+        ("check-dependency-contract.py", "dependency contract gate"),
+        ("check-otadata-contract.py", "otadata contract gate"),
+        ("check-release-assets.py", "Release assets gate"),
+        ("prepare-reused-release.py", "immutable Release reuse gate"),
+        ("check-published-release.py", "published Release acceptance gate"),
+    ):
+        command = f'python3 "$repo_root/scripts/{name}" --self-test'
+        require(publication_gate.count(command) == 1,
+                label + ": shared self-test must have one build-contract owner")
+        require(f"python3 scripts/{name} --self-test" not in run_mock,
+                label + ": full host wrapper must not duplicate its build-contract owner")
     relevance_gate = 'run_gate "release relevance and publication selectors" 120 scripts/release-relevance.sh --self-test'
     build_gate = 'run_gate "build and manifest contract tests" 120 scripts/test-build-contracts.sh --build-and-manifest'
     require(run_mock.count(relevance_gate) == 1 and run_mock.count(build_gate) == 1,
@@ -648,8 +711,6 @@ def validate(root: Path) -> None:
             "strict host gate must execute retained-bootloader and USB-consumer admission controls")
     require("python3 scripts/check-nvs-contract.py --self-test" in run_mock,
             "run-mock-tests.sh does not execute the NVS contract gate")
-    require("python3 scripts/check-dependency-contract.py --self-test" in run_mock,
-            "run-mock-tests.sh does not execute the dependency contract gate")
     require('run_gate "tesla-ble incremental source admission" 120 python3 test/test_patch_incremental.py' in run_mock,
             "run-mock-tests.sh does not execute incremental patch admission")
     require('run_gate "exact dependency source admission" 120 python3 test/test_dependency_sources.py' in run_mock,
@@ -660,10 +721,6 @@ def validate(root: Path) -> None:
             "run-mock-tests.sh does not execute dependency harness source ordering")
     require('run_gate "dependency query process lifetime" 120 python3 test/test_dependency_process.py' in run_mock,
             "run-mock-tests.sh does not execute dependency query process lifetime")
-    require("python3 scripts/check-otadata-contract.py --self-test" in run_mock,
-            "run-mock-tests.sh does not execute the otadata contract gate")
-    require("python3 scripts/prepare-reused-release.py --self-test" in run_mock,
-            "run-mock-tests.sh does not execute the immutable Release reuse gate")
     require("        scripts/check-dependency-contract.py \\\n" in run_mock and
             "        scripts/check-otadata-contract.py \\\n" in run_mock and
             "        scripts/prepare-reused-release.py \\\n" in run_mock,
@@ -1204,8 +1261,8 @@ def self_test(root: Path) -> None:
          "fallback omits main/safe_mode.cpp"),
         ("scripts/run-mock-tests.sh", "python3 scripts/check-nvs-contract.py --self-test",
          "python3 scripts/missing-nvs-contract.py --self-test", "execute the NVS"),
-        ("scripts/run-mock-tests.sh", "python3 scripts/check-dependency-contract.py --self-test",
-         "python3 scripts/missing-dependency-contract.py --self-test", "dependency contract gate"),
+        ("scripts/test-build-contracts.sh", 'python3 "$repo_root/scripts/check-dependency-contract.py" --self-test',
+         'python3 "$repo_root/scripts/missing-dependency-contract.py" --self-test', "dependency contract gate"),
         ("scripts/run-mock-tests.sh", 'run_gate "tesla-ble incremental source admission" 120 python3 test/test_patch_incremental.py',
          '# removed incremental patch admission', "does not execute incremental patch admission"),
         ("scripts/run-mock-tests.sh", 'run_gate "exact dependency source admission" 120 python3 test/test_dependency_sources.py',
@@ -1240,10 +1297,10 @@ def self_test(root: Path) -> None:
          'if false; then\nrun_gate "dependency harness source ordering" 120 python3 test/test_dependency_harness.py\nfi', "strict browser invocation flow"),
         ("scripts/run-mock-tests.sh", 'run_gate "dependency harness source ordering" 120 python3 test/test_dependency_harness.py',
          'exit 0\nrun_gate "dependency harness source ordering" 120 python3 test/test_dependency_harness.py', "strict browser invocation flow"),
-        ("scripts/run-mock-tests.sh", "python3 scripts/check-otadata-contract.py --self-test",
-         "python3 scripts/missing-otadata-contract.py --self-test", "otadata contract gate"),
-        ("scripts/run-mock-tests.sh", "python3 scripts/prepare-reused-release.py --self-test",
-         "python3 scripts/missing-reused-release.py --self-test", "immutable Release reuse gate"),
+        ("scripts/test-build-contracts.sh", 'python3 "$repo_root/scripts/check-otadata-contract.py" --self-test',
+         'python3 "$repo_root/scripts/missing-otadata-contract.py" --self-test', "otadata contract gate"),
+        ("scripts/test-build-contracts.sh", 'python3 "$repo_root/scripts/prepare-reused-release.py" --self-test',
+         'python3 "$repo_root/scripts/missing-reused-release.py" --self-test', "immutable Release reuse gate"),
         ("scripts/run-mock-tests.sh", "        scripts/check-dependency-contract.py \\\n",
          "", "strict inventory omits scripts/check-dependency-contract.py"),
         ("scripts/run-mock-tests.sh", "        scripts/check-otadata-contract.py \\\n",
@@ -1426,6 +1483,18 @@ def self_test(root: Path) -> None:
         ("scripts/test-build-contracts.sh", '  *) echo "usage: test-build-contracts.sh [--build-and-manifest]" >&2; exit 2 ;;',
          '  *) build_and_manifest_only=1 ;;', "build-contract profile invocation flow"),
     ])
+    for name in ("check-dependency-contract.py", "check-otadata-contract.py",
+                 "check-release-assets.py", "prepare-reused-release.py", "check-published-release.py"):
+        call = f'python3 "$repo_root/scripts/{name}" --self-test'
+        for replacement in ('# ' + call, 'if false; then ' + call + '; fi', call + ' || true'):
+            mutations.append(("scripts/test-build-contracts.sh", call, replacement,
+                              "shared publication self-test invocation flow"))
+        mutations.append(("scripts/test-build-contracts.sh", call, call + '\n' + call,
+                          "shared self-test must have one build-contract owner"))
+    duplicated = '    run_gate "duplicate contract" 120 python3 scripts/check-dependency-contract.py --self-test\n'
+    mutations.append(("scripts/run-mock-tests.sh", 'gate_group=runtime\n',
+                      'gate_group=runtime\n' + duplicated,
+                      "full host wrapper must not duplicate its build-contract owner"))
     for relative, old, new, expected in mutations:
         with tempfile.TemporaryDirectory(prefix="host-gate-contract-") as directory:
             fixture = Path(directory)
@@ -1493,9 +1562,10 @@ def main() -> int:
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
     try:
-        validate(args.root.resolve())
         if args.self_test:
             self_test(args.root.resolve())
+        else:
+            validate(args.root.resolve())
     except (OSError, UnicodeError, ContractError) as exc:
         print(f"host-gate-contract: {exc}", file=sys.stderr)
         return 1

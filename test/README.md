@@ -1,6 +1,11 @@
 # Host tests
 
 The host suite exercises IDF-free decisions and selected production glue with deterministic stubs.
+`run-mock-tests.sh` prints elapsed seconds for each completed gate. Contract parsers use bounded,
+process-local caches of immutable text analyses, with fresh inventory copies for callers; they do
+not cache filesystem verdicts or bypass changed mutations. Passive shell-flow spies check required
+arguments, execution order and failure propagation while avoiding repeated Python interpreter startup. Real
+compilation, runtime tests, browser checks and sanitizers retain their separate execution.
 Fast C++ and normal host checks run without Docker. Strict mode on macOS also requires Docker
 for the real Linux browser check. No host check requires USB or a vehicle. Firmware compilation is a separate
 [development gate](../docs/DEVELOPMENT.md#validate-a-change).
