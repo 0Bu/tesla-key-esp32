@@ -73,7 +73,7 @@ def check(shell: str) -> None:
             for relative, source in (
                 ("LICENSE", root / "LICENSE"),
                 ("THIRD_PARTY.md", root / "docs/THIRD_PARTY.md"),
-                ("vendor/esptool-js-0.7.0.LICENSE", root / "docs/vendor/esptool-js-0.7.0.LICENSE"),
+                ("vendor/esptool-js-0.7.1.LICENSE", root / "docs/vendor/esptool-js-0.7.1.LICENSE"),
                 ("vendor/pako-2.1.0.LICENSE", root / "docs/vendor/pako-2.1.0.LICENSE"),
                 ("vendor/pako-2.1.0.zlib.README", root / "docs/vendor/pako-2.1.0.zlib.README"),
             ):
