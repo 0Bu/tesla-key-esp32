@@ -203,7 +203,8 @@ wall-time bound. A completed retrieval attempt returns `200`; check `response.re
 | `POST /set_ota` | `{"channel":"release"\|"dev"}` — switch the update channel. |
 | `GET` or `POST /ota/check[?ms=<epoch>][&pr=<N>]` | Start a background update check (then poll `/ota/status`); `pr=<N>` targets that PR's preview build. |
 | `POST /ota/update[?pr=<N>]` | Start the background self-update (downloads, then reboots). |
-| `GET /ota/status` | `{state, progress, message, available, update_available, current, channel, pr}` (`pr` only while a PR build is targeted). |
+| `POST /ota/upload` | Dev-channel-only raw signed app upload; see [direct upload](#direct-signed-firmware-upload). |
+| `GET /ota/status` | Progress/offer plus `upload`, `busy`, `verification`, `recovery_required_bytes`, `project`, `target`, full `elf_sha256` and per-boot `boot_id`; `pr` only while a PR build is targeted. |
 | `GET /ota/changelog` | Release notes for the offered update: `text/plain`, ≤ 1024 bytes, `no-store`; `204` when none. |
 | `GET /api/proxy/1/version` | `{version, platform}` (`"ESP32"`/`"ESP32-S3"`/`"ESP32-C3"`/`"ESP32-C6"`). |
 | `POST /mcp` | MCP server for AI agents (Streamable HTTP, stateless JSON-RPC 2.0; `GET` → `405`, no SSE): [MCP.md](MCP.md). |
@@ -226,7 +227,7 @@ All of `/set_time`, `/set_mqtt`, `/set_syslog`, `/set_wifi` and `/set_ota` retur
 `/gen_keys` also returns `409` during a pending VIN transition, `503` when existing-key storage
 cannot be verified, and `500` when rotation is incomplete. Not-committed or ambiguous commits
 trigger a recovery reboot; a committed key with pending cleanup uses the supervisor retry path.
-`/ota/check` and `/ota/update` return `409` while another device operation owns their shared gate,
+`/ota/check`, `/ota/update` and `/ota/upload` return `409` while another device operation owns their shared gate,
 `503` when the service or nonblocking check queue is unavailable, and `500` when startup fails.
 For `/ota/check`, `started:true` accepts one reserved request: memory admission and worker startup
 run after HTTP request cleanup and can subsequently publish an error through `/ota/status`.
@@ -262,6 +263,58 @@ or with a valid timestamp after NTP has committed, a normal check needs no brows
 An updating-entry snapshot returns `409` before timestamp processing or any clock/check effect;
 it does not exclude an update starting later. Degraded replies after a possible clock effect follow
 the uncertainty contract below.
+
+### Direct signed firmware upload
+
+`POST /ota/upload` accepts a raw **signed app-only `.bin`** for the selected board, without
+a published Dev feed, Release or prior merge. The board's saved OTA channel must already be `dev`;
+`release` returns `403`. This endpoint is for explicitly authorized board tests. It does not
+replace PR reviews/gates, grant signing authority or publish firmware.
+
+For a maintainer's local production-board test, use the global `$ota` workflow and
+[`scripts/dev-ota-upload.py`](../scripts/dev-ota-upload.py), which bind local source, executed
+checks/build, independent read-only review and the exact signed image to one approved board
+and one upload. The following curl example documents the low-level HTTP body contract;
+it is not a replacement for the [local test prerequisites](DEVELOPMENT.md#local-ota-test-before-merge).
+
+```bash
+curl --fail-with-body --max-time 180 "http://<ESP32-IP>/ota/upload" \
+  -H 'Content-Type: application/octet-stream' -H 'Expect:' \
+  --data-binary @signed-app.bin
+```
+
+Use a regular file so curl supplies `Content-Length`. Multipart forms, transfer encoding,
+query parameters, bodies below 512 bytes and images larger than the `0x1f0000` slot are
+refused (`400`, or `413` for oversize). The binary must be for the detected target and carry
+the existing trusted RSA signature. Canonical versions with an equal or newer version core
+are accepted, including repeated versions and PR/local suffixes; older cores are refused.
+Unsigned files, merged/installer images and foreign signatures cannot activate an update.
+
+`GET /ota/status` identifies the running executable through its full app-descriptor ELF SHA-256,
+the chip target and project, and a fresh 16-hex-digit boot nonce. A changed nonce plus the exact
+expected ELF/version distinguishes a new boot even when versions repeat; `verification` remains
+the cached image state (`stable`, `pending_verify`, `unknown`). `busy` describes active/retained
+writer work; a network-cleanup quarantine can still refuse admission with `409` after it clears.
+`recovery_required_bytes` advertises the unchanged local operation-entry policy.
+These fields are passive diagnostics, not a fresh flash/health attestation by the status handler.
+
+`upload:true` identifies a direct upload. Accepting one clears the previous feed offer, PR and
+release notes; `available` remains empty because no manifest supplies a target version. The UI
+shows generic upload progress and locks configuration controls during the active flow. After restart,
+a changed boot nonce alone reports a restart; the local test helper additionally checks the
+expected image identity and health. Feed operations use `upload:false`.
+
+The connection stays open during the upload. The existing OTA task streams bounded chunks;
+other HTTP requests and `GET /ota/status` remain available. Admission uses the same operation,
+memory and running-image probation gates as pull OTA (`409`, `503`, or startup failure `500`).
+Channel/config changes are refused while the upload is active. Success returns
+`200 {"result":true,"reason":"installed; rebooting"}` after verification and
+boot selection; the board then reboots with ordinary health confirmation/rollback. Upload,
+image or signature failures return `400 {"result":false,"reason":...}` and publish details
+through `/ota/status`. An uncertain writer/boot-selection effect reports `outcome:"unknown"`
+and keeps the operation blocked; do not retry it automatically. A lost HTTP response also
+does not establish whether boot selection succeeded. NVS, keys, sessions, partition layout
+and the existing publication/PR gates are preserved.
 
 ### Response classes
 
@@ -316,7 +369,8 @@ See [pairing](USER_GUIDE.md#pairing-and-identity) for the NFC card and vehicle c
 `sys.board_mac` remains visible. `/diag?redact=1` substitutes identifiers per line, retains the board
 MAC and discards a wrapped partial first line. Lines over 288 bytes become `"<redacted>"`;
 truncated sensitive values are redacted through the line's end. Known network-identifier formats from
-netif, WiFi (including block-ack `<ba-add>` AP addresses), TLS DNS and MQTT URI parsing become a complete replacement line. For recognized complete V1 log records, the ring copy flattens embedded CR/LF while retaining
+netif, WiFi (including block-ack `<ba-add>` AP addresses), TLS DNS and MQTT URI parsing become a complete replacement line. For recognized complete V1 library records and application records containing a known
+identifier marker, the ring copy flattens embedded CR/LF while retaining
 trailing line endings; this also affects raw `/diag`. Serial and Syslog retain the original bytes except known MQTT URI parse errors, which become
 a fixed credential-free line before any sink, even if optional ring allocation fails.
 Fragmented driver output and other library or serial output may contain identifiers; inspect
