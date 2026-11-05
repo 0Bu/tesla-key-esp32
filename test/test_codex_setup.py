@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise native hook payloads and blocking results without executing a tool or contacting a device."""
 import importlib.util
+import ast
 import contextlib
 import io
 import json
@@ -187,9 +188,26 @@ for error in [KeyError('missing'), TypeError('shape'), subprocess.TimeoutExpired
 
 # Convert the neutral Stop result to Codex's actual continuation shape.
 with patch.object(HOOK, 'core', return_value=json.dumps({'decision': 'block', 'reason': 'red tests',
-        'hookSpecificOutput': {'hookEventName': 'Stop', 'permissionDecision': 'block'}})):
+        'hookSpecificOutput': {'hookEventName': 'Stop', 'permissionDecision': 'block'}})) as stop_core:
     assert HOOK.dispatch('Stop', {'hook_event_name': 'Stop'}) == {'decision': 'block', 'reason': 'red tests'}
+    adapter_timeout = stop_core.call_args.args[2]
     checks += 1
+
+# Compare the native dispatch with all shipped enclosing budgets. A valid strict host
+# run must finish cleanup before an outer adapter/registration can kill it.
+coordinator = ast.parse((ROOT / 'scripts/run-local-checks.py').read_text())
+suite_timeout = next(node.value.value for node in coordinator.body if isinstance(node, ast.Assign)
+                     and any(isinstance(target, ast.Name) and target.id == 'CHECK_TIMEOUT' for target in node.targets))
+neutral_core = ast.parse((ROOT / 'tools/agent-hooks/agent_hook.py').read_text())
+stop_function = next(node for node in neutral_core.body if isinstance(node, ast.FunctionDef) and node.name == 'run_stop_logic_tests')
+core_timeout = max(keyword.value.value for node in ast.walk(stop_function) if isinstance(node, ast.Call)
+                   for keyword in node.keywords if keyword.arg == 'timeout'
+                   and isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, int))
+canonical_timeout = json.loads((ROOT / '.agents/hooks.json').read_text())['stop-tests']['Stop'][0]['timeout']
+native_timeout = json.loads((ROOT / '.codex/hooks.json').read_text())['hooks']['Stop'][0]['hooks'][0]['timeout']
+assert 1200 <= suite_timeout < core_timeout < adapter_timeout < canonical_timeout
+assert canonical_timeout == native_timeout
+checks += 1
 with patch.object(HOOK, 'core', return_value='context'):
     value = HOOK.dispatch('SessionStart', {'hook_event_name': 'SessionStart'})
     assert value['hookSpecificOutput'] == {'hookEventName': 'SessionStart', 'additionalContext': 'context\ncontext'}

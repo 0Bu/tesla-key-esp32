@@ -120,6 +120,39 @@ layout and trusted-keyboard checks; this is modern-browser evidence, not every-b
 Start with checks relevant to the diff. Host suite scope and prerequisites are in the
 [test guide](../test/README.md); no host result establishes hardware or vehicle behavior.
 
+Run the complete local handoff once with `scripts/check-local.sh`; add `--firmware` for the
+four-target build, disposable-key signing and reproducibility contract. The entry point runs host,
+protocol, repository/agent gates and Linux sanitizers, using the pinned Docker image for sanitizers
+on macOS. It performs no publication, real-key signing, device or vehicle operation. Standalone
+commands below remain available for focused iteration.
+
+For repeated local host checks, use:
+
+```bash
+scripts/with-host-python.sh python3 scripts/run-local-checks.py --require-all
+```
+
+The Stop and strict pre-commit hooks share this coordinator. Successful runs can be reused for
+identical HEAD, tracked and non-ignored new file contents/modes, resolved tools, environment and
+host configuration. Deleted files invalidate the result. Concurrent callers share a worktree-local
+lock, inherited by bounded sub-gates. Failed and interrupted runs leave no success receipt.
+The 20-minute strict suite budget is enclosed by longer core, adapter and hook-registration
+deadlines, leaving time for cleanup before an outer timeout can interrupt it.
+`--force` always executes; CI never consumes or writes local receipts. These receipts provide local
+feedback, not review, remote CI, signed-artifact or hardware evidence.
+Pre-commit removes only the leading builtin helper path added by Git before starting tests.
+Custom Git exec paths and unrelated PATH entries remain unchanged and invalidate reuse normally.
+
+Startup files, module search paths and nonliteral compiler overrides disable reuse. On macOS,
+changes to the browser runner's local image also invalidate it; unrelated Docker images do not.
+Initial browser/CMake setup can change runtime
+inputs during a successful run; that result is reported but not cached. Pre-commit uses `--staged`:
+when working-tree inputs differ from the index, it executes fresh checks without reuse. Those
+checks still exercise the working tree; partial staging needs separate staged-snapshot verification
+before claiming commit-byte coverage. Host runners remove signing-key environment variables.
+Per-call runner metadata (`CODEX_TOOL_CALL_ID`) is removed from Git and test subprocesses and
+omitted from the cache identity. Other unknown environment variables still invalidate reuse.
+
 ```bash
 scripts/run-mock-tests.sh
 scripts/repo-lint.sh
@@ -153,6 +186,20 @@ The IDF wrapper applies the same CPU/memory ceiling to ordinary builds, daemon c
 Fast-Build volume setup. Volume setup uses the pinned IDF image and stops on failure. Its offline
 self-test executes the shipped wrapper with a passive Docker CLI, including setup failures; it
 neither accesses a Docker daemon nor establishes actual container resource enforcement.
+
+CI computes cumulative firmware relevance once in `prepare`, conservatively building when the
+published baseline cannot be verified. Target jobs consume that scheduling decision; signing and
+publication revalidate current source and authority at their own boundaries. The primary S3 leg
+checks the optional LED variant once. Independent main rebuilds use `--skip-led-variant` and
+reproduce all four published images without recompiling the unshipped variant.
+
+PR feedback is selected by `scripts/check-change-scope.py`: Markdown-only changes use repository
+lint without firmware compilation; browser changes use strict browser checks; firmware source uses
+runtime, protocol and sanitizer checks. Shared native/browser parity runs in both profiles. Unknown,
+combined runtime/browser code, test, policy, build and dependency changes use full coverage. `repo-lint.sh --quick` keeps
+actual validators while omitting their unrelated mutation self-tests. Local handoff and main/manual
+publication remain full. Main still reconciles shipped documentation through the existing signed
+site pipeline; PR selection does not change that publication/source contract.
 
 ## Build and evidence contracts
 
@@ -341,6 +388,15 @@ disposable signed fixtures and confirms that each target failure stops before pu
 
 ### Served PR preview acceptance
 
+The preview version is selected once from trusted default-branch code. Four separate, cache-free,
+read-only target jobs rebuild the exact PR head concurrently, without producer artifact access.
+A secret-free join requires every target and assembles the complete source/version-bound inventory.
+The protected signer compares producer and independent payloads, revalidates the live PR and stable
+version, and never checks out PR code.
+Eligible previews additionally require both complete host/protocol acceptance suites, parallel with
+the target legs. Selected PR feedback never suffices for signing. A source run without the unsigned
+firmware artifact is ineligible, so a documentation-only PR does not start preview rebuilds.
+
 After signed preview publication, `scripts/check-pr-preview-served.py` runs trusted default-branch
 code without keys or repository tokens. It validates the local signed four-target site against the
 source, canonical PR version and production public-key pin, then compares the served manifest,
@@ -434,6 +490,10 @@ grant no device-read, publication or vehicle authority.
 
 Required independent checks and exact-head records are in [AGENTS.md](../AGENTS.md#pr-and-review).
 Skills specify how to perform them; a green build does not substitute for review.
+Bounded changes use focused reviews of changed contracts and affected consumers against an accepted
+baseline. Explicit whole-project reviews, cross-cutting migrations, target/dependency or trust-boundary
+changes, and unknown baselines use full audits. Reports state scope and exclusions; the existing
+head-bound records and independent privacy/English check remain required.
 Before PR creation or a new push, publication reviews can bind a clean local candidate with
 verified branch, base and ancestry. Recheck the exact GitHub head after push; these records do
 not establish remote CI or merge acceptance.

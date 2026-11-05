@@ -33,7 +33,7 @@ export function registrations(rootDir) {
       SubagentStart: [handler("SubagentStart", 15, "Loading repository reviewer boundaries")],
       PreToolUse: [handler("PreToolUse", 200, "Checking project safety and current PR evidence", matcher)],
       PostToolUse: [handler("PostToolUse", 30, "Formatting edited first-party C and C++", neutral["post-tool-formatter"].PostToolUse[0].matcher)],
-      Stop: [handler("Stop", 600, "Running changed host logic tests")],
+      Stop: [handler("Stop", neutral["stop-tests"].Stop[0].timeout, "Running changed host logic tests")],
     },
   };
   const files = new Map([

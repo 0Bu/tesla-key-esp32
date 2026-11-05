@@ -5,10 +5,21 @@ description: "Read-only whole-project coherence review of tesla-key-esp32 for bu
 
 # Project review
 
-Invoke `$project-review` for whole-project coherence, including documentation quality. Read
+Invoke `$project-review` for coherence and documentation quality in an explicit review scope. Read
 [AGENTS.md](../../../AGENTS.md) first. Review is read-only: inspect/test/report/stop; no edits,
 PR stamps, commits, push, merge, signing, release, flash/OTA or live device/vehicle contact.
 A later implementation is a separate scope and requires an independent later review.
+
+## Choose the scope
+
+Use a focused review for a bounded diff against an accepted main baseline: inspect every changed
+contract, its direct and transitive consumers, affected skills/reviewers and owning documentation.
+State the baseline, complete changed/untracked inputs, scope and exclusions. Inherited baseline
+facts are not newly certified. Use full scope for an explicit whole-project review, cross-cutting
+migration, target/dependency or trust-boundary changes, or an unknown/unverified baseline.
+A focused clean record means complete coverage of that declared scope, never whole-tree acceptance.
+Uncommitted implementation reviews report the diff and limits; exact-head gate records require a
+frozen committed candidate. Keep independent review and publication authority separate.
 
 ## How to run a review
 
@@ -30,11 +41,11 @@ A later implementation is a separate scope and requires an independent later rev
 2. Discover shipped source/configuration from `main/CMakeLists.txt`, `main/`, `main/logic/`,
    `sdkconfig.defaults*`, `main/Kconfig.projbuild`, `partitions.csv`, manifest/locks, patches,
    `version.txt`, workflows, scripts, Pages runtime and tests. Follow call sites and consumers,
-   not only the diff. Account for every shipped subsystem and any excluded area. Include native
+   not only the diff. Account for every affected subsystem and any excluded area; full scope covers the whole tree. Include native
    `.codex/` adapters, effective primary-checkout hook trust and parent reviewer permission overrides.
 3. Compare docs→code and code→docs; verify endpoints, bounds, optional fields, persistent records,
    defaults, UI labels and build/dependency/layout facts. Re-derive runtime invariants below.
-4. Assess documentation quality and audit **every** canonical skill/reviewer using the
+4. Assess documentation quality and audit every affected canonical skill/reviewer (all in full scope) using the
    [skill-audit checklist](../skill-audit/SKILL.md#per-target-checklist).
 5. Run proportionate local checks permitted by the scope, then produce evidence-bounded findings
    and coverage. Do not contact hardware to prove a hypothesis.
@@ -48,10 +59,10 @@ A later implementation is a separate scope and requires an independent later rev
 
 ## Documentation quality (required in every review)
 
-Every review assesses the whole repository's documentation: `README.md`, `docs/`, `test/README.md`,
+Every review assesses documentation in its scope and all affected mirrors: `README.md`, `docs/`, `test/README.md`,
 `AGENTS.md`, scoped rules, skills and reviewer instructions. Keep repository documentation in English;
 the user-facing entry point must be understandable to technically experienced users without firmware
-internals. Inspect changed documentation in depth and check the wider structure and repeated topics.
+internals. Inspect changed documentation in depth and check surrounding structure and repeated topics. Full scope covers the whole documentation tree.
 
 - **Structure:** each document has a clear purpose and audience; navigation separates setup,
   operation, integration and development, with deeper references linked where needed.
@@ -129,5 +140,5 @@ State baseline SHA, scope/exclusions and overall verdict. List findings by impac
 `BUG`, `INCONSISTENCY`, `DOC-DRIFT`, `DOC-QUALITY`, `SKILL-DRIFT`, `RISK` or `NIT`, separate severity,
 path/line (both sides for drift), cause, reader/runtime impact, evidence/confidence and specific fix.
 Report doc↔code, config/build, cross-cutting consumers, **documentation-quality scope/verdict/limits**,
-and every skill/reviewer coverage. End with prioritized actions and exact-head readiness or reason
+and affected skill/reviewer coverage (every entry in full scope). End with prioritized actions and exact-head readiness or reason
 withheld. Unresolved material documentation findings or incomplete assessment prevent clean.

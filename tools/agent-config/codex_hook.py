@@ -62,7 +62,7 @@ def dispatch(event: str, payload: dict) -> dict:
         context = "\n".join(core(action, payload, 10) for action in actions)
         return {"hookSpecificOutput": {"hookEventName": event, "additionalContext": context[:8000]}}
     if event == "Stop":
-        output = core("stop-logic-tests", payload, 550)
+        output = core("stop-logic-tests", payload, 1250)
         verdict = json.loads(output) if output.strip() else {}
         if verdict.get("decision") == "block":
             return {"decision": "block", "reason": verdict.get("reason", "Host checks did not pass.")}

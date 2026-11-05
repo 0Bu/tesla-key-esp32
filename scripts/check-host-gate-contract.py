@@ -367,9 +367,12 @@ def probe_stack_hook_invocations(source: str) -> None:
             label + ": actual shell seams are missing/ambiguous")
     mode = re.findall(r"(?m)^set -euo pipefail$", source)
     timeout = re.findall(r"(?m)^TIMEOUT_RUNNER=tools/agent-hooks/run_with_timeout.py$", source)
+    profile = re.findall(r"(?m)^PROFILE=full$", source)
+    group = re.findall(r"(?m)^gate_group=runtime$", source)
     require(len(mode) == len(timeout) == 1, label + ": actual shell mode/timeout runner changed")
+    require(len(profile) == len(group) == 1, label + ": local default must retain full coverage")
     branch = source[source.index(begin):source.index(end)]
-    program = (mode[0] + "\n" + timeout[0] + "\n" + gate[0] + "\n" + branch +
+    program = (mode[0] + "\n" + timeout[0] + "\n" + profile[0] + "\n" + group[0] + "\n" + gate[0] + "\n" + branch +
                "    python3 __stack_hook_flow_after__\nfi\n")
     probe_stack_hook_program(program)
     probe_stack_hook_program(program, "test/test_evcc_vehicle.rb", "ruby", (), "evcc YAML invocation flow")
@@ -550,6 +553,12 @@ def validate(root: Path) -> None:
             'run_gate "BLE browser-row parity" 120 scripts/check-ble-row-parity.sh' in run_mock and
             "test/ble_row_golden_dump.cpp" in run_mock and "tools/ble_row_parity.js" in run_mock,
             "actual web presenter native/glyph parity is missing from the strict host gate")
+    require("--exclude-regex '^(runtime_boundary_contract|eth_startup_cleanup_controls|f137_task_host_contract)$'" in run_mock,
+            "strict host CTest must exclude exactly the three directly executed contracts")
+    require('run_gate "PR feedback selection" 120 python3 test/test_change_scope.py' in run_mock,
+            "strict host must exercise PR feedback selection")
+    require('run_gate "local host result reuse and invalidation" 120 python3 test/test_local_checks.py' in run_mock,
+            "strict host must exercise local check invalidation")
     require("--require-all" in run_mock and 'REQUIRE_ALL=1' in run_mock,
             "run-mock-tests.sh has no strict mode")
     for tool in ("python3", "node", "cmake", "ruby", "jq"):
@@ -593,6 +602,8 @@ def validate(root: Path) -> None:
         "test/ota_http_parser/http_parser.c",
         "test/ota_http_parser/http_parser.h",
         "test/test_codex_setup.py",
+        "test/test_local_checks.py",
+        "scripts/run-local-checks.py",
         "scripts/check-bench-acceptance.py",
         "scripts/check-dependency-contract.py",
         "scripts/check-bootloader-compat.py",
@@ -657,7 +668,7 @@ def validate(root: Path) -> None:
             "        scripts/check-otadata-contract.py \\\n" in run_mock and
             "        scripts/prepare-reused-release.py \\\n" in run_mock,
             "run-mock-tests.sh strict gate_file inventory omits dependency/otadata/reuse validators")
-    require('[str(script), "--require-all"]' in hook,
+    require('[str(python_wrapper), "python3", str(coordinator), "--require-all"]' in hook,
             "Stop hook does not invoke the strict host gate")
     require('("git", "python3", "cmake", "node")' in hook,
             "Stop hook tool inventory is incomplete")
@@ -983,6 +994,8 @@ IDENTITY_SANITIZER_COMMAND_BLOCK = 'ASAN_OPTIONS="$asan_options" UBSAN_OPTIONS="
 def self_test(root: Path) -> None:
     validate(root)
     mutations = [
+        ("scripts/run-mock-tests.sh", "runtime_boundary_contract|eth_startup_cleanup_controls|f137_task_host_contract)$", "runtime_boundary_contract|eth_startup_cleanup_controls|f137_task_host_contract|logic_tests)$", "exactly the three"),
+        ("scripts/run-mock-tests.sh", 'run_gate "local host result reuse and invalidation" 120 python3 test/test_local_checks.py', "true # omitted local result controls", "local check invalidation"),
         ("scripts/run-mock-tests.sh", 'run_gate "cached identity recovery and actual restart owner" 120 python3 test/test_identity_recovery_contract.py',
          '# removed actual recovery gate', "actual identity recovery host/sanitizer gate is missing"),
         ("scripts/run-sanitizer-tests.sh", 'python3 test/test_identity_recovery_contract.py --sanitize',
@@ -1162,7 +1175,7 @@ def self_test(root: Path) -> None:
          '# removed real cJSON intake tests', "locked cJSON intake/OOM"),
         ("scripts/run-mock-tests.sh", "need_tool cmake", "# removed", "cmake"),
         ("scripts/run-mock-tests.sh", "tools/agent-hooks/run_with_timeout.py", "missing.py", "bounded"),
-        ("tools/agent-hooks/agent_hook.py", '[str(script), "--require-all"]', "[str(script)]", "strict"),
+        ("tools/agent-hooks/agent_hook.py", '[str(python_wrapper), "python3", str(coordinator), "--require-all"]', "[str(script)]", "strict"),
         ("test/CMakeLists.txt", "add_test(NAME stack_sample_tests COMMAND stack_sample_tests)",
          "# omitted stack sample CTest", "Stack sample CMake/source group"),
         ("scripts/run-mock-tests.sh", 'run_gate "execute stack sample tests" 120 "$BUILD_DIR/stack_sample_tests"',

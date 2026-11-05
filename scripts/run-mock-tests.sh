@@ -9,6 +9,7 @@
 # direct-compiler fallback otherwise in normal mode (see test/CMakeLists.txt, whose targets
 # and flags the fallback mirrors; --require-all strictly requires cmake). See test/README.md.
 set -euo pipefail
+unset OTA_SIGNING_KEY OTA_SIGNING_KEY_FILE
 if ! python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 11))' >/dev/null 2>&1; then
     exec bash "$(cd "$(dirname "$0")" && pwd)/with-host-python.sh" bash "$0" "$@"
 fi
@@ -17,14 +18,20 @@ cd "$(dirname "$0")/.."
 
 BUILD_DIR=build_mock   # matches .gitignore (/build_mock/)
 REQUIRE_ALL=0
-if [ "${1:-}" = --require-all ]; then
-    REQUIRE_ALL=1
-    shift
-fi
-if [ "$#" -ne 0 ]; then
-    echo "usage: scripts/run-mock-tests.sh [--require-all]" >&2
-    exit 2
-fi
+PROFILE=full
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --require-all) REQUIRE_ALL=1; shift ;;
+        --profile)
+            [ "$#" -ge 2 ] || exit 2
+            PROFILE="$2"; shift 2 ;;
+        *) echo "usage: run-mock-tests.sh [--require-all] [--profile full|runtime|browser]" >&2; exit 2 ;;
+    esac
+done
+case "$PROFILE" in full|runtime|browser) ;; *) exit 2 ;; esac
+[ "$PROFILE" = full ] || [ "$REQUIRE_ALL" = 1 ] || exit 2
+printf 'run-mock-tests: selected %s profile\n' "$PROFILE"
+gate_group=runtime
 
 TIMEOUT_RUNNER=tools/agent-hooks/run_with_timeout.py
 
@@ -46,6 +53,9 @@ need_tool() {
 run_gate() {
     local label="$1" seconds="$2"
     shift 2
+    if [ "$PROFILE" != full ] && [ "$gate_group" != shared ] && [ "$PROFILE" != "$gate_group" ]; then
+        return 0
+    fi
     if [ "$REQUIRE_ALL" = 1 ]; then
         if python3 "$TIMEOUT_RUNNER" "$seconds" "$@"; then
             return 0
@@ -68,6 +78,10 @@ if [ "$REQUIRE_ALL" = 1 ]; then
     gate_file "$TIMEOUT_RUNNER"
     for required in \
         scripts/check-display-sim-parity.sh \
+        scripts/run-local-checks.py \
+        scripts/check-change-scope.py \
+        test/test_change_scope.py \
+        test/test_local_checks.py \
         test/test_provision.py \
         test/test_capture_wake.py \
         test/test_log_origin_contract.py \
@@ -210,7 +224,10 @@ fi
 if command -v cmake >/dev/null 2>&1; then
     run_gate "configure host C++ tests" 120 cmake -S test -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Debug
     run_gate "build host C++ tests" 120 cmake --build "$BUILD_DIR" --parallel
-    run_gate "execute host C++ tests" 120 ctest --test-dir "$BUILD_DIR" --output-on-failure
+    # These three Python contracts run below in both CMake and compiler-fallback mode.
+    # Keep them registered for standalone CTest, but execute each only once in this full suite.
+    run_gate "execute host C++ tests" 120 ctest --test-dir "$BUILD_DIR" --output-on-failure \
+        --exclude-regex '^(runtime_boundary_contract|eth_startup_cleanup_controls|f137_task_host_contract)$'
 else
     # No cmake on this host (e.g. a bare Raspberry Pi) — compile every host boundary directly.
     # Keep flags, sources and include paths in sync with test/CMakeLists.txt.
@@ -291,20 +308,29 @@ if command -v python3 >/dev/null 2>&1; then
     run_gate "evcc vehicle YAML and actual jq state mapping" 120 ruby test/test_evcc_vehicle.rb
     run_gate "log origin contract" 120 python3 test/test_log_origin_contract.py
     run_gate "diagnostic export guidance" 120 python3 test/test_diagnostic_export_guidance.py
+    if [ "$PROFILE" = full ]; then
     run_gate "stack context owner hooks" 120 python3 test/test_stack_context_hooks.py . --self-test
+    else
+        run_gate "stack context owner hooks" 120 python3 test/test_stack_context_hooks.py .
+    fi
     run_gate "runtime C-boundary inventory" 120 python3 test/test_runtime_boundary_contract.py
     run_gate "Ethernet actual cleanup safety controls" 120 python3 test/test_eth_startup_cleanup.py
     run_gate "MQTT/WDT and network iteration bodies" 120 python3 test/test_f137_host.py --source . --controls --execute-controlled-host-only
     run_gate "coherent charge presentation snapshot" 120 python3 test/test_charge_presentation.py
     run_gate "contextual charging command outcomes" 120 python3 test/test_command_outcomes.py
+    gate_group=browser
     run_gate "CSS bytes and actual inline generation" 120 python3 test/test_inline_assets.py
+    gate_group=runtime
     run_gate "optional LED driver decisions and GPIO" 120 python3 test/test_led_driver_contract.py
     run_gate "cached identity recovery and actual restart owner" 120 python3 test/test_identity_recovery_contract.py
     run_gate "locked cJSON intake and OOM" 120 bash test/run-cjson-oom-tests.sh
     run_gate "local OTA source, review, image and one-upload binding" 120 python3 test/test_dev_ota_upload.py
     run_gate "maintenance actual backend source contract" 120 python3 scripts/check-config-repair-backend-contract.py
     run_gate "maintenance actual backend and console" 120 bash test/run-config-repair-backend.sh
+    gate_group=policy
+    run_gate "PR feedback selection" 120 python3 test/test_change_scope.py
     run_gate "native Codex hook payload contract" 120 python3 test/test_codex_setup.py
+    run_gate "local host result reuse and invalidation" 120 python3 test/test_local_checks.py
     run_gate "bounded hook read exceptions" 120 python3 test/test_hook_read_contract.py
     run_gate "release relevance and publication selectors" 120 scripts/release-relevance.sh --self-test
     run_gate "build and manifest contract tests" 120 scripts/test-build-contracts.sh --build-and-manifest
@@ -321,7 +347,9 @@ run_gate "dependency harness source ordering" 120 python3 test/test_dependency_h
 run_gate "dependency query process lifetime" 120 python3 test/test_dependency_process.py
     run_gate "preview reconciliation contract" 120 scripts/reconcile-pr-previews.sh --self-test
     run_gate "served PR preview and removal acceptance" 120 python3 test/test_pr_preview_served.py
+    gate_group=browser
     run_gate "vendored esptool-js contract" 120 scripts/verify-vendored-esptool-js.sh
+    gate_group=policy
     run_gate "bench acceptance validator contract" 120 \
         python3 scripts/check-bench-acceptance.py --self-test
     run_gate "published Release asset contract" 120 \
@@ -330,14 +358,17 @@ run_gate "dependency query process lifetime" 120 python3 test/test_dependency_pr
         python3 scripts/prepare-reused-release.py --self-test
     run_gate "deployed Release and Pages byte contract" 120 \
         python3 scripts/check-published-release.py --self-test
+    gate_group=runtime
     run_gate "pure-logic test ownership and standalone headers" 120 \
         python3 scripts/check-logic-test-ownership.py --compile --self-test
     run_gate "host-gate execution and fallback wiring contract" 120 \
         python3 scripts/check-host-gate-contract.py
     run_gate "exact NVS namespace/key/owner/retention contract" 120 \
         python3 scripts/check-nvs-contract.py --self-test
+    gate_group=browser
     run_gate "browser launch policy" 120 python3 test/test_web_ui_browser_gate.py
     run_gate "browser pipe transport" 120 python3 test/test_browser_cdp.py
+    gate_group=runtime
     run_gate "deterministic parser fuzz smoke" 120 scripts/run-fuzz-smoke.sh
 else
     echo "run-mock-tests: python3 not found — skipping display-sim parity check" >&2
@@ -348,10 +379,13 @@ fi
 # does (so the browser can't silently drift from the host-tested rules). Skipped only where node is
 # unavailable — the C++ logic tests are the hard gate; CI's ubuntu-26.04 runner ships node.
 if command -v node >/dev/null 2>&1; then
+    gate_group=browser
     run_gate "Node web UI contracts" 120 node --test \
         test/serial_port_release.test.mjs test/web_installer.test.mjs test/web_ui_http.test.mjs \
         test/tesla_protocol_vectors.test.mjs
+    gate_group=shared
     run_gate "BLE browser-row parity" 120 scripts/check-ble-row-parity.sh
+    gate_group=browser
     if [ "$REQUIRE_ALL" = 1 ]; then
         if [ "$(uname -s)" = Darwin ]; then
             run_gate "Linux-container DOM and accessibility contract" 120 scripts/run-browser-tests-linux.sh

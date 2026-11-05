@@ -25,18 +25,21 @@ ACTION = re.compile(r"^\s+(?:-\s+)?uses:\s*([^\s#]+)", re.MULTILINE)
 PINNED_ACTION = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@[0-9a-f]{40}$")
 JOB = re.compile(r"^  ([A-Za-z0-9_-]+):\s*$", re.MULTILINE)
 UNPRIVILEGED_PERMISSIONS = {
-    ("build.yml", "prepare"): {"contents": "read"},
+    ("build.yml", "prepare"): {"contents": "read", "pages": "read"},
     ("build.yml", "logic-test"): {"contents": "read"},
     ("build.yml", "logic-harness"): {"contents": "read"},
-    ("build.yml", "build-target"): {"contents": "read", "pages": "read"},
-    ("build.yml", "build"): {"contents": "read", "pages": "read"},
-    ("build.yml", "independent-rebuild-target"): {"contents": "read", "pages": "read"},
+    ("build.yml", "build-target"): {"contents": "read"},
+    ("build.yml", "build"): {"contents": "read"},
+    ("build.yml", "independent-rebuild-target"): {"contents": "read"},
     ("build.yml", "independent-rebuild"): {"contents": "read"},
     ("signed-pr-preview.yml", "validate"): {
         "actions": "read",
         "contents": "read",
         "pull-requests": "read",
     },
+    ("signed-pr-preview.yml", "trusted-host"): {"contents": "read"},
+    ("signed-pr-preview.yml", "preview-version"): {"contents": "read"},
+    ("signed-pr-preview.yml", "trusted-rebuild-target"): {"contents": "read"},
     ("signed-pr-preview.yml", "trusted-rebuild"): {"contents": "read"},
     ("bench-acceptance.yml", "ingest-report"): {"contents": "read"},
 }
@@ -50,7 +53,7 @@ EXPECTED_WORKFLOW_JOBS = {
     "pr-policy.yml": {"current-head-records"},
     "pr-preview-cleanup.yml": {"cleanup-event", "discover-stale", "reconcile-stale"},
     "renovate.yaml": {"renovate"},
-    "signed-pr-preview.yml": {"validate", "trusted-rebuild", "sign-preview"},
+    "signed-pr-preview.yml": {"validate", "preview-version", "trusted-rebuild-target", "trusted-rebuild", "trusted-host", "sign-preview"},
 }
 
 EXPECTED_TOP_LEVEL_PERMISSIONS = {
@@ -64,12 +67,12 @@ EXPECTED_TOP_LEVEL_PERMISSIONS = {
 
 EXPECTED_JOB_PERMISSIONS = {
     ("bench-acceptance.yml", "ingest-report"): {"contents": "read"},
-    ("build.yml", "prepare"): {"contents": "read"},
+    ("build.yml", "prepare"): {"contents": "read", "pages": "read"},
     ("build.yml", "logic-test"): {"contents": "read"},
     ("build.yml", "logic-harness"): {"contents": "read"},
-    ("build.yml", "build-target"): {"contents": "read", "pages": "read"},
-    ("build.yml", "build"): {"contents": "read", "pages": "read"},
-    ("build.yml", "independent-rebuild-target"): {"contents": "read", "pages": "read"},
+    ("build.yml", "build-target"): {"contents": "read"},
+    ("build.yml", "build"): {"contents": "read"},
+    ("build.yml", "independent-rebuild-target"): {"contents": "read"},
     ("build.yml", "independent-rebuild"): {"contents": "read"},
     ("build.yml", "publish"): {"actions": "read", "contents": "write", "pages": "read"},
     ("build.yml", "deploy"): {
@@ -91,6 +94,9 @@ EXPECTED_JOB_PERMISSIONS = {
     ("signed-pr-preview.yml", "validate"): {
         "actions": "read", "contents": "read", "pull-requests": "read",
     },
+    ("signed-pr-preview.yml", "trusted-host"): {"contents": "read"},
+    ("signed-pr-preview.yml", "preview-version"): {"contents": "read"},
+    ("signed-pr-preview.yml", "trusted-rebuild-target"): {"contents": "read"},
     ("signed-pr-preview.yml", "trusted-rebuild"): {"contents": "read"},
     ("signed-pr-preview.yml", "sign-preview"): {
         "actions": "read", "contents": "write", "pages": "write",
@@ -161,10 +167,20 @@ EXPECTED_ACTIONS = {
     ),
     # Note: ("renovate.yaml", "renovate") is dynamic: validated in validate() against PINNED_ACTION.
     ("signed-pr-preview.yml", "validate"): (),
-    ("signed-pr-preview.yml", "trusted-rebuild"): (
+    ("signed-pr-preview.yml", "trusted-host"): (
         "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+    ),
+    ("signed-pr-preview.yml", "preview-version"): (
+        "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+    ),
+    ("signed-pr-preview.yml", "trusted-rebuild-target"): (
         "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
         "espressif/esp-idf-ci-action@e6f5c74232b1ccd4c97ed641f1e48553853f1fd5",
+        "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+    ),
+    ("signed-pr-preview.yml", "trusted-rebuild"): (
+        "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+        "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
         "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
     ),
     ("signed-pr-preview.yml", "sign-preview"): (
@@ -197,8 +213,8 @@ SIGNING_ENVIRONMENT_JOBS = {
 EXPECTED_PRIVILEGED_JOB_SHA256 = {
     ('build.yml', 'publish'): "3d8071b2e6361b0d013b5a07e6f598ff5152245e64eda83f4f031ba2f4850180",
     ('build.yml', 'deploy'): "415caf4c6a5be8ac9f31711193bd0a47b13b4e47562ecf67b95bf779022b7bad",
-    ('signed-pr-preview.yml', 'sign-preview'): "e44a21370d774b00b10dafcd11ff44a1d590485aeb8e03f62d600c3829f90925",
-    ('signed-pr-preview.yml', 'validate'): "44f1065eb3e479f4363e2fba6c10b29ae814cb01fe4ea4f0482f6b548f63511b",
+    ('signed-pr-preview.yml', 'sign-preview'): "2222beed0b8590b49bf7299032e20ce763342a31846e7824b93bef07b191d761",
+    ('signed-pr-preview.yml', 'validate'): "369bfeafebd5ee6667301a590741051df63b0e9d84f8ad0ddc68c9c07c336309",
     ('pr-preview-cleanup.yml', 'cleanup-event'): "c36a5602067c24346a24d2c431e4bec2860de35cc0101ee0d11113b30367890b",
     ('pr-preview-cleanup.yml', 'discover-stale'): "8669d8d2c7f0d295d9291e4b54dd19126ed549e9b82862d4747972bf64ab2b7e",
     ('pr-preview-cleanup.yml', 'reconcile-stale'): "9869eb7b4c3405527941a3c6120e1792701bffc571564ed4fc2092d54064d91d",
@@ -548,6 +564,15 @@ def validate(root: Path) -> None:
         "independent-rebuild-target", "independent-rebuild", "publish", "deploy",
     ):
         require(name in build, f"build.yml:{name} job is missing")
+    require(build["prepare"].count("./scripts/release-relevance.sh --changed-dev") == 1
+            and build["prepare"].count("./scripts/release-relevance.sh --changed-pr") == 1
+            and "firmware: ${{ steps.changes.outputs.firmware }}" in build["prepare"],
+            "build.yml:prepare must make one cumulative fail-closed firmware decision")
+    for name in ("build-target", "build", "independent-rebuild-target"):
+        require("FIRMWARE_RELEVANT: ${{ needs.prepare.outputs.firmware }}" in build[name]
+                and 'case "$FIRMWARE_RELEVANT" in yes|no) ;; *) exit 1 ;; esac' in build[name]
+                and "./scripts/release-relevance.sh" not in build[name],
+                f"build.yml:{name} must consume the prepared firmware decision")
     # build-target no longer waits for the host tests (only for the run mode / version), so a red
     # host gate must be enforced where the jobs converge: `build` needs all three producers.
     require(job_has_need(build["build-target"], "prepare"),
@@ -604,6 +629,39 @@ def validate(root: Path) -> None:
         job_has_need(build["deploy"], "build") and job_has_need(build["deploy"], "publish"),
         "build.yml:deploy must need both build and successful immutable Release publication",
     )
+    host_model = workflow_model(root / ".github/workflows/build.yml", contents["build.yml"])["jobs"]
+    full = "steps.scope.outputs.profile == 'full'"
+    runtime = full + " || steps.scope.outputs.profile == 'runtime'"
+    selected = "steps.scope.outputs.profile == 'runtime' || steps.scope.outputs.profile == 'browser'"
+    conditions = {
+        "logic-test": {"Validate runner-neutral agent configuration": full,
+                       "Validate repository syntax, links and workflow policy": full,
+                       "Validate repository without repeating unrelated validator self-tests": "steps.scope.outputs.profile != 'full'",
+                       "Run host-side logic tests": full, "Run selected strict host feedback": selected},
+        "logic-harness": {"Run tesla-ble integration harness": runtime,
+                          "Prove and run Linux memory-safety instrumentation": runtime,
+                          "Test ESP-IDF build contracts": full, "Test the PR-gate command matcher": full},
+    }
+    for name, expected_conditions in conditions.items():
+        steps = host_model[name]["steps"]
+        selectors = [step for step in steps if step.get("id") == "scope"]
+        require(len(selectors) == 1 and set(selectors[0]) == {"name", "id", "env", "run"}
+                and selectors[0]["env"] == {"EVENT_NAME": "${{ github.event_name }}",
+                    "BASE_SHA": "${{ github.event.pull_request.base.sha }}",
+                    "HEAD_SHA": "${{ github.event.pull_request.head.sha }}"}
+                and selectors[0]["run"].strip() == 'python3 scripts/check-change-scope.py --event "$EVENT_NAME" --base "$BASE_SHA" --head "$HEAD_SHA" --github-output >> "$GITHUB_OUTPUT"',
+                f"build.yml:{name}: feedback selection must be unconditional and bound to the event/diff")
+        for label, condition in expected_conditions.items():
+            matches = [step for step in steps if step.get("name") == label]
+            require(len(matches) == 1 and matches[0].get("if") == condition
+                    and "continue-on-error" not in matches[0],
+                    f"build.yml:{name}: selected feedback conditions must preserve full main/publication coverage")
+    require('./scripts/run-mock-tests.sh --require-all --profile "$HOST_PROFILE"' in build["logic-test"]
+            and "HOST_PROFILE: ${{ steps.scope.outputs.profile }}" in build["logic-test"],
+            "build.yml selected host profile must bind to the validated scope")
+    full_steps = [step for step in host_model["logic-test"]["steps"] if step.get("name") == "Run host-side logic tests"]
+    require(len(full_steps) == 1 and full_steps[0].get("run") == "./scripts/run-mock-tests.sh --require-all",
+            "build.yml:logic-test must run the fail-closed host gate")
     require("./scripts/run-mock-tests.sh --require-all" in build["logic-test"],
             "build.yml:logic-test must run the fail-closed host gate")
     require("./scripts/repo-lint.sh" in build["logic-test"],
@@ -676,6 +734,8 @@ def validate(root: Path) -> None:
         )
     require(
         "./scripts/ci-build-all.sh" in leg
+        and "--skip-led-variant" in leg
+        and "--skip-led-variant" not in build["build-target"]
         and '--target "${{ matrix.target }}"' in leg
         and '"${{ github.sha }}"' in leg
         and '"${{ needs.prepare.outputs.release-version }}"' in leg
@@ -1039,25 +1099,68 @@ def validate(root: Path) -> None:
     require(job_has_need(signed["trusted-rebuild"], "validate"),
             "signed-pr-preview.yml:trusted-rebuild must need validate")
     require(job_has_need(signed["sign-preview"], "validate") and
-            job_has_need(signed["sign-preview"], "trusted-rebuild"),
+            job_has_need(signed["sign-preview"], "trusted-rebuild") and job_has_need(signed["sign-preview"], "trusted-host"),
             "signed-pr-preview.yml:sign-preview must need validation and trusted rebuild")
+    preview_model = workflow_model(root / ".github/workflows/signed-pr-preview.yml", signed_text)["jobs"]
+    acceptance = preview_model["trusted-host"]
+    require(acceptance.get("needs") == "validate"
+            and acceptance.get("if") == "needs.validate.outputs.eligible == 'true'"
+            and acceptance.get("strategy") == {"fail-fast": "false", "matrix": {"suite": ["logic", "protocol"]}}
+            and "continue-on-error" not in acceptance,
+            "signed-pr-preview.yml full host acceptance must cover both suites before signing")
+    host_steps = acceptance["steps"]
+    require(host_steps[0].get("with") == {"ref": "${{ needs.validate.outputs.head-sha }}",
+                "fetch-depth": "0", "persist-credentials": "false"},
+            "signed-pr-preview.yml full host checkout must be producer-path-compatible and exact-head")
+    require(len(host_steps) == 3 and host_steps[1].get("if") == "matrix.suite == 'logic'"
+            and host_steps[2].get("if") == "matrix.suite == 'protocol'"
+            and all("continue-on-error" not in step for step in host_steps)
+            and "./scripts/run-mock-tests.sh --require-all" in host_steps[1].get("run", "")
+            and "--profile" not in host_steps[1].get("run", "")
+            and "./scripts/repo-lint.sh" in host_steps[1].get("run", "")
+            and "./scripts/test-tesla-ble-harness.sh --require-all" in host_steps[2].get("run", "")
+            and "./scripts/run-sanitizer-tests.sh --self-test" in host_steps[2].get("run", "")
+            and "./scripts/run-sanitizer-tests.sh\n" in host_steps[2].get("run", ""),
+            "signed-pr-preview.yml full host acceptance commands must not be reduced")
+    expected_needs = {
+        "preview-version": ["validate"],
+        "trusted-rebuild-target": ["validate", "preview-version"],
+        "trusted-rebuild": ["validate", "preview-version", "trusted-rebuild-target"],
+    }
+    for name, needs in expected_needs.items():
+        job, model = signed[name], preview_model[name]
+        actual_needs = model.get("needs")
+        if isinstance(actual_needs, str): actual_needs = [actual_needs]
+        require(actual_needs == needs and model.get("if") == "needs.validate.outputs.eligible == 'true'"
+                and "continue-on-error" not in model
+                and all(not ({"if", "continue-on-error"} & set(step)) for step in model["steps"])
+                and "actions/cache@" not in job and "firmware-unsigned" not in job
+                and "working-directory:" not in job and "persist-credentials: false" in job,
+                f"signed-pr-preview.yml:{name} must be default-owned, exact-head, producer-path-compatible and primary-isolated")
+    version = signed["preview-version"]
+    require("ref: ${{ github.sha }}" in version
+            and "./scripts/select-release-version.sh --latest-published-stable" in version
+            and "version: ${{ steps.trusted-version.outputs.version }}" in version,
+            "signed-pr-preview.yml trusted preview version must be captured before PR code")
+    leg = signed["trusted-rebuild-target"]
+    require(preview_model["trusted-rebuild-target"].get("strategy") == {
+                "fail-fast": "false", "matrix": {"target": ["esp32", "esp32s3", "esp32c3", "esp32c6"]}},
+            "signed-pr-preview.yml: exact four-target matrix drift")
+    require("ref: ${{ needs.validate.outputs.head-sha }}" in leg
+            and "path: _ci-rebuild-source" not in leg
+            and '--target "${{ matrix.target }}"' in leg
+            and '"${{ needs.preview-version.outputs.version }}"' in leg
+            and '"${{ needs.validate.outputs.head-sha }}"' in leg
+            and "actions/download-artifact@" not in leg
+            and "name: trusted-preview-target-${{ matrix.target }}-${{ needs.validate.outputs.head-sha }}" in leg,
+            "signed-pr-preview.yml target legs must be default-owned, exact-head, producer-path-compatible and without producer access")
     trusted_rebuild = signed["trusted-rebuild"]
-    require(
-        "ref: ${{ github.sha }}\n          fetch-depth: 0" in trusted_rebuild
-        and "ref: ${{ needs.validate.outputs.head-sha }}\n          fetch-depth: 0"
-        in trusted_rebuild
-        and "./scripts/select-release-version.sh --latest-published-stable" in trusted_rebuild
-        and "./scripts/ci-build-all.sh" in trusted_rebuild
-        and "cd _ci-rebuild-source" not in trusted_rebuild
-        and "working-directory:" not in trusted_rebuild
-        and "name: trusted-preview-rebuild-${{ needs.validate.outputs.head-sha }}"
-        in trusted_rebuild
-        and "actions/cache@" not in trusted_rebuild
-        and "actions/download-artifact@" not in trusted_rebuild
-        and "firmware-unsigned" not in trusted_rebuild,
-        "signed-pr-preview.yml:trusted-rebuild must be default-owned, exact-head, "
-        "producer-path-compatible and primary-isolated",
-    )
+    require("ref: ${{ needs.validate.outputs.head-sha }}" in trusted_rebuild
+            and "pattern: trusted-preview-target-*-${{ needs.validate.outputs.head-sha }}" in trusted_rebuild
+            and "check-build-artifact-inventory.py" in trusted_rebuild
+            and '--expected-source-sha "$SOURCE_SHA" --version "$DISPLAY_VERSION"' in trusted_rebuild
+            and "name: trusted-preview-rebuild-${{ needs.validate.outputs.head-sha }}" in trusted_rebuild,
+            "signed-pr-preview.yml join must require every independent target and bind the complete inventory")
     require("environment: firmware-signing" in signed["sign-preview"],
             "signed-pr-preview.yml signing job lost its protected environment")
     require(
@@ -1442,11 +1545,23 @@ def self_test(root: Path) -> None:
     )
     current_renovate_action = renovate_actions[0]
     mutations = [
+        ("preview-full-host-need", "signed-pr-preview.yml", "needs: [validate, trusted-rebuild, trusted-host]", "needs: [validate, trusted-rebuild]", "validation and trusted rebuild"),
+        ("preview-full-host-profile", "signed-pr-preview.yml", "./scripts/run-mock-tests.sh --require-all", "./scripts/run-mock-tests.sh --require-all --profile browser", "host acceptance commands must not be reduced"),
+        ("preview-full-host-suite", "signed-pr-preview.yml", "suite: [logic, protocol]", "suite: [logic]", "both suites before signing"),
+        ("main-host-coverage", "build.yml", "if: steps.scope.outputs.profile == 'full'\n        run: ./scripts/run-mock-tests.sh --require-all", "if: false\n        run: ./scripts/run-mock-tests.sh --require-all", "full main/publication coverage"),
+        ("feedback-wrong-event", "build.yml", "EVENT_NAME: ${{ github.event_name }}\n          BASE_SHA:", "EVENT_NAME: pull_request\n          BASE_SHA:", "feedback selection must be unconditional"),
+        ("independent-led-duplicate", "build.yml", "            --skip-led-variant\n", "", "must rebuild one target"),
+        ("prepared-relevance-missing", "build.yml", "firmware: ${{ steps.changes.outputs.firmware }}", "firmware: no", "cumulative fail-closed firmware decision"),
+        ("prepared-relevance-stale", "build.yml", "FIRMWARE_RELEVANT: ${{ needs.prepare.outputs.firmware }}", "FIRMWARE_RELEVANT: no", "consume the prepared firmware decision"),
+        ("preview-target-omission", "signed-pr-preview.yml", "target: [esp32, esp32s3, esp32c3, esp32c6]", "target: [esp32, esp32s3, esp32c3]", "exact four-target matrix"),
+        ("preview-target-include", "signed-pr-preview.yml", "        target: [esp32, esp32s3, esp32c3, esp32c6]", "        target: [esp32, esp32s3, esp32c3, esp32c6]\n        include: [{target: esp32c5}]", "exact four-target matrix"),
+        ("preview-join-missing-need", "signed-pr-preview.yml", "needs: [validate, preview-version, trusted-rebuild-target]", "needs: [validate, preview-version]", "primary-isolated"),
+        ("preview-wrong-target-artifact", "signed-pr-preview.yml", "pattern: trusted-preview-target-*-${{ needs.validate.outputs.head-sha }}", "pattern: firmware-target-*", "complete inventory"),
         ("quoted-job-permission", "build.yml", "      pages: read\n", '      issues: "write"\n      pages: read\n', "permissions must match the exact reviewed inventory"),
         ("single-quoted-job-permission", "build.yml", "      pages: read\n", "      issues: 'write'\n      pages: read\n", "permissions must match the exact reviewed inventory"),
         ("quoted-permission-key", "build.yml", "      pages: read\n", '      "issues": write\n      pages: read\n', "permissions must match the exact reviewed inventory"),
         ("quoted-top-permission", "build.yml", "permissions:\n  contents: read\n", 'permissions:\n  contents: read\n  issues: "write"\n', "top-level permissions must be exact"),
-        ("flow-permission", "build.yml", "    permissions:\n      contents: read\n      pages: read\n    strategy:", '    permissions: {contents: read, pages: read, issues: "write"}\n    strategy:', "job-level permissions are missing"),
+        ("flow-permission", "build.yml", "    permissions:\n      contents: read\n    strategy:", '    permissions: {contents: read, issues: "write"}\n    strategy:', "job-level permissions are missing"),
         ("matrix-exclude-target", "build.yml", "        target: [esp32, esp32s3, esp32c3, esp32c6]\n", "        target: [esp32, esp32s3, esp32c3, esp32c6]\n        exclude: [{target: esp32c6}]\n", "exact four-target matrix"),
         ("matrix-include-target", "build.yml", "        target: [esp32, esp32s3, esp32c3, esp32c6]\n", "        target: [esp32, esp32s3, esp32c3, esp32c6]\n        include: [{target: esp32c5}]\n", "exact four-target matrix"),
         ("matrix-extra-dimension", "build.yml", "        target: [esp32, esp32s3, esp32c3, esp32c6]\n", "        target: [esp32, esp32s3, esp32c3, esp32c6]\n        other: [unexpected]\n", "exact four-target matrix"),
@@ -1599,8 +1714,8 @@ def self_test(root: Path) -> None:
         ("harness-job-failure-ignored", "build.yml", "  logic-harness:\n", "  logic-harness:\n    continue-on-error: true\n",
          "required host gate must not be conditional"),
         ("logic-merge-history", "build.yml",
-         "          fetch-depth: 0\n      - name: Validate runner-neutral agent configuration",
-         "      - name: Validate runner-neutral agent configuration",
+         "          fetch-depth: 0\n      - name: Select host feedback scope",
+         "      - name: Select host feedback scope",
          "fetch PR merge parents"),
         ("sanitizers", "build.yml", "./scripts/run-sanitizer-tests.sh --self-test",
          "true", "ASan/UBSan/LSan"),
@@ -1904,7 +2019,7 @@ def self_test(root: Path) -> None:
          "uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1",
          "action inventory drift"),
         ("preview-trusted-dag", "signed-pr-preview.yml",
-         "    needs: [validate, trusted-rebuild]\n",
+         "    needs: [validate, trusted-rebuild, trusted-host]\n",
          "    needs: validate\n", "validation and trusted rebuild"),
         ("preview-untrusted-rebuild-artifact", "signed-pr-preview.yml",
          "      - name: Download trusted independent PR rebuild as data\n"

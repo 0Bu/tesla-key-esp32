@@ -112,8 +112,15 @@ fi
 
 enforce_budget=1
 target_override=""
+skip_led_variant=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --skip-led-variant)
+      # The independent main rebuild reproduces the published bytes. The primary S3 leg already
+      # checks the unshipped opt-in LED variant; do not compile that extra variant twice.
+      skip_led_variant=1
+      shift
+      ;;
     --target)
       shift
       target_override="${1:?usage: ci-build-all.sh [--target <target>] [--no-enforce-budget] <display-version> [source-sha]}"
@@ -284,7 +291,7 @@ done
 # EXACT_FOUR_TARGETS_END budget
 
 # Compile the opt-in driver once where an S3 primary exists; keep variant bytes outside dist.
-if [[ -z "$target_override" || "$target_override" == esp32s3 ]]; then
+if [[ "$skip_led_variant" -eq 0 && ( -z "$target_override" || "$target_override" == esp32s3 ) ]]; then
   bash scripts/ci-build-led-variant.sh "$version" dist/esp32s3/sdkconfig.esp32s3
 fi
 

@@ -227,7 +227,9 @@ import contextlib,importlib.util,io,json,pathlib,subprocess,sys
 sys.path.insert(0,str(pathlib.Path(sys.argv[1]).parent))
 spec=importlib.util.spec_from_file_location("h",sys.argv[1]); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 r=pathlib.Path(sys.argv[2])/"stop"; (r/"scripts").mkdir(parents=True)
-script=r/"scripts/run-mock-tests.sh"; script.write_text("#!/bin/sh\nexit 0\n"); script.chmod(0o755)
+runner=r/"scripts/run-mock-tests.sh"; runner.write_text("#!/bin/sh\nexit 0\n"); runner.chmod(0o755)
+script=r/"scripts/run-local-checks.py"; script.write_text("# passive coordinator fixture\n")
+wrapper=r/"scripts/with-host-python.sh"; wrapper.write_text("#!/bin/sh\nexit 0\n"); wrapper.chmod(0o755)
 m.HOOK_ROOT=r
 class R:
   def __init__(self,code=0,out=""): self.returncode=code; self.stdout=out; self.stderr=""
@@ -251,7 +253,7 @@ def invoke(script_result=R(), missing_tool=None, timeout=False):
   finally: sys.stdin=old_stdin
   return rc,output.getvalue(),calls
 rc,out,calls=invoke()
-assert rc==0 and not out and any(c==[str(script),"--require-all"] for c in calls)
+assert rc==0 and not out and any(c==[str(wrapper),"python3",str(script),"--require-all"] for c in calls)
 for kwargs in ({"missing_tool":"git"},{"missing_tool":"python3"},{"missing_tool":"cmake"},{"missing_tool":"node"},
                {"missing_tool":"compiler"},{"script_result":R(9,"failed")},{"timeout":True}):
   rc,out,_=invoke(**kwargs); assert rc==0 and json.loads(out)["decision"]=="block"

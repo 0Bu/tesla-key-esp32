@@ -4,12 +4,34 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 import signal
+import stat
 import subprocess
 import sys
 
 
 MAX_TIMEOUT_SECONDS = 120.0
+
+
+class CheckInterrupted(Exception):
+    """A cancellation that subprocess's platform wait code cannot consume as OSError."""
+
+
+def inherited_lock() -> tuple[int, ...]:
+    value = os.environ.get("TESLA_LOCAL_CHECK_LOCK_FD")
+    if value is None:
+        return ()
+    if not value.isdecimal() or int(value) < 3:
+        raise ValueError("invalid local check lock descriptor")
+    descriptor = int(value)
+    opened = os.fstat(descriptor)
+    expected = Path(__file__).resolve().parents[2] / ".tmp/local-checks/host.lock"
+    actual = expected.lstat()
+    if (not stat.S_ISREG(opened.st_mode) or not stat.S_ISREG(actual.st_mode)
+            or opened.st_nlink != 1 or (opened.st_dev, opened.st_ino) != (actual.st_dev, actual.st_ino)):
+        raise ValueError("local check lock does not belong to this worktree")
+    return (descriptor,)
 
 
 def main() -> int:
@@ -23,12 +45,20 @@ def main() -> int:
         return 2
 
     try:
-        process = subprocess.Popen(sys.argv[2:], start_new_session=True)
-    except OSError:
+        environment = {key: value for key, value in os.environ.items() if key != "TESLA_LOCAL_CHECK_LOCK_FD"}
+        process = subprocess.Popen(sys.argv[2:], start_new_session=True, pass_fds=inherited_lock(),
+                                   env=environment)
+    except (OSError, ValueError):
         return 2
+    def interrupted(_signum, _frame):
+        raise CheckInterrupted("bounded host check interrupted")
+    signal.signal(signal.SIGTERM, interrupted)
+    signal.signal(signal.SIGINT, interrupted)
     try:
         return process.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
+    except (subprocess.TimeoutExpired, CheckInterrupted):
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
         try:
             os.killpg(process.pid, signal.SIGTERM)
         except ProcessLookupError:

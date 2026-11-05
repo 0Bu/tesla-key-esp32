@@ -20,15 +20,15 @@ def pipeline_probe() -> None:
     assert tail.count(end) == 1
     section = tail.split(end, 1)[0]
     with tempfile.TemporaryDirectory(prefix="led-pipeline-") as directory:
-        for target in ("", "esp32s3", "esp32", "esp32c3", "esp32c6"):
-            calls = Path(directory) / (target or "all")
-            shell = ('set -euo pipefail; target_override="$1"; version=1.2.3; calls="$2"; '
+        for target, skip in ((target, skip) for target in ("", "esp32s3", "esp32", "esp32c3", "esp32c6") for skip in (0, 1)):
+            calls = Path(directory) / f'{target or "all"}-{skip}'
+            shell = ('set -euo pipefail; target_override="$1"; version=1.2.3; calls="$2"; skip_led_variant="$3"; '
                      'bash() { printf "%s\\n" "$*" >> "$calls"; };\n') + section
-            subprocess.run(["bash", "-c", shell, "led-pipeline", target, str(calls)],
+            subprocess.run(["bash", "-c", shell, "led-pipeline", target, str(calls), str(skip)],
                            check=True, timeout=5)
             got = calls.read_text().splitlines() if calls.exists() else []
-            expected = ["scripts/ci-build-led-variant.sh 1.2.3 dist/esp32s3/sdkconfig.esp32s3"] if target in ("", "esp32s3") else []
-            assert got == expected, ("actual LED pipeline branch", target, got)
+            expected = ["scripts/ci-build-led-variant.sh 1.2.3 dist/esp32s3/sdkconfig.esp32s3"] if not skip and target in ("", "esp32s3") else []
+            assert got == expected, ("actual LED pipeline branch", target, skip, got)
 
 
 def main() -> None:
@@ -240,7 +240,7 @@ int main() {
                        check=True, timeout=45)
         subprocess.run([str(binary)], check=True, timeout=10)
     pipeline_probe()
-    print("LED driver: PASS (256 GPIO frames, 20 OTA-state cases, 16 actual task frames, 5 actual pipeline branches)")
+    print("LED driver: PASS (256 GPIO frames, 20 OTA-state cases, 16 actual task frames, 10 actual pipeline branches)")
 
 
 if __name__ == "__main__":

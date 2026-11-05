@@ -1301,20 +1301,28 @@ def run_stop_logic_tests(_: argparse.Namespace) -> int:
     script = root / "scripts/run-mock-tests.sh"
     if not script.is_file() or script.is_symlink() or not os.access(script, os.X_OK):
         return block("scripts/run-mock-tests.sh is missing, a symlink, or not executable")
+    coordinator = root / "scripts/run-local-checks.py"
+    python_wrapper = root / "scripts/with-host-python.sh"
+    if not coordinator.is_file() or coordinator.is_symlink():
+        return block("scripts/run-local-checks.py is missing or a symlink")
+    if not python_wrapper.is_file() or python_wrapper.is_symlink() or not os.access(python_wrapper, os.X_OK):
+        return block("scripts/with-host-python.sh is missing or unsafe")
     try:
         result = subprocess.run(
-            [str(script), "--require-all"],
+            [str(python_wrapper), "python3", str(coordinator), "--require-all"],
             cwd=root,
+            env={key: value for key, value in os.environ.items()
+                 if key not in ("OTA_SIGNING_KEY", "OTA_SIGNING_KEY_FILE")},
             check=False,
             capture_output=True,
             text=True,
-            timeout=540,
+            timeout=1210,
         )
         if result.returncode == 0:
             return 0
         output = (result.stdout + result.stderr).strip()
     except subprocess.TimeoutExpired as exc:
-        output = f"host logic tests exceeded 540 seconds: {exc}"
+        output = f"host logic tests exceeded the 20-minute strict suite budget: {exc}"
     except OSError as exc:
         output = f"host logic tests could not be started: {exc}"
     return block(output or f"host logic tests exited {result.returncode} without diagnostics")

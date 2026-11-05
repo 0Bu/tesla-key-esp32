@@ -332,7 +332,7 @@ def validate(root: Path) -> None:
 
     build_all = read(root, "scripts/ci-build-all.sh")
     led_variant = read(root, "scripts/ci-build-led-variant.sh")
-    led_call = 'if [[ -z "$target_override" || "$target_override" == esp32s3 ]]; then\n  bash scripts/ci-build-led-variant.sh "$version" dist/esp32s3/sdkconfig.esp32s3\nfi'
+    led_call = 'if [[ "$skip_led_variant" -eq 0 && ( -z "$target_override" || "$target_override" == esp32s3 ) ]]; then\n  bash scripts/ci-build-led-variant.sh "$version" dist/esp32s3/sdkconfig.esp32s3\nfi'
     require(build_all.count(led_call) == 1 and
             build_all.index(led_call) > build_all.index("# EXACT_FOUR_TARGETS_END budget") and
             all(token in led_variant for token in (
@@ -1293,11 +1293,11 @@ def validate(root: Path) -> None:
         "  workflow_run:" in preview_workflow
         and "workflows: [build]" in preview_workflow
         and "  trusted-rebuild:" in preview_workflow
-        and "needs: [validate, trusted-rebuild]" in preview_workflow
+        and "needs: [validate, trusted-rebuild, trusted-host]" in preview_workflow
         and "ref: ${{ github.sha }}" in preview_workflow
         and "ref: ${{ needs.validate.outputs.head-sha }}\n          fetch-depth: 0"
         in preview_workflow
-        and preview_workflow.count("ref: ${{ needs.validate.outputs.head-sha }}") == 1
+        and preview_workflow.count("ref: ${{ needs.validate.outputs.head-sha }}") == 3
         and "path: _ci-source" not in preview_workflow
         and "--source-root _ci-source" not in preview_workflow
         and "--compare-to _ci-independent" in preview_workflow
@@ -1318,10 +1318,10 @@ def validate(root: Path) -> None:
     require_order(
         preview_workflow,
         "signed-pr-preview.yml trusted rebuild -> protected compare -> key chain",
-        ("  trusted-rebuild:", "Independently rebuild exact PR head",
+        ("  trusted-rebuild-target:", "Independently rebuild exact PR head",
          "Upload trusted independent rebuild evidence", "  sign-preview:",
          "Download trusted independent PR rebuild as data",
-         "check-build-artifact-inventory.py",
+         "--verify --artifact-root _ci-input --compare-to _ci-independent",
          "Revalidate PR immediately before key provisioning", "Provision OTA signing key"),
     )
     require(
@@ -1880,7 +1880,7 @@ def self_test(root: Path) -> None:
          "--accept-workflow-attested-source", "--accept-unbound-workflow-source",
          "default-owned rebuild"),
         ("preview-trusted-dag", ".github/workflows/signed-pr-preview.yml",
-         "needs: [validate, trusted-rebuild]", "needs: validate",
+         "needs: [validate, trusted-rebuild, trusted-host]", "needs: validate",
          "default-owned rebuild"),
         ("preview-trusted-artifact", ".github/workflows/signed-pr-preview.yml",
          "name: trusted-preview-rebuild-${{ needs.validate.outputs.head-sha }}",
