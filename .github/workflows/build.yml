@@ -615,6 +615,12 @@ jobs:
           SOURCE_SHA: ${{ github.sha }}
         run: ./scripts/select-release-version.sh --require-current-main "$SOURCE_SHA"
 
+      # Download only the same pinned image, overlapping key-free artifact/provenance checks.
+      # Stable create/reuse retain their existing path; no signing key exists during this pull.
+      - name: Start pinned Dev signing image pull
+        if: needs.build.outputs.mode == 'dev'
+        run: bash scripts/prefetch-idf-image.sh start "$RUNNER_TEMP/dev-signing-image"
+
       - name: Download unsigned build
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -753,6 +759,15 @@ jobs:
             sed -n '1,5p' "$api_error" >&2
             exit 1
           }
+
+      - name: Require pinned Dev signing image before key provisioning
+        if: steps.release-mode.outputs.mode == 'dev'
+        env:
+          DISPLAY_VERSION: ${{ needs.build.outputs.display-version }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          bash scripts/prefetch-idf-image.sh wait "$RUNNER_TEMP/dev-signing-image"
+          ./scripts/select-release-version.sh --require-release-candidate "$SOURCE_SHA" "$DISPLAY_VERSION"
 
       - name: Provision OTA signing key
         if: steps.release-mode.outputs.mode == 'create' || steps.release-mode.outputs.mode == 'dev'
@@ -1074,7 +1089,7 @@ jobs:
           pages_base_url="$(python3 scripts/check-pages-source.py "$pages_json" --print-url)"
           gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$RELEASE_VERSION" > "$release_json"
           python3 scripts/wait-pages-build.py --repository "$GITHUB_REPOSITORY" \
-            --attempts 8 --interval 10 --timeout 15
+            --attempts 32 --interval 10 --timeout 15
           python3 scripts/check-published-release.py \
             --pages-base-url "$pages_base_url" \
             --release-base-url "https://github.com/$GITHUB_REPOSITORY/releases/download/v$RELEASE_VERSION" \
@@ -1126,7 +1141,7 @@ jobs:
           gh api "repos/$GITHUB_REPOSITORY/pages" > "$pages_json"
           pages_base_url="$(python3 scripts/check-pages-source.py "$pages_json" --print-url)"
           python3 scripts/wait-pages-build.py --repository "$GITHUB_REPOSITORY" \
-            --attempts 8 --interval 10 --timeout 15
+            --attempts 32 --interval 10 --timeout 15
           python3 scripts/check-dev-pages.py \
             --pages-base-url "$pages_base_url" \
             --staged-site ./_deploy-input/_site \
