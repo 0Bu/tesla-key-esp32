@@ -242,6 +242,14 @@ needs `prepare`, both host jobs and `build-target`; `independent-rebuild` needs 
 check, and GitHub treats a check skipped because a need failed as passed, so `build` runs with
 `if: ${{ always() }}` and fails first unless every need succeeded. The independent join has no key.
 
+`prepare` performs cumulative relevance classification once for scheduling. It does not grant
+publication authority; current-source and Pages/Release checks remain at every mutation boundary.
+Signed previews similarly resolve a trusted version, rebuild four targets on separate read-only
+runners, then join their complete inventory before the protected compare/sign stage.
+Selected PR feedback cannot authorize signing: eligible previews require additional complete
+host/protocol acceptance before the protected job. Main and manual publication always run full
+checks. Local cached successes are never consumed as publication or independent review evidence.
+
 | Phase | Required proof and authority |
 |---|---|
 | Unprivileged build | Exact source SHA/fingerprint, four target graphs, size/stack/layout/effective-build checks and unsigned inventory; no signing key or write token. PRs build exact head. |
