@@ -8,6 +8,7 @@ import hashlib
 import runpy
 import re
 from collections import Counter
+from functools import lru_cache
 import tempfile
 from pathlib import Path
 
@@ -125,6 +126,7 @@ SOURCE_PATHS = cmake_source_paths(MAIN)
 SOURCES = {name: path.read_text(encoding="utf-8") for name, path in SOURCE_PATHS.items()}
 
 
+@lru_cache(maxsize=128)
 def normalize_preprocessor_text(text: str) -> str:
     """Apply the source transformations that can change directive token adjacency.
 
@@ -452,6 +454,13 @@ def normalize_registered_callback(expression: str, site: str) -> str:
 
 
 def task_inventory(text: str) -> set[str]:
+    # Cache only immutable parsing results, keyed by the complete source text. Each caller
+    # receives its own set; mutating a fixture or a returned inventory cannot reuse a verdict.
+    return set(_task_inventory(text))
+
+
+@lru_cache(maxsize=256)
+def _task_inventory(text: str) -> frozenset[str]:
     code = scrub_cpp(text)
     task_arg = {
         "xTaskCreate": 0,
@@ -473,7 +482,7 @@ def task_inventory(text: str) -> set[str]:
             if index >= len(args) or not args[index]:
                 continue  # prose such as "xTaskCreate()" is not a registration
             found.add(normalize_registered_callback(args[index], function))
-    return found
+    return frozenset(found)
 
 
 def assignment_callbacks(text: str, pattern: str, site: str) -> set[str]:
@@ -484,6 +493,11 @@ def assignment_callbacks(text: str, pattern: str, site: str) -> set[str]:
 
 
 def callback_inventory(text: str) -> set[str]:
+    return set(_callback_inventory(text))
+
+
+@lru_cache(maxsize=256)
+def _callback_inventory(text: str) -> frozenset[str]:
     code = scrub_cpp(text)
     found: set[str] = set()
 
@@ -643,9 +657,10 @@ def callback_inventory(text: str) -> set[str]:
     # The documented IDF weak extension is a C callback boundary without registration.
     if re.search(r'extern\s+"C"\s+void\s+sntp_sync_time\s*\(', text):
         found.add("sntp_sync_time")
-    return found
+    return frozenset(found)
 
 
+@lru_cache(maxsize=1024)
 def function_body_in(text: str, name: str) -> str:
     definition = re.compile(
         rf"^[ \t]*(?:\[\[gnu::noinline\]\][ \t]+)?(?:extern\s+\"C\"\s+)?(?:static\s+)?"
@@ -708,6 +723,7 @@ def require_mutation_rejected(label: str, check) -> None:
     raise AssertionError(f"{label} mutation passed unexpectedly")
 
 
+@lru_cache(maxsize=256)
 def scrub_cpp_preserving_layout(text: str) -> str:
     """Remove comments/literals without changing offsets or hiding newlines/braces."""
     return CPP_NOISE.sub(

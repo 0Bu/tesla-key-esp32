@@ -173,6 +173,29 @@ def contract(parts, owners, helpers):
             'safe logger rechecks current context at actual exit')
 
 
+def check_parser_reuse(helpers):
+    # A parsed result may be reused; a changed input and a caller's mutable set may not.
+    for name, source, original, changed in (
+        ('task_inventory', 'xTaskCreate(task_alpha, "task", 1, nullptr, 1, nullptr);',
+         'task_alpha', 'task_beta'),
+        ('callback_inventory', 'esp_mqtt_client_register_event(client, event, callback_alpha, nullptr);',
+         'callback_alpha', 'callback_beta'),
+    ):
+        parse = helpers[name]
+        first = parse(source)
+        require(first == {original}, name + ': parser reuse positive')
+        first.add('caller_mutation')
+        require(parse(source) == {original}, name + ': returned inventory is isolated')
+        require(parse(source.replace(original, changed)) == {changed},
+                name + ': source mutation must be reparsed')
+        require(parse(source) == {original}, name + ': original input remains independent')
+    source = 'static void entry() { first(); }'
+    body = helpers['function_body_in']
+    require(body(source, 'entry') == '{ first(); }', 'body reuse positive')
+    require(body(source.replace('first', 'second'), 'entry') == '{ second(); }',
+            'body source mutation must be reparsed')
+
+
 def main(root, self_test):
     # Loading definitions performs reads only; the existing gate's __main__ is not invoked here.
     helpers = runpy.run_path(str(root / 'test/test_runtime_boundary_contract.py'))
@@ -183,6 +206,7 @@ def main(root, self_test):
     owners = json.loads((root / 'test/stack_context_hook_owners.json').read_text())
     contract(parts, owners, helpers)
     if self_test:
+        check_parser_reuse(helpers)
         # Source/inventory controls only, never called runtime HWM measurements.
         mutations = []
         for entry, (path, context) in CALLBACKS.items():
