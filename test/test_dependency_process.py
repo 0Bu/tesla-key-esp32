@@ -6,12 +6,31 @@ then cleaned by the test owner; only ESRCH permits the production helper to repo
 """
 from pathlib import Path
 from unittest.mock import patch
-import datetime,hashlib,importlib.util,json,os,shutil,signal,subprocess,sys,tempfile,time
+import datetime,hashlib,importlib.util,inspect,json,os,shutil,signal,subprocess,sys,tempfile,time
 os.umask(0o077)
 ROOT=Path(__file__).resolve().parents[1]
 F=ROOT/'scripts/dependency_source.py'
 spec=importlib.util.spec_from_file_location('f088_query_v2',F);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
 rows=[];real_mono=time.monotonic;real_killpg=os.killpg;real_popen=subprocess.Popen
+
+def publish_fixture_record(path, data):
+ # Existence is a readiness signal: never let a cancellation observe a partial JSON record.
+ temporary=path.with_name(path.name+'.tmp')
+ temporary.write_text(json.dumps(data))
+ temporary.replace(path)
+
+fixture_publication=inspect.getsource(publish_fixture_record)
+with tempfile.TemporaryDirectory(prefix='dependency-fixture-publication-') as temporary:
+ record=Path(temporary)/'record.json';real_write=Path.write_text
+ def paused_write(path, text, *args, **kwargs):
+  assert path==record.with_name('record.json.tmp') and not record.exists()
+  real_write(path,'{')
+  assert not record.exists(),'partial fixture record became a readiness signal'
+  return real_write(path,text,*args,**kwargs)
+ with patch.object(Path,'write_text',paused_write):
+  publish_fixture_record(record,{'group':123})
+ assert json.loads(record.read_text())=={'group':123}
+ rows.append({'case':'fixture-readiness-atomic','result':'PASS'})
 
 def clean_error_double(child):
  # The real EOF guardian may be exiting concurrently after an intentionally denied cleanup.
@@ -32,8 +51,7 @@ def clean_error_double(child):
 
 with tempfile.TemporaryDirectory(prefix='dependency-query-lifetime-') as tmp:
  root=Path(tmp).resolve();tool=root/'git';marker=root/'owned.json';trusted=root/'trusted';trusted.mkdir()
- tool.write_text('#!'+__import__('sys').executable+'\n'+'''import json,os,signal,sys,time
-from pathlib import Path
+ tool.write_text('#!'+__import__('sys').executable+'\nimport json,os,signal,sys,time\nfrom pathlib import Path\n'+fixture_publication+'''
 mode=os.environ['F088_CASE'];marker=Path(os.environ['F088_MARKER'])
 if mode=='both-pipes':
  os.write(2,b'diagnostic'*2000);os.write(1,b'OK');sys.exit(0)
@@ -44,10 +62,10 @@ if mode in ('exited-leader','term-resistant-descendant'):
  child=os.fork()
  if child==0:
   if mode=='term-resistant-descendant':signal.signal(signal.SIGTERM,signal.SIG_IGN)
-  marker.write_text(json.dumps({'group':os.getpgrp(),'descendant':os.getpid()}));time.sleep(60);os._exit(0)
+  publish_fixture_record(marker,{'group':os.getpgrp(),'descendant':os.getpid()});time.sleep(60);os._exit(0)
  while not marker.exists():time.sleep(.005)
  os._exit(0)
-marker.write_text(json.dumps({'group':os.getpgrp()}));time.sleep(60)
+publish_fixture_record(marker,{'group':os.getpgrp()});time.sleep(60)
 ''');tool.chmod(0o700)
  cases=['both-pipes','stdout-bound','stderr-bound','nonzero-exit','deadline-live-leader','exited-leader','term-resistant-descendant','signal-error','observation-error','observation-transient','unconfirmed-cleanup']
  for case in cases:
@@ -152,11 +170,11 @@ with tempfile.TemporaryDirectory(prefix='dependency-query-outer-') as temporary:
   compile(source,str(local_source),'exec');local_source.write_text(source)
   fake=tools/'git';exited=case in ('canonical-exited','sigkill-exited','sigkill-cleanup','cleanup-atomic-omitted')
   fake.write_text('#!'+sys.executable+'\n'+
-   'from pathlib import Path\nimport json,os,signal,time\n'+
+   'from pathlib import Path\nimport json,os,signal,time\n'+fixture_publication+
    'child=os.fork()\n'+
    'if child==0:\n signal.signal(signal.SIGTERM,signal.SIG_IGN)\n Path('+repr(str(ready))+').write_text("TERM resistance installed")\n time.sleep(3.2)\n Path('+repr(str(effect))+').write_text("owned inert effect")\n time.sleep(20)\n os._exit(0)\n'+
    'until=time.monotonic()+1\nwhile not Path('+repr(str(ready))+').exists() and time.monotonic()<until:time.sleep(.005)\nassert Path('+repr(str(ready))+').exists(),"descendant did not become ready"\n'+
-   'Path('+repr(str(record))+').write_text(json.dumps({"git":os.getpid(),"child":child,"group":os.getpgrp()}))\n'+
+   'publish_fixture_record(Path('+repr(str(record))+'),{"git":os.getpid(),"child":child,"group":os.getpgrp()})\n'+
    ('os._exit(0)\n' if exited else 'time.sleep(20)\n'))
   fake.chmod(0o700)
   helper=work/'query.py'
@@ -167,9 +185,9 @@ with tempfile.TemporaryDirectory(prefix='dependency-query-outer-') as temporary:
     'real_kill=m.os.killpg\n'+
     'def kill_before_atomic(group,sig):\n if sig==signal.SIGKILL:\n  Path('+repr(str(work/'cleanup-interruption'))+').write_text("parent killed before group KILL")\n  os.kill(os.getpid(),signal.SIGKILL)\n return real_kill(group,sig)\n'+
     'm.time.monotonic=clock;m.os.killpg=kill_before_atomic\n')
-  helper.write_text('from pathlib import Path\nimport importlib.util,json,os,sys\n'+
+  helper.write_text('from pathlib import Path\nimport importlib.util,json,os,sys\n'+fixture_publication+
    'sys.dont_write_bytecode=True\n'+
-   'Path('+repr(str(helper_record))+').write_text(json.dumps({"pid":os.getpid(),"group":os.getpgrp()}))\n'+
+   'publish_fixture_record(Path('+repr(str(helper_record))+'),{"pid":os.getpid(),"group":os.getpgrp()})\n'+
    's=importlib.util.spec_from_file_location("actual_query",'+repr(str(local_source))+')\n'+
    'm=importlib.util.module_from_spec(s);s.loader.exec_module(m)\n'+
    'm.parent_lifetime_boundary(cli=True)\n'+
@@ -245,7 +263,7 @@ with tempfile.TemporaryDirectory(prefix='dependency-query-status-') as temporary
  rows.append({'case':'status-restored','result':'PASS'})
  # Status EOF must fail immediately even while an exited Git leader's child holds data pipes.
  marker=root/'status-owned.json'
- fake.write_text('#!'+sys.executable+'\nfrom pathlib import Path\nimport json,os,time\nchild=os.fork()\nif child==0:\n time.sleep(20)\n os._exit(0)\nPath('+repr(str(marker))+').write_text(json.dumps({"group":os.getpgrp(),"child":child}))\nos._exit(0)\n')
+ fake.write_text('#!'+sys.executable+'\nfrom pathlib import Path\nimport json,os,time\n'+fixture_publication+'child=os.fork()\nif child==0:\n time.sleep(20)\n os._exit(0)\npublish_fixture_record(Path('+repr(str(marker))+'),{"group":os.getpgrp(),"child":child})\nos._exit(0)\n')
  wait='import time\nuntil=time.monotonic()+2\nwhile not os.path.exists('+repr(str(marker))+') and time.monotonic()<until:time.sleep(.005)\nos.close(status)\nstatus=-1\nchild=None\nos.close(1)'
  assert m.GIT_GUARDIAN.count('os.close(1)')==1
  start=real_mono();owned=None

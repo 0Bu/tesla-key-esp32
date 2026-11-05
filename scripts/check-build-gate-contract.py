@@ -143,6 +143,7 @@ REQUIRED_FILES = (
     "scripts/check-reproducible-build.sh",
     "scripts/check-reproducible-artifacts.py",
     "scripts/idf-docker.sh",
+    "scripts/prefetch-idf-image.sh",
     "scripts/check-idf-container-mounts.py",
     "scripts/apply-tesla-ble-patches.sh",
     "scripts/apply-tesla-ble-patches.py",
@@ -454,10 +455,12 @@ def validate(root: Path) -> None:
             "Pages build readiness self-test must run in host and build-contract gates")
     for consumer in ("check-dev-pages.py", "check-published-release.py"):
         readiness = ('python3 scripts/wait-pages-build.py --repository "$GITHUB_REPOSITORY" \\\n'
-                     '            --attempts 8 --interval 10 --timeout 15\n'
+                     '            --attempts 32 --interval 10 --timeout 15\n'
                      '          python3 scripts/' + consumer + ' \\\n')
         require(build_workflow.count(readiness) == 1,
                 "Pages build readiness must immediately precede both byte acceptance consumers")
+    require(build_contracts.count('python3 "$repo_root/test/test_signing_image_prefetch.py"') == 1,
+            "test-build-contracts.sh: signing image prefetch shell controls must run once")
     require(build_contracts.count(
                 'python3 "$repo_root/scripts/generate-ota-changelog.py" --self-test') == 1,
             "test-build-contracts.sh: OTA changelog generator self-test is not wired")
@@ -1782,13 +1785,13 @@ def self_test(root: Path) -> None:
          "release_validator.validate_metadata(release_metadata",
          "release_validator.validate_metadata({}", "immutable API metadata gate"),
         ("pages-build-readiness-stable", ".github/workflows/build.yml",
-         '            --attempts 8 --interval 10 --timeout 15\n'
+         '            --attempts 32 --interval 10 --timeout 15\n'
          '          python3 scripts/check-published-release.py',
          '            --attempts 1 --interval 10 --timeout 15\n'
          '          python3 scripts/check-published-release.py',
          "Pages build readiness must immediately precede"),
         ("pages-build-readiness-dev", ".github/workflows/build.yml",
-         '            --attempts 8 --interval 10 --timeout 15\n'
+         '            --attempts 32 --interval 10 --timeout 15\n'
          '          python3 scripts/check-dev-pages.py',
          '            --attempts 1 --interval 10 --timeout 15\n'
          '          python3 scripts/check-dev-pages.py',
@@ -1800,6 +1803,13 @@ def self_test(root: Path) -> None:
         ("pages-build-readiness-contract-test", "scripts/test-build-contracts.sh",
          'python3 "$repo_root/scripts/wait-pages-build.py" --self-test\n', "",
          "Pages build readiness self-test must run"),
+        ("prefetch-controls-missing", "scripts/test-build-contracts.sh",
+         'python3 "$repo_root/test/test_signing_image_prefetch.py"\n', "",
+         "signing image prefetch shell controls must run once"),
+        ("prefetch-controls-duplicate", "scripts/test-build-contracts.sh",
+         'python3 "$repo_root/test/test_signing_image_prefetch.py"\n',
+         'python3 "$repo_root/test/test_signing_image_prefetch.py"\n' * 2,
+         "signing image prefetch shell controls must run once"),
         ("pr-head", ".github/workflows/build.yml", HEAD_REF,
          "ref: ${{ github.sha }}", "exact head SHA"),
         ("independent-rebuild", ".github/workflows/build.yml",

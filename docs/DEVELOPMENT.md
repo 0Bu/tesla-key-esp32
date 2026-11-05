@@ -373,8 +373,9 @@ See [API](API.md#direct-signed-firmware-upload) and [security](SECURITY.md#ota-s
 
 ### Served Pages acceptance
 
-Stable and Dev acceptance first observe the latest Pages build with up to eight status reads and
-exponential delays capped at 60 seconds (310 seconds of default waiting). Queued/building, failed
+Stable and Dev acceptance first observe the latest Pages build with up to 32 status reads at fixed
+10-second intervals (the same 310-second waiting span). This avoids up to 60 seconds of readiness
+detection lag from exponential polling. Queued/building, failed
 builds and unavailable status have distinct diagnostics before byte acceptance starts. This latest
 build observation is a readiness hint, not provenance for a particular firmware snapshot.
 Post-publication byte acceptance then retries the complete manifest, all 16 Pages parts and changelog with
@@ -392,6 +393,14 @@ they do not reuse older firmware under the newer source SHA. Stable publication 
 Before either Pages branch write, the downloaded candidate passes four key-free RSA-PSS checks
 against the production public pin. The offline deploy-consumer test executes this YAML step with
 disposable signed fixtures and confirms that each target failure stops before publication.
+
+Dev publication prefetches the unchanged digest-pinned IDF image on the signing runner while
+key-free artifact and provenance checks run. The pull must finish successfully and the exact image
+must exist before key provisioning; source/version authority is refreshed after the wait.
+`scripts/prefetch-idf-image.sh` exclusively creates private per-job state and rejects failed pulls,
+changed pins, stale state and timeouts. The signer still uses `scripts/idf-docker.sh` with its
+existing resource limits and all independent-byte, signature, size and layout checks. Stable
+creation and immutable reuse retain their existing paths. Prefetching is not signing authority.
 
 ### Served PR preview acceptance
 
