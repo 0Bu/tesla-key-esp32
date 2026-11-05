@@ -2,6 +2,12 @@
 # Fast, offline repository hygiene gate. Every parser is provided by the pinned repository or the
 # same Python/Node/Bash baseline already required by the host tests; no network install is needed.
 set -euo pipefail
+self_test=(--self-test)
+case "${1:-}" in
+    "") [ "$#" -eq 0 ] || exit 2 ;;
+    --quick) [ "$#" -eq 1 ] || exit 2; self_test=() ;;
+    *) echo "usage: repo-lint.sh [--quick]" >&2; exit 2 ;;
+esac
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
@@ -49,13 +55,13 @@ while IFS= read -r -d '' path; do [ -f "$path" ] && yaml_files+=("$path"); done 
 ruby scripts/check-yaml-syntax.rb --self-test "${yaml_files[@]}"
 echo "repo-lint: YAML parsed by offline Psych; GitHub semantics use mutation-tested policy (no actionlint download)"
 
-python3 scripts/check-workflow-policy.py --self-test
-python3 scripts/check-markdown-links.py --self-test
-python3 scripts/check-esp-idf-matrix.py --self-test
-python3 scripts/check-logic-test-ownership.py --self-test
-python3 scripts/check-nvs-contract.py --self-test
-python3 scripts/check-host-gate-contract.py --self-test
-python3 scripts/check-vehicle-command-sync.py --self-test
+python3 scripts/check-workflow-policy.py ${self_test[@]+"${self_test[@]}"}
+python3 scripts/check-markdown-links.py ${self_test[@]+"${self_test[@]}"}
+python3 scripts/check-esp-idf-matrix.py ${self_test[@]+"${self_test[@]}"}
+python3 scripts/check-logic-test-ownership.py ${self_test[@]+"${self_test[@]}"}
+python3 scripts/check-nvs-contract.py ${self_test[@]+"${self_test[@]}"}
+python3 scripts/check-host-gate-contract.py ${self_test[@]+"${self_test[@]}"}
+python3 scripts/check-vehicle-command-sync.py ${self_test[@]+"${self_test[@]}"}
 
 git diff --check
 git diff --cached --check

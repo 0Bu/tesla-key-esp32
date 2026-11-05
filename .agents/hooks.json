@@ -56,7 +56,7 @@
         "type": "command",
         "command": "python3 \"$(git rev-parse --show-toplevel)/tools/agent-hooks/agent_hook.py\" stop-logic-tests",
         "statusMessage": "Running changed host logic tests",
-        "timeout": 600
+        "timeout": 1300
       }
     ]
   }

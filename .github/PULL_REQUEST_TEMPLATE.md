@@ -16,6 +16,8 @@ cannot build or USB-flash — see AGENTS.md).
 
 ## Verification
 
+<!-- Name the reviewed baseline, focused/full scope and affected consumers; full audits apply to migrations, target/dependency/trust changes and unknown baselines. -->
+
 <!-- How this was checked. State what ran and what couldn't (e.g. no build in a cloud session). -->
 - [ ] `scripts/run-mock-tests.sh` passes (host-side logic tests — CI's `logic-test` gate)
 - [ ] `tools/agent-config/selftest.sh` passes when agent config, skills, or hooks changed

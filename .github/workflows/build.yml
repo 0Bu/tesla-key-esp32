@@ -35,7 +35,7 @@ permissions:
 
 jobs:
   prepare:
-    # The run mode and release version, computed once for every downstream job. They used to be the
+    # Run mode, version and cumulative firmware relevance, resolved once for all target jobs. They used to be the
     # last steps of logic-test, which forced the four firmware builds to wait for the whole ~3 minute
     # host-test job. The builds only need these two answers, so they now depend on this ~20 s job and
     # run concurrently with logic-test; `build` still needs logic-test and fails unless it
@@ -44,7 +44,9 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+      pages: read
     outputs:
+      firmware: ${{ steps.changes.outputs.firmware }}
       release-version: ${{ steps.version.outputs.version }}
       latest-published-stable: ${{ steps.version.outputs.latest }}
       mode: ${{ steps.mode.outputs.mode }}
@@ -108,87 +110,6 @@ jobs:
           echo "version=$release" >> "$GITHUB_OUTPUT"
           echo "latest=$latest" >> "$GITHUB_OUTPUT"
 
-  # Keep a bounded envelope for the full strict host suite and cold browser fixtures.
-  logic-test:
-    runs-on: ubuntu-26.04
-    timeout-minutes: 20
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # repo-lint checks the checked-out commit itself; PR merge refs need both parents present.
-          fetch-depth: 0
-      - name: Validate runner-neutral agent configuration
-        run: ./tools/agent-config/selftest.sh
-      - name: Validate repository syntax, links and workflow policy
-        run: ./scripts/repo-lint.sh
-      - name: Verify vendored installer source and notices
-        run: ./scripts/verify-vendored-esptool-js.sh --source
-      - name: Run host-side logic tests
-        run: ./scripts/run-mock-tests.sh --require-all
-
-  logic-harness:
-    # The remaining host gates, split out of logic-test so the two run concurrently: the tesla-ble
-    # harness, the sanitizer tripwires, the build/PR-gate contract self-tests and the gate matcher.
-    # `build` needs both jobs and fails unless both succeeded, so a red gate in either still fails
-    # the required build check.
-    runs-on: ubuntu-26.04
-    timeout-minutes: 10
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-      - name: Run tesla-ble integration harness
-        run: ./scripts/test-tesla-ble-harness.sh --require-all
-      - name: Prove and run Linux memory-safety instrumentation
-        run: |
-          ./scripts/run-sanitizer-tests.sh --self-test
-          ./scripts/run-sanitizer-tests.sh
-      - name: Test ESP-IDF build contracts
-        run: |
-          ./scripts/ci-build-all.sh --self-test
-          ./scripts/select-release-version.sh --self-test
-          python3 scripts/check-sdkconfig-defaults.py --self-test
-          python3 scripts/report-firmware-size.py --self-test
-          python3 scripts/check-dev-pages.py --self-test
-          python3 scripts/wait-pages-build.py --self-test
-          python3 scripts/generate-ota-changelog.py --self-test
-          python3 scripts/check-build-gate-contract.py --self-test
-          python3 tools/agent-hooks/agent_hook.py build-efficiency --self-test
-          test "$(./scripts/idf-version.sh)" = v6.1
-
-      # The PR-gate command matcher (tools/agent-hooks/pr-gate-lib.sh). Cheap, offline, and it
-      # guards a hole that is invisible in review: an unmatched command is not a lenient
-      # verdict, it is NO verdict — the hook exits 0 having checked nothing, so a regression
-      # here silently disarms the merge gate rather than failing loudly.
-      - name: Test the PR-gate command matcher
-        run: ./scripts/test-pr-gates.sh
-
-  build-target:
-    needs: prepare
-    runs-on: ubuntu-26.04
-    timeout-minutes: 30
-    permissions:
-      contents: read
-      pages: read
-    strategy:
-      fail-fast: false
-      matrix:
-        target: [esp32, esp32s3, esp32c3, esp32c6]
-        # Off main, every target is built twice in parallel: the primary build and a second, fresh,
-        # isolated copy whose bytes the `build` job compares with the primary. A back-to-back rebuild
-        # inside one job added ~100 s to the critical path. On main the independent rebuild is the
-        # reproducibility authority, so only the primary leg exists there.
-        leg: ${{ fromJSON(github.ref == 'refs/heads/main' && '["primary"]' || '["primary","reproduction"]') }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-          fetch-depth: 0
-
       - name: Detect firmware-relevant changes
         id: changes
         env:
@@ -197,7 +118,10 @@ jobs:
           SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           if [ "${{ github.event_name }}" = pull_request ]; then
-            if ! changed="$(./scripts/release-relevance.sh --changed-pr "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}")"; then
+            feedback="$(python3 scripts/check-change-scope.py --base "${{ github.event.pull_request.base.sha }}" --head "${{ github.event.pull_request.head.sha }}")" || feedback=full
+            if [ "$feedback" = docs ]; then
+              changed=no
+            elif ! changed="$(./scripts/release-relevance.sh --changed-pr "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}")"; then
               echo "release relevance check failed; building target" >&2
               changed=yes
             fi
@@ -215,6 +139,129 @@ jobs:
           esac
           echo "firmware=$changed" >> "$GITHUB_OUTPUT"
           echo "firmware-relevant: $changed"
+
+
+  # Keep a bounded envelope for the full strict host suite and cold browser fixtures.
+  logic-test:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # repo-lint checks the checked-out commit itself; PR merge refs need both parents present.
+          fetch-depth: 0
+      - name: Select host feedback scope
+        id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: >-
+          python3 scripts/check-change-scope.py --event "$EVENT_NAME"
+          --base "$BASE_SHA" --head "$HEAD_SHA" --github-output >> "$GITHUB_OUTPUT"
+      - name: Validate runner-neutral agent configuration
+        if: steps.scope.outputs.profile == 'full'
+        run: ./tools/agent-config/selftest.sh
+      - name: Validate repository syntax, links and workflow policy
+        if: steps.scope.outputs.profile == 'full'
+        run: ./scripts/repo-lint.sh
+      - name: Validate repository without repeating unrelated validator self-tests
+        if: steps.scope.outputs.profile != 'full'
+        run: ./scripts/repo-lint.sh --quick
+      - name: Verify vendored installer source and notices
+        run: ./scripts/verify-vendored-esptool-js.sh --source
+      - name: Run host-side logic tests
+        if: steps.scope.outputs.profile == 'full'
+        run: ./scripts/run-mock-tests.sh --require-all
+
+      - name: Run selected strict host feedback
+        if: steps.scope.outputs.profile == 'runtime' || steps.scope.outputs.profile == 'browser'
+        env:
+          HOST_PROFILE: ${{ steps.scope.outputs.profile }}
+        run: ./scripts/run-mock-tests.sh --require-all --profile "$HOST_PROFILE"
+
+  logic-harness:
+    # The remaining host gates, split out of logic-test so the two run concurrently: the tesla-ble
+    # harness, the sanitizer tripwires, the build/PR-gate contract self-tests and the gate matcher.
+    # `build` needs both jobs and fails unless both succeeded, so a red gate in either still fails
+    # the required build check.
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Select host feedback scope
+        id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: >-
+          python3 scripts/check-change-scope.py --event "$EVENT_NAME"
+          --base "$BASE_SHA" --head "$HEAD_SHA" --github-output >> "$GITHUB_OUTPUT"
+      - name: Run tesla-ble integration harness
+        if: steps.scope.outputs.profile == 'full' || steps.scope.outputs.profile == 'runtime'
+        run: ./scripts/test-tesla-ble-harness.sh --require-all
+      - name: Prove and run Linux memory-safety instrumentation
+        if: steps.scope.outputs.profile == 'full' || steps.scope.outputs.profile == 'runtime'
+        run: |
+          ./scripts/run-sanitizer-tests.sh --self-test
+          ./scripts/run-sanitizer-tests.sh
+      - name: Test ESP-IDF build contracts
+        if: steps.scope.outputs.profile == 'full'
+        run: |
+          ./scripts/ci-build-all.sh --self-test
+          ./scripts/select-release-version.sh --self-test
+          python3 scripts/check-sdkconfig-defaults.py --self-test
+          python3 scripts/report-firmware-size.py --self-test
+          python3 scripts/check-dev-pages.py --self-test
+          python3 scripts/wait-pages-build.py --self-test
+          python3 scripts/generate-ota-changelog.py --self-test
+          python3 scripts/check-build-gate-contract.py --self-test
+          python3 tools/agent-hooks/agent_hook.py build-efficiency --self-test
+          test "$(./scripts/idf-version.sh)" = v6.1
+
+      # The PR-gate command matcher (tools/agent-hooks/pr-gate-lib.sh). Cheap, offline, and it
+      # guards a hole that is invisible in review: an unmatched command is not a lenient
+      # verdict, it is NO verdict — the hook exits 0 having checked nothing, so a regression
+      # here silently disarms the merge gate rather than failing loudly.
+      - name: Test the PR-gate command matcher
+        if: steps.scope.outputs.profile == 'full'
+        run: ./scripts/test-pr-gates.sh
+
+  build-target:
+    needs: prepare
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [esp32, esp32s3, esp32c3, esp32c6]
+        # Off main, every target is built twice in parallel: the primary build and a second, fresh,
+        # isolated copy whose bytes the `build` job compares with the primary. A back-to-back rebuild
+        # inside one job added ~100 s to the critical path. On main the independent rebuild is the
+        # reproducibility authority, so only the primary leg exists there.
+        leg: ${{ fromJSON(github.ref == 'refs/heads/main' && '["primary"]' || '["primary","reproduction"]') }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+
+      - name: Use prepared firmware relevance
+        id: changes
+        env:
+          FIRMWARE_RELEVANT: ${{ needs.prepare.outputs.firmware }}
+        run: |
+          case "$FIRMWARE_RELEVANT" in yes|no) ;; *) exit 1 ;; esac
+          echo "firmware=$FIRMWARE_RELEVANT" >> "$GITHUB_OUTPUT"
 
       - name: Read pinned ESP-IDF toolchain
         if: steps.changes.outputs.firmware == 'yes'
@@ -297,9 +344,6 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
-      # release-relevance.sh reads the configured live Pages URL; without this minimum scope the
-      # Pages API fails and every docs-only main push conservatively schedules a new Release.
-      pages: read
     outputs:
       display-version: ${{ steps.stamp.outputs.disp }}
       release-version: ${{ needs.prepare.outputs.release-version }}
@@ -340,32 +384,13 @@ jobs:
           echo "image-version=$(./scripts/idf-version.sh --image-version)" >> "$GITHUB_OUTPUT"
           echo "ESP-IDF image: $(./scripts/idf-version.sh --image)"
 
-      - name: Detect firmware-relevant changes
+      - name: Use prepared firmware relevance
         id: changes
         env:
-          GH_TOKEN: ${{ github.token }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          SOURCE_SHA: ${{ github.sha }}
+          FIRMWARE_RELEVANT: ${{ needs.prepare.outputs.firmware }}
         run: |
-          if [ "${{ github.event_name }}" = pull_request ]; then
-            if ! changed="$(./scripts/release-relevance.sh --changed-pr "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}")"; then
-              echo "release relevance check failed; scheduling publication reconciliation" >&2
-              changed=yes
-            fi
-          elif [ "${{ github.event_name }}" = push ] && [ "${{ github.ref }}" = refs/heads/main ]; then
-            if ! changed="$(./scripts/release-relevance.sh --changed-dev "$SOURCE_SHA")"; then
-              echo "release relevance check failed; scheduling publication reconciliation" >&2
-              changed=yes
-            fi
-          else
-            changed=yes
-          fi
-          case "$changed" in
-            yes|no) ;;
-            *) echo "invalid release relevance result: $changed" >&2; exit 1 ;;
-          esac
-          echo "firmware=$changed" >> "$GITHUB_OUTPUT"
-          echo "firmware-relevant: $changed"
+          case "$FIRMWARE_RELEVANT" in yes|no) ;; *) exit 1 ;; esac
+          echo "firmware=$FIRMWARE_RELEVANT" >> "$GITHUB_OUTPUT"
 
       - name: Stamp firmware version
         id: stamp
@@ -453,8 +478,6 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
-      # release-relevance.sh reads the configured live Pages URL, exactly as in build and build-target.
-      pages: read
     strategy:
       fail-fast: false
       matrix:
@@ -466,27 +489,13 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Detect firmware-relevant changes
+      - name: Use prepared firmware relevance
         id: changes
         env:
-          GH_TOKEN: ${{ github.token }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          SOURCE_SHA: ${{ github.sha }}
+          FIRMWARE_RELEVANT: ${{ needs.prepare.outputs.firmware }}
         run: |
-          if [ "${{ github.event_name }}" = push ] && [ "${{ github.ref }}" = refs/heads/main ]; then
-            if ! changed="$(./scripts/release-relevance.sh --changed-dev "$SOURCE_SHA")"; then
-              echo "release relevance check failed; scheduling publication reconciliation" >&2
-              changed=yes
-            fi
-          else
-            changed=yes
-          fi
-          case "$changed" in
-            yes|no) ;;
-            *) echo "invalid release relevance result: $changed" >&2; exit 1 ;;
-          esac
-          echo "firmware=$changed" >> "$GITHUB_OUTPUT"
-          echo "firmware-relevant: $changed"
+          case "$FIRMWARE_RELEVANT" in yes|no) ;; *) exit 1 ;; esac
+          echo "firmware=$FIRMWARE_RELEVANT" >> "$GITHUB_OUTPUT"
 
       - name: Read pinned ESP-IDF toolchain
         if: steps.changes.outputs.firmware == 'yes'
@@ -507,6 +516,7 @@ jobs:
           target: esp32
           command: >-
             ./scripts/ci-build-all.sh
+            --skip-led-variant
             --target "${{ matrix.target }}"
             "${{ needs.prepare.outputs.release-version }}"
             "${{ github.sha }}"
