@@ -113,6 +113,9 @@ Notes that matter to a calling agent:
   reserved for malformed requests (unknown tool/method, missing required args, parse
   errors). Already-satisfied charging requests follow the [shared command policy](API.md)
   and return successful tool results.
+  Charge-start/stop no-ops include `structuredContent.noop` (`complete`, `is_charging`,
+  `not_charging` or `already_set`) and explanatory text, with `isError:false`. This request-owned
+  result does not update charging telemetry or claim that a charge physically started.
 - **`get_vehicle_state` is cache-fed.** Fields appear only when known: after a reboot
   with the car asleep, expect `vin`, `paired`, `session_available`, `charge_available:false` and `link`.
   `paired` means a stored VCSEC session; `session_available` means a usable VCSEC session in RAM
@@ -259,7 +262,7 @@ curl -si http://<ESP32-IP>/mcp | head -1
 | `-32700` | Body is not valid JSON (including malformed raw UTF-8 or invalid string escapes), empty, or could not be received. |
 | `-32600` | Invalid request: body over the 2 KB cap (HTTP `413`, message `request body too large`); nesting beyond 16 arrays/objects (`JSON nesting too deep`); more than 64 values (`too many JSON values`, `id:null`); escaped U+0000 anywhere (`JSON NUL escape not supported`); a batch array or non-object body; `jsonrpc` missing or not the exact string `"2.0"` (a separate valid `id` is still correlated); duplicate object keys at any depth (a duplicate `id` is ambiguous, so `id:null`); no `method`; an invalid `id`; or a `notifications/*` message that carries an `id`. |
 | `-32601` | Method not implemented (`resources/*`, `prompts/*`, …). |
-| `-32602` | `tools/call` with an unknown tool, an absent required argument (`missing required argument: <key>`) or a present-but-unparseable one (`integer required: <key>`, `boolean required: <key>` or `invalid argument: <key>`, according to the registry type and input). |
+| `-32602` | Unknown tool, absent required argument (`missing required argument: <key>`), invalid integer/boolean syntax (`integer required: <key>`, `boolean required: <key>` or `invalid argument: <key>`), or an integral value outside its command bounds (`argument out of range: <key>`). |
 | `-32603` | HTTP `503`: receive-buffer, cJSON materialization or pre-effect response-build/print allocation failure. |
 
 These codes describe handler replies. Before dispatch, runtime admission can return the flat

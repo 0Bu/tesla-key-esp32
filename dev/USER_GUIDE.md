@@ -94,7 +94,7 @@ setting the VIN. This preserves the pending recovery record.
 
 In the web UI, click the download icon on **Firmware**, confirm the offered update and wait for
 the device to reboot. Click the version to select **Release** (official releases, default) or
-**Dev** (main builds). OTA preserves configuration and keys.
+**Development** (main builds). OTA preserves configuration and keys.
 The update dialog shows up to five change entries at once. Scroll inside the list to read more.
 
 For USB recovery, **Connect** checks the chip and reads the installed partition table and firmware
@@ -124,6 +124,9 @@ Never flash an unsigned local build: it cannot boot. [Verified delivery procedur
 A reviewed same-repository PR with the `signed-preview` label may offer a signed installer at
 `https://0bu.github.io/tesla-key-esp32/PR/<N>/`. Its version is `<stable>-PR-<N>` and it remains on
 the selected update channel. The preview disappears when closed, force-pushed or unlabelled.
+Preview OTA and Dev uploads still enforce numeric-core downgrade protection. A preview based on
+an older stable core cannot replace a newer Development core; use its signed USB installer for
+that case. Equal or newer preview cores can pass the version gate, subject to the normal OTA checks.
 
 ### Update memory recovery
 

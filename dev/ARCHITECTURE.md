@@ -41,7 +41,12 @@ activity. Charger input fields do not establish climate power consumption or an 
 `vehicle_loop` attempts one climate, drive, tires or closures slot roughly every 30 s, rotating
 domains with bounded missing-climate retries. Windowed telemetry uses `NO_WAKE_SKIP`;
 the supervisor's non-waking VCSEC health/enrollment requests use `NoWakeFail`.
+VCSEC status sampling does not apply Infotainment wake-policy decisions; `NoWakeSkip` would not
+suppress that VCSEC request. Each health probe shares one eight-second connect/response budget.
 Command/query ownership, including the VCSEC health probe, pauses windowed telemetry.
+The idle-window falling edge takes the same command owner without waiting, resamples command
+recency and defers disconnect while a command/probe owns it. Tick stamps are loaded before time
+samples, preserving unsigned counter wrap without treating a newly started command as old.
 Each entry point explicitly chooses foreground/background `ConnectOrigin`.
 
 Synchronous tesla-ble callbacks copy fixed nanopb state into latest-value mailboxes under a short
@@ -270,7 +275,8 @@ compatibility; unrelated saves preserve an unset choice. Changelog intake is bou
 ### Image confirmation and update admission
 
 Rollback health uses `logic/health_gate.hpp`: admitted runtime, acknowledged healthy NimBLE host,
-proven network lease, the shared ordinary-entry INTERNAL-largest requirement and 90 s uptime. At 600 s with an expected but
+proven network lease, the shared ordinary-entry INTERNAL-largest requirement and 90 s observation
+since the health-confirmation task starts. At 600 s of that observation with an expected but
 missing lease, leave PendingVerify armed; do not restart for a router outage. Setup mode never reaches
 Ready, so even its saved configuration cannot confirm an image.
 
@@ -438,7 +444,8 @@ for that boot. Browser and restored estimates do not establish this timestamp. S
 no discovery entities.
 
 On reconnect: discovery → online availability → state; periodic snapshots follow. Invalid caches
-publish `{}` once to remove retained stale readings, then stay quiet. Sticky JSON ownership prevents
+publish `{}` once per connection to remove retained stale readings, then stay quiet. Reconnect
+rearms invalid-domain clears on the publisher task: outbox admission is not a PUBACK. Sticky JSON ownership prevents
 partial retained documents; every build/print/publish failure rearms the entire sequence.
 The 60 s watchdog is fed at loop boundaries and each completed publish, never around a stuck call.
 
@@ -589,11 +596,16 @@ still use its remaining retries; the portal does not suspend that owner. Once a 
 exists, the portal is torn down and the boot continues in place. The open AP closes after 10 min
 without a client and 30 min after opening; retries continue. A failed AP close is retried with the
 same backoff, and the boot does not continue while the AP is up. Nothing here reboots: a timed restart would revert a pending OTA image,
-defeat the crash counter and re-seed the vehicle window. Once online, event-driven reconnect
-continues indefinitely. The 30 s gateway watchdog recovers after two failures only if the link
+defeat the crash counter and re-seed the vehicle window. A proven WiFi lease permits indefinite
+event-driven WiFi reconnect; Ethernet alone does not prove the radio credentials. A wired lease
+pauses redundant WiFi retries, and cable loss rearms an already-started station. A pending WiFi
+trial consumes its backup only after that WiFi attempt succeeds, never after wired rescue or an
+unpersisted rollback. The 30 s gateway watchdog recovers after two failures only if the link
 claims up and that transport's gateway answered at least once. Never-answering ICMP is unusable
 evidence. Probe setup errors fail open; missing lease/gateway or unanswered probes are unreachable.
 Recovery disconnects WiFi (the event handler reconnects) or restarts Ethernet; it never reboots.
+Repeated unchanged MQTT/gateway failures log on transitions and at most hourly thereafter.
+Configuration-read failures surface as service errors; valid legacy configuration remains supported.
 
 Ping state/semaphores are persistent. Each asynchronous session owns a generation. Timeout requests
 stop and waits a second bounded interval; without matching end, quarantine as PendingEnd. No handle
@@ -1021,6 +1033,8 @@ parsing or callbacks. Use `tk::SemGuard`/`MutexGuard` and `InFlightGuard` for un
   catch-all, without logging. `StatusCompletion` has a separate allocatable runner-error path; its
   success callback copies fixed fields. Runner callbacks execute synchronously under Vehicle
   ownership: normally on the Vehicle task, or in the controller caller during cancellation/clear.
+  They borrow the runner's error only until return and copy bounded visible bytes before signalling,
+  without an intermediate heap-owned error or nested completion adapter.
   They are not NimBLE-host or SDK C callbacks.
 - Command task publishes result text after waiting. `cmd_in_flight_` is set under command ownership;
   it pauses background work but orders no other fields.
