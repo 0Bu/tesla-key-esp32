@@ -712,16 +712,16 @@ test("recovery uses the hero without a key-send banner, button or browser reques
   assert.doesNotMatch(app, /\/send_key|sendExistingKey/);
 });
 
-test("toggleCharge renders server rejection reason on HTTP 502", async () => {
+test("toggleCharge renders an authenticated successful complete no-op on HTTP 200", async () => {
   const { context } = loadUi();
   const messages = [];
   context.state = { vin: "5YJ3E1EA1JF000001", vehicle: { status: "Stopped" } };
   context.toast = (message, kind) => messages.push({ message, kind });
   context.fetch = async () => ({
-    ok: false,
-    status: 502,
+    ok: true,
+    status: 200,
     async json() {
-      return { response: { result: false, reason: "action failed: complete" } };
+      return { response: { result: true, noop: "complete", reason: "Charging is already complete" } };
     }
   });
 
@@ -729,6 +729,25 @@ test("toggleCharge renders server rejection reason on HTTP 502", async () => {
 
   assert.equal(messages.at(-1).kind, "info");
   assert.equal(messages.at(-1).message, "Charging is already complete");
+});
+
+test("charging completion is known without a reported charge limit", () => {
+  const { context } = loadUi();
+  assert.equal(context.chargeComplete({status:"Complete"},false),true);
+  assert.equal(context.chargeComplete({status:"Stopped",soc:100},false),false);
+  assert.equal(context.chargeComplete({status:"Complete"},true),false);
+});
+
+for (const [noop,status,message] of [
+  ["is_charging","Stopped","Vehicle is already charging"],
+  ["not_charging","Charging","Vehicle is already not charging"]
+]) test(`toggleCharge shows ${noop} as information`, async () => {
+  const {context}=loadUi(); const messages=[];
+  context.state={vin:"5YJ3E1EA1JF000001",vehicle:{status}};
+  context.toast=(message,kind)=>messages.push({message,kind});
+  context.fetch=async()=>({ok:true,status:200,json:async()=>({response:{result:true,noop}})});
+  await context.toggleCharge();
+  assert.deepEqual(messages.at(-1),{message,kind:"info"});
 });
 
 test("wakeCar renders server reason on HTTP 502", async () => {

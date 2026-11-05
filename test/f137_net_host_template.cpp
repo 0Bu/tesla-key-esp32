@@ -14,6 +14,7 @@
 #include "freertos/semphr.h"
 #include "ping_probe.hpp"
 #include "logic/net_link.hpp"
+#include "logic/connect_outcome.hpp"
 #include "runtime_fault_log.hpp"
 #include "stack_watch.hpp"
 

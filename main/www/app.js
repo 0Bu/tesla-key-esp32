@@ -396,7 +396,8 @@ function defrostChip(s){
 // an unknown limit (field absent) leaves the start button live rather than blocking on a guess.
 function chargeComplete(v,charging){
   var cur = (v && v.usable_soc!=null) ? v.usable_soc : (v ? v.soc : null);
-  return !charging && !!v && v.charge_limit!=null && (cur!=null?cur:0)>=v.charge_limit;
+  return !charging && !!v && (v.status==='Complete' ||
+    (v.charge_limit!=null && cur!=null && cur>=v.charge_limit));
 }
 // Compact "time ago" for the asleep card (seconds → "<1 min" / "5 min" / "2 h" / "3 d").
 function fmtAgo(sec){
@@ -406,16 +407,6 @@ function fmtAgo(sec){
   var m=Math.round(sec/60); if(m<60) return m+' min';
   var h=Math.floor(m/60);   if(h<48) return h+' h';
   return Math.floor(h/24)+' d';
-}
-
-/* ---------- setup shortcuts ---------- */
-function scrollToKey(){
-  var el = $("rowKey") || $("paneSettings");
-  if(el && typeof el.scrollIntoView === 'function'){
-    try { el.scrollIntoView({ behavior: 'smooth' }); } catch(e){ el.scrollIntoView(); }
-  }
-  var btn = $("keyBtn");
-  if(btn && typeof btn.focus === 'function') btn.focus();
 }
 
 // Only the named gauge button invokes the primary action. The surrounding card is informational.
@@ -651,15 +642,16 @@ function render(s){
 
   // MQTT — Home Assistant bridge
   var mq=s.mqtt||{};
-  if(!mq.configured) setRow('mqtt','','<span class="ph">Not configured</span>','Disabled');
+  if(!mq.configured && mq.error) setRow('mqtt','warn','','Error · '+esc(mq.error));
+  else if(!mq.configured) setRow('mqtt','','<span class="ph">Not configured</span>','Disabled');
   else if(mq.connected) setRow('mqtt','ok',esc(mq.broker||''),'Connected'+(mq.tls?' · secured':''));
   else { setRow('mqtt','warn',esc(mq.broker||''),'Disconnected · '+esc(mq.error||'not connected')); }
 
   // Syslog — UDP diag-log forwarder. Delivery is gated on DNS only (resolved); reachability is an
   // advisory ping hint, so a resolved-but-not-answering host still shows the destination, flagged.
   var sy=s.syslog||{};
-  if(!sy.configured) setRow('syslog','','<span class="ph">Not configured</span>','Disabled');
-  else if(sy.error){ setRow('syslog','warn',esc(sy.host?(sy.host+':'+(sy.port||514)):''),'Error · '+esc(sy.error)); }
+  if(sy.error){ setRow('syslog','warn',esc(sy.host?(sy.host+':'+(sy.port||514)):''),'Error · '+esc(sy.error)); }
+  else if(!sy.configured) setRow('syslog','','<span class="ph">Not configured</span>','Disabled');
   else if(sy.resolved){
     setRow('syslog',sy.reachable?'ok':'warn',esc(sy.host+':'+(sy.port||514)),sy.reachable?'Sending · UDP':'Not answering ping');
   }
@@ -768,6 +760,14 @@ function toggleCharge(){
       var j=res.json;
       if(showDegradedReply(j,'charge')) return;
       if(j && j.response && typeof j.response.result === 'boolean'){
+        if(j.response.result && j.response.noop){
+          var noop=j.response.noop;
+          toast(noop==='complete'?'Charging is already complete':
+            noop==='is_charging'?'Vehicle is already charging':
+            noop==='not_charging'?'Vehicle is already not charging':'Requested state is already set',
+            'info','charge');
+          return;
+        }
         if(j.response.result){ toast(isCharging?'Charging stopped':'Charging started', 'ok', 'charge'); return; }
         var f=chargeFailMsg((j.response.reason)||'', isCharging);
         toast(f.msg, f.type, 'charge');

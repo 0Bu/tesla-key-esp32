@@ -56,7 +56,7 @@ docs for personal/private information and non-English content. Neither $project-
 $skill-audit being clean establishes it; run $pr-hygiene separately.
 
 $vehicle-command-audit only arms when the diff reaches vehicle-command/BLE paths:
-main/command_exec.cpp, main/vehicle_*, main/ble_client.*, main/logic/{command_registry,command_runner,ble_dispatcher,rx_framing,session_state,command_result,key_rotation,ble_chunk,ble_deferred_event,wake_poll,active_window,telemetry_poll}.hpp,
+main/command_exec.cpp, main/vehicle_*, main/ble_client.*, main/logic/{command_registry,command_runner,ble_dispatcher,rx_framing,session_state,command_result,command_fault,vcsec_response,key_rotation,ble_chunk,ble_deferred_event,ble_deferred_queue,wake_poll,active_window,telemetry_poll}.hpp,
 patches/tesla-ble/, main/idf_component.yml, test/test_tesla_ble_harness.cpp,
 scripts/test-tesla-ble-harness.sh, scripts/apply-tesla-ble-patches.{sh,py},
 scripts/tesla-ble-patch-state.json, scripts/check-dependency-contract.py,

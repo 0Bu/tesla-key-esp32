@@ -97,6 +97,8 @@ public:
     // VIN configured no connection is made.
     void connect(const std::string& address) override;
     void disconnect() override;
+    // vehicle_loop owns bounded retries when a zero-wait host callback cannot finish lifecycle work.
+    void service_pending();
     bool write(const std::vector<uint8_t>& data) override;
 
     // vehicle_loop calls this only after connection state is updated for the deferred
@@ -199,7 +201,7 @@ private:
     // Terminate the currently published GAP link after the caller has already invalidated
     // readiness under intent_mutex_. Deliberately preserves a newer connect intent so the
     // delayed DISCONNECT event can restart that request.
-    void terminate_published_link_();
+    void terminate_published_link_(uint32_t expected_generation);
     void note_scan_(const ble_gap_disc_desc& d, const ble_hs_adv_fields& f);
     // Cache connectability by address — primary adverts carry no name (Tesla puts the name in
     // the SCAN_RSP, but connectability only on the primary advert), so the first observation is
@@ -291,6 +293,8 @@ private:
     // flag closes that interval immediately, so a following command cannot enqueue on a link
     // already being terminated. The host task clears it only after publishing a fresh link.
     std::atomic<bool> disconnecting_{false};
+    std::atomic<uint32_t> terminate_pending_generation_{tk::ble::kNoReadyGeneration};
+    std::atomic<bool> scan_pending_{false};
     // Connect-failure tracking for the target car (see connect_fail_recent()). Stamped on
     // every connect attempt; the count climbs on each GAP connect error and resets on a
     // successful link. Written on the NimBLE host task, read by the status reader — atomic

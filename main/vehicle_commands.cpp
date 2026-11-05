@@ -213,6 +213,7 @@ VehicleController::CommandOutcome VehicleController::await_completion_(
             tk::completion_ok_note(completion_timeout_);
             out.completed = completion->completed;
             out.success   = completion->success;
+            out.no_op     = completion->no_op;
             out.failure   = completion->failure;
             out.error     = completion->error.data();
             if (!out.error.empty()) ESP_LOGW(TAG, "command failed: %s", out.error.c_str());
@@ -250,16 +251,17 @@ VehicleController::CommandOutcome VehicleController::await_completion_(
 VehicleController::ResultCb VehicleController::make_result_cb_(
         const std::shared_ptr<CommandCompletion>& completion,
         uint32_t generation, bool auth_fail_is_health_probe, bool response_expected) {
-    return [this, completion, generation, auth_fail_is_health_probe, response_expected](tk::OperationResult result) {
+    return [this, completion, generation, auth_fail_is_health_probe, response_expected](
+            bool success, const std::string& msg, tk::CommandFailureInfo info) {
       // A timeout flush synchronously invokes queued callbacks. Generation is deliberately
       // checked before any state mutation, so such callbacks cannot complete a later request.
       if (command_generation_.load() != generation) return;
       try {
         completion->completed = true;
-        completion->success = result.compatible_success();
-        completion->failure = result.error()
-            ? tk::CommandFailureInfo{result.error()->severity(), result.error()->outcome()}
-            : tk::CommandFailureInfo{};
+        completion->success = success;
+        completion->no_op = success ? info.no_op : tk::CommandNoOp::None;
+        completion->failure = success ? tk::CommandFailureInfo{}
+            : tk::CommandFailureInfo{info.severity, info.outcome};
         if (completion->success && response_expected) {
             // A successful response breaks a consecutive-error streak. A TX-only completion
             // proves only local submission, so it cannot stamp reachability or reset that streak.
@@ -272,8 +274,9 @@ VehicleController::ResultCb VehicleController::make_result_cb_(
             // while the car merely sleeps nearby. NO_WAKE polls don't update note_contact_.
             note_reachable_();
         }
-        if (result.is_failure() && result.error()) {
-            const auto& msg = result.error()->message();
+        if (!success) {
+            // The runner owns msg until this synchronous callback returns. Copy only the
+            // bounded visible result before signalling; no intermediate error allocation.
             const char* visible = tk::execution_uncertain(completion->failure)
                 ? tk::uncertain_command_reason() : msg.c_str();
             const size_t error_size = std::min(std::strlen(visible), completion->error.size() - 1);
@@ -324,6 +327,7 @@ VehicleController::ResultCb VehicleController::make_result_cb_(
       } catch (...) {
           completion->completed = true;
           completion->success = false;
+          completion->no_op = tk::CommandNoOp::None;
           completion->callback_fault = true;
           completion->failure = tk::uncertain_command_failure();
           const char* reason = tk::uncertain_command_reason();
@@ -418,16 +422,13 @@ VehicleController::CommandOutcome VehicleController::send_vcsec_locked_(
         const uint32_t now_ms = static_cast<uint32_t>(pdTICKS_TO_MS(xTaskGetTickCount()));
         const uint32_t timeout_ms = remaining_ms_(deadline);
 
+        if (timeout_ms == 0) {
+            out.error = "command deadline exhausted";
+            return out;
+        }
+
         auto cb = make_result_cb_(completion, generation, auth_fail_is_health_probe, !completes_on_transmit);
-        auto on_done = [cb](bool success, const std::string& err, tk::CommandFailureInfo info) {
-            if (success) {
-                cb(tk::OperationResult::success());
-            } else {
-                cb(tk::OperationResult::failure(
-                    std::make_unique<tk::CommandError>(
-                        err, info.severity, info.outcome)));
-            }
-        };
+        auto on_done = std::move(cb);
         cmd_id = command_runner_.enqueue(
             name, tk::BleDomain::VehicleSecurity, wp, timeout_ms, now_ms, {}, std::move(on_done),
             completes_on_transmit, max_retries, kind);
@@ -464,7 +465,9 @@ VehicleController::CommandOutcome VehicleController::send_vcsec_locked_(
 }
 
 bool VehicleController::send_infotainment_(const std::string& name, Builder builder,
-                                            int timeout_ms, WakePolicy wp, tk::CommandOutcomePolicy policy) {
+                                            int timeout_ms, WakePolicy wp, tk::CommandOutcomePolicy policy,
+                                            tk::CommandNoOp* no_op) {
+    if (no_op) *no_op = tk::CommandNoOp::None;
     CommandOutcome out;
     if (timeout_ms <= 0) {
         out.error = "command deadline exhausted";
@@ -481,6 +484,7 @@ bool VehicleController::send_infotainment_(const std::string& name, Builder buil
     tk::InFlightGuard inflight(cmd_in_flight_);
     last_cmd_ticks_.store(xTaskGetTickCount());
     out = send_infotainment_locked_(name, std::move(builder), deadline, wp, tk::CommandEffect::Mutating, policy);
+    if (no_op && out.success) *no_op = out.no_op;
     publish_command_outcome_(out);
     return out.success;
 }
@@ -520,16 +524,13 @@ VehicleController::CommandOutcome VehicleController::send_infotainment_locked_(
         const uint32_t now_ms = static_cast<uint32_t>(pdTICKS_TO_MS(xTaskGetTickCount()));
         const uint32_t timeout_ms = remaining_ms_(deadline);
 
+        if (timeout_ms == 0) {
+            out.error = "command deadline exhausted";
+            return out;
+        }
+
         auto cb = make_result_cb_(completion, generation);
-        auto on_done = [cb](bool success, const std::string& err, tk::CommandFailureInfo info) {
-            if (success) {
-                cb(tk::OperationResult::success());
-            } else {
-                cb(tk::OperationResult::failure(
-                    std::make_unique<tk::CommandError>(
-                        err, info.severity, info.outcome)));
-            }
-        };
+        auto on_done = std::move(cb);
         cmd_id = command_runner_.enqueue(
             name, tk::BleDomain::Infotainment, wp, timeout_ms, now_ms, {}, std::move(on_done));
         completion->command_id = cmd_id;
@@ -593,7 +594,7 @@ bool VehicleController::wake_up(int timeout_ms) {
     // deadline, without another wake frame. Local TX completion alone does not prove Awake.
     CommandOutcome sent;
     if (remaining_ms_(deadline) > 0) {
-        sent = send_vcsec_outcome_("Wake", [](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
+        sent = send_vcsec_outcome_("Wake", +[](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
             return c->build_vcsec_action_message(VCSEC_RKEAction_E_RKE_ACTION_WAKE_VEHICLE, b, l);
         }, WakePolicy::NoWakeFail, capped_deadline_(deadline, 9000), tk::ConnectOrigin::Foreground, false,
            tk::CompletionTimeoutPolicy::ForegroundWarn, true /* completes_on_transmit */,
@@ -635,20 +636,20 @@ bool VehicleController::wake_up(int timeout_ms) {
     return false;
 }
 
-bool VehicleController::charge_start(int timeout_ms) {
-    return send_infotainment_("Start Charging", [](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
+bool VehicleController::charge_start(int timeout_ms, tk::CommandNoOp* no_op) {
+    return send_infotainment_("Start Charging", +[](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
         bool enable = true;
         return c->build_car_server_vehicle_action_message(
             b, l, CarServer_VehicleAction_chargingStartStopAction_tag, &enable);
-    }, timeout_ms, WakePolicy::WakeIfNeeded, tk::CommandOutcomePolicy::ChargeStart);
+    }, timeout_ms, WakePolicy::WakeIfNeeded, tk::CommandOutcomePolicy::ChargeStart, no_op);
 }
 
-bool VehicleController::charge_stop(int timeout_ms) {
-    return send_infotainment_("Stop Charging", [](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
+bool VehicleController::charge_stop(int timeout_ms, tk::CommandNoOp* no_op) {
+    return send_infotainment_("Stop Charging", +[](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
         bool enable = false;
         return c->build_car_server_vehicle_action_message(
             b, l, CarServer_VehicleAction_chargingStartStopAction_tag, &enable);
-    }, timeout_ms, WakePolicy::WakeIfNeeded, tk::CommandOutcomePolicy::ChargeStop);
+    }, timeout_ms, WakePolicy::WakeIfNeeded, tk::CommandOutcomePolicy::ChargeStop, no_op);
 }
 
 bool VehicleController::set_charging_amps(int amps, int timeout_ms) {
@@ -704,7 +705,7 @@ bool VehicleController::set_charging_amps(int amps, int timeout_ms) {
         const ChargingAmpsFeedback feedback_before = charging_amps_feedback_snapshot_();
         poll_outcome = send_infotainment_locked_(
             "Verify Charging Amps",
-            [](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
+            +[](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
                 return c->build_car_server_get_vehicle_data_message(
                     b, l, CarServer_GetVehicleData_getChargeState_tag);
             },
@@ -787,7 +788,7 @@ bool VehicleController::set_charge_limit(int percent, int timeout_ms) {
 }
 
 bool VehicleController::charge_port_open(int timeout_ms) {
-    return send_vcsec_("Open Charge Port", [](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
+    return send_vcsec_("Open Charge Port", +[](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
         VCSEC_ClosureMoveRequest req = VCSEC_ClosureMoveRequest_init_zero;
         req.chargePort = VCSEC_ClosureMoveType_E_CLOSURE_MOVE_TYPE_OPEN;
         return c->build_vcsec_closure_message(&req, b, l);
@@ -795,7 +796,7 @@ bool VehicleController::charge_port_open(int timeout_ms) {
 }
 
 bool VehicleController::charge_port_close(int timeout_ms) {
-    return send_vcsec_("Close Charge Port", [](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
+    return send_vcsec_("Close Charge Port", +[](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
         VCSEC_ClosureMoveRequest req = VCSEC_ClosureMoveRequest_init_zero;
         req.chargePort = VCSEC_ClosureMoveType_E_CLOSURE_MOVE_TYPE_CLOSE;
         return c->build_vcsec_closure_message(&req, b, l);
@@ -803,26 +804,26 @@ bool VehicleController::charge_port_close(int timeout_ms) {
 }
 
 bool VehicleController::door_lock(int timeout_ms) {
-    return send_vcsec_("Lock", [](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
+    return send_vcsec_("Lock", +[](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
         return c->build_vcsec_action_message(VCSEC_RKEAction_E_RKE_ACTION_LOCK, b, l);
     }, WakePolicy::WakeIfNeeded, timeout_ms);
 }
 
 bool VehicleController::door_unlock(int timeout_ms) {
-    return send_vcsec_("Unlock", [](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
+    return send_vcsec_("Unlock", +[](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
         return c->build_vcsec_action_message(VCSEC_RKEAction_E_RKE_ACTION_UNLOCK, b, l);
     }, WakePolicy::WakeIfNeeded, timeout_ms);
 }
 
 bool VehicleController::flash_lights(int timeout_ms) {
-    return send_infotainment_("Flash Lights", [](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
+    return send_infotainment_("Flash Lights", +[](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
         return c->build_car_server_vehicle_action_message(
             b, l, CarServer_VehicleAction_vehicleControlFlashLightsAction_tag, nullptr);
     }, timeout_ms);
 }
 
 bool VehicleController::honk_horn(int timeout_ms) {
-    return send_infotainment_("Honk Horn", [](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
+    return send_infotainment_("Honk Horn", +[](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
         return c->build_car_server_vehicle_action_message(
             b, l, CarServer_VehicleAction_vehicleControlHonkHornAction_tag, nullptr);
     }, timeout_ms);
@@ -837,7 +838,7 @@ bool VehicleController::set_sentry_mode(bool enable, int timeout_ms) {
 }
 
 bool VehicleController::climate_start(int timeout_ms) {
-    return send_infotainment_("Climate On", [](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
+    return send_infotainment_("Climate On", +[](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
         bool enable = true;
         return c->build_car_server_vehicle_action_message(
             b, l, CarServer_VehicleAction_hvacAutoAction_tag, &enable);
@@ -845,7 +846,7 @@ bool VehicleController::climate_start(int timeout_ms) {
 }
 
 bool VehicleController::climate_stop(int timeout_ms) {
-    return send_infotainment_("Climate Off", [](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
+    return send_infotainment_("Climate Off", +[](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
         bool enable = false;
         return c->build_car_server_vehicle_action_message(
             b, l, CarServer_VehicleAction_hvacAutoAction_tag, &enable);

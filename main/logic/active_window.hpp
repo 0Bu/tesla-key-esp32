@@ -23,6 +23,11 @@
 
 namespace tk {
 
+// The shell snapshots last_cmd before sampling now; unsigned subtraction preserves real wrap.
+inline constexpr bool command_is_recent(uint32_t last_cmd, uint32_t now, uint32_t window) {
+    return last_cmd != 0 && (now - last_cmd) < window;
+}
+
 struct WindowInputs {
     bool     recent_cmd;      // a command was sent within kActiveWindowMs
     bool     charging_state;  // cached charging_state is "Charging" or "Starting"

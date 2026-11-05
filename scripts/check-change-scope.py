@@ -17,6 +17,9 @@ BROWSER_FILES = {
     "test/web_installer.test.mjs", "test/web_ui_http.test.mjs",
 }
 
+# These Markdown files are executable checker inputs, so prose-only feedback cannot validate them.
+CHECKED_MARKDOWN = {".github/PULL_REQUEST_TEMPLATE.md", "docs/FEATURES.md", "docs/THIRD_PARTY.md"}
+
 
 def classify(paths: list[str]) -> str:
     groups = set()
@@ -24,6 +27,8 @@ def classify(paths: list[str]) -> str:
         if not path or path.startswith("/") or ".." in Path(path).parts:
             return "full"
         if path.endswith("AGENTS.md") or path.startswith((".agents/", ".codex/", "tools/agent-", ".githooks/")):
+            return "full"
+        if path in CHECKED_MARKDOWN:
             return "full"
         if path.endswith(".md"):
             groups.add("docs")

@@ -394,7 +394,9 @@ public:
         if (!cmd) return;
         if (already_set || is_nominal_already_set(err)) {
             cmd->is_already_set = true;
-            finish_command_(cmd, true, "command executed successfully", TerminalReason::AlreadySet);
+            finish_command_(cmd, true, "command executed successfully", TerminalReason::AlreadySet,
+                            {CommandError::Severity::Temporary, CommandError::Outcome::DefinitelyFailed,
+                             CommandNoOp::AlreadySet});
         } else if (success) {
             finish_command_(cmd, true, "", TerminalReason::Success);
         } else {
@@ -738,7 +740,9 @@ public:
             (!is_success && authenticated_rejection && has_counter && from_domain == BleDomain::Infotainment &&
              is_nominal_charge_outcome(cmd->outcome_policy, error_string))) {
             cmd->is_already_set = true;
-            finish_command_(cmd, true, "command executed successfully", TerminalReason::AlreadySet);
+            finish_command_(cmd, true, "command executed successfully", TerminalReason::AlreadySet,
+                            {CommandError::Severity::Temporary, CommandError::Outcome::DefinitelyFailed,
+                             admitted_command_noop(error_string)});
         } else if (is_success) {
             finish_command_(cmd, true, "", TerminalReason::Success);
         } else {

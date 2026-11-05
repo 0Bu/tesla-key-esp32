@@ -106,7 +106,7 @@ jobs:
           else
             release="$(./scripts/select-release-version.sh)"
           fi
-          latest="$(./scripts/select-release-version.sh --latest-published-stable)"
+          latest="$(./scripts/select-release-version.sh --latest-published-stable-optional)"
           echo "version=$release" >> "$GITHUB_OUTPUT"
           echo "latest=$latest" >> "$GITHUB_OUTPUT"
 

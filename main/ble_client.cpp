@@ -406,11 +406,32 @@ bool BleClient::cancel_scan_locked_() {
 void BleClient::ensure_scanning_(TickType_t timeout) {
     if (!intent_mutex_) return;
     tk::SemGuard intent(intent_mutex_, timeout);
-    if (!intent) return;
+    if (!intent) {
+        scan_pending_.store(true);
+        return;
+    }
     ensure_scanning_locked_();
 }
 
+void BleClient::service_pending() {
+    const uint32_t pending = terminate_pending_generation_.exchange(tk::ble::kNoReadyGeneration);
+    if (pending != tk::ble::kNoReadyGeneration) terminate_published_link_(pending);
+    if (scan_pending_.exchange(false) && want_connect_.load()) ensure_scanning_(0);
+    if (disconnecting_.load() && !has_gap_link_()) {
+        tk::SemGuard intent(intent_mutex_, 0);
+        const uint32_t generation = connection_generation_.load();
+        if (intent && !(generation & 1U) && conn_handle_.load() == BLE_HS_CONN_HANDLE_NONE &&
+            connection_generation_.load() == generation) {
+            // A retirement may have bypassed a task-held lifecycle lock. Repair its stale flag
+            // only with no live handle, then service any newer intent that arrived in that gap.
+            disconnecting_.store(false);
+            ensure_scanning_locked_();
+        }
+    }
+}
+
 void BleClient::disconnect_from_callback_() noexcept {
+    const uint32_t generation = connection_generation_.load();
     // Every field touched here is atomic. Close readiness and cancel the old intent directly:
     // taking intent_mutex_ would add no protection when a zero-wait attempt loses, while even a
     // successful attempt would make this host callback larger for the same fail-closed result.
@@ -420,7 +441,7 @@ void BleClient::disconnect_from_callback_() noexcept {
     disconnecting_.store(true);
     want_connect_.store(false);
     connecting_.store(false);
-    terminate_published_link_();
+    terminate_published_link_(generation);
 }
 
 void BleClient::ensure_scanning_locked_() {
@@ -677,12 +698,14 @@ void BleClient::connect(const std::string& address) {
 void BleClient::stop_connecting() {
     if (!intent_mutex_) return;
     bool drop_gap_link = false;
+    uint32_t generation = 0;
     {
         tk::SemGuard intent(intent_mutex_);
         if (!intent) return;
         want_connect_.store(false);
         drop_gap_link = has_gap_link_();
         if (drop_gap_link) {
+            generation = connection_generation_.load();
             // A command deadline owns the whole GAP+GATT attempt. Invalidate immediately so its
             // delayed callbacks cannot call on_connected(true) or publish a ready generation.
             disconnecting_.store(true);
@@ -692,28 +715,41 @@ void BleClient::stop_connecting() {
             cancel_scan_locked_();
         }
     }
-    if (drop_gap_link) terminate_published_link_();
+    if (drop_gap_link) terminate_published_link_(generation);
 }
 
 void BleClient::disconnect() {
+    uint32_t generation = 0;
     // ble_gap_terminate is asynchronous. Make the software link unavailable before issuing it,
     // otherwise a following request can reuse the doomed handle until GAP_DISCONNECT arrives.
     if (intent_mutex_) {
         tk::SemGuard intent(intent_mutex_);
         if (intent) {
+            generation = connection_generation_.load();
             disconnecting_.store(true);
             ready_generation_.store(tk::ble::kNoReadyGeneration);
             want_connect_.store(false);
         }
     } else {
+        generation = connection_generation_.load();
         disconnecting_.store(true);
         ready_generation_.store(tk::ble::kNoReadyGeneration);
         want_connect_.store(false);
     }
-    terminate_published_link_();
+    terminate_published_link_(generation);
 }
 
-void BleClient::terminate_published_link_() {
+void BleClient::terminate_published_link_(uint32_t expected_generation) {
+    expected_generation += expected_generation & 1U;
+    uint32_t pending = terminate_pending_generation_.load();
+    for (;;) {
+        const uint32_t current = connection_generation_.load();
+        if (current + (current & 1U) != expected_generation) return;
+        if (pending == expected_generation || terminate_pending_generation_.compare_exchange_weak(
+                pending, expected_generation)) break;
+    }
+    tk::SemGuard intent(intent_mutex_, 0);
+    if (!intent) return;
     // A connect/disconnect host callback changes the seqlock only for a very short publish
     // interval. If this request lands inside it, yield until a stable snapshot exists rather
     // than losing the termination request and letting that just-published link escape.
@@ -723,20 +759,29 @@ void BleClient::terminate_published_link_() {
             taskYIELD();
             continue;
         }
+        if (generation != expected_generation) {
+            // Retirement or a replacement link invalidates this request. Never terminate a
+            // newer command's connection on behalf of an old failed termination.
+            terminate_pending_generation_.compare_exchange_strong(expected_generation,
+                tk::ble::kNoReadyGeneration);
+            if (conn_handle_.load() == BLE_HS_CONN_HANDLE_NONE) disconnecting_.store(false);
+            return;
+        }
         const uint16_t conn_handle = conn_handle_.load();
         if (connection_generation_.load() != generation) continue;
-        // The connect publisher clears this flag before its final even generation. Reasserting
-        // it after the stable snapshot therefore cannot be overwritten by that same publish.
-        disconnecting_.store(true);
+        // The caller already closed readiness. A retry must never reassert disconnecting after
+        // a concurrent retirement cleared it, even if that event bypassed the zero-wait lock.
         if (connection_generation_.load() != generation) continue;
         if (conn_handle != BLE_HS_CONN_HANDLE_NONE) {
-            ble_gap_terminate(conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+            if (ble_gap_terminate(conn_handle, BLE_ERR_REM_USER_CONN_TERM) != 0) return;
         } else {
             disconnecting_.store(false);
         }
+        terminate_pending_generation_.compare_exchange_strong(expected_generation,
+            tk::ble::kNoReadyGeneration);
         return;
     }
-    ESP_LOGW(TAG, "could not obtain stable BLE handle while disconnecting");
+    // The vehicle loop retries; readiness remains closed until GAP retirement is observed.
 }
 
 bool BleClient::write(const std::vector<uint8_t>& data) {
@@ -928,10 +973,7 @@ int BleClient::on_gap_event(ble_gap_event* event) {
             ESP_LOGD(TAG, "connect error: %d", event->connect.status);
             ready_generation_.store(tk::ble::kNoReadyGeneration);
             connect_fail_count_.fetch_add(1);   // advert was heard but the link never came up
-            if (on_connected_) {
-                (void)on_connected_(connected_context_, false, BLE_HS_CONN_HANDLE_NONE,
-                                    connection_generation_.load());
-            }
+            // No link was published: do not invalidate sessions restored from NVS.
             // Keep the intent so an in-flight command retries within its timeout
             // window; ensure_connected_() clears it via stop_connecting() on timeout.
             const tk::ble::ConnectLifecycle retry =
@@ -941,6 +983,7 @@ int BleClient::on_gap_event(ble_gap_event* event) {
             break;
         }
         bool canceled = false;
+        uint32_t canceled_generation = 0;
         int svc_rc = 0;
         {
             // Linearize GAP publication with stop_connecting()/disconnect(). If cancellation won,
@@ -978,6 +1021,7 @@ int BleClient::on_gap_event(ble_gap_event* event) {
                 disconnecting_.store(true);
                 ready_generation_.store(tk::ble::kNoReadyGeneration);
                 canceled = true;
+                canceled_generation = generation;
             } else {
                 // Queue service discovery while cancellation is excluded. Once queued, a later
                 // stop marks disconnecting before any callback can pass its snapshot gate.
@@ -991,7 +1035,7 @@ int BleClient::on_gap_event(ble_gap_event* event) {
         if (canceled) {
             ESP_LOGD(TAG, "late GAP connection after canceled intent — dropping handle=%d",
                      event->connect.conn_handle);
-            terminate_published_link_();
+            terminate_published_link_(canceled_generation);
         } else if (svc_rc != 0) {
             ESP_LOGD(TAG, "svc discovery failed: %d", svc_rc);
             disconnect_from_callback_();
@@ -1043,6 +1087,7 @@ int BleClient::on_gap_event(ble_gap_event* event) {
     }
 
     case BLE_GAP_EVENT_NOTIFY_RX: {
+        const uint32_t generation = connection_generation_.load();
         if (event->notify_rx.attr_handle != notify_val_handle_) break;
         struct os_mbuf* om = event->notify_rx.om;
         if (!om) break;
@@ -1053,10 +1098,9 @@ int BleClient::on_gap_event(ble_gap_event* event) {
             ready_generation_.store(tk::ble::kNoReadyGeneration);
             want_connect_.store(false);
             disconnecting_.store(true);
-            terminate_published_link_();
+            terminate_published_link_(generation);
             break;
         }
-        const uint32_t generation = connection_generation_.load();
         if (!connection_snapshot_matches_(event->notify_rx.conn_handle, generation)) break;
         int rc = os_mbuf_copydata(om, 0, pkt_len, buf.data());
         if (rc == 0) {
@@ -1071,7 +1115,7 @@ int BleClient::on_gap_event(ble_gap_event* event) {
                 ready_generation_.store(tk::ble::kNoReadyGeneration);
                 want_connect_.store(false);
                 disconnecting_.store(true);
-                terminate_published_link_();
+                terminate_published_link_(generation);
             }
         }
         break;

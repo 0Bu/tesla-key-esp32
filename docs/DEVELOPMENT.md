@@ -8,7 +8,8 @@ inspect status, `origin/main`, the merge-base and intervening changes; preserve 
 
 Use `scripts/idf-docker.sh` with the ESP-IDF tag and immutable digest in
 [`esp-idf-toolchain.txt`](../esp-idf-toolchain.txt). The wrapper limits each container to 1.5 CPU
-and 1800 MiB. A remote runner without Docker can run host checks but cannot establish IDF evidence.
+and 1800 MiB and uses Docker's init reaper so killed subprocess descendants do not remain zombies.
+A remote runner without Docker can run host checks but cannot establish IDF evidence.
 
 ```bash
 scripts/idf-docker.sh idf.py -B build set-target esp32s3 build
@@ -190,8 +191,9 @@ checks all four size and stack baselines incrementally; `--target` narrows inves
 `--clean` removes its cache. Narrow checks do not replace the four-target handoff.
 
 The IDF wrapper applies the same CPU/memory ceiling to ordinary builds, daemon creation and
-Fast-Build volume setup. Volume setup uses the pinned IDF image and stops on failure. Its offline
-self-test executes the shipped wrapper with a passive Docker CLI, including setup failures; it
+Fast-Build volume setup. Volume setup uses the pinned IDF image and stops on failure.
+Daemon reuse additionally requires the init reaper. The offline self-test executes the shipped
+wrapper with a passive Docker CLI, including setup failures; it
 neither accesses a Docker daemon nor establishes actual container resource enforcement.
 
 CI computes cumulative firmware relevance once in `prepare`, conservatively building when the
@@ -200,9 +202,12 @@ publication revalidate current source and authority at their own boundaries. The
 checks the optional LED variant once. Independent main rebuilds use `--skip-led-variant` and
 reproduce all four published images without recompiling the unshipped variant.
 
-PR feedback is selected by `scripts/check-change-scope.py`: Markdown-only changes use repository
+PR feedback is selected by `scripts/check-change-scope.py`: ordinary Markdown-only changes use repository
 lint without firmware compilation; browser changes use strict browser checks; firmware source uses
-runtime, protocol and sanitizer checks. Shared native/browser parity runs in both profiles. Unknown,
+runtime, protocol and sanitizer checks. The PR template, feature catalog and third-party notices
+are executable checker inputs and select full coverage. Protocol vectors and shared native/browser
+parity run in both profiles. The strict runtime gate includes the retained MQTT JSON/registry owner;
+Linux sanitizers execute that same owner with instrumentation. Unknown,
 combined runtime/browser code, test, policy, build and dependency changes use full coverage. `repo-lint.sh --quick` keeps
 actual validators while omitting their unrelated mutation self-tests. Local handoff and main/manual
 publication remain full. Main still reconciles shipped documentation through the existing signed
@@ -401,6 +406,35 @@ must exist before key provisioning; source/version authority is refreshed after 
 changed pins, stale state and timeouts. The signer still uses `scripts/idf-docker.sh` with its
 existing resource limits and all independent-byte, signature, size and layout checks. Stable
 creation and immutable reuse retain their existing paths. Prefetching is not signing authority.
+
+### Recover a published stable site
+
+A Release that became immutable before a failed deploy can be recovered after main advances.
+Use a clean checkout of current main, Python 3.11+, `gh`, `rsync`, authenticated GitHub reads and
+an explicitly authorized stable Pages recovery. Publication additionally requires `GITHUB_TOKEN`
+with the repository/Pages write permissions. Do not rerun historical workflow code or use `--exact`
+to recreate the existing tag.
+
+First verify the original stable build's numeric run ID without writing Pages:
+
+```bash
+python3 scripts/recover-release-pages.py --run-id <original-run-id>
+```
+
+After the recovery is authorized, add `--publish` to the same invocation. The helper downloads
+the exact unexpired signed artifact and checks its API-authenticated ZIP digest before extraction.
+It preserves the original HTML/JavaScript, firmware and changelog; it does not rebuild current
+documentation under an old source SHA. It requires the latest immutable Release, exact tag/source,
+source ancestry and successful original host/rebuild/signature gates. A later publish-job failure
+is recoverable only when all critical pre-publication steps succeeded; cancelled runs are refused.
+Explicitly attested key-free immutable reuse is also accepted. Every branch retry repeats these
+checks, then readiness and full public-byte acceptance follow. Expired artifacts, foreign authority,
+changed latest/main/tag or any byte mismatch stop the operation. Stable creation and Dev never use
+this exception.
+
+Unprivileged `prepare` accepts an empty latest-stable base only for no eligible immutable latest
+Release; existing version fallbacks then apply. API reads retry at most three times; malformed or
+denied responses remain errors. Signed preview version selection still requires an eligible base.
 
 ### Served PR preview acceptance
 

@@ -178,10 +178,11 @@ static esp_err_t handle_tools_call_(GuardedReq rq, const tk::mcp_json::RpcId& id
             // absent optional → keep the zero default
         } else if (a.type == tk::CmdArgType::Int) {
             double number{};
-            if (!tk::json_command_number(j, number) ||
-                !tk::mcp_integer_value(number, a.lo, a.hi, ival[i])) {
+            if (!tk::json_command_number(j, number) || !tk::mcp_integer_syntax(number)) {
                 problem = cJSON_IsNumber(j) || (cJSON_IsString(j) && j->valuestring)
                               ? "integer required" : "invalid argument";
+            } else if (!tk::mcp_integer_value(number, a.lo, a.hi, ival[i])) {
+                problem = "argument out of range";
             }
         } else {  // Bool
             if      (cJSON_IsBool(j))   bval[i] = cJSON_IsTrue(j);
@@ -210,7 +211,8 @@ static esp_err_t handle_tools_call_(GuardedReq rq, const tk::mcp_json::RpcId& id
     rq.reply()->id = id; // validated bounded snapshot, independent of the released request tree
     rq.reply()->state.shape = tk::ReplyShape::Rpc;
     rq.reply()->state.attempting(tk::RequestEffect::Command);
-    bool ok = execute_vehicle_command(*g_vehicle, info->kind, ival, bval);
+    tk::CommandNoOp no_op = tk::CommandNoOp::None;
+    bool ok = execute_vehicle_command(*g_vehicle, info->kind, ival, bval, &no_op);
     if (ok) rq.reply()->state.succeeded();
 
     // Command outcome text is shared with the REST /command path (logic/command_result.hpp)
@@ -218,9 +220,11 @@ static esp_err_t handle_tools_call_(GuardedReq rq, const tk::mcp_json::RpcId& id
     // isError results, not JSON-RPC errors (the protocol reserves those for malformed calls).
     std::string err = g_vehicle->last_command_error();
     const bool effective_ok = ok || tk::is_nominal_already_set(err);
-    const char* text = tk::command_result_text(effective_ok, err);
+    const char* text = ok && no_op != tk::CommandNoOp::None ? tk::command_noop_text(no_op) :
+        tk::command_result_text(effective_ok, err);
     return send_effect_json(rq, 200, tk::mcp_json::build_result_envelope(
-        id, tk::mcp_json::build_tool_result(text, !effective_ok)).release());
+        id, tk::mcp_json::build_tool_result(text, !effective_ok,
+            ok ? tk::command_noop_code(no_op) : nullptr)).release());
 }
 
 // ─── entry points (dispatched from http_server.cpp's handle_all) ──────────────

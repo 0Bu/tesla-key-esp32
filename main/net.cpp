@@ -50,6 +50,7 @@
 #include "logic/eth_board.hpp"
 #include "logic/net_link.hpp"
 #include "logic/wifi_rollback.hpp"
+#include "logic/connect_outcome.hpp"
 #include "ping_probe.hpp"
 #include "runtime_fault_log.hpp"
 #include <esp_timer.h>
@@ -118,6 +119,7 @@ unsigned     net_reconnect_count(){ return s_reconnects.load(); }
 // (known-good → retry forever). Also gates the reconnect counter so the first lease of a
 // boot is not counted.
 static std::atomic<bool> s_ever_up{false};
+static std::atomic<bool> s_wifi_ever_up{false};
 
 // Per-transport lease state. BOTH can be true at once: a board whose W5500 found no lease at
 // boot falls back to WiFi with the Ethernet driver still running, so a cable plugged in later
@@ -166,6 +168,7 @@ static void link_up(NetLink kind) {
     const bool was_up = (s_kind.load() != NetLink::None);
     advance_lease_generation(kind);
     if (kind == NetLink::Eth) s_eth_lease.store(true); else s_wifi_lease.store(true);
+    if (kind == NetLink::Wifi) s_wifi_ever_up.store(true);
     recompute_link();
     // Count a RE-establishment, not a transport switch: going from one live transport to the
     // other is not an outage anybody needs to see in the flap counter.
@@ -227,7 +230,13 @@ static void wifi_event_handler(void*, esp_event_base_t base, int32_t event_id, v
         // these credentials" and "the AP was not there". Stored, never acted on here — this runs
         // on the event task and the decision belongs to the boot window in net_start_wifi().
         if (data) s_last_disco_reason.store(((wifi_event_sta_disconnected_t*)data)->reason);
-        if (!s_ever_up.load() && !s_rollback_active.load() && s_retry_num >= MAX_RETRY) {
+        const auto retry = tk::wifi_retry_action(s_eth_lease.load(), s_wifi_ever_up.load(),
+                                                s_rollback_active.load(), s_retry_num, MAX_RETRY);
+        if (retry == tk::WifiRetryAction::PauseForEthernet) {
+            // The Ethernet disconnect callback rearms WiFi fallback if this station was started.
+            return;
+        }
+        if (retry == tk::WifiRetryAction::Exhausted) {
             // Never been online AND not in rollback grace AND the boot retry budget is spent →
             // credentials are almost certainly wrong. Stop so net_start_wifi() times out and main.cpp
             // falls back to the setup portal.
@@ -616,6 +625,7 @@ static bool eth_startup_fallback(EthStartupResources& r) {
 }
 
 [[noreturn]] static void eth_startup_fatal(EthStartupResources& r, const char* component) {
+    ESP_LOGE(TAG, "%s failed", component);
     if (!eth_cleanup_startup(r)) boot_fatal("Ethernet startup cleanup");
     boot_fatal(component);
 }
@@ -763,6 +773,7 @@ static void eth_event_handler(void*, esp_event_base_t base, int32_t event_id, vo
         ESP_LOGW(TAG, "Ethernet link down");
         s_eth_link.store(false);
         link_down(NetLink::Eth);
+        if (s_sta_started.load() && !s_wifi_lease.load()) esp_wifi_connect();
     } else if (base == IP_EVENT && event_id == IP_EVENT_ETH_GOT_IP) {
         ip_event_got_ip_t* ev = (ip_event_got_ip_t*)data;
         ESP_LOGI(TAG, "IP: " IPSTR " (eth)", IP2STR(&ev->ip_info.ip));
@@ -1075,7 +1086,7 @@ static GatewaySample gateway_reachable() {
 }
 
 // Force the ACTIVE transport to re-establish its link. WiFi drops the ghost association and
-// the event handler reconnects with the known-good credentials (s_ever_up is true by
+// the event handler reconnects with the known-good credentials (s_wifi_ever_up is true by
 // definition here, so we must not call esp_wifi_connect() ourselves — that would race the
 // handler into a double-connect).
 static void net_recover(tk::GatewayIdentity sampled) {
@@ -1128,6 +1139,8 @@ static void net_watchdog_task(void*) {
       tk::GatewayIdentity watched_identity{};
       tk::GatewayBaseline baselines[2]{};
       tk::IterationFaultLog faults{};
+      tk::PeriodicLogState gateway_notice{};
+      tk::WatchAction last_action = tk::WatchAction::Idle;
       for (;;) {
         tk::StackWatchScope f135_iteration_exit(tk::StackWatch::NetWatchdog);
         vTaskDelay(pdMS_TO_TICKS(kWdPeriodS * 1000));
@@ -1143,12 +1156,15 @@ static void net_watchdog_task(void*) {
             // failure. Drop the failure streak — it described a transport that may be gone.
             watch = tk::LinkWatch{};
             watched_identity = {};
+            tk::periodic_log_reset(gateway_notice);
+            last_action = tk::WatchAction::Idle;
             continue;
         }
         // A failure streak belongs to one transport generation; a switch starts a new streak.
         if (sample.identity != watched_identity) {
             watch = tk::LinkWatch{};
             watched_identity = sample.identity;
+            tk::periodic_log_reset(gateway_notice);
         }
         const bool gw = up && sample.reachable;
 
@@ -1160,16 +1176,21 @@ static void net_watchdog_task(void*) {
         const auto baseline_index = sample.identity.transport == NetLink::Eth ? 1 : 0;
         const bool gw_ever = baselines[baseline_index].observe(sample.identity, sample.replied);
 
-        switch (tk::watch_step(watch, up, gw, gw_ever)) {
+        const auto action = tk::watch_step(watch, up, gw, gw_ever);
+        if (action != last_action) tk::periodic_log_reset(gateway_notice);
+        last_action = action;
+        const bool report = tk::periodic_log_due(gateway_notice,
+            static_cast<uint64_t>(esp_timer_get_time()) / 1000ULL, tk::kAutoPairNoticeRepeatMs);
+        switch (action) {
             case tk::WatchAction::Idle:
                 break;
             case tk::WatchAction::Wait:
-                ESP_LOGW(TAG, "watchdog: no LAN connectivity (%d/%d, link=up)",
-                         watch.fails, tk::kWatchFailsToRecover);
+                if (report) ESP_LOGW(TAG, "watchdog: no LAN connectivity (%d/%d, link=up)",
+                                    watch.fails, tk::kWatchFailsToRecover);
                 break;
             case tk::WatchAction::NoBaseline:
-                ESP_LOGW(TAG, "watchdog: gateway has never answered ICMP — not forcing a "
-                              "re-establish");
+                if (report) ESP_LOGW(TAG, "watchdog: gateway has never answered ICMP — not forcing a "
+                                         "re-establish");
                 break;
             case tk::WatchAction::Recover:
                 net_recover(sample.identity);

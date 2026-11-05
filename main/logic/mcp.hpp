@@ -78,6 +78,10 @@ inline bool mcp_integer_value(double d, int lo, int hi, int& out) {
     return true;
 }
 
+inline bool mcp_integer_syntax(double d) {
+    return std::isfinite(d) && std::trunc(d) == d;
+}
+
 // The only numeric boolean spellings accepted by the MCP compatibility layer are exactly 0
 // and 1. Values such as -1, 2, NaN and Infinity are not booleans and must be rejected.
 inline bool mcp_bool_value(double d, bool& out) {

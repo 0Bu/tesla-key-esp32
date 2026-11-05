@@ -5,9 +5,8 @@
 # real "run it and see" loop a cloud session has (it cannot build firmware or USB-flash).
 #
 # Usage: scripts/run-mock-tests.sh [--require-all]
-# Requires: a C++17 host compiler (g++/clang++); cmake is used when present, with a
-# direct-compiler fallback otherwise in normal mode (see test/CMakeLists.txt, whose targets
-# and flags the fallback mirrors; --require-all strictly requires cmake). See test/README.md.
+# Requires CMake and C/C++ host compilers for the complete suite. Portable focused native checks
+# live in scripts/run-fast-tests.sh. See test/README.md.
 set -euo pipefail
 unset OTA_SIGNING_KEY OTA_SIGNING_KEY_FILE
 if ! python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 11))' >/dev/null 2>&1; then
@@ -45,7 +44,7 @@ gate_file() {
 
 need_tool() {
     command -v "$1" >/dev/null 2>&1 || {
-        echo "run-mock-tests: --require-all needs $1" >&2
+        echo "run-mock-tests: complete host suite requires $1" >&2
         exit 2
     }
 }
@@ -75,15 +74,15 @@ run_gate() {
 if [ "$REQUIRE_ALL" = 1 ]; then
     need_tool python3
     need_tool node
-    need_tool cmake
-    need_tool ruby
-    need_tool jq
     gate_file "$TIMEOUT_RUNNER"
     for required in \
         scripts/check-display-sim-parity.sh \
         scripts/run-local-checks.py \
         scripts/check-change-scope.py \
         test/test_change_scope.py \
+        test/test_ble_lifecycle.py \
+        test/test_release_pages_recovery.py \
+        scripts/recover-release-pages.py \
         test/test_local_checks.py \
         test/test_provision.py \
         test/test_capture_wake.py \
@@ -92,6 +91,7 @@ if [ "$REQUIRE_ALL" = 1 ]; then
         test/test_runtime_boundary_contract.py \
         test/test_hook_read_contract.py \
         test/test_evcc_vehicle.rb \
+        test/run-mqtt-json-publish-tests.sh \
         tools/agent-hooks/shell_read.py \
         test/generate_eth_startup_adapter.py \
         test/test_eth_startup_cleanup.cpp \
@@ -224,6 +224,11 @@ if [ "$REQUIRE_ALL" = 1 ]; then
     done
 fi
 
+need_tool cmake
+need_tool ruby
+need_tool jq
+need_tool rsync
+
 if command -v cmake >/dev/null 2>&1; then
     run_gate "configure host C++ tests" 120 cmake -S test -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Debug
     run_gate "build host C++ tests" 120 cmake --build "$BUILD_DIR" --parallel
@@ -232,7 +237,7 @@ if command -v cmake >/dev/null 2>&1; then
     run_gate "execute host C++ tests" 120 ctest --test-dir "$BUILD_DIR" --output-on-failure \
         --exclude-regex '^(runtime_boundary_contract|eth_startup_cleanup_controls|f137_task_host_contract)$'
 else
-    # No cmake on this host (e.g. a bare Raspberry Pi) — compile every host boundary directly.
+    # Passive wiring fixtures exercise this direct-compiler branch. The complete runner requires CMake.
     # Keep flags, sources and include paths in sync with test/CMakeLists.txt.
     CXX="${CXX:-}"
     if [ -z "$CXX" ]; then
@@ -321,12 +326,14 @@ if command -v python3 >/dev/null 2>&1; then
     run_gate "MQTT/WDT and network iteration bodies" 120 python3 test/test_f137_host.py --source . --controls --execute-controlled-host-only
     run_gate "coherent charge presentation snapshot" 120 python3 test/test_charge_presentation.py
     run_gate "contextual charging command outcomes" 120 python3 test/test_command_outcomes.py
+    run_gate "BLE lifecycle retirement and deferred intent" 120 python3 test/test_ble_lifecycle.py
     gate_group=browser
     run_gate "CSS bytes and actual inline generation" 120 python3 test/test_inline_assets.py
     gate_group=runtime
     run_gate "optional LED driver decisions and GPIO" 120 python3 test/test_led_driver_contract.py
     run_gate "cached identity recovery and actual restart owner" 120 python3 test/test_identity_recovery_contract.py
     run_gate "locked cJSON intake and OOM" 120 bash test/run-cjson-oom-tests.sh
+    run_gate "retained MQTT JSON and discovery registry" 120 bash test/run-mqtt-json-publish-tests.sh
     run_gate "local OTA source, review, image and one-upload binding" 120 python3 test/test_dev_ota_upload.py
     run_gate "maintenance actual backend source contract" 120 python3 scripts/check-config-repair-backend-contract.py
     run_gate "maintenance actual backend and console" 120 bash test/run-config-repair-backend.sh
@@ -337,6 +344,7 @@ if command -v python3 >/dev/null 2>&1; then
     run_gate "bounded hook read exceptions" 120 python3 test/test_hook_read_contract.py
     run_gate "release relevance and publication selectors" 120 scripts/release-relevance.sh --self-test
     run_gate "build and manifest contract tests" 120 scripts/test-build-contracts.sh --build-and-manifest
+    run_gate "immutable Release Pages recovery" 120 python3 test/test_release_pages_recovery.py
     run_gate "retained bootloader compatibility and USB consumers" 120 python3 test/test_bootloader_preflight.py
     run_gate "tesla-ble patch applicability" 120 scripts/apply-tesla-ble-patches.sh --self-test
     run_gate "tesla-ble incremental source admission" 120 python3 test/test_patch_incremental.py
@@ -364,7 +372,8 @@ run_gate "dependency query process lifetime" 120 python3 test/test_dependency_pr
     gate_group=runtime
     run_gate "deterministic parser fuzz smoke" 120 scripts/run-fuzz-smoke.sh
 else
-    echo "run-mock-tests: python3 not found — skipping display-sim parity check" >&2
+    echo "run-mock-tests: Python 3.11 or newer is required" >&2
+    exit 2
 fi
 
 # Browser checks: exercise the inline Web Serial installer and port-release flow, then confirm the
@@ -374,8 +383,9 @@ fi
 if command -v node >/dev/null 2>&1; then
     gate_group=browser
     run_gate "Node web UI contracts" 120 node --test \
-        test/serial_port_release.test.mjs test/web_installer.test.mjs test/web_ui_http.test.mjs \
-        test/tesla_protocol_vectors.test.mjs
+        test/serial_port_release.test.mjs test/web_installer.test.mjs test/web_ui_http.test.mjs
+    gate_group=shared
+    run_gate "Tesla protocol vectors" 120 node --test test/tesla_protocol_vectors.test.mjs
     gate_group=shared
     run_gate "BLE browser-row parity" 120 scripts/check-ble-row-parity.sh
     gate_group=browser

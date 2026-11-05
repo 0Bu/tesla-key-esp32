@@ -64,8 +64,8 @@ public:
     bool start_tasks();
 
     bool wake_up(int timeout_ms = 20000);
-    bool charge_start(int timeout_ms = 20000);
-    bool charge_stop(int timeout_ms = 20000);
+    bool charge_start(int timeout_ms = 20000, tk::CommandNoOp* no_op = nullptr);
+    bool charge_stop(int timeout_ms = 20000, tk::CommandNoOp* no_op = nullptr);
     bool set_charging_amps(int amps, int timeout_ms = 20000);
     bool set_charge_limit(int percent, int timeout_ms = 20000);
     bool charge_port_open(int timeout_ms = 20000);
@@ -389,9 +389,10 @@ public:
     static uint8_t boot_heap_restarts();
 
 private:
-    // Builder function type used by send_vcsec_ and send_infotainment_
+    // Capture-free builders use unary + to share the function-pointer adapter instead of
+    // emitting a separate std::function manager for every lambda. Capturing builders stay owned.
     using Builder = std::function<int(TeslaBLE::Client*, uint8_t*, size_t*)>;
-    using ResultCb = std::function<void(tk::OperationResult)>;
+    using ResultCb = std::function<void(bool, const std::string&, tk::CommandFailureInfo)>;
 
     // Sub-handlers for processing received BLE frames, decomposed to bound vehicle_loop stack frame.
     bool response_matches_current_(const UniversalMessage_RoutableMessage& msg);
@@ -409,6 +410,7 @@ private:
         SemaphoreHandle_t sem{xSemaphoreCreateBinary()};
         bool completed{false};
         bool success{false};
+        tk::CommandNoOp no_op{tk::CommandNoOp::None};
         tk::CommandFailureInfo failure{};
         uint32_t command_id{0};
         bool drop_link{false};
@@ -424,6 +426,7 @@ private:
     struct CommandOutcome {
         bool completed{false};
         bool success{false};
+        tk::CommandNoOp no_op{tk::CommandNoOp::None};
         tk::CommandFailureInfo failure{};
         std::string error;
     };
@@ -479,7 +482,8 @@ private:
                      bool completes_on_transmit, tk::CommandEffect effect, tk::VcsecReplyKind kind);
     bool send_infotainment_(const std::string& name, Builder builder, int timeout_ms,
                             WakePolicy wp = WakePolicy::WakeIfNeeded,
-                            tk::CommandOutcomePolicy policy = tk::CommandOutcomePolicy::AlreadySetOnly);
+                            tk::CommandOutcomePolicy policy = tk::CommandOutcomePolicy::AlreadySetOnly,
+                            tk::CommandNoOp* no_op = nullptr);
     // Same runner with command_mutex_ + cmd_in_flight_ already held. The absolute deadline
     // includes connection setup and all preceding work in the transaction. Used by
     // set_charging_amps to keep the action and its independent ChargeState readback
@@ -643,7 +647,7 @@ private:
     // logic/active_window.hpp). The background poll and get_charge_state() must both use it: if the
     // getter kept a window open that the poll had already closed, it would demand a fresh
     // ChargeState nothing refreshes any more and answer evcc with a permanent 503.
-    bool active_window_now_(uint32_t now_ticks, bool charging_state) const;
+    bool active_window_now_(bool charging_state) const;
 
     // Set when an unexpected error occurs during BLE rx framing or processing.
     // Exceptions are caught at our boundary and set this; loop_task then drops the BLE link once to
@@ -759,10 +763,11 @@ private:
     // True once the car's current report is still ASLEEP and that run has held uninterrupted for
     // at least debounce_s seconds (tk::vcsec_asleep_proven).
     bool vcsec_stably_asleep_(uint32_t debounce_s) const {
+        const auto state = static_cast<tk::SleepState>(vcsec_sleep_state_.load());
+        const uint32_t since = vcsec_asleep_since_ticks_.load();
+        const uint32_t now = xTaskGetTickCount();
         return tk::vcsec_asleep_proven(
-            static_cast<tk::SleepState>(vcsec_sleep_state_.load()),
-            vcsec_asleep_since_ticks_.load(), xTaskGetTickCount(), configTICK_RATE_HZ,
-            debounce_s);
+            state, since, now, configTICK_RATE_HZ, debounce_s);
     }
 
     // Cached results for non-blocking UI access

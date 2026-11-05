@@ -7,7 +7,7 @@
 class CompletionController {
 public:
 #include "completion-types.inc"
-    using ResultCb = std::function<void(tk::OperationResult)>;
+    using ResultCb = std::function<void(bool, const std::string&, tk::CommandFailureInfo)>;
     tk::CommandRunner command_runner_;
     std::atomic<uint32_t> command_generation_{1};
     std::atomic<int> auth_fail_streak_{0}, cmd_fail_streak_{0};
@@ -75,12 +75,12 @@ static void check_native_command_completion() {
         }
         if (scenario == 5) {
             // Exercise catch-all inside the actual bounded callback, with no error allocation.
-            c.throw_contact = true; cb(tk::OperationResult::success());
+            c.throw_contact = true; on_done(true, "", {});
         }
         if (scenario == 6) {
             // The old generation's late callback cannot mutate or signal the waiting object.
             c.command_generation_.store(2);
-            cb(tk::OperationResult::failure(std::make_unique<tk::CommandError>("late", Severity::Permanent, Outcome::DefinitelyFailed)));
+            on_done(false, "late", {Severity::Permanent, Outcome::DefinitelyFailed});
             expect(!completion->completed && completion->sem->gives == 0,
                    "stale generation cannot signal or replace completion", "late callback changed result");
         }
@@ -108,7 +108,7 @@ static void check_native_command_completion() {
         c.command_runner_.notify_tx_started(tk::TxAction::SendCommandPayload);
         if (signalled) c.command_runner_.complete_current_command(false,
             "long diagnostic that cannot fit any supported standard library short string");
-        // The real cancellation delegate allocates an error before its stale-generation check.
+        // Cancellation reuses the direct callback; stale generations do not allocate or signal.
         const auto queued = c.command_runner_.enqueue("queued", tk::BleDomain::Infotainment,
             tk::WakePolicy::NoWakeFail, 60000, native_ticks, {}, on_done);
         c.command_builders_[queued % tk::CommandRunner::kMaxQueueSize] = [] {};
@@ -135,8 +135,7 @@ static void check_native_command_completion() {
     {
         Controller c; auto completion = std::make_shared<Controller::CommandCompletion>();
         auto cb = c.make_result_cb_(completion, 1);
-        cb(tk::OperationResult::failure(std::make_unique<tk::CommandError>(
-            "connection lost", Severity::Temporary, Outcome::MayHaveSucceeded)));
+        cb(false, "connection lost", {Severity::Temporary, Outcome::MayHaveSucceeded});
         expect(std::strcmp(completion->error.data(), tk::uncertain_command_reason()) == 0 &&
                tk::execution_uncertain(completion->failure),
                "typed callback exposes uncertainty without parsing original diagnostic text",
@@ -147,11 +146,34 @@ static void check_native_command_completion() {
         for (unsigned i = 0; i < 4; ++i) {
             auto completion = std::make_shared<Controller::CommandCompletion>();
             auto cb = c.make_result_cb_(completion, 1);
-            cb(tk::OperationResult::failure(std::make_unique<tk::CommandError>(reason, Severity::Permanent, Outcome::DefinitelyFailed)));
+            cb(false, reason, {Severity::Permanent, Outcome::DefinitelyFailed});
             expect(completion->completed && !completion->success && !completion->drop_link &&
                    !tk::execution_uncertain(completion->failure) && c.cmd_fail_streak_.load() == 0 && !c.ble_fault_.load(),
                    "explicit vehicle faults never count as transport loss", "valid negative response dropped healthy link");
         }
+    }
+    for (auto no_op : {tk::CommandNoOp::AlreadySet, tk::CommandNoOp::Complete,
+                       tk::CommandNoOp::IsCharging, tk::CommandNoOp::NotCharging}) {
+        Controller c; auto completion = std::make_shared<Controller::CommandCompletion>();
+        auto callback = c.make_result_cb_(completion, 1);
+        callback(true, "", {Severity::Permanent, Outcome::MayHaveSucceeded, no_op});
+        expect(completion->completed && completion->success && completion->no_op == no_op &&
+               !tk::execution_uncertain(completion->failure) && completion->sem->gives == 1,
+               "direct native success keeps request-owned no-op and clears failure metadata",
+               "native callback lost no-op metadata or retained a failure");
+    }
+    {
+        Controller c; auto completion = std::make_shared<Controller::CommandCompletion>();
+        auto callback = c.make_result_cb_(completion, 1);
+        const std::string reason = "vehicle fault: vehicle permission denied with a long bounded diagnostic";
+        fail_cpp_allocations = true;
+        callback(false, reason, {Severity::Permanent, Outcome::DefinitelyFailed});
+        fail_cpp_allocations = false;
+        expect(completion->completed && !completion->success && !completion->callback_fault &&
+               completion->no_op == tk::CommandNoOp::None && completion->sem->gives == 1 &&
+               std::strcmp(completion->error.data(), reason.c_str()) == 0,
+               "direct failure completion copies before one signal without any allocation",
+               "allocation-armed completion allocated, lost metadata or changed the error");
     }
 }
 
@@ -228,7 +250,7 @@ static void check_native_wake_confirmation() {
         c.throw_contact = !response_expected;
         auto completion = std::make_shared<CompletionController::CommandCompletion>();
         auto callback = c.make_result_cb_(completion, 1, false, response_expected);
-        callback(tk::OperationResult::success());
+        callback(true, "", {});
         expect(completion->completed && completion->success && !completion->callback_fault &&
                c.contacts == unsigned(response_expected) &&
                c.auth_fail_streak_.load() == (response_expected ? 0 : 2) &&
@@ -310,7 +332,8 @@ static void check_native_wake_confirmation() {
             f.controller.command_builders_[id % tk::CommandRunner::kMaxQueueSize] = std::move(builder);
             f.controller.ble.write_ok = write_ok; f.controller.ble.submit_then_fail = !write_ok;
             f.controller.drive_command_runner_();
-            return WakeController::CommandOutcome{f.completions != 0, f.success, f.last_failure, f.last_reason};
+            return WakeController::CommandOutcome{f.completions != 0, f.success, tk::CommandNoOp::None,
+                                                  f.last_failure, f.last_reason};
         };
         const auto started = native_ticks;
         native_wake_delay_hook = [&] {

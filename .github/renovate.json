@@ -3,7 +3,7 @@
   "customManagers": [
     {
       "customType": "regex",
-      "description": "Bump the yoziru/tesla-ble git dependency pinned in idf_component.yml. Upgrades across the 5.x line require manual review and patch rebase per #304; closed PR #303 was superseded by #305 and remote branch deleted so future tags (> v5.2.0) are proposed as fresh PRs.",
+      "description": "Propose updates to the pinned yoziru/tesla-ble git dependency. Each update requires an explicitly authorized migration, patch rebase and protocol-vector review; dependency updates never auto-merge.",
       "managerFilePatterns": ["/^main/idf_component\\.yml$/"],
       "matchStrings": [
         "git:\\s*\"https://github\\.com/yoziru/tesla-ble\\.git\"\\s+version:\\s*\"(?<currentValue>v[0-9]+\\.[0-9]+\\.[0-9]+)\""
@@ -34,7 +34,7 @@
   ],
   "packageRules": [
     {
-      "description": "Never auto-merge a tracked firmware dependency, even when CI is green. A green `build` job only proves the firmware compiles — it does NOT prove the Tesla BLE crypto/pairing/signed-command path still works (yoziru/tesla-ble), nor that WiFi/BLE coexistence and runtime behaviour survive an ESP-IDF bump, nor that the browser installer still flashes (esptool-js, which the build doesn't exercise on hardware). These are only validated by a human running the live e2e against a real paired car. Renovate still opens, rebases and rebuilds the PR; a human reviews, runs e2e, and merges manually. (GitHub Action digest bumps are unaffected and keep auto-merging.)",
+      "description": "Tracked firmware and installer dependencies require manual review, relevant protocol/runtime tests and separately authorized physical acceptance. CI success alone is not hardware evidence. Among GitHub Actions, only renovatebot/github-action is managed and eligible for the configured automerge; build and publication action pins remain manually reviewed trust boundaries.",
       "matchDepNames": [
         "yoziru/tesla-ble",
         "espressif/idf",

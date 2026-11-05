@@ -148,13 +148,16 @@ bool is_command_route(const char* uri) {
 
 [[gnu::noinline]] static esp_err_t send_command_result(GuardedReq rq, bool ok,
                                                        const char* cmd, const char* vin,
-                                                       const std::string& err) {
+                                                       const std::string& err, tk::CommandNoOp no_op) {
     const bool effective_ok = ok || tk::is_nominal_already_set(err);
     // A false command outcome is not an HTTP success: evcc otherwise accepts the request
     // as delivered and the old current can remain active. Keep the Tesla-compatible JSON
     // body, but make the transport status retryable/observable.
     return send_effect_json(rq, effective_ok ? 200 : 502,
-                     make_response(effective_ok, cmd, vin, tk::command_result_text(effective_ok, err)));
+                     make_response(effective_ok, cmd, vin,
+                         ok && no_op != tk::CommandNoOp::None ? tk::command_noop_text(no_op) :
+                         tk::command_result_text(effective_ok, err),
+                         ok ? tk::command_noop_code(no_op) : nullptr));
 }
 
 esp_err_t handle_command(GuardedReq rq) {
@@ -265,7 +268,8 @@ esp_err_t handle_command(GuardedReq rq) {
     // the BLE round-trip (up to ~20 s) and before any response/error-string allocation.
     json.reset();
     rq.reply()->state.attempting(tk::RequestEffect::Command);
-    bool ok = execute_vehicle_command(*g_vehicle, info->kind, ival, bval);
+    tk::CommandNoOp no_op = tk::CommandNoOp::None;
+    bool ok = execute_vehicle_command(*g_vehicle, info->kind, ival, bval, &no_op);
     if (ok) rq.reply()->state.succeeded(); // before fallible/global error-text sampling
     // On failure, distinguish "the car rejected it" (we got an error reply, e.g.
     // "complete") from "the car was unreachable" (no reply / timed out). The former
@@ -273,7 +277,7 @@ esp_err_t handle_command(GuardedReq rq) {
     // selection is shared with the MCP tools/call result (logic/mcp.hpp) so the two
     // paths can never report the same outcome differently.
     std::string err = g_vehicle->last_command_error();
-    return send_command_result(rq, ok, cmd, vin, err);
+    return send_command_result(rq, ok, cmd, vin, err, no_op);
 }
 
 // ─── GET /api/1/vehicles/{VIN}/vehicle_data ───────────────────────────────────

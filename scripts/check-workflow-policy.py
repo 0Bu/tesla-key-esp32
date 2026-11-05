@@ -214,7 +214,7 @@ EXPECTED_PRIVILEGED_JOB_SHA256 = {
     ('build.yml', 'publish'): "68ff37c2955715396fd0df6e79018025b1132a212c796a6f77652d482b07db31",
     ('build.yml', 'deploy'): "c0c682f2ad561332c6184726c704753d3fa15962b964d0a9b22cda62befe6952",
     ('signed-pr-preview.yml', 'sign-preview'): "2222beed0b8590b49bf7299032e20ce763342a31846e7824b93bef07b191d761",
-    ('signed-pr-preview.yml', 'validate'): "369bfeafebd5ee6667301a590741051df63b0e9d84f8ad0ddc68c9c07c336309",
+    ('signed-pr-preview.yml', 'validate'): "adf2cdb72c38f71415d7e1b71b43f4af0806d706589a09805eab13d0da021cb6",
     ('pr-preview-cleanup.yml', 'cleanup-event'): "c36a5602067c24346a24d2c431e4bec2860de35cc0101ee0d11113b30367890b",
     ('pr-preview-cleanup.yml', 'discover-stale'): "8669d8d2c7f0d295d9291e4b54dd19126ed549e9b82862d4747972bf64ab2b7e",
     ('pr-preview-cleanup.yml', 'reconcile-stale'): "9869eb7b4c3405527941a3c6120e1792701bffc571564ed4fc2092d54064d91d",
@@ -519,6 +519,13 @@ def validate(root: Path) -> None:
             steps = structured_job.get("steps")
             require(isinstance(steps, list) and all(isinstance(step, dict) for step in steps),
                     f"{name}:{job_name}: steps must be mappings")
+            for step in steps:
+                # gh rejects --slurp with its own output formatter. External jq is supported.
+                for line in str(step.get("run", "")).replace("\\\n", " ").splitlines():
+                    if re.search(r"\bgh\s+api\b", line) and "--slurp" in line:
+                        gh_part = line.split("|", 1)[0]
+                        require(not re.search(r"--(?:jq|template)(?:[=\s]|$)|(?:^|\s)-[qt]", gh_part),
+                                f"{name}:{job_name}: gh api --slurp cannot use --jq or --template")
             if key in {("build.yml", "logic-test"), ("build.yml", "logic-harness")}:
                 require(not ({"if", "continue-on-error"} & set(structured_job)),
                         f"{name}:{job_name}: required host gate must not be conditional or tolerate job failure")
@@ -1574,6 +1581,10 @@ def self_test(root: Path) -> None:
     )
     current_renovate_action = renovate_actions[0]
     mutations = [
+        ("gh-slurp-jq", "signed-pr-preview.yml", "gh api --paginate --slurp", "gh api --jq . --paginate --slurp", "--slurp cannot use --jq"),
+        ("gh-slurp-template", "signed-pr-preview.yml", "gh api --paginate --slurp", "gh api --template '{{.}}' --paginate --slurp", "--slurp cannot use --jq"),
+        ("gh-slurp-short-jq", "signed-pr-preview.yml", "gh api --paginate --slurp", "gh api -q . --paginate --slurp", "--slurp cannot use --jq"),
+        ("gh-slurp-short-template", "signed-pr-preview.yml", "gh api --paginate --slurp", "gh api -t '{{.}}' --paginate --slurp", "--slurp cannot use --jq"),
         ("preview-full-host-need", "signed-pr-preview.yml", "needs: [validate, trusted-rebuild, trusted-host]", "needs: [validate, trusted-rebuild]", "validation and trusted rebuild"),
         ("preview-full-host-profile", "signed-pr-preview.yml", "./scripts/run-mock-tests.sh --require-all", "./scripts/run-mock-tests.sh --require-all --profile browser", "host acceptance commands must not be reduced"),
         ("preview-full-host-suite", "signed-pr-preview.yml", "suite: [logic, protocol]", "suite: [logic]", "both suites before signing"),

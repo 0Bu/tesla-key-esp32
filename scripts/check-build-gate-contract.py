@@ -576,21 +576,24 @@ def validate(root: Path) -> None:
             f"sdkconfig.defaults.{target}: must not override the disabled NimBLE peripheral role or SMP",
         )
     require(
-        idf_docker.count("docker run --rm --cpus 1.5 --memory 1800m") == 2,
+        idf_docker.count("docker run --rm --init --cpus 1.5 --memory 1800m") == 2,
         "idf-docker.sh: build containers must retain the explicit 1.5 CPU / 1800 MiB limits",
     )
     require(
-        'docker run -d --name "$daemon_name" \\\n        --cpus 1.5 --memory 1800m \\' in idf_docker,
+        'docker run -d --init --name "$daemon_name" \\\n        --cpus 1.5 --memory 1800m \\' in idf_docker,
         "idf-docker.sh: daemon creation must retain the explicit resource ceiling",
     )
     require(
-        'docker run --rm --cpus 1.5 --memory 1800m --user 0:0 --entrypoint /bin/chmod \\\n      -v "$build_vol_name":/b "$image" 777 /b >/dev/null\n' in idf_docker
+        'docker run --rm --init --cpus 1.5 --memory 1800m --user 0:0 --entrypoint /bin/chmod \\\n      -v "$build_vol_name":/b "$image" 777 /b >/dev/null\n' in idf_docker
         and 'alpine' not in idf_docker
         and 'python3 "$repo_root/test/test_idf_wrapper_runtime.py"' in idf_docker,
         "idf-docker.sh: volume setup must use the pinned image, normal limits and checked exit",
     )
     # F06: a running daemon is reusable only when it was created from the CURRENT pin with the
     # reviewed limits. The check must guard daemon start, status and the build-time reuse path.
+    require("'{{.HostConfig.Init}}'" in idf_docker
+            and '&& [ "$init_enabled" = true ]' in idf_docker,
+            "idf-docker.sh: daemon reuse must require the init reaper")
     require(
         idf_docker.count("daemon_matches_contract") >= 5
         and "[ \"$daemon_image\" = \"$image\" ]" in idf_docker
@@ -1127,6 +1130,9 @@ def validate(root: Path) -> None:
         in release_relevance,
         "release-relevance.sh: immutable Release reuse path/canary drifted",
     )
+    require(release_relevance.count("recover-release-pages") == 3 and
+            "Release Pages recovery contract change was not release-relevant" in release_relevance,
+            "release-relevance.sh: key-free recovery relevance path/canary drifted")
     require(release_selector.count(".immutable == true") == 3 and
             "fake-release-without-immutable.json" in release_selector and
             "fake-release-mutable.json" in release_selector,
@@ -1496,8 +1502,12 @@ def self_test(root: Path) -> None:
          'require(is_after, "recorded patch postimage drifted',
          'require(True, "recorded patch postimage drifted', "exact source states with zero fuzz"),
         ("idf-docker-resource-limits", "scripts/idf-docker.sh",
-         "docker run --rm --cpus 1.5 --memory 1800m",
-         "docker run --rm --cpus 4 --memory 8g", "explicit 1.5 CPU / 1800 MiB limits"),
+         "docker run --rm --init --cpus 1.5 --memory 1800m",
+         "docker run --rm --init --cpus 4 --memory 8g", "explicit 1.5 CPU / 1800 MiB limits"),
+        ("idf-docker-init-reaper", "scripts/idf-docker.sh",
+         "docker run --rm --init --cpus 1.5", "docker run --rm --cpus 1.5", "explicit 1.5 CPU / 1800 MiB limits"),
+        ("idf-docker-daemon-init", "scripts/idf-docker.sh",
+         '&& [ "$init_enabled" = true ]', '&& true', "daemon reuse must require the init reaper"),
         ("idf-docker-daemon-creation-limits", "scripts/idf-docker.sh",
          '--cpus 1.5 --memory 1800m \\\n        --label',
          '--cpus 4 --memory 8g \\\n        --label', "daemon creation must retain the explicit resource ceiling"),
@@ -1668,9 +1678,12 @@ def self_test(root: Path) -> None:
          "after_snapshot_validation=None",
          "post-metadata path-swap snapshot canary"),
         ("reuse-release-relevance", "scripts/release-relevance.sh",
-         "check-signed-root-inventory|prepare-reused-release|check-published-release",
-         "check-signed-root-inventory|check-published-release",
+         "check-signed-root-inventory|prepare-reused-release|recover-release-pages|check-published-release",
+         "check-signed-root-inventory|recover-release-pages|check-published-release",
          "immutable Release reuse path/canary"),
+        ("recovery-release-relevance", "scripts/release-relevance.sh",
+         "prepare-reused-release|recover-release-pages|check-published-release",
+         "prepare-reused-release|check-published-release", "key-free recovery relevance path/canary"),
         ("prepublish-merged-layout", "scripts/check-release-assets.py",
          "def validate_staged_merged_layout(", "def removed_staged_merged_layout(",
          "complete pre-publication merged-layout"),

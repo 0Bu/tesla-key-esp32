@@ -48,7 +48,16 @@ fi
 # A source archive without a .git marker has no external metadata mount. Authoritative provenance
 # still requires a real Git checkout in check-build-artifact-inventory.py.
 
-repo_hash="$(printf '%s' "$repo_root" | shasum 2>/dev/null | cut -c1-8 || md5 -qs "$repo_root" 2>/dev/null | cut -c1-8 || echo "default")"
+if command -v shasum >/dev/null 2>&1; then
+  repo_hash="$(printf '%s' "$repo_root" | shasum | cut -c1-8)"
+elif command -v sha256sum >/dev/null 2>&1; then
+  repo_hash="$(printf '%s' "$repo_root" | sha256sum | cut -c1-8)"
+elif command -v sha1sum >/dev/null 2>&1; then
+  repo_hash="$(printf '%s' "$repo_root" | sha1sum | cut -c1-8)"
+else
+  echo "idf-docker: shasum, sha256sum or sha1sum is required for isolated build volumes" >&2
+  exit 1
+fi
 daemon_name="idf-daemon-${repo_hash}"
 build_vol_name="idf-build-${repo_hash}"
 mount_contract=(python3 "$repo_root/scripts/check-idf-container-mounts.py"
@@ -63,15 +72,17 @@ IDF_DAEMON_NANO_CPUS=1500000000       # --cpus 1.5
 IDF_DAEMON_MEMORY_BYTES=1887436800    # --memory 1800m
 
 daemon_matches_contract() {
-  local daemon_image nano_cpus memory daemon_mount_label daemon_mounts
+  local daemon_image nano_cpus memory init_enabled daemon_mount_label daemon_mounts
   daemon_image="$(docker inspect -f '{{.Config.Image}}' "$daemon_name" 2>/dev/null)" || return 1
   nano_cpus="$(docker inspect -f '{{.HostConfig.NanoCpus}}' "$daemon_name" 2>/dev/null)" || return 1
   memory="$(docker inspect -f '{{.HostConfig.Memory}}' "$daemon_name" 2>/dev/null)" || return 1
+  init_enabled="$(docker inspect -f '{{.HostConfig.Init}}' "$daemon_name" 2>/dev/null)" || return 1
   daemon_mount_label="$(docker inspect -f '{{index .Config.Labels "org.tesla-key.idf-mount-contract"}}' "$daemon_name" 2>/dev/null)" || return 1
   daemon_mounts="$(docker inspect -f '{{json .Mounts}}' "$daemon_name" 2>/dev/null)" || return 1
   [ "$daemon_image" = "$image" ] \
     && [ "$nano_cpus" = "$IDF_DAEMON_NANO_CPUS" ] \
     && [ "$memory" = "$IDF_DAEMON_MEMORY_BYTES" ] \
+    && [ "$init_enabled" = true ] \
     && [ "$daemon_mount_label" = "$mount_label" ] \
     && printf '%s\n' "$daemon_mounts" | "${mount_contract[@]}" --inspect
 }
@@ -90,12 +101,13 @@ idf_docker_self_test() {
       *:'{{.Config.Image}}') printf '%s\n' "${fake_image_value}" ;;
       *:'{{.HostConfig.NanoCpus}}') printf '%s\n' "${fake_cpus_value}" ;;
       *:'{{.HostConfig.Memory}}') printf '%s\n' "${fake_memory_value}" ;;
+      *:'{{.HostConfig.Init}}') printf '%s\n' "$fake_init_value" ;;
       *:'{{index .Config.Labels "org.tesla-key.idf-mount-contract"}}') printf '%s\n' "$fake_mount_label" ;;
       *:'{{json .Mounts}}') printf '%s\n' "$fake_mounts" ;;
       *) return 1 ;;
     esac
   }
-  local fake_image_value fake_cpus_value fake_memory_value
+  local fake_image_value fake_cpus_value fake_memory_value fake_init_value=true
   local fake_mount_label="$mount_label" fake_mounts
   fake_mounts="$("${mount_contract[@]}" --expected)"
   expect() {
@@ -119,6 +131,11 @@ idf_docker_self_test() {
   expect reject "a daemon without the memory ceiling must not be reused"
   fake_memory_value="$IDF_DAEMON_MEMORY_BYTES"; fake_state=absent
   expect reject "a missing daemon must not count as matching"
+  fake_state=present; fake_init_value=false
+  expect reject "a daemon without an init reaper must not be reused"
+  fake_init_value='<nil>'
+  expect reject "a daemon with unknown init policy must not be reused"
+  fake_init_value=true
   fake_state=present; fake_mount_label=""
   expect reject "a daemon without the mount contract label must not be reused"
   fake_mount_label=stale
@@ -177,7 +194,7 @@ if [ "${IDF_FAST_BUILD:-0}" = "1" ] || [ "${1:-}" = "daemon" ]; then
     docker volume create "$build_vol_name" >/dev/null
     # Use the pinned toolchain image and normal resource ceiling even for volume setup.
     # Refuse setup failure before a daemon or build can start.
-    docker run --rm --cpus 1.5 --memory 1800m --user 0:0 --entrypoint /bin/chmod \
+    docker run --rm --init --cpus 1.5 --memory 1800m --user 0:0 --entrypoint /bin/chmod \
       -v "$build_vol_name":/b "$image" 777 /b >/dev/null
   fi
   vol_flags=(-v "$build_vol_name":/build_cache)
@@ -200,7 +217,7 @@ if [ "${1:-}" = "daemon" ]; then
       fi
       docker rm -f "$daemon_name" >/dev/null 2>&1 || true
       echo "idf-docker: starting background daemon ($daemon_name)..."
-      docker run -d --name "$daemon_name" \
+      docker run -d --init --name "$daemon_name" \
         --cpus 1.5 --memory 1800m \
         --label "org.tesla-key.idf-mount-contract=$mount_label" \
         ${vol_flags[@]+"${vol_flags[@]}"} \
@@ -283,7 +300,8 @@ fi
 # -u maps to the host user so build/ artifacts aren't root-owned; HOME=/tmp gives that non-root
 # user a writable home; GIT_CONFIG safe.directory='*' avoids git "dubious ownership" on the
 # mounted repo and on /opt/esp/idf.
-exec docker run --rm --cpus 1.5 --memory 1800m ${tty_flags[@]+"${tty_flags[@]}"} \
+# A real PID-1 reaper is required: killed query descendants must disappear, not remain zombies.
+exec docker run --rm --init --cpus 1.5 --memory 1800m ${tty_flags[@]+"${tty_flags[@]}"} \
   ${vol_flags[@]+"${vol_flags[@]}"} \
   "${mount_flags[@]}" -w /project \
   -u "$(id -u):$(id -g)" -e HOME=/tmp \

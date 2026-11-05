@@ -1008,7 +1008,7 @@ def self_test_f135_ping_targets(header: str, net: str, syslog: str) -> None:
 F137_MQTT_CLEANUP_PROGRAM = '  bool reported = false;\n  while (!watchdog.release()) {\n      if (!reported) {\n          reported = true;\n          try { ESP_LOGE(TAG, "mqtt publisher parked: watchdog removal unconfirmed"); }\n          catch (...) {}\n      }\n      watchdog.feed(true);\n      tk::stack_watch_sample(tk::StackWatch::Mqtt); // owned park after diagnostics/feed\n      vTaskDelay(pdMS_TO_TICKS(1000));\n  }\n  try { ESP_LOGE(TAG, "mqtt publisher stopped after boundary failure"); } catch (...) {}\n  tk::stack_watch_sample(tk::StackWatch::Mqtt); // deepest terminal path before self-delete\n  vTaskDelete(nullptr);\n}'
 F137_RESET_PROGRAM = '{\n    // Required host-down/sticky reset publication precedes fallible diagnostics.\n    try {\n        if (g_instance) g_instance->on_reset();\n    } catch (...) {\n        if (g_instance) g_instance->report_callback_fault(false, "reset");\n    }\n    try {\n        ESP_LOGW(TAG, "NimBLE host reset, reason=%d", reason);\n    } catch (...) {\n        if (g_instance) g_instance->report_callback_fault(false, "reset diagnostic");\n    }\n}'
 F137_REPORTER_PROGRAM = '{\n    try {\n        auto& faults = timer_context ? timer_callback_faults_ : host_callback_faults_;\n        tk::report_iteration_fault(faults,\n            static_cast<std::uint64_t>(esp_timer_get_time()) / 1000u,\n            [site](std::uint32_t suppressed) {\n                ESP_LOGW(TAG, "BLE %s callback failed (suppressed=%u)", site,\n                         static_cast<unsigned>(suppressed));\n            });\n    } catch (...) {}\n}'
-F137_NET_TASK_PROGRAM = '{\n    try {\n      tk::LinkWatch watch{};\n      tk::GatewayIdentity watched_identity{};\n      tk::GatewayBaseline baselines[2]{};\n      tk::IterationFaultLog faults{};\n      for (;;) {\n        tk::StackWatchScope f135_iteration_exit(tk::StackWatch::NetWatchdog);\n        vTaskDelay(pdMS_TO_TICKS(kWdPeriodS * 1000));\n        try {\n        // When the link already knows it is down, the transport\'s own reconnect path owns\n        // recovery — there is nothing to detect (the ghost case is link=up by definition) and\n        // logging every period would fill the 16 KB /diag ring across a long router outage.\n        const bool up = net_is_up();\n        GatewaySample sample;\n        if (up) sample = gateway_reachable();\n        if (!up || !sample.usable) {\n            // Not measurable, or the transport changed during the probe: neither a reply nor a\n            // failure. Drop the failure streak — it described a transport that may be gone.\n            watch = tk::LinkWatch{};\n            watched_identity = {};\n            continue;\n        }\n        // A failure streak belongs to one transport generation; a switch starts a new streak.\n        if (sample.identity != watched_identity) {\n            watch = tk::LinkWatch{};\n            watched_identity = sample.identity;\n        }\n        const bool gw = up && sample.reachable;\n\n        // Keep proof for each leased transport across route failover; a new lease or gateway\n        // starts cold when that transport becomes active again. That includes the lease this\n        // watchdog ends itself: net_recover() re-associates, so the next lease must answer ICMP\n        // once before another recovery is allowed (docs/ARCHITECTURE.md, "State is per\n        // transport and lease").\n        const auto baseline_index = sample.identity.transport == NetLink::Eth ? 1 : 0;\n        const bool gw_ever = baselines[baseline_index].observe(sample.identity, sample.replied);\n\n        switch (tk::watch_step(watch, up, gw, gw_ever)) {\n            case tk::WatchAction::Idle:\n                break;\n            case tk::WatchAction::Wait:\n                ESP_LOGW(TAG, "watchdog: no LAN connectivity (%d/%d, link=up)",\n                         watch.fails, tk::kWatchFailsToRecover);\n                break;\n            case tk::WatchAction::NoBaseline:\n                ESP_LOGW(TAG, "watchdog: gateway has never answered ICMP — not forcing a "\n                              "re-establish");\n                break;\n            case tk::WatchAction::Recover:\n                net_recover(sample.identity);\n                break;\n        }\n        } catch (...) {\n            // An observation or a partially attempted recovery is uncertain.\n            // Require a new matching positive gateway reply before another reset.\n            watch = tk::LinkWatch{};\n            watched_identity = {};\n            baselines[0] = {};\n            baselines[1] = {};\n            try {\n                tk::report_iteration_fault(faults,\n                    static_cast<std::uint64_t>(esp_timer_get_time()) / 1000u,\n                    [](std::uint32_t suppressed) {\n                        ESP_LOGW(TAG, "network watchdog iteration failed; proof cleared (suppressed=%u)",\n                                 static_cast<unsigned>(suppressed));\n                    });\n            } catch (...) {}\n        }\n      }\n    } catch (...) {\n        try { ESP_LOGE(TAG, "network watchdog boundary failed; stopping task"); } catch (...) {}\n        tk::stack_watch_sample(tk::StackWatch::NetWatchdog);\n        vTaskDelete(nullptr);\n    }\n}'
+F137_NET_TASK_PROGRAM = '{\n\n    try {\n      tk::LinkWatch watch{};\n      tk::GatewayIdentity watched_identity{};\n      tk::GatewayBaseline baselines[2]{};\n      tk::IterationFaultLog faults{};\n      tk::PeriodicLogState gateway_notice{};\n      tk::WatchAction last_action = tk::WatchAction::Idle;\n      for (;;) {\n        tk::StackWatchScope f135_iteration_exit(tk::StackWatch::NetWatchdog);\n        vTaskDelay(pdMS_TO_TICKS(kWdPeriodS * 1000));\n        try {\n        // When the link already knows it is down, the transport\'s own reconnect path owns\n        // recovery — there is nothing to detect (the ghost case is link=up by definition) and\n        // logging every period would fill the 16 KB /diag ring across a long router outage.\n        const bool up = net_is_up();\n        GatewaySample sample;\n        if (up) sample = gateway_reachable();\n        if (!up || !sample.usable) {\n            // Not measurable, or the transport changed during the probe: neither a reply nor a\n            // failure. Drop the failure streak — it described a transport that may be gone.\n            watch = tk::LinkWatch{};\n            watched_identity = {};\n            tk::periodic_log_reset(gateway_notice);\n            last_action = tk::WatchAction::Idle;\n            continue;\n        }\n        // A failure streak belongs to one transport generation; a switch starts a new streak.\n        if (sample.identity != watched_identity) {\n            watch = tk::LinkWatch{};\n            watched_identity = sample.identity;\n            tk::periodic_log_reset(gateway_notice);\n        }\n        const bool gw = up && sample.reachable;\n\n        // Keep proof for each leased transport across route failover; a new lease or gateway\n        // starts cold when that transport becomes active again. That includes the lease this\n        // watchdog ends itself: net_recover() re-associates, so the next lease must answer ICMP\n        // once before another recovery is allowed (docs/ARCHITECTURE.md, "State is per\n        // transport and lease").\n        const auto baseline_index = sample.identity.transport == NetLink::Eth ? 1 : 0;\n        const bool gw_ever = baselines[baseline_index].observe(sample.identity, sample.replied);\n\n        const auto action = tk::watch_step(watch, up, gw, gw_ever);\n        if (action != last_action) tk::periodic_log_reset(gateway_notice);\n        last_action = action;\n        const bool report = tk::periodic_log_due(gateway_notice,\n            static_cast<uint64_t>(esp_timer_get_time()) / 1000ULL, tk::kAutoPairNoticeRepeatMs);\n        switch (action) {\n            case tk::WatchAction::Idle:\n                break;\n            case tk::WatchAction::Wait:\n                if (report) ESP_LOGW(TAG, "watchdog: no LAN connectivity (%d/%d, link=up)",\n                                    watch.fails, tk::kWatchFailsToRecover);\n                break;\n            case tk::WatchAction::NoBaseline:\n                if (report) ESP_LOGW(TAG, "watchdog: gateway has never answered ICMP — not forcing a "\n                                         "re-establish");\n                break;\n            case tk::WatchAction::Recover:\n                net_recover(sample.identity);\n                break;\n        }\n        } catch (...) {\n            // An observation or a partially attempted recovery is uncertain.\n            // Require a new matching positive gateway reply before another reset.\n            watch = tk::LinkWatch{};\n            watched_identity = {};\n            baselines[0] = {};\n            baselines[1] = {};\n            try {\n                tk::report_iteration_fault(faults,\n                    static_cast<std::uint64_t>(esp_timer_get_time()) / 1000u,\n                    [](std::uint32_t suppressed) {\n                        ESP_LOGW(TAG, "network watchdog iteration failed; proof cleared (suppressed=%u)",\n                                 static_cast<unsigned>(suppressed));\n                    });\n            } catch (...) {}\n        }\n      }\n    } catch (...) {\n        try { ESP_LOGE(TAG, "network watchdog boundary failed; stopping task"); } catch (...) {}\n        tk::stack_watch_sample(tk::StackWatch::NetWatchdog); // no C++ unwind on delete\n        vTaskDelete(nullptr);\n    }\n}'
 F137_WDT_HEADER_PROGRAM = '#pragma once\n\n#include <esp_task_wdt.h>\n\nnamespace tk {\n\n// Current-task ownership only. Explicit release must precede FreeRTOS self-deletion;\n// vTaskDelete(nullptr) does not unwind a live C++ scope.\nclass TaskWatchdogSubscription {\npublic:\n    TaskWatchdogSubscription() = default;\n    TaskWatchdogSubscription(const TaskWatchdogSubscription&) = delete;\n    TaskWatchdogSubscription& operator=(const TaskWatchdogSubscription&) = delete;\n    TaskWatchdogSubscription(TaskWatchdogSubscription&&) = delete;\n    TaskWatchdogSubscription& operator=(TaskWatchdogSubscription&&) = delete;\n\n    bool subscribe() noexcept {\n        // This one consumer may subscribe once; never silently rearm a retired owner.\n        if (started_ || released_) return false;\n        started_ = true;\n        try {\n            active_ = esp_task_wdt_add(nullptr) == ESP_OK ||\n                      esp_task_wdt_status(nullptr) == ESP_OK;\n        } catch (...) {\n            active_ = false;\n        }\n        return active_;\n    }\n\n    void feed(bool uncertain_subscription = false) noexcept {\n        if (released_ || (!active_ && !uncertain_subscription)) return;\n        try { (void)esp_task_wdt_reset(); } catch (...) {}\n    }\n\n    bool release() noexcept {\n        if (released_) return true;\n        try {\n            const esp_err_t result = esp_task_wdt_delete(nullptr);\n            // In the pinned SDK these mean confirmed removal, no current-task\n            // entry, or an uninitialized TWDT with no entries, respectively.\n            if (result != ESP_OK && result != ESP_ERR_NOT_FOUND &&\n                result != ESP_ERR_INVALID_STATE) return false;\n            active_ = false;\n            released_ = true;\n            return true;\n        } catch (...) {\n            return false;\n        }\n    }\n\n    ~TaskWatchdogSubscription() { (void)release(); }\n\nprivate:\n    bool started_{false};\n    bool active_{false};\n    bool released_{false};\n};\n\n}  // namespace tk\n'
 
 
@@ -1637,7 +1637,7 @@ CLIMATE_GETTER_SEAMS = (
     # derived from the stamped tick (a forced-closed window, have_age = true, a dropped charging
     # arm or age_s = 0 would each let a dead feedback path pose as fresh data).
     "return tk::climate_cache_usable(snapshot.valid, active_window, have_age, age_s);",
-    "active_window_now_(now, charging)",
+    "active_window_now_(charging)",
     "have_age = generation != 0;",
     "(now - sample) / configTICK_RATE_HZ",
 )
@@ -1666,7 +1666,7 @@ CACHE_READ_ALLOWED_CALLS = {
         "g", "load", "vehicle_climate_data", "xTaskGetTickCount", "active_window_now_",
         "climate_cache_usable",
     },
-    "active_window_now_": {"load", "pdMS_TO_TICKS", "seconds_since_contact", "active_window_open"},
+    "active_window_now_": {"load", "xTaskGetTickCount", "command_is_recent", "pdMS_TO_TICKS", "seconds_since_contact", "active_window_open"},
 }
 CACHE_READ_FORBIDDEN_CALLS = (
     "{ VehicleStatusResult vs; (void)get_vehicle_status(vs, tk::ConnectOrigin::Foreground, 1000); }",
@@ -1771,7 +1771,7 @@ CHARGE_GETTER_SEAMS = (
     # gate the response (a forced-closed window, have_sample_age = true, a dropped charging arm or an
     # age of 0 would each let a dead feedback path pose as fresh data inside the active window).
     "uint32_t now = xTaskGetTickCount();",
-    "const bool active_window = active_window_now_(now, charging);",
+    "const bool active_window = active_window_now_(charging);",
     "bool have_sample_age = generation != 0;",
     "uint32_t sample_age_s = have_sample_age ? (now - sample) / configTICK_RATE_HZ : 0;",
     "if (!tk::charge_cache_usable(cached.valid, active_window, have_sample_age, sample_age_s)) {",
@@ -1805,13 +1805,14 @@ CHARGE_GETTER_FORBIDDEN = (
 # its command or charging arm would silently disable in-window freshness everywhere.
 ACTIVE_WINDOW_SEAMS = (
     "const uint32_t lc = last_cmd_ticks_.load();",
-    "const bool recent_cmd = (lc != 0) && ((now_ticks - lc) < pdMS_TO_TICKS(kActiveWindowMs));",
+    "const uint32_t now_ticks = xTaskGetTickCount();",
+    "const bool recent_cmd = tk::command_is_recent(lc, now_ticks, pdMS_TO_TICKS(kActiveWindowMs));",
     "const bool have_contact = seconds_since_contact(contact_age);",
     "return tk::active_window_open({recent_cmd, charging_state, have_contact, contact_age});",
 )
 # The contact age also has a reference write in seconds_since_contact(), which cpp_writes does
 # not count. These are the initializers; a later assignment must not bypass a pinned input.
-ACTIVE_WINDOW_WRITES = {"lc": 1, "recent_cmd": 1, "contact_age": 1, "have_contact": 1}
+ACTIVE_WINDOW_WRITES = {"lc": 1, "now_ticks": 1, "recent_cmd": 1, "contact_age": 1, "have_contact": 1}
 CACHE_SEAM_WIRING = (
     "require_vehicle_climate_cache_seam", "require_vehicle_drive_cache_seam",
     "require_vehicle_drive_getter_seam", "require_vehicle_climate_getter_seam",
@@ -1833,6 +1834,7 @@ def require_active_window_seam(source: str) -> None:
     for token in ACTIVE_WINDOW_SEAMS:
         if token not in code:
             raise AssertionError(f"active window lost its command/charging/contact input: {token}")
+    require_before("activity sample precedes fresh clock", code, "last_cmd_ticks_.load()", "xTaskGetTickCount()")
     if len(re.findall(r"\breturn\b", code)) != 1:
         raise AssertionError("active window must have exactly one return (the shared decision)")
     for name, expected in ACTIVE_WINDOW_WRITES.items():
@@ -3770,8 +3772,15 @@ def require_explicit_idf_boot_error_contract(main_source: str, net_source: str,
     # Portal scheduling only suppresses its own new calls. A station whose boot deadline expired
     # before MAX_RETRY still reconnects from its event handler, including while an AP client exists.
     event = " ".join(scrub_cpp(function_body_in(net_source, "wifi_event_handler")).split())
-    if "!s_ever_up.load() && !s_rollback_active.load() && s_retry_num >= MAX_RETRY" not in event:
+    if "const auto retry = tk::wifi_retry_action(s_eth_lease.load(), s_wifi_ever_up.load(), s_rollback_active.load(), s_retry_num, MAX_RETRY);" not in event:
         raise AssertionError("review the shared station/portal retry ownership after an event-policy change")
+    require_before("Ethernet pause precedes retry exhaustion", event, "if (retry == tk::WifiRetryAction::PauseForEthernet)", "if (retry == tk::WifiRetryAction::Exhausted)")
+    if "if (retry == tk::WifiRetryAction::PauseForEthernet) { return; }" not in event or \
+            "if (retry == tk::WifiRetryAction::Exhausted) { xEventGroupSetBits(s_wifi_events, WIFI_FAIL_BIT); }" not in event:
+        raise AssertionError("Ethernet pause and WiFi retry exhaustion must remain distinct")
+    if "if (kind == NetLink::Wifi) s_wifi_ever_up.store(true);" not in function_body_in(net_source, "link_up") or \
+            "if (s_sta_started.load() && !s_wifi_lease.load()) esp_wifi_connect();" not in function_body_in(net_source, "eth_event_handler"):
+        raise AssertionError("WiFi proof and Ethernet-disconnect fallback must remain transport-specific")
     if not re.search(r"else \{ esp_wifi_connect\(\); s_retry_num\+\+;", event):
         raise AssertionError("remaining boot retries must be accounted for independently of portal scheduling")
     # First-time setup stays terminal; the stored-credential portal returns only through the
@@ -3816,15 +3825,17 @@ def require_explicit_idf_boot_error_contract(main_source: str, net_source: str,
     if boot.count("provisioning_run_with_retry(config_store);") != 2:
         raise AssertionError("the boot must recover both missing-WiFi Ethernet and stored-WiFi failures")
     wired_start = boot.find("if (!on_wire && ssid.empty()) {")
-    wifi_start = boot.find("!tk::net_start_wifi(ssid.c_str(), password.c_str(), cfg_blob.wifi_rollback_active)) {")
+    wifi_start = boot.find("const bool wifi_proven = !on_wire && tk::net_start_wifi(ssid.c_str(), password.c_str(), cfg_blob.wifi_rollback_active);")
     wired_recovery = boot[wired_start:wifi_start]
     for token in ("provisioning_run_with_retry(config_store);", "on_wire = tk::net_kind() == tk::NetLink::Eth;"):
         if wired_start < 0 or token not in wired_recovery:
             raise AssertionError(f"credential-free Ethernet recovery lost {token}")
     wifi_boot = boot[wifi_start:]
     require_before("stored-credential WiFi failure takes the retrying portal", wifi_boot,
-                   "!tk::net_start_wifi(ssid.c_str(), password.c_str(), cfg_blob.wifi_rollback_active)) {",
+                   "if (!on_wire && !wifi_proven) {",
                    "provisioning_run_with_retry(config_store);")
+    if "if (tk::wifi_trial_can_commit(wifi_proven, rollback_unpersisted) && cfg_blob.wifi_rollback_active) {" not in wifi_boot:
+        raise AssertionError("trial backup commit must require proven WiFi and persisted rollback state")
     unpersisted = wifi_boot.find("} else if (rollback_unpersisted) {")
     if unpersisted < 0 or "provisioning_run(config_store);" not in \
             wifi_boot[unpersisted:wifi_boot.find("provisioning_run_with_retry(config_store);")]:
@@ -4100,8 +4111,8 @@ def require_ble_callback_lock_contract(ble_source: str) -> None:
             "ESP_LOGD", "ble_gap_disc_cancel", "load", "scan_running_after_cancel", "store",
         },
         "connection_snapshot_matches_": {"load"},
-        "disconnect_from_callback_": {"store", "terminate_published_link_"},
-        "ensure_scanning_": {"ensure_scanning_locked_", "intent"},
+        "disconnect_from_callback_": {"load", "store", "terminate_published_link_"},
+        "ensure_scanning_": {"ensure_scanning_locked_", "intent", "store"},
         "ensure_scanning_locked_": {
             "connect_scan_should_start", "has_gap_link_", "load", "start_scan_locked_",
         },
@@ -4156,7 +4167,7 @@ def require_ble_callback_lock_contract(ble_source: str) -> None:
             "ESP_LOGD", "ble_gattc_disc_all_dscs", "connection_snapshot_matches_",
             "disconnect_from_callback_",
         },
-        "terminate_published_link_": {"ESP_LOGW", "ble_gap_terminate", "load", "store", "taskYIELD"},
+        "terminate_published_link_": {"ble_gap_terminate", "compare_exchange_strong", "compare_exchange_weak", "intent", "load", "store", "taskYIELD"},
     }
     require_exact("BLE callback call-allowlist owners", set(allowed_calls), callback_reachable)
 
@@ -4168,15 +4179,15 @@ def require_ble_callback_lock_contract(ble_source: str) -> None:
     program_fingerprints = {
         "cancel_scan_locked_": "ed79b53939e28078f96405b2be3b17f8f14830b9ca33bcd5b51db9b2a4cf4c40",
         "connection_snapshot_matches_": "e27c016ecb425d1c9715778c6671bbffe257308cf5583325aecd4e67ba66402e",
-        "disconnect_from_callback_": "73bfc2472e7d1f93de72de34be27a8b10a756c14175cffee401cc2433d10438b",
-        "ensure_scanning_": "b0df06d9554e0e89430a71423e5da1c124c5ae0a2dcff53999eb020ae12b858e",
+        "disconnect_from_callback_": "37814d474bfba745014c8ad7dff57b7ca3a72753e14408c68034b763e0183a4c",
+        "ensure_scanning_": "1a4f06dd41c14c1a1ea0a2a99f92c793a4bb7be378c6144e56f88102a1700d92",
         "ensure_scanning_locked_": "96dda6c77fa2762bce01e467af651b603ab8e63cf2856f6a7958d0a8e0002766",
         "has_gap_link_": "87be523038b9d7843373203c7d307a6946e2bad88340360a926cfaef0caf3508",
         "note_connectable_": "f22081647b1c6b17e884c21a5173fb45ba567dbefa0a3dbdc8cfdec519e6931a",
         "note_scan_": "0bc069b1372559facfd9e3e2adb29a307f1332d2de58d80c7f60042cf57e44b3",
         "on_chr_disc": "02ae0d160e0c2e143672a61f53d687abb98b8f9268aa0af3cd925ed0a5f162f3",
         "on_dsc_disc": "5cb6705aca81956c2e1d6a493d3915dd89ed893f305b5f73b7c133e329d7f618",
-        "on_gap_event": "8119fa18dcc9a2d10783fbf88c814e15bba9ec0caf79529d5065cf64b0a054e0",
+        "on_gap_event": "226ce68b7cac052357779119eb5559ee8eb6f8ae2e7b994d0e37f23981fea563",
         "on_mtu_exchange": "28a7ad2c78f9efd5f6f9a53b31c53ec7a51c79b0c6e2431837c79f752c4dc520",
         "on_reset": "a6a11090a79118c9ef6526cb04fe27e35adb57b18f5801fa2479cb9a2110b990",
         "on_scan_timeout": "7611bc6220fd5cc504a1f6b3b0503645a304f5ee97d32c47b91b22486f1fce95",
@@ -4185,7 +4196,7 @@ def require_ble_callback_lock_contract(ble_source: str) -> None:
         "on_sync": "7c8b104bd654a1ac3a460c0764aa100d2ef356eead442851ae6729ad4b9266bc",
         "start_scan_locked_": "15d90a0dd3771816e41339b817f74ccf8c8068bc86d26b87f9077e173cc629ca",
         "subscribe_notify_": "00365f0a70b509e1ae52003e893292d393066d8f10bdce97b87c32a3e6712091",
-        "terminate_published_link_": "278504e6e169798cd796886fc12cb9eebc75fab2d3c52b20beefef339501fb9a",
+        "terminate_published_link_": "464a36a5f245de427d2494b0f48467da7b9b8f68ad5b6c4d0770c20e69b538c6",
     }
     require_exact(
         "BLE callback program-fingerprint owners",
@@ -4300,7 +4311,8 @@ def require_ble_callback_lock_contract(ble_source: str) -> None:
         "disconnecting_.store(true);",
         "want_connect_.store(false);",
         "connecting_.store(false);",
-        "terminate_published_link_();",
+        "const uint32_t generation = connection_generation_.load();",
+        "terminate_published_link_(generation);",
     ):
         if token not in drop_adapter:
             raise AssertionError(
@@ -4462,6 +4474,10 @@ def require_tesla_cpp_callback_contract(
 
     result_factory = function_body_in(commands, "make_result_cb_")
     result_code = scrub_cpp(result_factory)
+    borrowed = "bool success, const std::string& msg, tk::CommandFailureInfo info"
+    if result_code.count(borrowed) != 1:
+        raise AssertionError("command callback must borrow the exact synchronous runner result tuple")
+    result_code = result_code.replace(borrowed, "bool success, borrowed_message msg, tk::CommandFailureInfo info", 1)
     for forbidden in (
         "std::string", "std::vector", "tk::SemGuard", "tk::MutexGuard",
         "save_str", "ESP_LOG", "throw", "new ", "catch (const",
@@ -4469,10 +4485,10 @@ def require_tesla_cpp_callback_contract(
         if forbidden in result_code:
             raise AssertionError(f"command result callback contains forbidden {forbidden!r}")
     for token in (
-        "const auto& msg = result.error()->message();",
         "std::memcpy(completion->error.data(), visible, error_size);",
         "const char* visible = tk::execution_uncertain(completion->failure)",
-        "result.error()->severity(), result.error()->outcome()",
+        "tk::CommandFailureInfo{info.severity, info.outcome}",
+        "completion->no_op = success ? info.no_op : tk::CommandNoOp::None;",
         "completion->failure = tk::uncertain_command_failure();",
         "completion->callback_fault = true;",
         "xSemaphoreGive(completion->sem);",
@@ -4724,7 +4740,7 @@ def require_safe_mode_source_contract(source: str) -> None:
 ITERATION_FAULT_TASKS = (
     ("vehicle_telemetry.cpp", "loop_task_fn_", "while (true)", 50),
     ("display.cpp", "display_task", "for (;;)", 200),
-    ("led_status.cpp", "led_task", "for (int frame = 0;; ++frame)", 200),
+    ("led_status.cpp", "led_task", "for (uint32_t frame = 0;; frame = (frame + 1) % kSampleEveryFrames)", 200),
 )
 
 
@@ -4943,10 +4959,30 @@ def require_command_path_seams(telemetry: str, commands: str, ctrl: str) -> None
         raise AssertionError("the command runner must be ticked exactly once, with the pinned inputs")
     # The loop and the cached getters ask the same member whether the active window is open.
     loop = scrub_cpp(function_body_in(telemetry, "loop_task_fn_"))
-    if not re.search(r"bool window = self->active_window_now_\(now_ticks, charging_state\);", loop):
+    if not re.search(r"bool window = self->active_window_now_\(charging_state\);", loop):
         raise AssertionError("vehicle loop must take its active window from active_window_now_")
-    if len(re.findall(r"\bwindow\s*=(?!=)", loop)) != 1:
-        raise AssertionError("vehicle loop must not overwrite its active window after deciding it")
+    drop = re.search(r"if \(paired && prev_window && !window && self->ble_connected\(\)\) \{", loop)
+    if not drop:
+        raise AssertionError("idle disconnect must remain a falling edge on a paired live link")
+    end = balanced_end(loop, drop.end()-1, "{", "}", "idle disconnect")
+    expected = """{
+        tk::SemGuard command_guard(self->command_mutex_, 0);
+        if (!command_guard || self->cmd_in_flight_.load()) {
+            defer_idle_drop = true;
+        } else {
+            window = self->active_window_now_(charging_state);
+            if (!window) {
+                ESP_LOGI(TAG, "idle: dropping link so car can sleep");
+                self->ble_->disconnect();
+            }
+        }
+    }"""
+    if f137_program(loop[drop.end()-1:end+1]) != f137_program(expected):
+        raise AssertionError("idle disconnect must own zero-wait command arbitration and recheck before dropping")
+    if len(re.findall(r"\bwindow\s*=(?!=)", loop)) != 2:
+        raise AssertionError("active window may be reassigned only by its owned falling-edge recheck")
+    if "bool defer_idle_drop = false;" not in loop or "prev_window = window || defer_idle_drop;" not in loop:
+        raise AssertionError("a busy command owner must retain the pending falling edge")
     # Boot seeds activity only for the reviewed reset/reboot-evidence decision.
     init = scrub_cpp(function_body_in(ctrl, "init"))
     seeds = [match.start() for match in re.finditer(
@@ -5044,15 +5080,25 @@ def self_test_ble_safety_contract() -> None:
          mutate("confirm", telemetry_src, "if (tk::vcsec_status_confirms_wake(reported, status.has_closureStatuses)) {",
                 "if (true) {"), commands_src, ctrl_src),
         ("vehicle loop window forced open",
-         mutate("window", telemetry_src, "bool window = self->active_window_now_(now_ticks, charging_state);",
+         mutate("window", telemetry_src, "bool window = self->active_window_now_(charging_state);",
                 "bool window = true;"), commands_src, ctrl_src),
         ("raw VCSEC sleep state not handed to the runner",
          mutate("raw store", telemetry_src, "vcsec_sleep_state_.store(static_cast<int>(reported));",
                 "vcsec_sleep_state_.store(static_cast<int>(tk::SleepState::Awake));"), commands_src, ctrl_src),
         ("vehicle loop window overwritten after the decision",
-         mutate("window overwrite", telemetry_src, "bool window = self->active_window_now_(now_ticks, charging_state);",
-                "bool window = self->active_window_now_(now_ticks, charging_state);\n        window = true;"),
+         mutate("window overwrite", telemetry_src, "bool window = self->active_window_now_(charging_state);",
+                "bool window = self->active_window_now_(charging_state);\n        window = true;"),
          commands_src, ctrl_src),
+        ("idle drop bypasses command owner",
+         mutate("idle guard", telemetry_src, "tk::SemGuard command_guard(self->command_mutex_, 0);",
+                "tk::SemGuard command_guard(self->command_mutex_, 1);"), commands_src, ctrl_src),
+        ("idle drop skips in-flight arbitration",
+         mutate("idle inflight", telemetry_src, "!command_guard || self->cmd_in_flight_.load()", "!command_guard"), commands_src, ctrl_src),
+        ("idle drop ignores fresh activity",
+         mutate("idle recheck", telemetry_src, "window = self->active_window_now_(charging_state);\n                if (!window)",
+                "window = false;\n                if (!window)"), commands_src, ctrl_src),
+        ("busy owner loses falling edge",
+         mutate("idle defer", telemetry_src, "prev_window = window || defer_idle_drop;", "prev_window = window;"), commands_src, ctrl_src),
         ("boot seeds the window by plain assignment",
          telemetry_src, commands_src,
          mutate("seed assign", ctrl_src, "    if (tk::boot_activity_seed_allowed(tk::diag_crash_reset_info().code, boot_reason_slot().state)) {\n        last_cmd_ticks_.store(xTaskGetTickCount());",
@@ -6071,9 +6117,9 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
 
     for label, old, new in (
         ("window forced closed",
-         "active_window_now_(now, charging)", "false"),
+         "active_window_now_(charging)", "false"),
         ("charging arm dropped from the window",
-         "active_window_now_(now, charging)", "active_window_now_(now, false)"),
+         "active_window_now_(charging)", "active_window_now_(false)"),
         ("have_age forced true",
          "have_age = generation != 0;", "have_age = true;"),
         ("age forced to zero",
@@ -6120,9 +6166,9 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
 
     for label, old, new in (
         ("charging arm dropped from the window",
-         "active_window_now_(now, charging)", "active_window_now_(now, false)"),
+         "active_window_now_(charging)", "active_window_now_(false)"),
         ("window forced closed",
-         "active_window_now_(now, charging)", "false"),
+         "active_window_now_(charging)", "false"),
         ("Starting dropped from the charging arm",
          ' ||\n                          cached.charging_state == "Starting"', ""),
         ("have_sample_age forced true",
@@ -6184,6 +6230,9 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
                 climate_telemetry.replace(window_body, mutated_window, 1)),
         )
     for label, old, new in (
+        ("clock sampled before concurrent activity",
+         "    const uint32_t lc = last_cmd_ticks_.load();\n    const uint32_t now_ticks = xTaskGetTickCount();",
+         "    const uint32_t now_ticks = xTaskGetTickCount();\n    const uint32_t lc = last_cmd_ticks_.load();"),
         ("forced closed", "    const uint32_t lc", "    return false;\n    const uint32_t lc"),
         ("charging arm dropped", "{recent_cmd, charging_state,", "{recent_cmd, false,"),
         ("command arm dropped", "{recent_cmd, charging_state,", "{false, charging_state,"),
@@ -7477,9 +7526,21 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
         (
             "remaining event-driven retries omitted from portal ownership",
             main_source,
-            net_source.replace("s_retry_num >= MAX_RETRY", "false", 1),
+            net_source.replace("s_retry_num, MAX_RETRY", "0, MAX_RETRY", 1),
             provisioning_source,
         ),
+        ("Ethernet lease falsely proves WiFi credentials", main_source,
+         net_source.replace("s_eth_lease.load(), s_wifi_ever_up.load(),", "s_eth_lease.load(), s_ever_up.load(),", 1),
+         provisioning_source),
+        ("Ethernet disconnect loses WiFi fallback", main_source,
+         net_source.replace("if (s_sta_started.load() && !s_wifi_lease.load()) esp_wifi_connect();", "(void)s_sta_started;", 1),
+         provisioning_source),
+        ("wired rescue consumes WiFi rollback backup",
+         main_source.replace("wifi_trial_can_commit(wifi_proven, rollback_unpersisted)", "wifi_trial_can_commit(on_wire, rollback_unpersisted)", 1),
+         net_source, provisioning_source),
+        ("unpersisted rollback consumes WiFi backup",
+         main_source.replace("wifi_trial_can_commit(wifi_proven, rollback_unpersisted)", "wifi_trial_can_commit(wifi_proven, false)", 1),
+         net_source, provisioning_source),
     ):
         require_mutation_rejected(
             label,
@@ -7714,8 +7775,8 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
         lambda: require_ble_callback_lock_contract(blocking_ble_registry),
     )
     allocating_ble_helper = ble_callback_source.replace(
-        "void BleClient::terminate_published_link_() {",
-        "void BleClient::terminate_published_link_() {\n"
+        "void BleClient::terminate_published_link_(uint32_t expected_generation) {",
+        "void BleClient::terminate_published_link_(uint32_t expected_generation) {\n"
         "    std::string callback_allocation;",
         1,
     )
@@ -7726,8 +7787,8 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
         lambda: require_ble_callback_lock_contract(allocating_ble_helper),
     )
     hidden_allocating_ble_helper = ble_callback_source.replace(
-        "void BleClient::terminate_published_link_() {",
-        "void BleClient::terminate_published_link_() {\n"
+        "void BleClient::terminate_published_link_(uint32_t expected_generation) {",
+        "void BleClient::terminate_published_link_(uint32_t expected_generation) {\n"
         "    auto callback_allocation = std::to_string(42);",
         1,
     )
@@ -7738,9 +7799,9 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
         lambda: require_ble_callback_lock_contract(hidden_allocating_ble_helper),
     )
     static_allocating_ble_helper = ble_callback_source.replace(
-        "void BleClient::terminate_published_link_() {",
+        "void BleClient::terminate_published_link_(uint32_t expected_generation) {",
         "static void callback_allocating_helper() { std::string value; }\n\n"
-        "void BleClient::terminate_published_link_() {\n"
+        "void BleClient::terminate_published_link_(uint32_t expected_generation) {\n"
         "    callback_allocating_helper();",
         1,
     )
@@ -7751,9 +7812,9 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
         lambda: require_ble_callback_lock_contract(static_allocating_ble_helper),
     )
     aliased_allocating_ble_type = ble_callback_source.replace(
-        "void BleClient::terminate_published_link_() {",
+        "void BleClient::terminate_published_link_(uint32_t expected_generation) {",
         "using CallbackHiddenString = std::string;\n\n"
-        "void BleClient::terminate_published_link_() {\n"
+        "void BleClient::terminate_published_link_(uint32_t expected_generation) {\n"
         "    CallbackHiddenString hidden = \"a deliberately long callback allocation\";",
         1,
     )
@@ -7764,8 +7825,8 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
         lambda: require_ble_callback_lock_contract(aliased_allocating_ble_type),
     )
     raw_wait_ble_helper = ble_callback_source.replace(
-        "void BleClient::terminate_published_link_() {",
-        "void BleClient::terminate_published_link_() {\n"
+        "void BleClient::terminate_published_link_(uint32_t expected_generation) {",
+        "void BleClient::terminate_published_link_(uint32_t expected_generation) {\n"
         "    (void)xSemaphoreTake(intent_mutex_, portMAX_DELAY);",
         1,
     )
@@ -8586,8 +8647,10 @@ def require_request_intake_contract(parts: dict[str, str]) -> None:
     require_before("REST parsed number before existing range decision", rest_integer,
                    "tk::json_command_number(j, d)", "tk::strict_rest_int")
     mcp_call = function_body_in(parts["mcp"], "handle_tools_call_")
-    if 'if(!tk::json_command_number(j,number)||!tk::mcp_integer_value(number,a.lo,a.hi,ival[i]))' not in compact(mcp_call):
+    if 'if(!tk::json_command_number(j,number)||!tk::mcp_integer_syntax(number))' not in compact(mcp_call) or \
+            'if(!tk::mcp_integer_value(number,a.lo,a.hi,ival[i]))' not in compact(mcp_call):
         raise AssertionError("MCP integer adapter bypasses shared decimal/range checks")
+    require_before("MCP syntax before range decision", mcp_call, "tk::mcp_integer_syntax(number)", "tk::mcp_integer_value(number, a.lo, a.hi, ival[i])")
     number = function_body_in(parts["shared"], "json_command_number")
     if 'json_canonical_safe_integer(first, first + std::strlen(first), integer)' not in number:
         raise AssertionError("shared numeric strings no longer use canonical decimal parsing")
@@ -8757,7 +8820,8 @@ def require_api_reply_contract(parts: dict[str, str]) -> None:
             raise AssertionError(f"REST body status must use actual tested policy: {state}")
     sender = compact(function_body_in(parts["api"], "send_command_result"))
     expected = ('return send_effect_json(rq,effective_ok?200:502,make_response(effective_ok,cmd,vin,'
-                'tk::command_result_text(effective_ok,err)));')
+                'ok&&no_op!=tk::CommandNoOp::None?tk::command_noop_text(no_op):'
+                'tk::command_result_text(effective_ok,err),ok?tk::command_noop_code(no_op):nullptr));')
     if compact(expected) not in sender:
         raise AssertionError("REST command failure status/envelope drift")
     call = compact(function_body_in(parts["mcp"], "handle_tools_call_"))

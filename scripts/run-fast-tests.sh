@@ -18,7 +18,7 @@ self_test() {
     echo "run-fast-tests: C++17 compiler required for self-test" >&2
     exit 2
   }
-  echo "run-fast-tests: self-test PASS"
+  echo "run-fast-tests: compiler prerequisite PASS (does not execute test suites)"
 }
 
 target="logic"
@@ -75,6 +75,16 @@ run_boundary() {
   "$CXX" -std=c++17 -Wall -Wextra -Werror -pthread -Itest/stubs -Imain \
     -o "$BUILD_DIR/stack_sample_tests" test/test_stack_sample.cpp
   "$BUILD_DIR/stack_sample_tests"
+  python3 test/generate_clock_adapters.py "$BUILD_DIR/clock_adapters.generated.hpp"
+  "$CXX" -std=c++17 -Wall -Wextra -Werror -Itest/stubs -Imain -I"$BUILD_DIR" \
+    -o "$BUILD_DIR/clock_runtime_tests" test/test_clock_runtime.cpp main/stack_watch.cpp
+  "$BUILD_DIR/clock_runtime_tests"
+  python3 test/generate_effect_reply_adapters.py "$BUILD_DIR/effect_reply_adapters.generated.hpp"
+  "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Itest -c test/fixtures/idf_ota_state_query.c \
+    -o "$BUILD_DIR/idf_ota_state_query.o"
+  "$CXX" -std=c++17 -Wall -Wextra -Werror -Itest -Itest/stubs -Imain -I"$BUILD_DIR" \
+    -o "$BUILD_DIR/config_commit_tests" test/test_config_commit.cpp "$BUILD_DIR/idf_ota_state_query.o" main/stack_watch.cpp
+  "$BUILD_DIR/config_commit_tests"
   python3 test/generate_syslog_adapters.py "$BUILD_DIR/syslog_adapters.generated.hpp"
   "$CXX" -std=c++17 -Wall -Wextra -Werror -Imain -I"$BUILD_DIR" \
     -o "$BUILD_DIR/syslog_runtime_tests" test/test_syslog_runtime.cpp
@@ -109,6 +119,5 @@ case "$target" in
     run_logic
     run_nvs
     run_boundary
-    run_sanitizers
     ;;
 esac

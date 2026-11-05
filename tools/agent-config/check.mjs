@@ -116,7 +116,7 @@ const usbNoApprovalNeeded = /(?:live verification|HTTP requests?|(?:GET|POST|HTT
 const usbOtaNotStateChanging = /(?:GET|POST) \/ota\/check[^.!?]*(?:is not|isn't|not) state-changing/i;
 const usbAbsentApprovalProceeds = /(?:(?:approval|authorization)[^.!?]*(?:absent|missing|not obtained)|without (?:separate )?(?:approval|authorization))[^.!?]*(?:continue|proceed|run|contact|send|request)/i;
 const reviewedSkillSha256 = new Map([
-  ["add-logic-test", "564c0e171f99e6cb55117c55dcb272f9c07ac0342315b48199274c6c7f347b0a"],
+  ["add-logic-test", "4c0e000699ca232284208952f642dd5e037286a716ea85e5d302ae4bea1ffb42"],
   ["ci-heal", "dc84639ff9ac74ba436e994a653447d45eec85f63615a53851642ce08ed11128"],
   ["deploy", "9b77db37a67bf60fa234e49ca29e6740fb14100db11d4b00f20be9529507a503"],
   ["deploy-bench", "3910491d1c3c295a8c91c36627b656b29d8f41257ea2c8f5fc15c4bb149d58cf"],
@@ -124,8 +124,8 @@ const reviewedSkillSha256 = new Map([
   ["display-preview", "15e387aa51913799ca08e7aedbcaaf247c341e6f1535244a89d5744d860259a0"],
   ["feature-docs", "fed1863c2a2e3b24598f2b9d41219d09aaecd67da7aa32c628f090cabec76e90"],
   ["flash-esp32", "9f1b5078410c1d1eb1b0489a1d68898f4313f2a5ac09bcd955cee7f6e3546444"],
-  ["mock-test", "a310aa0c5e21bbec2d3312aa3d45a1cdfb5f83c2811d878e0a4c589d3d23d8b5"],
-  ["ota-release-verify", "7922b437e8037054b0c018de3e7a603946bddd5843992d074799e722db24e0dc"],
+  ["mock-test", "8b0f472daff9e8e6e8a0a38a50bf168182dc63e58c03b461524e14c346d109d0"],
+  ["ota-release-verify", "52a09232386f75c8382abbab08243b9a2b292e6b42a4f146c994343a22e4f433"],
   ["pr-hygiene", "1f12e067bba7d7ee60e30da296e0436b9754a01b42813cfa472e2455130181ed"],
   ["project-review", "b1e144671ecdb5ed8e86c966901969074e8661bb0fa5f71e133923eabfb87c23"],
   ["ship", "7a465a7200a5d08aa541256bbbd696e72cc00e270ca020a666ad8a159de4b191"],

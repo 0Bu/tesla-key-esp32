@@ -8,6 +8,7 @@
 #include "logic/ha_identity.hpp"
 #include "logic/mqtt_discovery_registry.hpp"
 #include "logic/mqtt_state_lifecycle.hpp"
+#include "logic/connect_outcome.hpp"
 #include "logic/units.hpp"
 #include "logic/link_state.hpp"
 #include "task_config.hpp"
@@ -63,8 +64,9 @@ static std::atomic<bool>         s_tls{false};           // connection uses mqtt
 // Last connection error, surfaced in /status so the web UI can explain a stuck connection
 // (especially a TLS handshake failure, since we never silently fall back to plaintext mqtt).
 // An atomic code (mapped to text in mqtt_ha_last_error) avoids locking a string across tasks.
-enum MqttErr { ME_NONE = 0, ME_TRANSPORT, ME_REFUSED, ME_OTHER };
+enum MqttErr { ME_NONE = 0, ME_TRANSPORT, ME_REFUSED, ME_OTHER, ME_CONFIG };
 static std::atomic<int>          s_last_err{ME_NONE};
+static std::atomic<bool> s_disconnect_reported{false};
 
 // Resolved config + derived topics (built once in mqtt_ha_start).
 static std::string s_uri, s_user, s_pass;     // broker connection
@@ -88,6 +90,7 @@ static const std::string& state_topic(tk::mqtt::StateDomain domain) {
 // writes it (publish_state() is its sole user), so it needs no lock. Value-initialised to
 // Unknown: right after a boot the broker may still hold pre-reboot readings.
 static std::array<tk::mqtt::DomainPublishState, tk::mqtt::kStateDomainCount> s_domain_state{};
+static std::atomic<bool> s_reset_domain_state{false};
 
 // ─── Publish helpers ──────────────────────────────────────────────────────────
 static bool pub(const char* topic, const char* payload, bool retain = true) {
@@ -467,12 +470,14 @@ static void mqtt_event_handler(void*, esp_event_base_t, int32_t event_id, void* 
         if (first) first = false; else s_reconnects.fetch_add(1);
         ESP_LOGI(TAG, "connected to broker%s", s_tls.load() ? " (TLS)" : "");
         s_connected = true;
+        s_disconnect_reported.store(false);
         s_last_err  = ME_NONE;    // clear any prior failure now that we're up
         s_need_discovery = true;  // (re)announce discovery + state from the publisher task
+        s_reset_domain_state.store(true);
         break;
     }
     case MQTT_EVENT_DISCONNECTED:
-        ESP_LOGW(TAG, "disconnected from broker");
+        if (!s_disconnect_reported.exchange(true)) ESP_LOGW(TAG, "disconnected from broker");
         s_connected = false;
         break;
     case MQTT_EVENT_ERROR: {
@@ -488,8 +493,8 @@ static void mqtt_event_handler(void*, esp_event_base_t, int32_t event_id, void* 
             default: break;
             }
         }
-        s_last_err = code;
-        ESP_LOGE(TAG, "MQTT error (type %d)", ev && ev->error_handle ? ev->error_handle->error_type : -1);
+        if (s_last_err.exchange(code) != code)
+            ESP_LOGE(TAG, "MQTT error (type %d)", ev && ev->error_handle ? ev->error_handle->error_type : -1);
         break;
     }
     default:
@@ -512,6 +517,7 @@ static void publisher_task(void*) {
   try {
     TickType_t last = 0;
     const TickType_t interval = pdMS_TO_TICKS(s_interval_s * 1000);
+    tk::PeriodicLogState outage_notice{};
 
     // Subscribe to the task watchdog: this task performs real, blocking network I/O (a publish over
     // a TLS socket to a broker that may be gone), and a wedge here is silent — HA simply stops
@@ -537,6 +543,10 @@ static void publisher_task(void*) {
         // std::terminate → reboot; contain it, skip this round, and try again next tick.
         try {
             if (s_connected) {
+                tk::periodic_log_reset(outage_notice);
+                if (s_reset_domain_state.exchange(false)) {
+                    for (auto& state : s_domain_state) state = tk::mqtt::domain_after_reconnect(state);
+                }
                 if (s_need_discovery.exchange(false)) {
                     const bool success = tk::mqtt_run_discovery_round(
                         [] { return publish_discovery(); },
@@ -565,6 +575,14 @@ static void publisher_task(void*) {
                     } else {
                         last = xTaskGetTickCount();
                     }
+                }
+            } else {
+                const uint64_t now_ms = static_cast<uint64_t>(esp_timer_get_time()) / 1000ULL;
+                if (!outage_notice.active) {
+                    outage_notice.active = true;
+                    outage_notice.last_emit_ms = now_ms;
+                } else if (tk::periodic_log_due(outage_notice, now_ms, tk::kAutoPairNoticeRepeatMs)) {
+                    ESP_LOGW(TAG, "broker still disconnected (error %d)", s_last_err.load());
                 }
             }
         } catch (const std::exception& e) {
@@ -619,7 +637,11 @@ static bool mqtt_ha_start_impl(VehicleController& vehicle,
     // Resolve broker URI: NVS "mqtt_uri" (web UI) overrides the Kconfig default. An
     // empty value (incl. an explicit "" stored to disable) leaves MQTT off.
     tk::ConfigBlob stored_cfg;
-    tk::cfg_load(config_store, stored_cfg);
+    if (tk::cfg_load_state(config_store, stored_cfg) == tk::ConfigLoadState::Error) {
+        s_last_err.store(ME_CONFIG);
+        ESP_LOGE(TAG, "MQTT configuration is unreadable");
+        return false;
+    }
     s_uri = stored_cfg.mqtt_uri;
     s_uri = tk::mqtt_trim(s_uri);
 
@@ -744,6 +766,7 @@ std::string mqtt_ha_broker() { return s_configured.load() ? s_broker_disp : std:
 
 // Human-readable last connection error ("" when none / connected). Surfaced in /status.
 std::string mqtt_ha_last_error() {
+    if (s_last_err.load() == ME_CONFIG) return "stored configuration is unreadable";
     if (!s_configured.load() || s_connected.load()) return {};
     switch (s_last_err.load()) {
     case ME_TRANSPORT: return s_tls.load() ? "TLS handshake failed (untrusted cert or wrong port?)"

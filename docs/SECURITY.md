@@ -74,6 +74,11 @@ firmware at boot, because it never erases an NVS partition it cannot initialize.
 require the flasher stub: the ROM loader erases 16 KiB blocks, so the partition-table write would
 reach into `nvs`.
 
+Runtime OTA accepts only the canonical OTA-slot offsets `0x20000`/`0x210000`, each `0x1f0000`
+bytes. Historical larger-flash partition layouts are not grandfathered into OTA; they need a
+separately authorized USB/layout recovery that preserves secret NVS. App-only USB delivery does
+not rewrite a partition table. The OTA writer uses raw `esp_ota_*`, not `esp_https_ota`.
+
 Installer **Clean flash**, merged-image writes and full flash erases destroy NVS. Each **Clean
 flash** requires a separate confirmation with a secret-NVS backup reminder before any flash work
 starts. Firmware rollback does not restore keys/configuration. Destructive or identity work needs
@@ -113,8 +118,11 @@ fetch-site provenance, or the specific `X-Requested-With` header; otherwise they
 POST aliases exist for ota/check, diag and coredump.
 
 Diagnostic GETs `/status`, `/diag`, `/heap`, `/coredump`, `/ota/status` and `/ota/changelog` require
-a device-owned Host before gathering or sending state, including redacted exports. The evcc version,
-vehicle-data and body-controller routes retain their existing compatibility behavior. `GET /mcp`
+a device-owned Host before gathering or sending state, including redacted exports.
+The foreground `body_controller_state` GET also requires an owned Host, while evcc clients without
+Origin/Referer remain supported. A cross-site request addressed directly to a known device IP can
+still pass this Host check and cause a foreground BLE read; Host validation does not establish
+caller identity. The evcc version and cache-only vehicle-data routes retain their compatibility behavior. `GET /mcp`
 returns a fixed 405 with no diagnostic data. The static UI at `/` and `/index.html` sends
 `X-Frame-Options: DENY` and `Content-Security-Policy: frame-ancestors 'none'`; embedding it in an iframe
 is unsupported. These headers do not restrict the page's scripts/styles. The open provisioning AP
@@ -288,6 +296,13 @@ exact staged snapshot without Release metadata and rechecks Pages source before 
 publisher. Each root or Dev push attempt and unchanged-byte build request rechecks staged
 SOURCE_SHA against fresh remote main. Root uses the same per-attempt staged-source/current-main
 admission; immutable Release authority is checked before the publisher.
+An explicit `root-recovery` mode is separate: current clean main helpers authenticate the original
+Actions ZIP by its GitHub artifact ID/digest, then verify its complete site and all 40 immutable
+latest Release assets, four production signatures, exact tag/source and main ancestry. Each push
+attempt and unchanged-byte build request repeats that authority check, including Pages source.
+No build, signing key, re-signing or Release mutation is available in this mode. An expired original
+artifact or changed authority stops recovery; [the runbook](DEVELOPMENT.md#recover-a-published-stable-site)
+owns its separately authorized invocation. First publication and Dev retain current-main equality.
 Cumulative relevance reads the manifest and changelog from one exact branch commit. Stable
 acceptance binds firmware to an immutable Release/tag; Dev checks its declared sizes/hashes without
 requiring a Release. Both require exact served changelog bytes. Absent Dev authority falls back to

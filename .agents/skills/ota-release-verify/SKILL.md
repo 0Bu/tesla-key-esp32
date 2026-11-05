@@ -292,6 +292,12 @@ describes the failure symptom; use the table below to investigate before retryin
 
 ## Interpreting failures — keyed on the known break modes
 
+For a damaged stable Pages site with an otherwise valid immutable latest Release, use the
+verify-only [published-site recovery procedure](../../../docs/DEVELOPMENT.md#recover-a-published-stable-site).
+It revalidates the original signed CI archive from current trusted main and needs no signing key.
+Its `--publish` action requires separate publication authorization; this skill does not grant it.
+An expired archive or invalid Release is a refusal, not permission to rebuild or replace immutable assets.
+
 | Symptom | Where it shows | What it means | Fix |
 |---------|----------------|---------------|-----|
 | Pages API is not `legacy` + `gh-pages:/` | step 2 before download | the repository no longer has the single branch-backed root + `PR/<N>/` serving authority | do not OTA; restore the repository Pages source contract and rerun from a fresh snapshot |
@@ -299,7 +305,7 @@ describes the failure symptom; use the table below to investigate before retryin
 | manifest lacks layout v2 fields, or `sourceSha` ≠ the Release tag commit | step 2 | legacy, stale, or non-Release republish; regex-valid provenance alone is insufficient | do not OTA; reconcile Pages from the exact Release commit, then rerun this check |
 | manifest length/SHA-256 differs from any downloaded part | step 2 | partial branch publication, cache race, or bytes changed underneath the manifest | do not OTA; let branch-backed Pages settle or republish, then rerun from a fresh snapshot |
 | Pages part differs from its byte range in the Release merged asset | step 2 | same-version/source manifest was regenerated around bytes that were not attached to the bound GitHub Release | do not OTA; republish Pages exclusively from the signed Release staging tree and rerun |
-| an app's embedded target/version differs from its manifest family/Release | step 2/3 | stale or cross-target app was published under the expected basename | do not OTA; rebuild/sign/publish the exact Release and verify all four descriptors |
+| an app's embedded target/version differs from its manifest family/Release | step 2/3 | stale or cross-target app was published under the expected basename | do not OTA; verify the immutable Release and original CI archive, recover Pages only if both are valid, then verify all four descriptors |
 | `/ota/status` `state:"idle"`, `message:"up to date"`, `update_available:false` | step 4 | the candidate is not eligible on the selected channel/PR | benign if the device already runs the release; otherwise verify candidate identity and the selected channel/PR → check step 2 |
 | `/ota/status` `state:"error"`, `message:"could not reach update server"` or `"invalid update manifest"` | step 4 | the check itself failed, so no offer was evaluated | check the device's network and the step 2 manifest, then retry |
 | `/ota/status` `message:"download or image validation failed"` | `GET /ota/status` after a separately authorized `POST /ota/update`, `state:"error"`; step 4 cannot produce it and its `POST /ota/check` overwrites it, so read the status first | the download or the image validation failed; this message does not separate them, and a TOFU trust-anchor mismatch is one possible cause, not proven by it | rule out transport and the step 2 URL and byte checks, then verify candidate chip/revision, integrity and signature evidence; only after establishing the cause, propose separately authorized [`$usb-recovery`](../usb-recovery/SKILL.md) if appropriate; see [`docs/SECURITY.md`](../../../docs/SECURITY.md) "Trust anchor (trust-on-first-use)" |

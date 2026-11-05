@@ -5,6 +5,7 @@ import os
 import pathlib
 import shutil
 import subprocess
+import sys
 import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -78,6 +79,7 @@ sys.exit(87)
                 assert result.returncode == expected, (layout, mode, helper_exit, result.returncode, result.stderr)
                 assert runs, (layout, mode, 'no command exercised')
                 for args in runs:
+                    assert args.count('--init') == 1, args
                     assert args[args.index('--cpus')+1] == '1.5', args
                     assert args[args.index('--memory')+1] == '1800m', args
                     assert image in args, args
@@ -99,6 +101,41 @@ sys.exit(87)
                 else:
                     assert len(runs) == (1 if mode == 'ordinary' else 2), runs
                 print('PASS actual IDF wrapper:', layout, mode, 'helper exit', helper_exit)
+
+        # A Linux-style PATH without shasum must still isolate checkout volume names.
+        # Only passive Docker is available here; the wrapper cannot reach a daemon.
+        minimal = workspace / 'linux-bin'; minimal.mkdir()
+        for name in ('bash', 'dirname', 'tr', 'cut', 'id', 'mkdir'):
+            (minimal / name).symlink_to(shutil.which(name))
+        (minimal / 'python3').symlink_to(sys.executable)
+        (minimal / 'docker').symlink_to(docker)
+        for algorithm in ('sha256sum', 'sha1sum'):
+            hasher = minimal / algorithm
+            hasher.write_text(f'#!{sys.executable}\nimport hashlib,sys\nprint(hashlib.{algorithm.removesuffix("sum")}(sys.stdin.buffer.read()).hexdigest()+"  -")\n')
+            hasher.chmod(0o700)
+            volumes = []
+            for root in (archive, workspace / ('second-' + algorithm)):
+                if root != archive:
+                    for name in runtime:
+                        destination = root / name; destination.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(ROOT / name, destination)
+                log = workspace / 'fallback.jsonl'; log.unlink(missing_ok=True)
+                env = dict(os.environ, PATH=str(minimal), FIXTURE_DOCKER_LOG=str(log), IDF_FAST_BUILD='1', IDF_DOCKER_DAEMON='0')
+                result = subprocess.run([str(minimal / 'bash'), str(root / 'scripts/idf-docker.sh'), 'true'],
+                    cwd=root, env=env, text=True, capture_output=True, timeout=15)
+                assert result.returncode == 0, result.stderr
+                calls = [json.loads(line) for line in log.read_text().splitlines()]
+                volume = next(args[2] for args in calls if args[:2] == ['volume', 'create'])
+                assert volume.startswith('idf-build-') and 'default' not in volume, volume
+                volumes.append(volume)
+            assert len(set(volumes)) == 2, volumes
+            hasher.unlink()
+        log.unlink(missing_ok=True)
+        result = subprocess.run([str(minimal / 'bash'), str(archive / 'scripts/idf-docker.sh'), 'true'],
+            cwd=archive, env=dict(env, FIXTURE_DOCKER_LOG=str(log)), text=True, capture_output=True, timeout=15)
+        assert result.returncode != 0 and 'required for isolated build volumes' in result.stderr, result.stderr
+        assert not log.exists(), 'missing hash tool must refuse before Docker'
+        print('PASS actual IDF wrapper: Linux hash fallbacks isolate paths; missing digest refuses')
     return 0
 
 if __name__ == '__main__':
