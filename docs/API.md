@@ -216,6 +216,11 @@ request to a known device address can still trigger this foreground read. See [s
 | `GET /api/proxy/1/version` | `{version, platform}` (`"ESP32"`/`"ESP32-S3"`/`"ESP32-C3"`/`"ESP32-C6"`). |
 | `POST /mcp` | MCP server for AI agents (Streamable HTTP, stateless JSON-RPC 2.0; `GET` → `405`, no SSE): [MCP.md](MCP.md). |
 
+PR previews selected with `pr=<N>` retain numeric-core downgrade protection: a preview based on
+an older `major.minor.patch` cannot replace a newer Development core by OTA or Dev upload. Use
+the preview's [signed USB installer](USER_GUIDE.md#updates-and-recovery) in that case. Equal or
+newer preview cores remain subject to the normal OTA checks.
+
 MQTT and Syslog request-body/schema errors are returned before loading stored configuration.
 Changed MQTT/Syslog saves reserve the restart owner before writing; an occupied owner returns `409`
 without saving. A successful save returns `firmware_verification`: `already_valid`,
