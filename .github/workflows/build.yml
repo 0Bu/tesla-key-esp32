@@ -161,12 +161,6 @@ jobs:
         run: >-
           python3 scripts/check-change-scope.py --event "$EVENT_NAME"
           --base "$BASE_SHA" --head "$HEAD_SHA" --github-output >> "$GITHUB_OUTPUT"
-      - name: Validate runner-neutral agent configuration
-        if: steps.scope.outputs.profile == 'full'
-        run: ./tools/agent-config/selftest.sh
-      - name: Validate repository syntax, links and workflow policy
-        if: steps.scope.outputs.profile == 'full'
-        run: ./scripts/repo-lint.sh
       - name: Validate repository without repeating unrelated validator self-tests
         if: steps.scope.outputs.profile != 'full'
         run: ./scripts/repo-lint.sh --quick
@@ -183,8 +177,8 @@ jobs:
         run: ./scripts/run-mock-tests.sh --require-all --profile "$HOST_PROFILE"
 
   logic-harness:
-    # The remaining host gates, split out of logic-test so the two run concurrently: the tesla-ble
-    # harness, the sanitizer tripwires, the build/PR-gate contract self-tests and the gate matcher.
+    # Run full repository/agent preflight beside the longer mock suite, followed by the tesla-ble
+    # harness, sanitizer tripwires and the remaining build/PR-gate contract self-tests.
     # `build` needs both jobs and fails unless both succeeded, so a red gate in either still fails
     # the required build check.
     runs-on: ubuntu-26.04
@@ -204,6 +198,12 @@ jobs:
         run: >-
           python3 scripts/check-change-scope.py --event "$EVENT_NAME"
           --base "$BASE_SHA" --head "$HEAD_SHA" --github-output >> "$GITHUB_OUTPUT"
+      - name: Validate runner-neutral agent configuration
+        if: steps.scope.outputs.profile == 'full'
+        run: ./tools/agent-config/selftest.sh
+      - name: Validate repository syntax, links and workflow policy
+        if: steps.scope.outputs.profile == 'full'
+        run: ./scripts/repo-lint.sh
       - name: Run tesla-ble integration harness
         if: steps.scope.outputs.profile == 'full' || steps.scope.outputs.profile == 'runtime'
         run: ./scripts/test-tesla-ble-harness.sh --require-all
@@ -214,15 +214,11 @@ jobs:
           ./scripts/run-sanitizer-tests.sh
       - name: Test ESP-IDF build contracts
         if: steps.scope.outputs.profile == 'full'
+        # Shared version/size/Pages/changelog/build-gate self-tests belong to the full mock
+        # suite's mandatory test-build-contracts.sh gate. Keep the unique checks here.
         run: |
           ./scripts/ci-build-all.sh --self-test
-          ./scripts/select-release-version.sh --self-test
           python3 scripts/check-sdkconfig-defaults.py --self-test
-          python3 scripts/report-firmware-size.py --self-test
-          python3 scripts/check-dev-pages.py --self-test
-          python3 scripts/wait-pages-build.py --self-test
-          python3 scripts/generate-ota-changelog.py --self-test
-          python3 scripts/check-build-gate-contract.py --self-test
           python3 tools/agent-hooks/agent_hook.py build-efficiency --self-test
           test "$(./scripts/idf-version.sh)" = v6.1
 
@@ -532,16 +528,15 @@ jobs:
             dist/${{ matrix.target }}/
 
   independent-rebuild:
-    # Joins the four independent legs into the single evidence artifact the signer consumes. Only
-    # this job needs the producer's display version, so it alone waits for `build`. It runs no build
-    # and holds no secret: it downloads the legs as data, binds them to the exact source commit and
-    # writes the same metadata and byte inventory a single full rebuild used to write.
-    needs: [build, independent-rebuild-target]
+    # Assemble independent evidence as soon as all four fresh rebuilds finish, using the same
+    # prepared release version as their producer. This key-free job grants no publication authority:
+    # publish still needs the successful build gate and compares both complete byte inventories.
+    needs: [prepare, independent-rebuild-target]
     if: >-
       github.ref == 'refs/heads/main'
       && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-      && needs.build.outputs.mode != 'test'
-      && needs.build.outputs.firmware == 'yes'
+      && needs.prepare.outputs.mode != 'test'
+      && needs.prepare.outputs.firmware == 'yes'
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
@@ -558,13 +553,13 @@ jobs:
           pattern: firmware-independent-target-*
           merge-multiple: true
           path: .
-      - name: Apply the producer's exact display-version stamp
+      - name: Apply the prepared exact display-version stamp
         env:
-          DISPLAY_VERSION: ${{ needs.build.outputs.display-version }}
+          DISPLAY_VERSION: ${{ needs.prepare.outputs.release-version }}
         run: printf '%s\n' "$DISPLAY_VERSION" > version.txt
       - name: Bind the independent rebuild to the exact source and version
         env:
-          DISPLAY_VERSION: ${{ needs.build.outputs.display-version }}
+          DISPLAY_VERSION: ${{ needs.prepare.outputs.release-version }}
           SOURCE_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
