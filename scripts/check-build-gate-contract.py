@@ -446,13 +446,16 @@ def validate(root: Path) -> None:
     require(build_contracts.count(
                 'python3 "$repo_root/scripts/check-pages-source.py" --self-test') == 1,
             "test-build-contracts.sh: branch-backed Pages source self-test is not wired")
-    require(build_contracts.count(
-                'python3 "$repo_root/scripts/check-dev-pages.py" --self-test') == 1,
-            "test-build-contracts.sh: dev Pages acceptance self-test is not wired")
-    require(build_contracts.count(
-                'python3 "$repo_root/scripts/wait-pages-build.py" --self-test') == 1
-            and build_workflow.count('python3 scripts/wait-pages-build.py --self-test') == 1,
-            "Pages build readiness self-test must run in host and build-contract gates")
+    # These execute through the mandatory full host build-contract gate. The independent
+    # harness retains its unique checks, without repeating this same self-test coverage.
+    for name in ("select-release-version.sh", "report-firmware-size.py", "check-dev-pages.py",
+                 "wait-pages-build.py", "generate-ota-changelog.py", "check-build-gate-contract.py"):
+        interpreter = "" if name.endswith(".sh") else "python3 "
+        call = f'{interpreter}"$repo_root/scripts/{name}" --self-test'
+        require(build_contracts.splitlines().count(call) == 1,
+                "test-build-contracts.sh: shared CI self-test owner drifted: " + name)
+        require(f"scripts/{name} --self-test" not in build_workflow,
+                "build.yml: duplicate shared CI self-test: " + name)
     for consumer in ("check-dev-pages.py", "check-published-release.py"):
         readiness = ('python3 scripts/wait-pages-build.py --repository "$GITHUB_REPOSITORY" \\\n'
                      '            --attempts 32 --interval 10 --timeout 15\n'
@@ -461,9 +464,6 @@ def validate(root: Path) -> None:
                 "Pages build readiness must immediately precede both byte acceptance consumers")
     require(build_contracts.count('python3 "$repo_root/test/test_signing_image_prefetch.py"') == 1,
             "test-build-contracts.sh: signing image prefetch shell controls must run once")
-    require(build_contracts.count(
-                'python3 "$repo_root/scripts/generate-ota-changelog.py" --self-test') == 1,
-            "test-build-contracts.sh: OTA changelog generator self-test is not wired")
     require(build_contracts.count(
                 'python3 "$repo_root/scripts/check-dependency-contract.py" --self-test') == 1,
             "test-build-contracts.sh: dependency contract self-test is not wired")
@@ -1163,8 +1163,6 @@ def validate(root: Path) -> None:
         and "--compare-to _ci-independent" in build_workflow,
         "build.yml: logic/build/rebuild/publish/deploy chain or independent byte comparison drifted",
     )
-    require("python3 scripts/check-build-gate-contract.py --self-test" in build_workflow,
-            "build.yml: static build-gate contract is not wired into logic-test")
     require_order(
         build_workflow,
         "build.yml draft -> immutable Release transaction",
@@ -1809,13 +1807,9 @@ def self_test(root: Path) -> None:
          '            --attempts 1 --interval 10 --timeout 15\n'
          '          python3 scripts/check-dev-pages.py',
          "Pages build readiness must immediately precede"),
-        ("pages-build-readiness-host-test", ".github/workflows/build.yml",
-         'python3 scripts/wait-pages-build.py --self-test',
-         'python3 scripts/missing-pages-build.py --self-test',
-         "Pages build readiness self-test must run"),
         ("pages-build-readiness-contract-test", "scripts/test-build-contracts.sh",
          'python3 "$repo_root/scripts/wait-pages-build.py" --self-test\n', "",
-         "Pages build readiness self-test must run"),
+         "shared CI self-test owner drifted"),
         ("prefetch-controls-missing", "scripts/test-build-contracts.sh",
          'python3 "$repo_root/test/test_signing_image_prefetch.py"\n', "",
          "signing image prefetch shell controls must run once"),
@@ -1862,10 +1856,10 @@ def self_test(root: Path) -> None:
          "Pages source self-test is not wired"),
         ("dev-pages-selftest-wiring", "scripts/test-build-contracts.sh",
          'python3 "$repo_root/scripts/check-dev-pages.py" --self-test\n', "",
-         "dev Pages acceptance self-test is not wired"),
+         "shared CI self-test owner drifted"),
         ("changelog-selftest-wiring", "scripts/test-build-contracts.sh",
          'python3 "$repo_root/scripts/generate-ota-changelog.py" --self-test\n', "",
-         "OTA changelog generator self-test is not wired"),
+         "shared CI self-test owner drifted"),
         ("release-reuse-selftest-wiring", "scripts/test-build-contracts.sh",
          'python3 "$repo_root/scripts/prepare-reused-release.py" --self-test\n', "",
          "immutable Release reuse self-test is not wired"),
@@ -1966,6 +1960,18 @@ def self_test(root: Path) -> None:
          'if component_hash(component) != expected:',
          'if False:', "locked-cJSON source"),
     )
+    for name in ("select-release-version.sh", "report-firmware-size.py", "check-dev-pages.py",
+                 "wait-pages-build.py", "generate-ota-changelog.py", "check-build-gate-contract.py"):
+        interpreter = "" if name.endswith(".sh") else "python3 "
+        call = f'{interpreter}"$repo_root/scripts/{name}" --self-test'
+        for replacement in ('# ' + call, call + ' || true', call + '\n' + call):
+            mutations += (("shared-ci-owner-" + name, "scripts/test-build-contracts.sh",
+                           call, replacement, "shared CI self-test owner drifted"),)
+        workflow_call = ("./" if name.endswith(".sh") else "python3 ") + f"scripts/{name} --self-test"
+        mutations += (("shared-ci-duplicate-" + name, ".github/workflows/build.yml",
+                       "          ./scripts/ci-build-all.sh --self-test\n",
+                       "          ./scripts/ci-build-all.sh --self-test\n          " + workflow_call + "\n",
+                       "duplicate shared CI self-test"),)
     for name in ("check-release-assets.py", "check-published-release.py"):
         call = f'python3 "$repo_root/scripts/{name}" --self-test'
         for replacement in ('# ' + call, call + ' || true', call + '\n' + call):

@@ -91,7 +91,13 @@ if a[0]=='scripts/check-firmware-artifacts.py':
 
     # Test-only in-memory digest admission isolates semantic gates from the raw-job hash.
     # It neither refreshes the source inventory nor supplies independent job approval.
-    fixture=root/'whole-policy';shutil.copytree(ROOT,fixture,ignore=shutil.ignore_patterns('__pycache__'))
+    # Policy validation consumes only workflows; its omission control additionally loads the
+    # checker and YAML helper. Never copy local build trees, caches or ignored worktree data.
+    fixture=root/'whole-policy'
+    shutil.copytree(ROOT/'.github/workflows',fixture/'.github/workflows')
+    (fixture/'scripts').mkdir()
+    for helper in ('check-workflow-policy.py','check-yaml-syntax.rb'):
+        shutil.copy2(ROOT/'scripts'/helper,fixture/'scripts'/helper)
     file=fixture/'.github/workflows/build.yml';original=file.read_text()
     _,jobs=policy.split_jobs(original,'build.yml');deploy=jobs['deploy']
     old_digest=policy.EXPECTED_PRIVILEGED_JOB_SHA256[('build.yml','deploy')]

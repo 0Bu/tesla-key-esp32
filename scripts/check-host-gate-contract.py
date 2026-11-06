@@ -19,6 +19,12 @@ import runpy
 F137_WIRING_MODULES: dict[str, dict] = {}
 
 DEPLOY_FLOW_VALIDATED: set[str] = set()
+SHARED_BUILD_SELFTESTS = (
+    "check-dependency-contract.py", "check-otadata-contract.py", "check-release-assets.py",
+    "prepare-reused-release.py", "check-published-release.py",
+    "select-release-version.sh", "report-firmware-size.py", "check-dev-pages.py",
+    "wait-pages-build.py", "generate-ota-changelog.py", "check-build-gate-contract.py",
+)
 
 
 class ContractError(RuntimeError):
@@ -75,15 +81,9 @@ def probe_build_contract_modes(source: str) -> None:
 
 
 def probe_deploy_consumer_invocations(source: str) -> None:
-    for relative, arguments in (
-        ("test/test_deploy_candidate.py", ()),
-        ("scripts/check-dependency-contract.py", ("--self-test",)),
-        ("scripts/check-otadata-contract.py", ("--self-test",)),
-        ("scripts/check-release-assets.py", ("--self-test",)),
-        ("scripts/prepare-reused-release.py", ("--self-test",)),
-        ("scripts/check-published-release.py", ("--self-test",)),
-    ):
-        probe_publication_selftest(source, relative, arguments)
+    probe_publication_selftest(source, "test/test_deploy_candidate.py", ())
+    for name in SHARED_BUILD_SELFTESTS:
+        probe_publication_selftest(source, "scripts/" + name, ("--self-test",))
 
 
 def probe_publication_selftest(source: str, relative: str, expected_arguments: tuple[str, ...]) -> None:
@@ -95,11 +95,23 @@ def probe_publication_selftest(source: str, relative: str, expected_arguments: t
         work = Path(temporary).resolve()
         scripts, tools = work / "scripts", work / "tools"
         scripts.mkdir(); tools.mkdir()
-        # Only this prefix is executed. Direct prerequisite shell commands are inert stubs;
-        # Python prerequisites and the embedded entry-point fixture are intercepted below.
+        # Only this prefix is executed. Record inert shell prerequisites as well as Python
+        # invocations, so the version selector's failure propagation is proved identically.
+        # Absolute-name Bash functions intercept those exact calls without spawning another
+        # shell per prerequisite. No real prerequisite executes and every call is still traced.
+        shell_recorders = []
         for name in set(re.findall(r'"\$repo_root/(scripts/[A-Za-z0-9_.-]+)"', prefix)):
+            command = shlex.quote(str(work / name))
+            # Explicit `bash script` calls bypass function lookup; retain an inert file too.
             file = work / name
-            file.write_text("#!/bin/sh\nexit 0\n"); file.chmod(0o700)
+            file.write_text('#!/bin/sh\nprintf \'%s\\000\' "$0" "$@" \'\' >> "$DEPLOY_FLOW_TRACE"\n'
+                            'if [ "$0" = "$DEPLOY_FLOW_WATCHED" ] && [ "$DEPLOY_FLOW_FAIL" = 1 ]; then exit 37; fi\n'
+                            'exit 0\n')
+            file.chmod(0o700)
+            shell_recorders.append(f'function {command} {{\n'
+                f'printf \'%s\\000\' {command} "$@" \'\' >> "$DEPLOY_FLOW_TRACE"\n'
+                f'if [ {command} = "$DEPLOY_FLOW_WATCHED" ] && [ "$DEPLOY_FLOW_FAIL" = 1 ]; then return 37; fi\n'
+                'return 0\n}\n')
         trace = work / "trace.bin"
         python = tools / "python3"
         python.write_text("#!/bin/sh\nexit 98\n")
@@ -111,7 +123,7 @@ return 0
 }
 '''
         script = scripts / "test-build-contracts.sh"
-        script.write_text(recorder + prefix + 'python3 __deploy_flow_after__\n')
+        script.write_text(recorder + "".join(shell_recorders) + prefix + 'python3 __deploy_flow_after__\n')
         env = {k: v for k, v in os.environ.items() if k not in
                ("ENV", "BASH_ENV", "OTA_SIGNING_KEY", "OTA_SIGNING_KEY_FILE", "GH_TOKEN", "GITHUB_TOKEN")
                and not k.startswith(("BASH_FUNC_", "PYTHON", "LD_", "DYLD_"))}
@@ -129,7 +141,7 @@ return 0
             calls = [[os.fsdecode(arg) for arg in block.split(b'\0')]
                      for block in trace.read_bytes().split(b'\0\0') if block] if trace.exists() else []
             target = [str(work / relative), *expected_arguments]
-            relevant = [args for args in calls if args == target or args == ["__deploy_flow_after__"]]
+            relevant = [args for args in calls if args and args[0] in (target[0], "__deploy_flow_after__")]
             require(result.returncode == (37 if fail else 0) and
                     relevant == ([target] if fail else [target, ["__deploy_flow_after__"]]),
                     ("actual signed deploy consumer" if relative.startswith("test/") else
@@ -574,17 +586,13 @@ def validate(root: Path) -> None:
             '    test_current_discovery_address();' in mqtt_test,
             "actual MQTT discovery address fixture is missing from the retained JSON gate")
     publication_gate = (root / "scripts/test-build-contracts.sh").read_text()
-    for name, label in (
-        ("check-dependency-contract.py", "dependency contract gate"),
-        ("check-otadata-contract.py", "otadata contract gate"),
-        ("check-release-assets.py", "Release assets gate"),
-        ("prepare-reused-release.py", "immutable Release reuse gate"),
-        ("check-published-release.py", "published Release acceptance gate"),
-    ):
-        command = f'python3 "$repo_root/scripts/{name}" --self-test'
+    for name in SHARED_BUILD_SELFTESTS:
+        label = name + " gate"
+        interpreter = "" if name.endswith(".sh") else "python3 "
+        command = f'{interpreter}"$repo_root/scripts/{name}" --self-test'
         require(publication_gate.count(command) == 1,
                 label + ": shared self-test must have one build-contract owner")
-        require(f"python3 scripts/{name} --self-test" not in run_mock,
+        require(f"scripts/{name} --self-test" not in run_mock,
                 label + ": full host wrapper must not duplicate its build-contract owner")
     relevance_gate = 'run_gate "release relevance and publication selectors" 120 scripts/release-relevance.sh --self-test'
     build_gate = 'run_gate "build and manifest contract tests" 120 scripts/test-build-contracts.sh --build-and-manifest'
@@ -596,7 +604,6 @@ def validate(root: Path) -> None:
         'run_gate "retained MQTT JSON and discovery registry" 120 bash test/run-mqtt-json-publish-tests.sh',
     ):
         require(run_mock.count(command) == 1, "strict browser invocation flow: issue-450 owner gate missing")
-    probe_build_contract_modes(publication_gate)
     require('        test/test_deploy_candidate.py \\\n' in run_mock,
             "actual signed deploy consumer tests are missing from the mandatory host gate")
     # Other mutation cases retain this exact shell body. Cache only an already executed
@@ -604,6 +611,7 @@ def validate(root: Path) -> None:
     if publication_gate not in DEPLOY_FLOW_VALIDATED:
         probe_deploy_consumer_invocations(publication_gate)
         DEPLOY_FLOW_VALIDATED.add(publication_gate)
+    probe_build_contract_modes(publication_gate)
     for validator in ("check-pages-manifest.py", "check-release-pages-bytes.py"):
         require(f'python3 "$repo_root/scripts/{validator}" --self-test' in publication_gate,
                 f"publication validator self-test is not executed: {validator}")
@@ -1278,7 +1286,7 @@ def self_test(root: Path) -> None:
         ("scripts/run-mock-tests.sh", "python3 scripts/check-nvs-contract.py --self-test",
          "python3 scripts/missing-nvs-contract.py --self-test", "execute the NVS"),
         ("scripts/test-build-contracts.sh", 'python3 "$repo_root/scripts/check-dependency-contract.py" --self-test',
-         'python3 "$repo_root/scripts/missing-dependency-contract.py" --self-test', "dependency contract gate"),
+         'python3 "$repo_root/scripts/missing-dependency-contract.py" --self-test', "shared self-test must have one build-contract owner"),
         ("scripts/run-mock-tests.sh", 'run_gate "tesla-ble incremental source admission" 120 python3 test/test_patch_incremental.py',
          '# removed incremental patch admission', "does not execute incremental patch admission"),
         ("scripts/run-mock-tests.sh", 'run_gate "exact dependency source admission" 120 python3 test/test_dependency_sources.py',
@@ -1314,9 +1322,9 @@ def self_test(root: Path) -> None:
         ("scripts/run-mock-tests.sh", 'run_gate "dependency harness source ordering" 120 python3 test/test_dependency_harness.py',
          'exit 0\nrun_gate "dependency harness source ordering" 120 python3 test/test_dependency_harness.py', "strict browser invocation flow"),
         ("scripts/test-build-contracts.sh", 'python3 "$repo_root/scripts/check-otadata-contract.py" --self-test',
-         'python3 "$repo_root/scripts/missing-otadata-contract.py" --self-test', "otadata contract gate"),
+         'python3 "$repo_root/scripts/missing-otadata-contract.py" --self-test', "shared self-test must have one build-contract owner"),
         ("scripts/test-build-contracts.sh", 'python3 "$repo_root/scripts/prepare-reused-release.py" --self-test',
-         'python3 "$repo_root/scripts/missing-reused-release.py" --self-test', "immutable Release reuse gate"),
+         'python3 "$repo_root/scripts/missing-reused-release.py" --self-test', "shared self-test must have one build-contract owner"),
         ("scripts/run-mock-tests.sh", "        scripts/check-dependency-contract.py \\\n",
          "", "strict inventory omits scripts/check-dependency-contract.py"),
         ("scripts/run-mock-tests.sh", "        scripts/check-otadata-contract.py \\\n",
@@ -1508,9 +1516,9 @@ def self_test(root: Path) -> None:
         ("scripts/test-build-contracts.sh", '  *) echo "usage: test-build-contracts.sh [--build-and-manifest]" >&2; exit 2 ;;',
          '  *) build_and_manifest_only=1 ;;', "build-contract profile invocation flow"),
     ])
-    for name in ("check-dependency-contract.py", "check-otadata-contract.py",
-                 "check-release-assets.py", "prepare-reused-release.py", "check-published-release.py"):
-        call = f'python3 "$repo_root/scripts/{name}" --self-test'
+    for name in SHARED_BUILD_SELFTESTS:
+        interpreter = "" if name.endswith(".sh") else "python3 "
+        call = f'{interpreter}"$repo_root/scripts/{name}" --self-test'
         for replacement in ('# ' + call, 'if false; then ' + call + '; fi', call + ' || true'):
             mutations.append(("scripts/test-build-contracts.sh", call, replacement,
                               "shared publication self-test invocation flow"))

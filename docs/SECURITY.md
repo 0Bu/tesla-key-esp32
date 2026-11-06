@@ -252,8 +252,10 @@ files, 28 diagnostics, 40 stable Release assets and 16 manifest parts. Do not us
 The main DAG starts `prepare`, `logic-test` and `logic-harness` together. The producer matrix
 `build-target` and the matrix `independent-rebuild-target` each need only `prepare`, so producer
 and independent target compiles run concurrently before protected publication. The `build` join
-needs `prepare`, both host jobs and `build-target`; `independent-rebuild` needs `build` and every
-`independent-rebuild-target` leg; `publish` and then `deploy` follow. `build` is a required status
+needs `prepare`, both host jobs and `build-target`; `independent-rebuild` needs `prepare` and every
+`independent-rebuild-target` leg, using the same prepared release version. The key-free independent
+join can finish before `build`; `publish` requires both successful joins, compares their complete
+inventories and bytes before key use, and then `deploy` follows. `build` is a required status
 check, and GitHub treats a check skipped because a need failed as passed, so `build` runs with
 `if: ${{ always() }}` and fails first unless every need succeeded. The independent join has no key.
 

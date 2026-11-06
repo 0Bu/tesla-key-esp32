@@ -364,15 +364,8 @@ def probe_harness_invocations(source: str) -> None:
         # generator and native guards through the actual shell, including failure propagation.
         stub = '''import json,os,sys
 from pathlib import Path
-name=Path(sys.argv[0]).name; args=sys.argv[1:]
-if name=="git":
-    if args[-2:]==["rev-parse","HEAD"]: print(os.environ["FLOW_MBEDTLS_COMMIT"])
-    else: raise SystemExit(2)
-elif name=="compiler":
-    if "-o" in args:
-        path=Path(args[args.index("-o")+1]); path.parent.mkdir(parents=True,exist_ok=True)
-        path.write_text("#!/bin/sh\\nexit 0\\n"); path.chmod(0o700)
-elif name=="python3":
+args=sys.argv[1:]
+if Path(sys.argv[0]).name=="python3":
     if args and args[0].endswith("/test/generate_ble_deferred_adapter.py"):
         with Path(os.environ["FLOW_TRACE"]).open("a") as out: out.write(json.dumps(args)+"\\n")
         if os.environ["FLOW_FAIL_GUARD"]=="generate": raise SystemExit(37)
@@ -396,12 +389,37 @@ elif name=="python3":
         else: print("0"*64)
     elif args and args[0]=="-": sys.stdin.read()
     else: raise SystemExit(2)
-elif name=="uname": print(os.environ["FLOW_SYSTEM"])
-elif name!="ar": raise SystemExit(2)
+else: raise SystemExit(2)
 '''
-        for name in ("git", "compiler", "python3", "uname", "ar"):
+        # These tools have no Python behavior to exercise. Keep their exact inert effects in
+        # shell so every full-source flow/mutation does not start an interpreter per fake object.
+        shell_stubs = {
+            "git": '''previous= last=
+for argument do previous=$last; last=$argument; done
+[ "$previous" = rev-parse ] && [ "$last" = HEAD ] || exit 2
+printf '%s\\n' "$FLOW_MBEDTLS_COMMIT"
+''',
+            "compiler": '''while [ "$#" -gt 0 ]; do
+  if [ "$1" = -o ]; then
+    shift
+    [ "$#" -gt 0 ] || exit 2
+    parent=.
+    case "$1" in */*) parent=${1%/*}; [ -n "$parent" ] || parent=/ ;; esac
+    mkdir -p "$parent" || exit 2
+    printf '#!/bin/sh\\nexit 0\\n' > "$1" || exit 2
+    chmod 700 "$1" || exit 2
+    exit 0
+  fi
+  shift
+done
+exit 0
+''',
+            "uname": 'printf \'%s\\n\' "$FLOW_SYSTEM"\n',
+            "ar": "exit 0\n",
+        }
+        for name, body in {**shell_stubs, "python3": stub}.items():
             tool = tools / name
-            tool.write_text("#!" + sys.executable + "\n" + stub)
+            tool.write_text(("#!" + sys.executable if name == "python3" else "#!/bin/sh") + "\n" + body)
             tool.chmod(0o700)
         env = os.environ.copy()
         for name in list(env):
