@@ -501,7 +501,8 @@ retains its existing semantics.
 `sys.runtime_state` is `booting`, `ready`, `safe_mode` or `fatal`. Fatal services remain stopped for this process; a status endpoint exists only if HTTP startup succeeded. `sys.fatal_component` appears only for Fatal and names the first bounded component category (`clock`, `nvs`, `configuration`, `identity`, `bluetooth`, `http`, `network`, `vehicle`, `ota`, `heap_supervisor`, `application` or `unknown`). State and category come from one atomic cached snapshot; these fields do not probe storage/OTA metadata, restart, send a key or contact the vehicle.
 
 `sys.diag_dropped_lines` counts capture attempts lost to an unavailable or busy diagnostic ring;
-`syslog.dropped_lines` counts full-queue losses. Both are boot-local unsigned counters modulo 2^32,
+`syslog.dropped_lines` counts local losses from a full queue, unresolved DNS, packet encoding,
+socket/send failures and failed boot/crash replay. Both are boot-local unsigned counters modulo 2^32,
 omitted at zero. Clearing the ring does not reset the loss counter. Neither proves UDP delivery.
 
 `ble.rssi` is a live-link sample while connected. During failed connection attempts it may
