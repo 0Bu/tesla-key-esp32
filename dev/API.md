@@ -209,10 +209,10 @@ request to a known device address can still trigger this foreground read. See [s
 | `POST /set_time` | `{"ms":<epoch milliseconds>}` — temporary browser estimate, neither persisted nor authority for new durable dates. After valid body/schema intake, synchronized NTP makes this a successful no-op. |
 | `POST /set_ota` | `{"channel":"release"\|"dev"}` — switch the update channel. |
 | `GET` or `POST /ota/check[?ms=<epoch>][&pr=<N>]` | Start a background update check (then poll `/ota/status`); `pr=<N>` targets that PR's preview build. |
-| `POST /ota/update[?pr=<N>]` | Start the background self-update (downloads, then reboots). |
+| `POST /ota/update?offer=<ID>[&pr=<N>]` | Consume the exact checked offer and start its background download/install. |
 | `POST /ota/upload` | Dev-channel-only raw signed app upload; see [direct upload](#direct-signed-firmware-upload). |
-| `GET /ota/status` | Progress/offer plus `upload`, `busy`, `verification`, `recovery_required_bytes`, `project`, `target`, full `elf_sha256` and per-boot `boot_id`; `pr` only while a PR build is targeted. |
-| `GET /ota/changelog` | Release notes for the offered update: `text/plain`, ≤ 1024 bytes, `no-store`; `204` when none. |
+| `GET /ota/status` | Progress/offer plus `channel` (checked source), `configured_channel`, `offer_id`, `upload`, `busy`, `verification`, `recovery_required_bytes`, `project`, `target`, full `elf_sha256` and per-boot `boot_id`; `pr` only while a PR build is targeted. An available offer includes `image_sha256` and `image_bytes`. |
+| `GET /ota/changelog[?offer=<ID>]` | Release notes for the current offer: `text/plain`, ≤ 1024 bytes, `no-store`; `204` when none, `409` when the supplied ID is stale. |
 | `GET /api/proxy/1/version` | `{version, platform}` (`"ESP32"`/`"ESP32-S3"`/`"ESP32-C3"`/`"ESP32-C6"`). |
 | `POST /mcp` | MCP server for AI agents (Streamable HTTP, stateless JSON-RPC 2.0; `GET` → `405`, no SSE): [MCP.md](MCP.md). |
 
@@ -249,6 +249,22 @@ A timed-out operation can keep later checks or updates at `409` while cleanup is
 A deadline, memory failure or terminal network-cleanup
 failure withdraws the update offer. Optional release-note failure is best-effort only after clean
 connection closure; details and blocking-SDK limits belong to [Architecture](ARCHITECTURE.md#ota-self-update).
+
+An available offer is one coherent snapshot of source channel, optional PR, version, selected
+notes and image identity. Save its opaque 24-character lowercase hexadecimal `offer_id` from
+`/ota/status`, request notes with that ID and submit the same ID and PR when confirming.
+Changing channel, starting another check or accepting an install/upload invalidates an earlier
+offer; switching back does not restore it. Saving the same channel preserves the offer. Reboot
+discards all offers. Missing/stale IDs or a mismatched PR return `409` with
+`{result:false,offer_changed:true,reason}`; malformed or duplicate offer parameters return `400`.
+These refusals perform no image download or flash operation and leave another client's valid
+offer intact. Run another check and confirm its result; never retry the old install automatically.
+After admission, the worker re-fetches and compares the complete manifest, selected notes,
+version and selected image hash/size before downloading. A changed candidate enters `error`
+and requires a fresh check. The received signed image must match its confirmed byte count and
+SHA-256 before SDK signature verification and boot selection. A manifest must contain the
+selected app part's path, offset, size and SHA-256; version-only legacy manifests are refused.
+This identity check does not authenticate the unsigned manifest or replace RSA verification.
 
 New MQTT and Syslog submissions accept at most 64 UTF-8 bytes; an unchanged stored value remains
 a no-write acknowledgement. Existing targets up to 120 bytes survive unrelated saves, including
@@ -336,7 +352,7 @@ errors with the route's flat or wrapped envelope. Successful `/diag` exports rem
 | `body_controller_state` | Wrapped `response`; a completed retrieval attempt returns `200`; inspect `response.result` for its outcome. |
 | Configuration | Wrapped `response` for time/VIN/MQTT/Syslog/WiFi. Key generation is flat `{result,reason}`. Channel success is flat `{ok,result,channel}`; channel errors are wrapped. Invalid intake is `400`/`413`, pending VIN identity recovery `409`, unavailable resources `503`, failed persistence `500`. |
 | OTA check | Flat `{started,reason?}`; `200` accepts the queued check, `409` for busy, `503` for unavailable service/queue, `500` for setup failure. Later memory/worker failures appear through `/ota/status`. |
-| OTA update | Flat `{result,reason}`; `200` on start; `409` for busy/probation, `503` for unavailable service, insufficient ordinary-entry recovery memory or unknown image state, `500` for worker startup failure. |
+| OTA update | Flat `{result,reason,offer_changed?}`; `200` on start; `400` for malformed/duplicate binding, `409` for busy/probation or missing/stale/mismatched offer (`offer_changed:true`), `503` for unavailable service, insufficient ordinary-entry recovery memory or unknown image state, `500` for worker startup failure. |
 | Pre-effect REST OOM fallback | Flat `{result:false,reason:"out of memory"}`, `503`, even for routes whose normal envelope is wrapped. |
 | Degraded mutation reply | HTTP `200` with explicit application outcome, as described below; this status alone does not establish success. |
 
