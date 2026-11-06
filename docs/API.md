@@ -566,8 +566,9 @@ the field and entity IDs stay stable.
 
 All state topics are retained JSON. Numeric fields appear only when the car reported them, so an
 unseen value shows as *unknown* in HA, not a phantom `0`; range, rate and odometer are converted to
-metric (km, km/h). An invalid or initially empty cache publishes retained `{}` once to clear stale
-readings, then stays quiet until valid data returns. While a parked car sleeps, ordinary source polls pause and MQTT keeps serving
+metric (km, km/h). An invalid or initially empty cache publishes retained `{}` once per connection
+to clear stale readings; reconnecting rearms that clear. It then stays quiet until valid data returns.
+While a parked car sleeps, ordinary source polls pause and MQTT keeps serving
 last-known values until the next successful relevant poll. Charge and drive can also refresh on
 the wake/bootstrap one-shot outside an active window. These topics carry no per-domain age;
 broker publication or link state alone does not establish each retained field's freshness.
