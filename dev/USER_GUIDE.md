@@ -96,6 +96,9 @@ In the web UI, click the download icon on **Firmware**, confirm the offered upda
 the device to reboot. Click the version to select **Release** (official releases, default) or
 **Development** (main builds). OTA preserves configuration and keys.
 The update dialog shows up to five change entries at once. Scroll inside the list to read more.
+The dialog keeps the channel and version from its check. If another client changes the channel
+or checks again, or the published candidate changes, the old confirmation is refused. Check
+again and confirm the new offer. Saving the same channel leaves a checked offer valid.
 
 For USB recovery, **Connect** checks the chip and reads the installed partition table and firmware
 without writing. This restarts the board through its bootloader; the log then follows its boot.
