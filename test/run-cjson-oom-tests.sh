@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # Compile the ownership/OOM gate against the exact cJSON source the firmware links.
 set -euo pipefail
+offer_omissions=0
+case "${1:-}" in
+    "") [ "$#" -eq 0 ] || exit 2 ;;
+    --ota-offer-omissions) [ "$#" -eq 1 ] || exit 2; offer_omissions=1 ;;
+    *) echo 'usage: run-cjson-oom-tests.sh [--ota-offer-omissions]' >&2; exit 2 ;;
+esac
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -143,16 +149,27 @@ PYVERIFY
 "$cc" -std=c11 -Wall -Wextra -Werror ${sanitize_flags[@]+"${sanitize_flags[@]}"} \
     -I"$repo_root/test/ota_http_parser" -c "$repo_root/test/ota_http_parser/http_parser.c" -o "$work/http_parser.o"
 ota_test_flags=(-pthread -DF145_HOST_TEST_HOOKS=1)
-"$cxx" -std=c++17 -Wall -Wextra -Werror "${ota_test_flags[@]}" ${sanitize_flags[@]+"${sanitize_flags[@]}"} \
+ota_crypto_link=()
+if [[ "$(uname -s)" == Linux ]]; then
+    # Reference hashing for passive PSA doubles; no development headers or crypto build.
+    ota_crypto_link=(-l:libcrypto.so.3)
+fi
+compile_ota_fixture() {
+local output="$1" writer="$2"
+"$cxx" -std=c++17 -Os -Wall -Wextra -Werror "${ota_test_flags[@]}" ${sanitize_flags[@]+"${sanitize_flags[@]}"} \
     -I"$repo_root/test/ota_stubs" -I"$repo_root/test/ota_http_parser" \
     -I"$repo_root/main" -I"$cjson_dir" -I"$work" \
     "$repo_root/test/test_ota_tls_admission.cpp" "$repo_root/main/ota_transport.cpp" \
     "$repo_root/main/ota_http.cpp" "$repo_root/main/ota_coordinator.cpp" \
-    "$repo_root/main/ota_writer.cpp" "$repo_root/main/stack_watch.cpp" \
-    "$work/cJSON.o" "$work/http_parser.o" -lm -o "$work/test_ota_tls_admission"
+    "$writer" "$repo_root/main/stack_watch.cpp" \
+    "$work/cJSON.o" "$work/http_parser.o" ${ota_crypto_link[@]+"${ota_crypto_link[@]}"} -lm -o "$output"
+}
+compile_ota_fixture "$work/test_ota_tls_admission" "$repo_root/main/ota_writer.cpp"
 "$work/test_ota_tls_admission" normal
 "$work/test_ota_tls_admission" budget
 "$work/test_ota_tls_admission" cleanup-cas
+"$work/test_ota_tls_admission" offer-exhaustion
+"$work/test_ota_tls_admission" channel-exhaustion
 # These disposable process-terminal fixtures assert retained authority before _Exit. They
 # intentionally do not claim post-effect task lifetime/LSan reclamation evidence.
 "$work/test_ota_tls_admission" commit
@@ -178,3 +195,19 @@ if "$cxx" -std=c++17 "${ota_test_flags[@]}" -DCONFIG_HTTPD_QUEUE_WORK_BLOCKING=1
 fi
 grep -Fq 'Deferred OTA metadata admission requires nonblocking HTTP work submission' "$work/blocking.log"
 echo 'OTA deferred HTTP inline/configuration negative controls passed'
+
+# Focused local proof after changing byte binding. Remote default coverage keeps the real
+# regression cases above; do not add repeated complete compilation to every ordinary host run.
+if [[ "$offer_omissions" == 1 ]]; then
+    for omission in digest length; do
+        python3 "$repo_root/test/ota_offer_mutations.py" "$omission" "$work/ota_writer_mutant.cpp"
+        compile_ota_fixture "$work/test_ota_offer_mutant" "$work/ota_writer_mutant.cpp"
+        if "$work/test_ota_offer_mutant" image-binding >"$work/$omission.log" 2>&1; then
+            echo "OTA $omission omission unexpectedly passed" >&2
+            exit 1
+        fi
+        grep -Fq 'OTA application ' "$work/$omission.log"
+        grep -Fq 'ends==0' "$work/$omission.log"
+    done
+    echo 'OTA actual digest/length runtime omission controls passed'
+fi

@@ -128,9 +128,9 @@ const reviewedSkillSha256 = new Map([
   ["ota-release-verify", "52a09232386f75c8382abbab08243b9a2b292e6b42a4f146c994343a22e4f433"],
   ["pr-hygiene", "1f12e067bba7d7ee60e30da296e0436b9754a01b42813cfa472e2455130181ed"],
   ["project-review", "b1e144671ecdb5ed8e86c966901969074e8661bb0fa5f71e133923eabfb87c23"],
-  ["ship", "7a465a7200a5d08aa541256bbbd696e72cc00e270ca020a666ad8a159de4b191"],
+  ["ship", "6d1705802ee9de4cd91f722f2e0bbf298baa859d279b895d16bb4a3e51a51005"],
   ["skill-audit", "965d43e8820a728ede255da0cd14bb18b46f1d3df223ea6b0e378205d2141436"],
-  ["usb-recovery", "60120c376e8dac1546cc92aafb98f946075753957db1dd0cb012106c1dfc56ca"],
+  ["usb-recovery", "1716017ae820abf46b2f8012749b753396ab07dca07c16ef015daea7a11d0676"],
   ["vehicle-command-audit", "c620e6ab777d5017c4402a8bbcca1105b4271ac13e02f0bf22f7196b121c7702"],
 ]);
 const featureDocsScopeTokens = [

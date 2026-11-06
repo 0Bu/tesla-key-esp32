@@ -5,6 +5,66 @@ import vm from "node:vm";
 
 const appSource = fs.readFileSync(new URL("../main/www/app.js", import.meta.url), "utf8");
 
+const OFFER_ID = "123456789abcdef000000001";
+function offered(fields = {}) {
+  return { state: "idle", update_available: true, progress: 0, message: "update available",
+    current: "1.5.0", available: "1.6.0", channel: "release", offer_id: OFFER_ID, ...fields };
+}
+function seedOffer(context, fields = {}) {
+  const offer = offered(fields);
+  context.otaOffer = offer;
+  context.otaAvail = offer.available;
+  return offer;
+}
+
+test("two clients bind the dialog label, notes and install to the captured offer", async () => {
+  const { context, element } = loadUi();
+  const source = seedOffer(context, { pr: 42, available: "1.6.0-PR-42" });
+  context.otaChannel = "dev"; // A different client's setting must not relabel Release.
+  context.location.search = "?pr=77";
+  const calls = [];
+  context.fetch = async url => {
+    calls.push(url);
+    if (url.startsWith("/ota/changelog")) return { ok: true, status: 200, text: async () => "Checked notes" };
+    return { ok: false, status: 409, json: async () => ({ result: false, offer_changed: true, reason: "Offer replaced" }) };
+  };
+  const opened = context.openFwUpdate();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(element("otaChannel").textContent, "PR preview #42");
+  source.pr = 77; source.available = "1.7.0"; source.offer_id = "aaaaaaaaaaaaaaaa00000002";
+  context.closeOtaModal(true); await opened;
+  assert.deepEqual(calls, ["/ota/changelog?offer=" + OFFER_ID, "/ota/update?offer=" + OFFER_ID + "&pr=42"]);
+  assert.equal(context.otaOffer, null); assert.equal(context.otaAvail, null);
+  assert.match(element("toasts").children[0].innerHTML, /Offer replaced/);
+});
+
+test("Release remains Release when another client selects Dev", async () => {
+  const { context, element } = loadUi();seedOffer(context);context.otaChannel = "dev";
+  context.fetch = async () => ({ ok: true, status: 200, text: async () => "Notes" });
+  const opened = context.openFwUpdate();await new Promise(resolve => setImmediate(resolve));
+  assert.equal(element("otaChannel").textContent, "Release");
+  context.closeOtaModal(false);await opened;
+});
+
+test("stale bound notes require another check and cannot reach confirmation or install", async () => {
+  const { context, element } = loadUi();seedOffer(context);const calls = [];
+  context.fetch = async url => {calls.push(url);return {ok:false,status:409};};
+  await context.openFwUpdate();
+  assert.deepEqual(calls, ["/ota/changelog?offer=" + OFFER_ID]);
+  assert.equal(element("otaModal").classList.contains("hide"), true);
+  assert.equal(context.otaOffer, null);assert.equal(context.otaAvail, null);
+});
+
+test("unbound and malformed confirmations cannot make an install request", async () => {
+  for (const offer of [null, offered({offer_id:""}), offered({offer_id:"123456789abcdef000000000"}),
+    offered({offer_id:"123456789abcdef0ffffffff"}), offered({channel:"other"})]) {
+    const {context}=loadUi();let calls=0;context.otaOffer=offer;
+    context.fetch=async()=>{++calls;throw new Error("must not dispatch");};
+    await context.startOtaUpdate();
+    assert.equal(calls,0);assert.equal(context.otaOffer,null);
+  }
+});
+
 function loadUi(opts = {}) {
   const elements = new Map();
   const listeners = {};
@@ -361,10 +421,10 @@ test("raw-upload resumption clears stale offers, renders progress and locks conf
   }
 });
 
-test("raw uploads have no feed offer and legacy feed status remains compatible", async () => {
+test("raw uploads have no feed offer and active feed status retains its target", async () => {
   const { context } = loadUi();
   const feed = { state: "downloading", progress: 20, message: "working", available: "1.6.4",
-    current: "1.6.3", update_available: true };
+    current: "1.6.3", update_available: false };
   let status = feed;
   context.fetch = async () => ({ ok: true, json: async () => status });
   assert.equal((await context.otaStatus()).available, "1.6.4");
@@ -431,9 +491,9 @@ test("a resumed upload supersedes an already open feed confirmation", async () =
     const { context, element } = loadUi();
     const upload = { state: "downloading", progress: 20, message: "uploading", available: "",
       current: "1.6.3", update_available: false, upload: true, boot_id: "0123456789abcdef" };
-    let response = { ...upload, state: "idle", upload: false, update_available: true, available: "1.6.4" };
+    let response = { ...upload, ...offered({ available: "1.6.4" }), upload: false };
     context.state = { version: "1.6.3" };
-    if (action === "openFwUpdate") context.otaAvail = "1.6.4";
+    if (action === "openFwUpdate") seedOffer(context, { available: "1.6.4" });
     context.loadOtaChangelog = async () => "A feed change";
     context.fetch = async url => ({ ok: true, json: async () => url.startsWith("/ota/check") ? { started: true } : response });
     const pending = context[action]();
@@ -1269,6 +1329,7 @@ test("otaCheck triggers load toast and resolves to up to date toast when idle", 
 test("OTA starts wait for a complete status body and pause new general polls", async () => {
   for (const action of ["otaCheck", "startOtaUpdate"]) {
     const {context}=loadUi();
+    if (action === "startOtaUpdate") seedOffer(context);
     const calls=[];
     const frame={paired:false,vin:"UNKNOWN",key_present:true,version:"1.6.3"};
     let finishBody;
@@ -1277,7 +1338,7 @@ test("OTA starts wait for a complete status body and pause new general polls", a
       if(url.startsWith("/status"))return {ok:true,json:()=>new Promise(resolve=>{finishBody=()=>resolve(frame);})};
       if(url.startsWith("/ota/check"))return {ok:true,status:200,json:async()=>({started:true})};
       if(url.startsWith("/ota/update"))return {ok:true,status:200,json:async()=>({result:true})};
-      if(url.startsWith("/ota/status"))return {ok:true,json:async()=>({state:action==="otaCheck"?"checking":"downloading",progress:1,message:"working",available:"1.6.4",current:"1.6.3",update_available:true})};
+      if(url.startsWith("/ota/status"))return {ok:true,json:async()=>({state:action==="otaCheck"?"checking":"downloading",progress:1,message:"working",available:"1.6.4",current:"1.6.3",update_available:false})};
       throw new Error("unexpected request "+url);
     };
     const status=context.poll();
@@ -1323,6 +1384,7 @@ test("a cancelled status-wait cannot launch OTA or cancel its replacement flow",
 test("waiting for status does not renew the original OTA deadline", async () => {
   for(const action of ["otaCheck","startOtaUpdate"]){
     const {context,element}=loadUi();let finishBody;const calls=[];
+    if (action === "startOtaUpdate") seedOffer(context);
     let now=Date.now();context.Date=class extends Date{static now(){return now;}};
     context.fetch=async url=>{calls.push(url);return {ok:true,json:()=>new Promise(resolve=>{finishBody=()=>resolve({version:"1.6.3"});})};};
     const status=context.poll();await new Promise(resolve=>setImmediate(resolve));
@@ -1805,7 +1867,7 @@ test("openFwUpdate with update available allows installing through startOtaUpdat
         async json() {
           return {
             state: "idle",
-            update_available: true,
+            update_available: true, offer_id: OFFER_ID, channel: "release",
             progress: 0,
             message: "update available",
             available: "1.5.0",
@@ -1821,7 +1883,7 @@ test("openFwUpdate with update available allows installing through startOtaUpdat
   };
 
   context.state = { version: "1.4.0" };
-  context.otaAvail = "1.5.0";
+  seedOffer(context, { current: "1.4.0", available: "1.5.0" });
 
   // Simulate user confirming install: closeOtaModal(true)
   setTimeout(() => {
@@ -1888,7 +1950,8 @@ test("UI disables settings and firmware controls during active OTA, closes open 
   assert.equal(element("verLink").disabled, false);
   assert.equal(element("paneSettings").classList.contains("ota-busy"), false);
 
-  // Trigger OTA update
+  // Trigger OTA update from an explicitly checked offer.
+  seedOffer(context);
   await context.startOtaUpdate("1.6.0");
 
   // Upon starting update:
@@ -1994,7 +2057,7 @@ test("tapping the update check button shows a toast and no modal when up to date
   toasts.length = 0;
   statusResponse = {
     state: "idle",
-    update_available: true,
+    update_available: true, offer_id: OFFER_ID, channel: "release",
     progress: 0,
     message: "update available",
     available: "1.5.0",
@@ -2018,7 +2081,7 @@ test("tapping the update check button shows a toast and no modal when up to date
   assert.equal(element("otaModal").classList.contains("hide"), true);
 
   // Case 3: When otaAvail is already set, tapping version link immediately opens otaModal
-  context.otaAvail = "1.5.0";
+  seedOffer(context, { current: "1.4.0", available: "1.5.0" });
   installPromise = context.openFwUpdate();
   await new Promise(r => setTimeout(r, 20));
   assert.equal(element("otaModal").classList.contains("hide"), false, "otaModal opens immediately when otaAvail is known");
@@ -2085,12 +2148,11 @@ test("Update confirmation dialog survives periodic background polls and does not
         async json() {
           return {
             state: "idle",
-            update_available: true,
+            update_available: true, offer_id: OFFER_ID, channel: "release",
             progress: 0,
             message: "update available",
             available: "1.5.0",
-            current: "1.4.0",
-            channel: "release"
+            current: "1.4.0"
           };
         }
       };
@@ -2456,7 +2518,7 @@ test("a second tap during the changelog fetch neither opens a second dialog nor 
   context.fetch = async (url) => {
     if (url.startsWith("/ota/check")) return { ok: true, status: 200, async json() { return { started: true }; } };
     if (url.startsWith("/ota/status")) return { ok: true, status: 200, async json() {
-      return { state: "idle", update_available: true, progress: 0, message: "update available", available: "1.5.0", current: "1.4.0" };
+      return offered({ current: "1.4.0", available: "1.5.0" });
     } };
     if (url.startsWith("/ota/changelog")) { changelogCalls++; await changelogGate; return { ok: true, status: 200, async text() { return "notes"; } }; }
     if (url.startsWith("/ota/update")) { updates.push(url); return { ok: true, status: 200, async json() { return { result: true }; } }; }
@@ -2494,7 +2556,7 @@ test("declining the update prompt frees the firmware controls and hands focus ba
   context.fetch = async (url) => {
     if (url.startsWith("/ota/check")) return { ok: true, status: 200, async json() { return { started: true }; } };
     if (url.startsWith("/ota/status")) return { ok: true, status: 200, async json() {
-      return { state: "idle", update_available: true, progress: 0, message: "update available", available: "1.5.0", current: "1.4.0" };
+      return offered({ current: "1.4.0", available: "1.5.0" });
     } };
     if (url.startsWith("/ota/changelog")) return { ok: true, status: 200, async text() { return ""; } };
     return { ok: true, status: 200, async json() { return {}; } };
@@ -2649,10 +2711,10 @@ test("?pr=<N> on the page selects the PR preview for check and update, strictly"
   const check = urls.find((u) => u.url.startsWith("/ota/check"));
   assert.match(check.url, /^\/ota\/check\?pr=42&ms=\d+$/);
 
-  context.otaAvail = "1.6.0-PR-42";
+  seedOffer(context, { available: "1.6.0-PR-42", pr: 42 });
   await context.startOtaUpdate("1.6.0-PR-42");
   const update = urls.find((u) => u.url.startsWith("/ota/update"));
-  assert.equal(update.url, "/ota/update?pr=42");
+  assert.equal(update.url, "/ota/update?offer=" + OFFER_ID + "&pr=42");
   assert.equal(update.method, "POST");
 
   // Without a valid selection the regular channel requests are unchanged.
@@ -2724,6 +2786,7 @@ test("degraded channel outcomes in either envelope never claim success or start 
 test("uncertain OTA starts preserve their reason and never start polling or retrying", async () => {
   for (const action of ['otaCheck','startOtaUpdate']) {
     const {context,element}=loadUi(); const calls=[];
+    if (action === 'startOtaUpdate') seedOffer(context);
     context.fetch=async (url)=>{ calls.push(url); return {ok:true,status:200,async json(){return {result:false,started:null,outcome:'unknown',reply_degraded:true,reason:'operation outcome unknown; reply degraded'};}}; };
     await context[action]();
     assert.equal(calls.length,1);
@@ -2736,6 +2799,7 @@ test("OTA start refusals retain device reasons without polling or retrying", asy
   for (const action of ['otaCheck','startOtaUpdate']) {
     for (const status of [409,500,503]) {
       const {context,element}=loadUi(); const calls=[];
+      if (action === 'startOtaUpdate') seedOffer(context);
       const reason='running firmware is still pending verification <&>';
       context.fetch=async (url,options)=>{
         calls.push({url,options});
@@ -2749,6 +2813,7 @@ test("OTA start refusals retain device reasons without polling or retrying", asy
     }
     for (const body of [null,{reason:42},'unreadable']) {
       const {context,element}=loadUi(); const calls=[];
+      if (action === 'startOtaUpdate') seedOffer(context);
       context.fetch=async (url)=>{ calls.push(url); return {ok:false,status:503,async json(){
         if(body==='unreadable') throw new Error('invalid JSON'); return body;
       }}; };
@@ -2767,7 +2832,8 @@ test("reopening an available PR update retains its preview badge", async () => {
     ['?xpr=42','Release'], ['?pr=12345678','Release'],
   ]) {
     const {context,element}=loadUi();
-    context.location.search=search; context.otaAvail=label==='Release'?'1.6.0':'1.6.0-PR-42';
+    context.location.search=search;
+    seedOffer(context, { available: label==='Release'?'1.6.0':'1.6.0-PR-42', pr: label==='Release'?0:42 });
     context.fetch=async()=>({ok:false,status:409,async json(){return {result:false,reason:'still pending verification'};}});
     await context.startOtaUpdate(context.otaAvail);
     assert.equal(context.otaBusy,false);
@@ -2782,6 +2848,7 @@ test("reopening an available PR update retains its preview badge", async () => {
 test("OTA refusal bodies share the start deadline and cannot leave the UI locked", async () => {
   for (const action of ['otaCheck','startOtaUpdate']) {
     const {context,element}=loadUi(); let expire,body=false,aborted=false,calls=0;
+    if (action === 'startOtaUpdate') seedOffer(context);
     context.AbortController=class {constructor(){this.signal={};} abort(){aborted=true;}};
     context.setTimeout=(callback,ms)=>{if(ms===context.OTA_HTTP_TIMEOUT_MS) expire=callback; return 1;};
     context.fetch=async()=>{++calls;return {ok:false,status:409,json(){body=true;return new Promise(()=>{});}};};

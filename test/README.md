@@ -509,6 +509,28 @@ probation/start admission, writer validation failure and a blocked connect that 
 retirement without granting a new effect. The old cheap runtime target retains raw query/cache
 cases; startup is no longer represented by a fake integer task parameter.
 
+The same fixture compiles actual update/status/notes/channel handlers against that OTA application.
+Two-client cases cover channel ABA, same-channel no-op, superseding checks, bound notes,
+missing/stale/duplicate IDs and mismatched PRs with zero image effects. Same-version manifest
+and selected-note changes refuse before image transfer. Dev and PR candidates reach mandatory
+SDK verification, and both generation/channel exhaustion remain fail-closed while signed direct
+upload stays available. Altered payloads and short/long images never reach SDK end/selection.
+The focused local `bash test/run-cjson-oom-tests.sh --ota-offer-omissions` also requires precise
+runtime assertion failures after separately omitting the actual digest and final byte-count guard;
+ordinary CI runs the regression cases without these repeated compilations.
+Passive PSA hashing uses CommonCrypto
+on macOS or the OpenSSL 3 runtime (`libcrypto.so.3`) on Linux, with a known SHA-256 answer and
+injected compute/setup/update/finish failures. This exercises control flow and byte identity,
+not the target PSA driver, cryptographic ABI or physical flash. The complete actual OTA adapter
+and its translation units compile with host `-Os`, including sanitizer and omission modes,
+so optimized control flow is exercised alongside the target size profile.
+
+Effective-build self-tests exercise the six OTA size-profile sources through matching compile
+and Ninja vectors on all four targets. Missing, duplicate, reordered and overriding flags,
+foreign object owners, basename aliases and changed/extra CMake property blocks must refuse.
+The real four-target builds separately verify that the exact `-Og -Os` profile reaches these
+sources, with `-Og` retained elsewhere, unchanged stack limits and independent app/ELF byte checks.
+
 The manifest-lifetime case tracks allocations from the real pinned cJSON parser for a multi-part
 manifest and requires them to be freed before reserving the notes body. It still checks the copied
 version, two metadata connections and no image-write effect. The UI fixtures hold a general status

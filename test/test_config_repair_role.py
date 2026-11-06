@@ -116,21 +116,30 @@ class Role(unittest.TestCase):
     self.assertIsNotNone(block)
     expected=re.findall(r'"([^"\n]+\.(?:c|cpp|cc|cxx))"',block[1])
     self.assertFalse(set(C.C.MAINTENANCE_SOURCES)&set(expected))
+    build=load('repair_build_profile_controls',ROOT/'scripts/check-build-semantics.py')
+    profile_sources=re.findall(r'"([^"\n]+\.cpp)"',build.OTA_SIZE_COMPILE_BLOCK)
+    self.assertEqual({'main/'+name for name in profile_sources},build.OTA_SIZE_SOURCES)
+    expected_profile=';'.join([*profile_sources,'PROPERTIES','COMPILE_OPTIONS','-Os'])
     # Execute the actual full component CMake with owned command doubles. No SDK, generator,
     # compiler or target is run; only the role-dependent source registrations are observed.
     prefix='cmake_minimum_required(VERSION 3.16)\nfunction(idf_component_register)\n    cmake_parse_arguments(OWNER "" "" "SRCS;INCLUDE_DIRS;EMBED_FILES;REQUIRES" ${ARGN})\n    set(COMPONENT_LIB owned_fake_main PARENT_SCOPE)\n    file(WRITE "${TRACE}" "base=${OWNER_SRCS}\\n")\nendfunction()\nfunction(target_sources owner visibility)\n    if(NOT owner STREQUAL "owned_fake_main" OR NOT visibility STREQUAL "PRIVATE")\n        message(FATAL_ERROR "unowned source registration")\n    endif()\n    file(APPEND "${TRACE}" "extra=${ARGN}\\n")\nendfunction()\nfunction(target_compile_options)\nendfunction()\nfunction(add_custom_command)\nendfunction()\nfunction(add_custom_target)\nendfunction()\nfunction(add_dependencies)\nendfunction()\n'
     with tempfile.TemporaryDirectory(prefix='cfg-role-cmake-') as temporary:
       directory=Path(temporary);script=directory/'owned.cmake';trace=directory/'trace'
-      script.write_text(prefix+text)
+      # CMake's source-property command is not scriptable under -P. Observe its exact call
+      # alongside the owned source graph; the effective-build validator owns the allowed profile.
+      profile_observer='function(set_source_files_properties)\n    file(APPEND "${TRACE}.properties" "${ARGN}\\n")\nendfunction()\n'
+      script.write_text(prefix+profile_observer+text)
       for target in C.C.TARGETS:
        for enabled in (False,True):
+        properties=directory/'trace.properties';properties.write_text('')
         env={k:v for k,v in os.environ.items() if k not in ('ENV','BASH_ENV','OTA_SIGNING_KEY','OTA_SIGNING_KEY_FILE') and not k.startswith(('CMAKE_','BASH_FUNC_','LD_','DYLD_'))}
         target_flags=['-DCONFIG_IDF_TARGET_'+name.upper()+'='+('ON' if target==name else 'OFF') for name in C.C.TARGETS]
         result=subprocess.run([cmake,'-DTRACE='+str(trace),'-DCONFIG_TESLA_CONFIG_REPAIR_USB='+('ON' if enabled else 'OFF'),*target_flags,'-P',str(script)],cwd=directory,env=env,capture_output=True,timeout=10)
-        self.assertEqual(result.returncode,0)
+        self.assertEqual(result.returncode,0,result.stdout.decode(errors='replace')+result.stderr.decode(errors='replace'))
         lines=trace.read_text().splitlines()
         self.assertEqual(lines[0],'base='+';'.join(expected))
         self.assertEqual(lines[1:],['extra='+';'.join(C.C.MAINTENANCE_SOURCES)] if enabled else [])
+        self.assertEqual(properties.read_text().splitlines(),[expected_profile])
 
  def test_separate_actual_stack_role_admission(self):
     units=S.expected_units(ROOT)

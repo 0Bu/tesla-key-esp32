@@ -2,7 +2,7 @@
 var $=function(id){return document.getElementById(id)};
 // Preserve DOM nodes and animation phase when polled markup is unchanged.
 function setHTML(el,html){ if(el && el.__h!==html){ el.__h=html; el.innerHTML=html; } }
-var state=null, otaTimer=null, otaAvail=null, waking=false, wakeTimeout=null, chgBusy=false, feedOk=false;
+var state=null, otaTimer=null, otaAvail=null, otaOffer=null, waking=false, wakeTimeout=null, chgBusy=false, feedOk=false;
 var otaBusy=false, otaPhase=null, otaPollState=null, otaDeadline=0, otaExpectedVersion=null, otaChannel='release', otaChannelInitialSet=false;
 var otaChannelInFlight=false, otaChannelTarget=null, otaPrompting=false;
 var otaFlowToken=null;
@@ -1192,13 +1192,21 @@ function otaAfterStatusPoll(start){
     return start();
   });
 }
-function otaFail(message){ otaReset(); if(typeof closeOtaModal === 'function') closeOtaModal(false); toast(message, 'err', 'ota'); if(typeof syncOtaUi === 'function') syncOtaUi(); }
+function otaFail(message,changed){ if(changed){otaAvail=null;otaOffer=null;} otaReset(); if(typeof closeOtaModal === 'function') closeOtaModal(false); toast(message, 'err', 'ota'); if(typeof syncOtaUi === 'function') syncOtaUi(); }
 function otaSchedule(fn,delay){
   if(!otaDeadline||Date.now()<otaDeadline){ otaTimer=setTimeout(fn,delay); return; }
   otaFail(otaPhase==='check'?'check timed out':'update timed out');
 }
 function otaVersion(v){return typeof v==='string'&&v.length<=31&&/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?$/.test(v)}
 function otaBootId(v){return typeof v==='string'&&/^[0-9a-f]{16}$/.test(v)}
+function otaOfferSnapshot(o){
+  if(!o||o.update_available!==true||!otaVersion(o.current)||!otaVersion(o.available)||
+     (o.channel!=='release'&&o.channel!=='dev')||typeof o.offer_id!=='string'||
+     !/^[0-9a-f]{24}$/.test(o.offer_id)||/^(00000000|ffffffff)$/.test(o.offer_id.slice(16))) return null;
+  var pr=o.pr==null?0:o.pr;
+  if(typeof pr!=='number'||!isFinite(pr)||pr%1!==0||pr<0||pr>9999999) return null;
+  return {current:o.current,available:o.available,channel:o.channel,pr:pr,offer_id:o.offer_id,update_available:true};
+}
 
 
 function otaStatus(){
@@ -1209,6 +1217,7 @@ function otaStatus(){
     if(valid&&o.upload!==undefined) valid=typeof o.upload==='boolean';
     if(valid&&o.upload===true) valid=!o.update_available&&o.available===''&&(o.pr==null||o.pr===0);
     else if(valid&&(o.update_available||o.state==='downloading'||o.state==='done')) valid=otaVersion(o.available);
+    if(valid&&o.update_available) valid=!!otaOfferSnapshot(o);
     if(!valid) throw new Error('invalid OTA status response');
     return o;
   });
@@ -1329,25 +1338,25 @@ function closeOtaModal(decision){
 
 function openFwUpdate(){
   if(isOtaFlowBusy()) return Promise.resolve();
-  var curVer = (state && state.version) || '?';
-  if(otaAvail){
-    var ver = otaAvail;
+  var offer = otaOfferSnapshot(otaOffer);
+  if(otaAvail&&offer&&offer.available===otaAvail){
+    otaFlowToken={};
     var token=otaFlowToken;
     otaPrompting = true; fwFocusId = 'fwCheckBtn';
     if(typeof syncOtaUi === 'function') syncOtaUi();
-    return loadOtaChangelog().then(function(notes){
+    return loadOtaChangelog(offer.offer_id).then(function(notes){
       if(otaFlowToken!==token) return false;
-      return askOtaInstall({ current: curVer, available: ver, pr: Number(otaPrSelection()), channel: otaChannel }, notes);
+      return askOtaInstall(offer, notes);
     }).then(function(installed){
       if(otaFlowToken!==token) return;
       if(installed){
-        return startOtaUpdate(ver);
+        return startOtaUpdate(offer);
       } else {
-        otaAvail = null;
+        otaAvail = null; otaOffer=null;
         if(state) render(state);
         otaReset();
       }
-    }).catch(function(){ if(otaFlowToken===token) otaReset(); });
+    }).catch(function(err){ if(otaFlowToken===token) otaFail((err&&err.message)||'update offer unavailable',err&&err.offerChanged); });
   }
   return otaCheck();
 }
@@ -1357,49 +1366,60 @@ function requestOtaStart(url,options){
   return requestJsonResultWithTimeout(url,options,OTA_HTTP_TIMEOUT_MS).then(function(r){
     if(!r.ok){
       var reason=r.json&&typeof r.json.reason==='string'?r.json.reason:'';
-      throw new Error(reason||'HTTP '+r.status);
+      var error=new Error(reason||'HTTP '+r.status);
+      error.offerChanged=!!(r.json&&r.json.offer_changed===true);
+      throw error;
     }
     return r.json;
   });
 }
 
-function startOtaUpdate(availVer){
+function startOtaUpdate(approved){
+  var offer=otaOfferSnapshot(approved&&typeof approved==='object'?approved:otaOffer);
+  if(!offer||(typeof approved==='string'&&approved!==offer.available)){
+    otaFail('Update offer changed — check again and confirm the new offer',true);
+    return Promise.resolve();
+  }
   otaPrompting = false;
   var om = $("otaModal"); if(om && om.classList) om.classList.add('hide');
   var am = $("askModal"); if(am && am.classList) am.classList.add('hide');
   if(typeof askClose === 'function' && askResolve) askClose(null);
   syncModal();
-  var ver = availVer || otaAvail;
-  otaExpectedVersion = ver || null;
+  otaExpectedVersion = offer.available;
   otaBusy = true;
   otaBegin('update', OTA_UPDATE_TIMEOUT_MS);
   var token=otaFlowToken;
   toast('Starting update…', 'load', 'ota');
   otaBarProgress('indet');
   if(typeof syncOtaUi === 'function') syncOtaUi();
-  var updatePr=otaPrSelection();
+  var updatePr=offer.pr;
   return otaAfterStatusPoll(function(){
-    return requestOtaStart('/ota/update'+(updatePr?'?pr='+updatePr:''), { method: 'POST' });
+    return requestOtaStart('/ota/update?offer='+offer.offer_id+(updatePr?'&pr='+updatePr:''), { method: 'POST' });
   }).then(function(j){
     if(otaFlowToken!==token) return;
     if(!j || j.result !== true){
       var reason = (j && j.reason) || 'update did not start';
       throw new Error(reason);
     }
+    otaAvail=null; otaOffer=null; // The server consumed this confirmed offer.
     otaPoll();
   }).catch(function(err){
-    if(otaFlowToken===token) otaFail((err && err.message) || 'update failed to start');
+    if(otaFlowToken===token) otaFail((err && err.message) || 'update failed to start',err&&err.offerChanged);
   });
 }
 
-function loadOtaChangelog(){
+function loadOtaChangelog(offerId){
   // The notes deadline covers headers and body while the OTA prompt remains locked.
   return timedRequest(function(url,opts){
     return fetch(url,opts).then(function(r){
+      if(r&&r.status===409){
+        var error=new Error('Update offer changed — check again and confirm the new offer');
+        error.offerChanged=true; throw error;
+      }
       if(!r || !r.ok || r.status === 204) return '';
       return r.text();
     });
-  }, '/ota/changelog', {cache: 'no-store'}, OTA_HTTP_TIMEOUT_MS).catch(function(){ return ''; });
+  }, '/ota/changelog'+(offerId?'?offer='+offerId:''), {cache: 'no-store'}, OTA_HTTP_TIMEOUT_MS).catch(function(err){ if(err&&err.offerChanged) throw err; return ''; });
 }
 
 function sizeOtaChanges(){
@@ -1428,7 +1448,7 @@ function askOtaInstall(status, changelog){
   var chanEl = $("otaChannel");
   if(chanEl){
     chanEl.textContent = (status.pr > 0) ? 'PR preview #' + status.pr
-      : (status.channel === 'dev' || otaChannel === 'dev') ? 'Development' : 'Release';
+      : status.channel === 'dev' ? 'Development' : 'Release';
   }
   var list = $("otaChanges");
   var count = 0;
@@ -1523,6 +1543,7 @@ function otaPrSelection(){
 }
 function otaCheck(){
   if(isOtaFlowBusy()) return Promise.resolve();
+  otaAvail=null; otaOffer=null;
   if(!fwFocusId) fwFocusId = 'fwCheckBtn';
   otaBusy=true;
   otaBegin('check',OTA_CHECK_TIMEOUT_MS);
@@ -1538,7 +1559,7 @@ function otaCheck(){
     if(otaFlowToken!==token) return;
     if(!j||j.started!==true) throw new Error((j&&j.reason)||'check did not start');
     return otaCheckPoll();
-  }).catch(function(err){ if(otaFlowToken===token) otaFail((err && err.message) || 'check failed'); });
+  }).catch(function(err){ if(otaFlowToken===token) otaFail((err && err.message) || 'check failed',err&&err.offerChanged); });
 }
 function otaCheckPoll(){
   var token=otaFlowToken;
@@ -1552,30 +1573,33 @@ function otaCheckPoll(){
     if(o.state==='error'){ otaFail('check failed'+(o.message?' — '+o.message:'')); return; }
     if(o.state!=='idle'){ otaFail('invalid check state'); return; }
     if(o.update_available){
+      var offer=otaOfferSnapshot(o);
+      if(!offer){ otaFail('Update offer identity is missing — check again'); return; }
+      otaOffer=offer;
       otaBusy=false;
       otaPhase=null;
       otaPrompting=true;
       if(typeof syncOtaUi === 'function') syncOtaUi();
       otaAvail=o.available||''; if(state)render(state); otaBarProgress();
       toast('Update available: v' + o.available, 'ok', 'ota');
-      return loadOtaChangelog().then(function(notes){
+      return loadOtaChangelog(offer.offer_id).then(function(notes){
         if(otaFlowToken!==token) return false;
-        return askOtaInstall(o, notes);
+        return askOtaInstall(offer, notes);
       }).then(function(installed){
         if(otaFlowToken!==token) return;
         if(installed){
-          return startOtaUpdate(o.available);
+          return startOtaUpdate(offer);
         } else {
-          otaAvail=null; if(state)render(state);
+          otaAvail=null; otaOffer=null; if(state)render(state);
           otaReset();
         }
       });
     } else {
-      otaAvail=null; if(state)render(state); otaReset();
+      otaAvail=null; otaOffer=null; if(state)render(state); otaReset();
       if(typeof closeOtaModal === 'function') closeOtaModal(false);
       toast('Firmware is up to date', 'ok', 'ota');
     }
-  }).catch(function(err){ if(otaFlowToken===token) otaFail((err && err.message) || 'check failed'); });
+  }).catch(function(err){ if(otaFlowToken===token) otaFail((err && err.message) || 'check failed',err&&err.offerChanged); });
 }
 function otaPoll(){
   clearTimeout(otaTimer);
@@ -1585,7 +1609,7 @@ function otaPoll(){
 function otaProgress(o){
   var upload=o.upload===true||(otaPollState&&otaPollState.upload===true&&o.state==='idle'&&otaPhase==='update');
   var bootId=upload&&(otaPollState&&otaPollState.upload===true?otaPollState.boot_id:o.boot_id);
-  if(upload){ otaAvail=null; otaExpectedVersion=null; otaPrompting=false; renderVerLink(); }
+  if(upload){ otaAvail=null; otaOffer=null; otaExpectedVersion=null; otaPrompting=false; renderVerLink(); }
   otaBusy=true;
   otaPollState=o;
   if(typeof syncOtaUi === 'function') syncOtaUi();

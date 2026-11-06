@@ -36,7 +36,8 @@ chip/revision and corruption.
 The signed app and final otadata erase recover firmware while preserving NVS.
 
 > ### Which path do I need?
-> - **OTA still works** — `/ota/check` → `update_available`, `/ota/update` installs and reboots
+> - **OTA still works** — `/ota/check` → `update_available` and `offer_id`, then
+>   `/ota/update?offer=<checked-ID>` installs and reboots
 >   onto the new version → **not this skill**; just OTA (or use [`$ship`](../ship/SKILL.md)).
 > - **Board boots but reports the wrong / old version and OTA is refused** ("download or image
 >   validation failed", with transport ruled out) → **this skill**.

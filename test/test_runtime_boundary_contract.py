@@ -15,6 +15,19 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MAIN = ROOT / "main"
+# Read the literal owned by the effective-build gate without executing that validator or
+# maintaining a second source/flag list in this runtime inventory.
+_build_policy = ast.parse((ROOT / "scripts/check-build-semantics.py").read_text(encoding="utf-8"))
+_ota_profiles = [
+    ast.literal_eval(node.value) for node in _build_policy.body
+    if isinstance(node, ast.Assign) and any(
+        isinstance(target, ast.Name) and target.id == "OTA_SIZE_COMPILE_BLOCK"
+        for target in node.targets
+    )
+]
+if len(_ota_profiles) != 1 or not isinstance(_ota_profiles[0], str):
+    raise AssertionError("missing or ambiguous literal OTA compile profile")
+OTA_SIZE_COMPILE_BLOCK = _ota_profiles[0]
 EXPECTED_COMPONENT_COMPILE_OPTIONS = (
     "-std=gnu++17",
     "-Werror=format",
@@ -50,6 +63,9 @@ def cmake_source_paths(main: Path) -> dict[str, Path]:
     # CMake commands are case-insensitive; reject any second attachment/include/subdirectory seam
     # instead of trying to emulate CMake and accidentally inventory only the visible SRCS block.
     cmake_code = re.sub(r"#[^\n]*", "", cmake)
+    if cmake_code.count(OTA_SIZE_COMPILE_BLOCK) != 1:
+        raise AssertionError("main/CMakeLists.txt: exact OTA size profile drifted")
+    cmake_code = cmake_code.replace(OTA_SIZE_COMPILE_BLOCK, "", 1)
     allowed_commands = {
         "idf_component_register",
         "target_compile_options",
@@ -1327,7 +1343,8 @@ CJSON_CALL_COUNTS = {
     "ota_update.cpp": {
         "cJSON_Delete": 2, "cJSON_ParseWithLengthOpts": 1,
     },
-    "ota_manifest.hpp": {"cJSON_IsObject": 1, "cJSON_IsString": 1},
+    "ota_manifest.hpp": {"cJSON_GetObjectItemCaseSensitive": 7, "cJSON_IsArray": 2,
+                         "cJSON_IsNumber": 2, "cJSON_IsObject": 2, "cJSON_IsString": 3},
     "status_json_emitter.hpp": {"cJSON_IsArray": 6},
 }
 
@@ -2426,18 +2443,18 @@ def require_recovery_reference_contract(ota_source: str) -> None:
         require_before("ordinary-entry reservation order", reservation, first, second)
     wrapper = function_body_in(ota_source, "prepare_operation")
     require_before("immediate entry reserves before allocation", wrapper,
-                   "reserve_operation(pr, image)", "prepare_owned_operation(origin, pr, ota_get_channel(), image, operation)")
+                   "reserve_operation(pr, image)", "prepare_owned_operation(origin, pr, captured, false, operation, generation)")
     entry = function_body_in(ota_source, "prepare_owned_operation")
     ordered = ("const auto entry_largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);",
                "tk::ota_recovery_required_bytes(tk::OtaRecoveryUse::OperationEntry)",
-               "publish_operation_start(image)",
+               "publish_operation_start(image, channel_state, generation, expected)",
                "operation = new (std::nothrow) OtaOperation")
     for token in ordered:
         if token not in entry: raise AssertionError("ordinary-entry recovery missing " + token)
     for first, second in zip(ordered, ordered[1:]):
         require_before("ordinary-entry owner/reference/allocation order", entry, first, second)
     start = entry.index("if (!tk::ota_recovery_memory_affordable(entry_largest,")
-    stop = entry.index("publish_operation_start(image)")
+    stop = entry.index("publish_operation_start(image, channel_state, generation, expected)")
     refused = entry[start:stop]
     for token in ("set_check_error(kOtaNoMemory);", "release_unstarted_operation();", "return Result::NoMemory;"):
         if token not in refused: raise AssertionError("typed entry-memory refusal missing " + token)
@@ -3325,9 +3342,9 @@ def require_ota_fetch_contract(ota_source: str, ota_logic: str,
         "std::string{}.swap(body);",
         "const std::string_view available(manifest.value);",
         "tk::canonical_ota_version(available)",
-        "tk::canonical_ota_version(res.current)",
-        "res.available.assign(available.data(), available.size());",
-        "tk::is_ota_update_available(res.available, res.current, pr_number, channel)",
+        "tk::canonical_ota_version(current)",
+        "copy_status_text(res.available, manifest.value);",
+        "tk::is_ota_update_available(res.available.data(), res.current.data(), pr_number, channel)",
     )
     for token in required_check_tokens:
         if token not in check:
@@ -3339,8 +3356,8 @@ def require_ota_fetch_contract(ota_source: str, ota_logic: str,
         "parse_end != body.c_str() + body.size()",
         "std::string{}.swap(body);",
         "tk::canonical_ota_version(available)",
-        "res.available.assign(available.data(), available.size());",
-        "tk::is_ota_update_available(res.available, res.current, pr_number, channel)",
+        "copy_status_text(res.available, manifest.value);",
+        "tk::is_ota_update_available(res.available.data(), res.current.data(), pr_number, channel)",
     )
     for before, after in zip(ordered, ordered[1:]):
         require_before("OTA validate/release/copy ordering", check, before, after)
@@ -3888,7 +3905,10 @@ def require_ota_status_lock_contract(ota_source: str, runtime_tests: str) -> Non
     unavailable = function_body_in(ota_source, "unavailable_status_snapshot")
     if "s_status" in scrub_cpp(unavailable):
         raise AssertionError("OTA unavailable snapshot reads shared status without a lock")
-    if 'return {OtaState::Error, 0, "unavailable", "", false, false, "", tk::ota_channel_name(ota_get_channel())};' not in unavailable:
+    expected_unavailable = ('{ OtaStatus result{}; result.state = OtaState::Error; '
+                            'copy_status_text(result.message, "unavailable"); '
+                            'result.channel = result.configured_channel = ota_get_channel(); return result; }')
+    if " ".join(scrub_cpp(unavailable).split()) != " ".join(scrub_cpp(expected_unavailable).split()):
         raise AssertionError("OTA lock failure lost its independent unavailable snapshot")
 
     reader = function_body_in(ota_source, "ota_get_status")
@@ -3899,21 +3919,23 @@ def require_ota_status_lock_contract(ota_source: str, runtime_tests: str) -> Non
         "tk::SemGuard g(lock);",
         "if (!g) return unavailable_status_snapshot();",
         "snapshot = s_status;",
-        "snapshot.message.data()",
-        "snapshot.available.data()",
+        "snapshot.update_available = false;",
+        "snapshot.available.fill(",
         "snapshot.upload",
-        "snapshot.current.data()",
+        "return static_cast<const OtaStatus&>(snapshot);",
     ):
         if token not in reader:
             raise AssertionError(f"OTA status reader lock contract missing {token!r}")
     if reader.count("s_status") != 1:
         raise AssertionError("OTA status reader has an unlocked or duplicate shared-status access")
+    if re.search(r"snapshot\.upload\s*=", reader):
+        raise AssertionError("OTA status reader overwrites captured upload source")
     require_before("OTA reader allocation failure before shared read", reader,
                    "if (!lock) return unavailable_status_snapshot();", "snapshot = s_status;")
     require_before("OTA reader guard failure before shared read", reader,
                    "if (!g) return unavailable_status_snapshot();", "snapshot = s_status;")
-    require_before("OTA reader fixed snapshot before string materialization", reader,
-                   "snapshot = s_status;", "snapshot.message.data()")
+    require_before("OTA reader fixed snapshot before public result", reader,
+                   "snapshot = s_status;", "return static_cast<const OtaStatus&>(snapshot);")
     reader_layout = scrub_cpp_preserving_layout(reader)
     snapshot_pos = reader_layout.find("OtaStatusPod snapshot{};")
     locked_open = reader_layout.find("{", snapshot_pos + len("OtaStatusPod snapshot{};"))
@@ -3923,13 +3945,12 @@ def require_ota_status_lock_contract(ota_source: str, runtime_tests: str) -> Non
         reader_layout, locked_open, "{", "}", "OTA reader status-lock scope"
     )
     locked_scope = reader_layout[locked_open:locked_close + 1]
-    if "snapshot.message.data()" in locked_scope or "return {" in locked_scope:
+    if re.search(r"\b(?:std::string|new|throw|assign|append)\b", locked_scope) or "return {" in locked_scope:
         raise AssertionError("OTA reader materializes allocating status while holding its lock")
 
     for token in (
         "struct OtaStatusPod",
-        "std::array<char, kOtaStatusMessageCapacity>",
-        "std::array<char, kOtaStatusVersionCapacity>",
+        "struct OtaStatusPod : OtaStatus",
         "static OtaStatusPod                   s_status",
     ):
         if token not in ota_source:
@@ -3974,23 +3995,29 @@ def require_ota_status_lock_contract(ota_source: str, runtime_tests: str) -> Non
         "OtaStatusPod candidate{};",
         "candidate.state =",
         "candidate.progress = 0;",
-        "candidate.update_available = r.update_available;",
-        "copy_status_text(candidate.message, r.reason.c_str());",
-        "copy_status_text(candidate.available, r.available.c_str());",
-        "copy_status_text(candidate.current, r.current.c_str());",
-        "publish_check_status(candidate);",
+        "candidate.update_available = r.ok && r.update_available && !operation.image;",
+        "copy_status_text(candidate.message, r.reason);",
+        "candidate.available = r.available;",
+        "candidate.current = r.current;",
+        "s_status = candidate;",
+        "s_status.generation != operation.offer_generation",
+        "operation.offer_generation != s_offer_serial.load(std::memory_order_acquire)",
+        "operation.channel_state != s_ota_channel.load(std::memory_order_acquire)",
     ):
         if token not in done:
             raise AssertionError(f"OTA completed-check snapshot missing {token!r}")
-    if done.count("publish_check_status(candidate);") != 1 or "s_status" in done:
+    if done.count("s_status = candidate;") != 1:
         raise AssertionError("OTA completed check is not one whole-snapshot publication")
+    require_before("OTA completed check guard before shared read", done, "if (!lock) return;", "s_status.generation")
+    require_before("OTA completed check take before shared read", done, "tk::SemGuard g(lock);", "s_status.generation")
     publisher = scrub_cpp(function_body_in(ota_source, "publish_check_status"))
     # Preserve only the active upload source for an error, inside the same guarded generation.
     expected_publisher = (
         "{ SemaphoreHandle_t lock = ensure_lock(); if (!lock) return; "
         "tk::SemGuard g(lock); if (!g) return; "
         "const bool upload = keep_upload && s_status.upload; "
-        "s_status = candidate; s_status.upload = upload; }"
+        "s_status = candidate; s_status.upload = upload; "
+        "if (!candidate.update_available) set_changelog_locked(nullptr); }"
     )
     if " ".join(publisher.split()) != expected_publisher:
         raise AssertionError("OTA publisher is not the exact guarded snapshot/source program")
@@ -5453,7 +5480,7 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
             '    -Werror=return-type\n'
             '    -Werror=unused-result\n'
             ')\n'
-        )
+        ) + OTA_SIZE_COMPILE_BLOCK + "\n"
         (fixture_main / "CMakeLists.txt").write_text(canonical_cmake, encoding="utf-8")
         (fixture_main / "root.cpp").write_text("void root() {}\n", encoding="utf-8")
         (fixture_main / "subdir/runtime_canary.cc").write_text(
@@ -5492,10 +5519,25 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
 
         # Both an in-tree and an escaping target_sources attachment, plus a subdirectory source
         # surface, must fail before the literal inventory can be mistaken for the production set.
+        for label, changed in (
+            ("missing OTA profile", canonical_cmake.replace(OTA_SIZE_COMPILE_BLOCK, "")),
+            ("duplicate OTA profile", canonical_cmake + "\n" + OTA_SIZE_COMPILE_BLOCK),
+            ("overridden OTA profile", canonical_cmake.replace('COMPILE_OPTIONS "-Os"',
+                                                               'COMPILE_OPTIONS "-O3"')),
+        ):
+            (fixture_main / "CMakeLists.txt").write_text(changed, encoding="utf-8")
+            try:
+                cmake_source_paths(fixture_main)
+            except AssertionError as exc:
+                if "exact OTA size profile" not in str(exc):
+                    raise AssertionError(f"{label} failed for the wrong reason: {exc}") from exc
+            else:
+                raise AssertionError(f"{label} mutation passed unexpectedly")
         for label, injection in (
             ("in-main target_sources", 'target_sources(${COMPONENT_LIB} PRIVATE "extra.cpp")\n'),
             ("outside-main target_sources", 'target_sources(${COMPONENT_LIB} PRIVATE "../outside.cpp")\n'),
             ("subdirectory", 'add_subdirectory("extra")\n'),
+            ("extra source property", 'set_source_files_properties("net.cpp" PROPERTIES COMPILE_OPTIONS "-Os")\n'),
         ):
             (fixture_main / "CMakeLists.txt").write_text(
                 canonical_cmake + injection, encoding="utf-8"
@@ -7594,15 +7636,15 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
         (
             "OTA unavailable snapshot must not claim an upload",
             ota_source.replace(
-                'return {OtaState::Error, 0, "unavailable", "", false, false, "",',
-                'return {OtaState::Error, 0, "unavailable", "", false, true, "",',
+                'result.state = OtaState::Error;',
+                'result.state = OtaState::Error; result.upload = true;',
                 1,
             ),
         ),
         (
             "OTA status reader loses upload source",
-            ota_source.replace("snapshot.update_available, snapshot.upload, snapshot.current.data()",
-                               "snapshot.update_available, false, snapshot.current.data()", 1),
+            ota_source.replace("return static_cast<const OtaStatus&>(snapshot);",
+                               "snapshot.upload = false; return static_cast<const OtaStatus&>(snapshot);", 1),
         ),
         (
             "OTA error publisher loses upload source",
@@ -7653,11 +7695,8 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
         )
 
     materialize_under_lock = ota_source.replace(
-        "    }\n    // Any allocation happens after releasing the status lock.",
-        "        return {snapshot.state, snapshot.progress, snapshot.message.data(),\n"
-        "                snapshot.available.data(), snapshot.update_available, snapshot.upload,\n"
-        "                snapshot.current.data(), tk::ota_channel_name(ota_get_channel()), snapshot.target_pr};\n"
-        "    }\n    // Any allocation happens after releasing the status lock.",
+        "latest = s_offer_serial.load(std::memory_order_acquire);",
+        "latest = s_offer_serial.load(std::memory_order_acquire); std::string forbidden;",
         1,
     )
     if materialize_under_lock == ota_source:
@@ -7668,9 +7707,9 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
     )
 
     partial_check_publish = ota_source.replace(
-        "    ESP_LOGI(TAG, \"available %s — %s\", res.available.c_str(), res.reason.c_str());",
-        "    set_state(OtaState::Idle, 0, res.reason.c_str());\n"
-        "    ESP_LOGI(TAG, \"available %s — %s\", res.available.c_str(), res.reason.c_str());",
+        "    ESP_LOGI(TAG, \"available %s — %s\", res.available.data(), res.reason);",
+        "    set_state(OtaState::Idle, 0, res.reason);\n"
+        "    ESP_LOGI(TAG, \"available %s — %s\", res.available.data(), res.reason);",
         1,
     )
     if partial_check_publish == ota_source:

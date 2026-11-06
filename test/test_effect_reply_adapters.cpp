@@ -242,7 +242,7 @@ static int httpd_req_get_url_query_str(httpd_req_t*,char* out,size_t size) {
 static bool ota_is_updating() { return updating; }
 [[maybe_unused]] static tk::OtaStartResult ota_check_start(unsigned pr) { ++immediate_check_starts; ++check_starts; last_ota_pr=pr; if (ota_result==tk::OtaStartResult::Started) effect_done(); return ota_result; }
 [[maybe_unused]] static tk::OtaStartResult ota_check_start_after_http(unsigned pr, void* server) { ++deferred_check_starts; deferred_check_server=server; ++check_starts; last_ota_pr=pr; if (ota_result==tk::OtaStartResult::Started) effect_done(); return ota_result; }
-static tk::OtaStartResult ota_start(unsigned pr) { ++update_starts; last_ota_pr=pr; if (ota_result==tk::OtaStartResult::Started) effect_done(); return ota_result; }
+static tk::OtaStartResult ota_start(unsigned pr,std::string_view offer) { CHECK(tk::ota_offer_id_valid(offer)); ++update_starts; last_ota_pr=pr; if (ota_result==tk::OtaStartResult::Started) effect_done(); return ota_result; }
 static void ota_set_channel(tk::OtaChannel) { effect_done(); }
 static tk::OtaChannel ota_get_channel() { return upload_channel; }
 static OtaStatus ota_get_status() { return ota_payload; }
@@ -350,7 +350,7 @@ static void reset(Handler handler) {
     clock_status=BrowserClockStatus::Applied; updating=false; check_starts=0; update_starts=0; last_ota_pr=0;
     immediate_check_starts=deferred_check_starts=0; deferred_check_server=nullptr;
     ota_result=tk::OtaStartResult::Started;
-    query="ms=1800000000000"; query_read_error=0;
+    query="ms=1800000000000&offer=123456789abcdef000000001"; query_read_error=0;
     api_command_name="charge_start"; api_body=nullptr; api_path_vin="TESTVIN0000000001";
     selected=handler; fail_json=false; throw_error=false; throw_remove=false; throw_effect=false;
     fail_json_after_effect=false; save_ok=true; start_ok=true; ntp_synced=true; guard_ok=true;
@@ -468,7 +468,11 @@ int main() {
     // Serialize the actual typed upload snapshot through the shipped HTTP status handler.
     for(bool upload:{false,true}){
         reset(handle_ota_status);
-        ota_payload={OtaState::Downloading,37,"uploading",upload?"":"1.6.4",!upload,upload,"1.6.3","dev",0};
+        ota_payload={};ota_payload.state=OtaState::Downloading;ota_payload.progress=37;
+        std::snprintf(ota_payload.message.data(),ota_payload.message.size(),"uploading");
+        std::snprintf(ota_payload.available.data(),ota_payload.available.size(),"%s",upload?"":"1.6.4");
+        std::snprintf(ota_payload.current.data(),ota_payload.current.size(),"1.6.3");
+        ota_payload.update_available=!upload;ota_payload.upload=upload;ota_payload.channel=tk::OtaChannel::Dev;
         httpd_req_t req;
         CHECK(handle_all(&req)==ESP_OK);
         const auto json=reply_json();CHECK(json);
@@ -757,6 +761,7 @@ int main() {
         for (const auto& valid : {std::pair<const char*,unsigned>{"",0}, {"other=1",0}, {"pr=1",1},
                                  {"PR=326",326}, {"pr=9999999",9999999}}) {
             reset(handler); query=valid.first;
+            if(handler==handle_ota_update)query+="&offer=123456789abcdef000000001";
             CHECK(handle_all(&req)==0 && response_status==200);
             CHECK(check_starts==int(handler==handle_ota_check) && update_starts==int(handler==handle_ota_update));
             CHECK(last_ota_pr==valid.second && clock_calls==0 && effects==1);

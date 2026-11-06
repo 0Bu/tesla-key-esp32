@@ -111,6 +111,19 @@ target_compile_options(${COMPONENT_LIB} PRIVATE
     -Werror=unused-result
 )
 
+# Bound the OTA implementation to a reviewed size profile so its signed C6 app fits the slot.
+# Every other project unit keeps -Og. The effective-build gate admits only this exact list,
+# owner and ordered -Og -Os vector; stack reports and independent byte rebuilds still apply.
+set_source_files_properties(
+    "http_ota.cpp"
+    "ota_update.cpp"
+    "ota_transport.cpp"
+    "ota_http.cpp"
+    "ota_coordinator.cpp"
+    "ota_writer.cpp"
+    PROPERTIES COMPILE_OPTIONS "-Os"
+)
+
 # Assemble + pre-compress the web UI at build time. The sources are split for edit
 # locality — www/index.html (markup with inline markers), www/style.css, www/app.js —
 # and inline_assets.cmake splices them back into the ONE self-contained page the device
