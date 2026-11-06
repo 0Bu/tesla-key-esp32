@@ -130,8 +130,15 @@ commands below remain available for focused iteration.
 The host runner reports elapsed time for each gate. Contract parsers reuse bounded immutable
 results for identical complete source strings within one process; changed fixture text is parsed
 again, and returned inventories are independent copies. Every mutation and failure-propagation
-case still runs. Shared dependency, otadata and Release-acceptance self-tests have one owner in
-`test-build-contracts.sh`; the full host wrapper does not repeat them. Main and trusted preview
+case still runs. Passive dependency-flow tools use shell stubs for inert compiler/archive/system
+effects. Deploy-policy fixtures copy their workflow/checker inputs without local build or cache trees.
+Shared dependency, otadata and Release-acceptance self-tests have one owner in
+`test-build-contracts.sh`; the full host wrapper does not repeat them. CI also leaves its shared
+version, size, Pages, changelog and build-gate self-tests with that mandatory full host gate.
+On main, full repository/agent preflight runs in `logic-harness` alongside the longer mock suite;
+both remain required by `build`. The independent artifact join uses `prepare`'s release version
+without waiting for `build`; protected publication still needs both successful joins and compares
+their full exact-source inventories and bytes before key use. Main and trusted preview
 acceptance still execute the complete remote contract before signing, without local receipts.
 
 For repeated local host checks, use:
