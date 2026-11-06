@@ -94,10 +94,10 @@ upstream. The evaluation recorded in #61 found no reason for a fork:
   commands, telemetry, the evcc end-to-end path, sleep/wake, and the W5500 Ethernet path, which
   no bench board covers. Once #327 added OTA from signed PR preview channels, the owner moved them
   ahead of the merge: the board installs this PR's signed preview (`/ota/check?pr=<N>`,
-  `/ota/update?pr=<N>`), whose `<release>-PR-<N>` version a plain update check replaces with the
+  `/ota/update?offer=<checked-ID>&pr=<N>`), whose `<release>-PR-<N>` version a plain update check replaces with the
   stable release of the same core. An image that never gets a lease stays pending under the
-  health gate, and the next power cycle rolls the board back. The health gate does not look at
-  BLE, so the BLE and command checks are the acceptance, not the gate. esp32, esp32c3 and esp32c6
+  health gate, and the next power cycle rolls the board back. The health gate checks NimBLE host
+  health; vehicle sessions and commands still require separate live acceptance. esp32, esp32c3 and esp32c6
   are covered by builds only.
 - **Mbed TLS optimization.** ESP-IDF 6 builds the Mbed TLS / TF-PSA-Crypto libraries at `-Os` by
   default, as a component-private option. `sdkconfig.defaults` pins it and

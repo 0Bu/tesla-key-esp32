@@ -75,10 +75,11 @@ static bool parse_pr_param_(httpd_req_t* req, unsigned& pr) {
 }
 
 static esp_err_t send_ota_error_(httpd_req_t* req, int status, const char* reason,
-                                bool check = false) {
+                                bool check = false, bool offer_changed = false) {
     tk::JsonBuilder json;
     json.boolean(json.root(), check ? "started" : "result", false);
     json.string(json.root(), "reason", reason);
+    if (offer_changed) json.boolean(json.root(), "offer_changed", true);
     return send_json(req, status, json.release());
 }
 
@@ -129,7 +130,7 @@ esp_err_t handle_ota_check(GuardedReq rq) {
     return send_effect_json(rq, tk::ota_start_http_status(result), json.release());
 }
 
-// POST /ota/update[?pr=<N>] — start the background download+install, return immediately.
+// POST /ota/update?offer=<ID>[&pr=<N>] — install exactly the confirmed offer.
 esp_err_t handle_ota_update(GuardedReq rq) {
     httpd_req_t* req = rq.req();
     if (validate_query_string(req) != ESP_OK) {
@@ -143,14 +144,22 @@ esp_err_t handle_ota_update(GuardedReq rq) {
         json.string(json.root(), "reason", "invalid PR parameter");
         return send_json(req, 400, json.release());
     }
+    char query[kQueryBufBytes]{};
+    const auto read = httpd_req_get_url_query_str(req, query, sizeof(query));
+    const auto offer = tk::ota_offer_query_parameter(query);
+    if (read == ESP_ERR_NOT_FOUND || !offer.present)
+        return send_ota_error_(req, 409, tk::ota_start_reason(tk::OtaStartResult::OfferChanged, false), false, true);
+    if (read != ESP_OK || !offer.valid || !tk::ota_offer_id_valid(offer.value))
+        return send_ota_error_(req, 400, "invalid update offer identity");
     rq.reply()->state.attempting(tk::RequestEffect::OtaStart);
-    const auto result = ota_start(pr);
+    const auto result = ota_start(pr, offer.value);
     const bool started = result == tk::OtaStartResult::Started;
     if (started) rq.reply()->state.succeeded();
     else rq.reply()->state.refused(tk::RequestEffect::OtaStart);
     tk::JsonBuilder json;
     json.boolean(json.root(), "result", started);
     json.string(json.root(), "reason", tk::ota_start_reason(result, false));
+    if (result == tk::OtaStartResult::OfferChanged) json.boolean(json.root(), "offer_changed", true);
     return send_effect_json(rq, tk::ota_start_http_status(result), json.release());
 }
 
@@ -185,12 +194,24 @@ esp_err_t handle_ota_status(GuardedReq rq) {
     tk::JsonBuilder json;
     json.string(json.root(), "state", ota_state_str(s.state));
     json.number(json.root(), "progress", s.progress);
-    json.string(json.root(), "message", s.message.c_str());
-    json.string(json.root(), "available", s.available.c_str());
+    json.string(json.root(), "message", s.message.data());
+    json.string(json.root(), "available", s.available.data());
     json.boolean(json.root(), "update_available", s.update_available);
     json.boolean(json.root(), "upload", s.upload);
-    json.string(json.root(), "current", s.current.c_str());
-    json.string(json.root(), "channel", s.channel.c_str());
+    json.string(json.root(), "current", s.current.data());
+    json.string(json.root(), "channel", tk::ota_channel_name(s.channel));
+    json.string(json.root(), "configured_channel", tk::ota_channel_name(s.configured_channel));
+    json.string(json.root(), "offer_id", s.offer_id.data());
+    if (s.update_available) {
+        char digest[65]{};
+        constexpr char hex[] = "0123456789abcdef";
+        for (size_t i = 0; i < s.image_sha256.size(); ++i) {
+            digest[i * 2] = hex[s.image_sha256[i] >> 4];
+            digest[i * 2 + 1] = hex[s.image_sha256[i] & 15];
+        }
+        json.string(json.root(), "image_sha256", digest);
+        json.number(json.root(), "image_bytes", s.image_bytes);
+    }
     json.boolean(json.root(), "busy", ota_is_busy());
     json.string(json.root(), "verification", tk::ota_verification_name(ota_cached_verification_state()));
     json.number(json.root(), "recovery_required_bytes",
@@ -221,7 +242,18 @@ esp_err_t handle_ota_changelog(GuardedReq rq) {
     char notes[1025];
     size_t len = 0;
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-    if (!ota_get_changelog(notes, sizeof(notes), len) || len == 0) {
+    char query[kQueryBufBytes]{};
+    const auto read = httpd_req_get_url_query_str(req, query, sizeof(query));
+    const auto offer = tk::ota_offer_query_parameter(query);
+    if ((read != ESP_OK && read != ESP_ERR_NOT_FOUND) ||
+        (offer.present && (!offer.valid || !tk::ota_offer_id_valid(offer.value))))
+        return send_ota_error_(req, 400, "invalid update offer identity");
+    bool stale = false;
+    const bool ready = ota_get_changelog(notes, sizeof(notes), len,
+                                         offer.present ? offer.value : std::string_view{}, &stale);
+    if (stale)
+        return send_ota_error_(req, 409, tk::ota_start_reason(tk::OtaStartResult::OfferChanged, false), false, true);
+    if (!ready || len == 0) {
         httpd_resp_set_status(req, "204 No Content");
         return httpd_resp_send(req, nullptr, 0);
     }

@@ -229,14 +229,21 @@ The effective-build validator closes every C/C++ compilation unit to reviewed so
 pinned compilers/includes. It verifies generated producers, Ninja commands/dependencies, archive
 objects, linker response files and the exact ELF-to-image chain. One literal main-component `SRCS`
 registration is permitted; hidden attachment, escaped sources or forced includes fail.
-The gate checks effective optimization tokens for every application C/C++ unit. Main and ordinary
-components require exactly `-Og`; main also requires one `-fstack-usage`. Closed source/owner rules
+The gate checks effective optimization tokens for every application C/C++ unit. Ordinary project
+and component units require exactly `-Og`; main also requires one `-fstack-usage`. The six OTA
+units `http_ota.cpp`, `ota_update.cpp`, `ota_transport.cpp`, `ota_http.cpp`,
+`ota_coordinator.cpp` and `ota_writer.cpp` append exactly one `-Os` after `-Og`.
+Their literal CMake property block and exact main-component source/object owners are closed by
+`check-build-semantics.py`; missing, additional or overriding options fail. This keeps the
+signed C6 app within the unchanged OTA slot and retains stack reports and independent four-target
+byte rebuilds. Closed source/owner rules
 preserve the pinned SDK's private Mbed TLS/TF-PSA-Crypto `-Og -Os`, its two PQCP units at `-Og`,
 and the six C3/C6 libc primitives at `-Og -O2` only when the SDK's optimized-misaligned-access
 selector is enabled. The generated project anchor retains its exact SDK recipe without an
 optimization flag. The validator owns the admitted paths and object owners; missing, duplicate,
-reordered or overriding optimization tokens fail. These checks preserve the existing compiler
-behavior. The separate size-optimized bootloader is compared between independent builds. Main
+reordered or overriding optimization tokens fail. The SDK exceptions preserve their pinned
+compiler behavior; the OTA profile is the explicit project exception. The separate
+size-optimized bootloader is compared between independent builds. Main
 privately enforces C++17 and return-value/format warnings.
 The Tesla BLE component privately selects `TESLA_BLE_LOG_LEVEL=2`; effective commands must
 contain that single definition. Its host harness uses the same level and keys object reuse to

@@ -13,8 +13,10 @@
 #include <esp_ota_ops.h>
 #include <esp_timer.h>
 #include <esp_http_server.h>
+#include <esp_random.h>
 #include <lwip/sockets.h>
 #include "ota_writer.hpp"
+#include "ota_hash.hpp"
 #include "logic/ota_lifetime.hpp"
 #include <cJSON.h>
 
@@ -259,7 +261,6 @@ static_assert(tk::ota_https_url(CONFIG_TESLA_OTA_FIRMWARE_BASE_URL),
 // ─── Shared status (written by the OTA task, read by HTTP handlers) ────────────
 
 static constexpr size_t kOtaStatusMessageCapacity = 96;
-static constexpr size_t kOtaStatusVersionCapacity = tk::kOtaVersionMaxBytes + 1;
 
 // These INFO lines reuse the existing bounded diagnostic ring. No checkpoint cache, URL,
 // identity or heap trace is retained. The pair is a sequential observation, not a reservation.
@@ -292,15 +293,9 @@ static void copy_status_text(std::array<char, N>& out, const char* text) noexcep
     std::memcpy(out.data(), text, size);
 }
 
-struct OtaStatusPod {
-    OtaState state{OtaState::Idle};
-    int progress{0};
-    bool update_available{false};
-    bool upload{false};
-    unsigned target_pr{0};
-    std::array<char, kOtaStatusMessageCapacity> message{};
-    std::array<char, kOtaStatusVersionCapacity> available{};
-    std::array<char, kOtaStatusVersionCapacity> current{};
+struct OtaStatusPod : OtaStatus {
+    uint32_t channel_state{0}, generation{0};
+    std::array<uint8_t, 32> manifest_sha256{}, notes_sha256{};
 };
 
 static OtaStatusPod initial_status() noexcept {
@@ -355,21 +350,34 @@ static void set_state(OtaState st, int pct, const char* msg, bool upload = false
     s_status.upload    = upload;
 }
 
-static OtaStatus unavailable_status_snapshot() {
-    // This object is built independently of s_status. It may still throw if the standard library
-    // cannot represent even these short strings under total OOM (callers already contain that),
-    // but it can never race a writer or copy a concurrently-reallocated std::string buffer.
-    return {OtaState::Error, 0, "unavailable", "", false, false, "", tk::ota_channel_name(ota_get_channel())};
+static std::atomic<uint32_t> s_ota_channel{0}; // packed channel plus nonwrapping revision
+static std::atomic<uint32_t> s_offer_serial{0}; // only the actual Ota owner advances; readers are lock-free
+
+static uint64_t offer_boot_nonce() noexcept {
+    // Initialize only outside the status lock. The nonce is public identity, not a credential.
+    static const uint64_t nonce = (static_cast<uint64_t>(esp_random()) << 32) | esp_random();
+    return nonce;
 }
 
-static std::atomic<tk::OtaChannel> s_ota_channel{tk::OtaChannel::Release};
+static OtaStatus unavailable_status_snapshot() {
+    OtaStatus result{};
+    result.state = OtaState::Error;
+    copy_status_text(result.message, "unavailable");
+    result.channel = result.configured_channel = ota_get_channel();
+    return result;
+}
 
 tk::OtaChannel ota_get_channel() {
-    return s_ota_channel.load(std::memory_order_acquire);
+    return tk::ota_channel_in_state(s_ota_channel.load(std::memory_order_acquire));
 }
 
 void ota_set_channel(tk::OtaChannel channel) {
-    s_ota_channel.store(channel, std::memory_order_release);
+    auto observed = s_ota_channel.load(std::memory_order_acquire);
+    for (;;) {
+        const auto next = tk::ota_changed_channel_state(observed, channel);
+        if (next == observed || s_ota_channel.compare_exchange_strong(observed, next,
+                std::memory_order_acq_rel, std::memory_order_acquire)) return;
+    }
 }
 
 OtaState ota_get_state() {
@@ -384,16 +392,26 @@ OtaStatus ota_get_status() {
     SemaphoreHandle_t lock = ensure_lock();
     if (!lock) return unavailable_status_snapshot();
     OtaStatusPod snapshot{};
+    uint32_t configured = 0;
+    uint32_t latest = 0;
     {
         tk::SemGuard g(lock);
         if (!g) return unavailable_status_snapshot();
         snapshot = s_status;  // fixed POD/arrays only; noexcept and cross-generation coherent
+        configured = s_ota_channel.load(std::memory_order_acquire);
+        latest = s_offer_serial.load(std::memory_order_acquire);
     }
-    // Any allocation happens after releasing the status lock. A failed materialization is caught
-    // by the HTTP/task boundary and cannot leave a partially published shared generation.
-    return {snapshot.state, snapshot.progress, snapshot.message.data(),
-            snapshot.available.data(), snapshot.update_available, snapshot.upload, snapshot.current.data(),
-            tk::ota_channel_name(ota_get_channel()), snapshot.target_pr};
+    snapshot.configured_channel = tk::ota_channel_in_state(configured);
+    if (snapshot.generation != latest || !tk::ota_offer_current(snapshot.channel_state, configured, snapshot.generation,
+                               snapshot.update_available)) {
+        snapshot.update_available = false;
+        if (snapshot.upload || (snapshot.state != OtaState::Downloading && snapshot.state != OtaState::Done))
+            snapshot.available.fill('\0');
+        snapshot.offer_id.fill('\0');
+        snapshot.image_sha256.fill(0);
+        snapshot.image_bytes = 0;
+    }
+    return static_cast<const OtaStatus&>(snapshot); // no string materialization/allocation
 }
 
 bool ota_is_busy() {
@@ -438,15 +456,21 @@ static bool publish_upload_start() noexcept {
     return true;
 }
 
-bool ota_get_changelog(char* out, size_t max_len, size_t& out_len) {
+bool ota_get_changelog(char* out, size_t max_len, size_t& out_len,
+                       std::string_view offer_id, bool* stale) {
     out_len = 0;
+    if (stale) *stale = !offer_id.empty();
     if (!out || max_len == 0) return false;
     SemaphoreHandle_t lock = ensure_lock();
     if (!lock) return false;
     tk::SemGuard g(lock);
-    if (!g || s_changelog_len == 0) {
-        return false;
-    }
+    if (!g || s_status.generation != s_offer_serial.load(std::memory_order_acquire) ||
+        !tk::ota_offer_current(s_status.channel_state,
+            s_ota_channel.load(std::memory_order_acquire), s_status.generation,
+            s_status.update_available) ||
+        (!offer_id.empty() && offer_id != s_status.offer_id.data())) return false;
+    if (stale) *stale = false;
+    if (s_changelog_len == 0) return false;
     const size_t copy_len = (s_changelog_len < max_len - 1) ? s_changelog_len : (max_len - 1);
     std::memcpy(out, s_changelog.data(), copy_len);
     out[copy_len] = '\0';
@@ -469,6 +493,7 @@ static void publish_check_status(const OtaStatusPod& candidate, bool keep_upload
     const bool upload = keep_upload && s_status.upload;
     s_status = candidate;
     s_status.upload = upload;
+    if (!candidate.update_available) set_changelog_locked(nullptr);
 }
 
 static void set_check_error(const char* message) noexcept {
@@ -544,6 +569,9 @@ struct OtaOperation {
     const unsigned target_pr;
     const tk::OtaChannel channel;
     const bool image;
+    uint32_t channel_state{0}, offer_generation{0};
+    uint64_t boot_nonce{0};
+    OtaCheckResult expected{};
     std::atomic<bool> coordinator_done{false};
     NetworkLaunch network_launch{NetworkLaunch::NotAttempted}; // Coordinator-only.
     httpd_req_t* upload_request{nullptr}; // Exclusive async ownership, never a borrowed request.
@@ -674,22 +702,19 @@ static OtaFetchResult http_get_to_buffer(OtaOperation& operation, const char* ur
 static OtaCheckResult perform_check(OtaOperation& operation, unsigned pr_number) {
     OtaCheckResult res{};
     res.target_pr = pr_number;
-    res.current = running_version();
-    const tk::OtaChannel channel = operation.channel;
-
-    {
-        SemaphoreHandle_t lock = ensure_lock();
-        if (lock) {
-            tk::SemGuard g(lock);
-            if (g) set_changelog_locked(nullptr);
-        }
+    const auto current = running_version();
+    if (!tk::canonical_ota_version(current)) {
+        res.reason = "invalid firmware version";
+        return res;
     }
+    copy_status_text(res.current, current.data());
+    const tk::OtaChannel channel = operation.channel;
 
     std::string manifest_url_storage;
     const char* manifest_url = tk::resolve_manifest_url_into(
         pr_number, channel, CONFIG_TESLA_OTA_MANIFEST_URL, manifest_url_storage);
     ESP_LOGI(TAG, "checking %s (channel %s, running %s)", manifest_url,
-             tk::ota_channel_name(channel), res.current.c_str());
+             tk::ota_channel_name(channel), res.current.data());
 
     std::string body;
     const auto manifest_fetch = http_get_to_buffer(operation, manifest_url, body);
@@ -701,6 +726,10 @@ static OtaCheckResult perform_check(OtaOperation& operation, unsigned pr_number)
     }
 
     {
+        if (tk::ota::sha256(body.data(), body.size(), res.manifest_sha256) != PSA_SUCCESS) {
+            res.reason = "could not identify update manifest";
+            return res;
+        }
         const char* parse_end = nullptr;
         const auto materialized = tk::json_materialize<cJSON>(
             body.data(), body.size(), [&](const char* text) {
@@ -716,8 +745,10 @@ static OtaCheckResult perform_check(OtaOperation& operation, unsigned pr_number)
         }
         std::unique_ptr<cJSON, decltype(&cJSON_Delete)> j(materialized.root, cJSON_Delete);
         const tk::OtaManifestVersion manifest = tk::inspect_ota_manifest(j.get());
+        tk::OtaManifestImage image;
         if (parse_end != body.c_str() + body.size() ||
-            manifest.status != tk::OtaManifestInspectStatus::Valid || !manifest.value) {
+            manifest.status != tk::OtaManifestInspectStatus::Valid || !manifest.value ||
+            !tk::inspect_ota_image(j.get(), "tesla-key-esp32" TESLA_OTA_IMG_SUFFIX ".bin", image)) {
             res.ok     = false;
             res.reason = "invalid update manifest";
             return res;
@@ -733,18 +764,21 @@ static OtaCheckResult perform_check(OtaOperation& operation, unsigned pr_number)
             res.reason = "invalid version in manifest";
             return res;
         }
-        if (!tk::canonical_ota_version(res.current)) {
-            res.ok     = false;
-            res.reason = "invalid firmware version";
-            return res;
-        }
-        res.available.assign(available.data(), available.size());
+        copy_status_text(res.available, manifest.value);
+        res.image_sha256 = image.sha256;
+        res.image_bytes = image.bytes;
     } // Notes need only the copied version; free the tree before their body/TLS allocations.
 
     res.ok               = true;
-    res.update_available = tk::is_ota_update_available(res.available, res.current, pr_number, channel);
+    res.update_available = tk::is_ota_update_available(res.available.data(), res.current.data(), pr_number, channel);
     res.reason           = res.update_available ? "update available" : "up to date";
-    ESP_LOGI(TAG, "available %s — %s", res.available.c_str(), res.reason.c_str());
+    ESP_LOGI(TAG, "available %s — %s", res.available.data(), res.reason);
+
+    if (tk::ota::sha256("", 0, res.notes_sha256) != PSA_SUCCESS) {
+        res.ok = res.update_available = false;
+        res.reason = "could not identify release notes";
+        return res;
+    }
 
     if (res.update_available) {
         char changelog_url[256];
@@ -765,13 +799,20 @@ static OtaCheckResult perform_check(OtaOperation& operation, unsigned pr_number)
             if (changelog_fetch == OtaFetchResult::Ok) {
                 char decoded[kOtaChangelogCapacity + 1];
                 if (tk::manifest_changelog(changelog_body.data(), changelog_body.size(),
-                                           res.available.c_str(), decoded, sizeof(decoded))) {
-                    if (tk::ota_changelog_select_range(decoded, res.current.c_str(), res.available.c_str()) !=
+                                           res.available.data(), decoded, sizeof(decoded))) {
+                    if (tk::ota_changelog_select_range(decoded, res.current.data(), res.available.data()) !=
                         tk::OtaChangelogRangeResult::Invalid) {
+                        if (tk::ota::sha256(decoded, std::strlen(decoded), res.notes_sha256) != PSA_SUCCESS) {
+                            res.ok = res.update_available = false;
+                            res.reason = "could not identify release notes";
+                            return res;
+                        }
                         SemaphoreHandle_t lock = ensure_lock();
-                        if (lock) {
+                        if (lock && !operation.image) {
                             tk::SemGuard g(lock);
-                            if (g) set_changelog_locked(decoded);
+                            if (g && s_status.generation == operation.offer_generation &&
+                                operation.channel_state == s_ota_channel.load(std::memory_order_acquire))
+                                set_changelog_locked(decoded);
                         }
                     }
                 }
@@ -786,23 +827,40 @@ static OtaCheckResult perform_check(OtaOperation& operation, unsigned pr_number)
 }
 
 // Publish a finished check into the shared status for /ota/status polling.
-static void set_check_done(const OtaCheckResult& r) {
+static void set_check_done(const OtaCheckResult& r, const OtaOperation& operation) {
     OtaStatusPod candidate{};
     candidate.state = r.ok ? OtaState::Idle : OtaState::Error;
     candidate.progress = 0;
-    candidate.update_available = r.update_available;
+    candidate.update_available = r.ok && r.update_available && !operation.image;
     candidate.target_pr = r.target_pr;
-    copy_status_text(candidate.message, r.reason.c_str());
-    copy_status_text(candidate.available, r.available.c_str());
-    copy_status_text(candidate.current, r.current.c_str());
-    publish_check_status(candidate);
-    if (!r.ok || !r.update_available) {
-        SemaphoreHandle_t lock = ensure_lock();
-        if (lock) {
-            tk::SemGuard g(lock);
-            if (g) set_changelog_locked(nullptr);
-        }
+    copy_status_text(candidate.message, r.reason);
+    candidate.available = r.available;
+    candidate.current = r.current;
+    candidate.channel = operation.channel;
+    candidate.channel_state = operation.channel_state;
+    candidate.generation = operation.offer_generation;
+    candidate.manifest_sha256 = r.manifest_sha256;
+    candidate.notes_sha256 = r.notes_sha256;
+    candidate.image_sha256 = r.image_sha256;
+    candidate.image_bytes = r.image_bytes;
+    if (candidate.update_available &&
+        !tk::format_ota_offer_id(candidate.offer_id, operation.boot_nonce, candidate.generation)) {
+        candidate.update_available = false;
+        candidate.state = OtaState::Error;
+        copy_status_text(candidate.message, "update offer identity unavailable");
     }
+    SemaphoreHandle_t lock = ensure_lock();
+    if (!lock) return;
+    tk::SemGuard g(lock);
+    if (!g || s_status.generation != operation.offer_generation ||
+        operation.offer_generation != s_offer_serial.load(std::memory_order_acquire)) return;
+    if (operation.channel_state != s_ota_channel.load(std::memory_order_acquire)) {
+        candidate.state = OtaState::Error;
+        candidate.update_available = false;
+        copy_status_text(candidate.message, "update channel changed; check again");
+    }
+    s_status = candidate;
+    if (!candidate.update_available) set_changelog_locked(nullptr);
 }
 
 [[gnu::noinline]] static std::string resolve_firmware_url(unsigned target_pr, tk::OtaChannel channel) {
@@ -825,19 +883,26 @@ static void set_check_done(const OtaCheckResult& r) {
 static void ota_task_impl(OtaOperation& operation) {
     const OtaCheckResult pre = perform_check(operation, operation.target_pr);
     if (!pre.ok || !pre.update_available) {
-        set_check_done(pre); // Fresh failures/OOM withdraw any earlier offer.
+        set_check_done(pre, operation); // Fresh failures/OOM withdraw any earlier offer.
         if (pre.ok) set_state(OtaState::Error, 0, "no newer version available");
         return;
+    }
+    if (operation.channel_state != s_ota_channel.load(std::memory_order_acquire) ||
+        pre.available != operation.expected.available ||
+        pre.manifest_sha256 != operation.expected.manifest_sha256 ||
+        pre.notes_sha256 != operation.expected.notes_sha256 ||
+        pre.image_sha256 != operation.expected.image_sha256 || pre.image_bytes != operation.expected.image_bytes) {
+        set_check_error(tk::ota_start_reason(tk::OtaStartResult::OfferChanged, false));
+        operation.coordinator.cancel(tk::ota::Outcome::ProtocolError);
+        return; // No image transfer, raw write or boot selection for a replaced candidate.
     }
     tk::ota::ImagePolicy policy{};
     policy.target_pr = operation.target_pr;
     policy.channel = operation.channel;
-    if (pre.available.size() >= sizeof(policy.expected) || pre.current.size() >= sizeof(policy.current)) {
-        operation.coordinator.cancel(tk::ota::Outcome::ProtocolError);
-        set_check_error("invalid firmware version"); return;
-    }
-    std::memcpy(policy.expected, pre.available.c_str(), pre.available.size() + 1);
-    std::memcpy(policy.current, pre.current.c_str(), pre.current.size() + 1);
+    std::memcpy(policy.expected, pre.available.data(), sizeof(policy.expected));
+    std::memcpy(policy.current, pre.current.data(), sizeof(policy.current));
+    policy.expected_sha256 = operation.expected.image_sha256;
+    policy.expected_bytes = operation.expected.image_bytes;
     if (!operation.writer.configure(policy)) {
         operation.coordinator.cancel(tk::ota::Outcome::InvalidState);
         set_check_error("could not configure image policy"); return;
@@ -1001,7 +1066,7 @@ static void run_coordinator_task(void* argument, bool image) noexcept {
         else {
             auto result = perform_check(operation, operation.target_pr);
             finish_check(operation, result);
-            set_check_done(result);
+            set_check_done(result, operation);
         }
     } catch (const std::bad_alloc&) {
         operation.coordinator.cancel(tk::ota::Outcome::NoMemory);
@@ -1068,7 +1133,6 @@ static tk::OtaStartResult reserve_operation(unsigned pr, bool image) noexcept {
             release_unstarted_operation();
             return Result::Unavailable;
         }
-        s_status.upload = false; // A new entry cannot inherit the previous operation's source.
     }
     // The old operation is quiescent. A new abort after this point belongs to this reservation
     // and must remain sticky through a queued HTTP callback and coordinator creation.
@@ -1076,15 +1140,37 @@ static tk::OtaStartResult reserve_operation(unsigned pr, bool image) noexcept {
     return Result::Started;
 }
 
-static void publish_operation_start(bool image) {
+static uint32_t advance_offer_generation() noexcept {
+    const auto next = tk::ota_next_offer_generation(s_offer_serial.load(std::memory_order_relaxed));
+    s_offer_serial.store(next, std::memory_order_release);
+    return next;
+}
+
+static bool publish_operation_start(bool image, uint32_t channel_state, uint32_t generation,
+                                     const OtaCheckResult* expected = nullptr) {
     s_running.store(true, std::memory_order_release);
     s_updating.store(image, std::memory_order_release);
-    set_state(image ? OtaState::Downloading : OtaState::Checking, 0,
-              image ? "starting download" : "checking for updates");
+    OtaStatusPod candidate{};
+    candidate.state = image ? OtaState::Downloading : OtaState::Checking;
+    candidate.target_pr = s_target_pr.load(std::memory_order_relaxed);
+    candidate.channel_state = channel_state;
+    candidate.channel = tk::ota_channel_in_state(channel_state);
+    candidate.generation = generation;
+    if (image && expected) candidate.available = expected->available; // active confirmed target, no reusable offer
+    copy_status_text(candidate.message, image ? "starting download" : "checking for updates");
+    copy_status_text(candidate.current, running_version().data());
+    const auto lock = ensure_lock();
+    if (!lock) return false;
+    tk::SemGuard guard(lock);
+    if (!guard) return false;
+    s_status = candidate;
+    set_changelog_locked(nullptr);
+    return true;
 }
 
 static tk::OtaStartResult prepare_owned_operation(uint64_t origin, unsigned pr,
-        tk::OtaChannel channel, bool image, OtaOperation*& operation) {
+        uint32_t channel_state, bool image, OtaOperation*& operation, uint32_t generation,
+        const OtaCheckResult* expected = nullptr) {
     using Result = tk::OtaStartResult;
     try {
     // No new Operation/task/body/TLS exists at this ordinary reference. The actual Ota owner
@@ -1097,13 +1183,20 @@ static tk::OtaStartResult prepare_owned_operation(uint64_t origin, unsigned pr,
         release_unstarted_operation();
         return Result::NoMemory;
     }
-    publish_operation_start(image);
-    operation = new (std::nothrow) OtaOperation(origin, pr, channel, image);
+    if (!publish_operation_start(image, channel_state, generation, expected)) {
+        release_unstarted_operation();
+        return Result::Unavailable;
+    }
+    operation = new (std::nothrow) OtaOperation(origin, pr, tk::ota_channel_in_state(channel_state), image);
     if (!operation) {
         set_check_error(kOtaNoMemory);
         release_unstarted_operation();
         return Result::InternalError;
     }
+    operation->channel_state = channel_state;
+    operation->offer_generation = generation;
+    operation->boot_nonce = offer_boot_nonce();
+    if (expected) operation->expected = *expected;
     if (!s_network_slot.claim(operation->job.generation)) {
         // No worker/raw writer exists; release only this actual owner before discarding it.
         (void)operation->lease.release();
@@ -1128,10 +1221,18 @@ static tk::OtaStartResult prepare_owned_operation(uint64_t origin, unsigned pr,
 
 static tk::OtaStartResult prepare_operation(uint64_t origin, unsigned pr, bool image,
                                            OtaOperation*& operation) {
+    if (image) return tk::OtaStartResult::OfferChanged; // No unbound internal install path.
     if (!ensure_lock()) return tk::OtaStartResult::Unavailable;
     const auto result = reserve_operation(pr, image);
     if (result != tk::OtaStartResult::Started) return result;
-    return prepare_owned_operation(origin, pr, ota_get_channel(), image, operation);
+    const auto captured = s_ota_channel.load(std::memory_order_acquire);
+    const auto generation = advance_offer_generation();
+    if ((captured & tk::kOtaChannelExhausted) || generation == UINT32_MAX) {
+        set_check_error("update offer identity exhausted; reboot required");
+        release_unstarted_operation();
+        return tk::OtaStartResult::Unavailable;
+    }
+    return prepare_owned_operation(origin, pr, captured, false, operation, generation);
 }
 
 static tk::OtaStartResult launch_coordinator(OtaOperation* operation, bool image) {
@@ -1163,8 +1264,9 @@ tk::OtaStartResult ota_upload_start(httpd_req_t* request, bool& handed_off) noex
     OtaOperation* operation = nullptr;
     const auto admission = reserve_operation(0, true);
     if (admission != Result::Started) return admission;
-    const auto prepared = prepare_owned_operation(origin, 0, tk::OtaChannel::Dev,
-                                                   true, operation);
+    const auto captured = s_ota_channel.load(std::memory_order_acquire);
+    const auto generation = advance_offer_generation(); // Also withdraws an old feed offer.
+    const auto prepared = prepare_owned_operation(origin, 0, captured, true, operation, generation);
     if (prepared != Result::Started) return prepared;
     if (!publish_upload_start() || ota_get_channel() != tk::OtaChannel::Dev ||
         httpd_req_async_handler_begin(request, &operation->upload_request) != ESP_OK) {
@@ -1190,7 +1292,7 @@ static tk::OtaStartResult launch_operation(uint64_t origin, unsigned pr, bool im
 #if defined(CONFIG_HTTPD_QUEUE_WORK_BLOCKING) && CONFIG_HTTPD_QUEUE_WORK_BLOCKING
 #error "Deferred OTA metadata admission requires nonblocking HTTP work submission"
 #endif
-struct DeferredCheckCapture { uint64_t origin; unsigned pr; tk::OtaChannel channel; };
+struct DeferredCheckCapture { uint64_t origin; unsigned pr; uint32_t channel_state, generation; };
 static struct {
     DeferredCheckCapture capture{};
     uint32_t ticket{0}; // Submission and consumption run only on this same HTTP server task.
@@ -1214,8 +1316,8 @@ static void ota_check_after_http_work(void* argument) noexcept {
             return;
         }
         OtaOperation* operation = nullptr;
-        if (prepare_owned_operation(captured.origin, captured.pr, captured.channel, false,
-                                    operation) == tk::OtaStartResult::Started)
+        if (prepare_owned_operation(captured.origin, captured.pr, captured.channel_state, false,
+                                    operation, captured.generation) == tk::OtaStartResult::Started)
             (void)launch_coordinator(operation, false);
     } catch (...) {
         // Never infer a failed queue/task creation from an exception, fabricate Ack or release
@@ -1233,9 +1335,19 @@ tk::OtaStartResult ota_check_start_after_http(unsigned pr, void* server) noexcep
         const auto reserved = reserve_operation(pr, false);
         if (reserved != tk::OtaStartResult::Started) return reserved;
         held = true;
+        const auto captured = s_ota_channel.load(std::memory_order_acquire);
+        const auto generation = advance_offer_generation();
+        if ((captured & tk::kOtaChannelExhausted) || generation == UINT32_MAX) {
+            set_check_error("update offer identity exhausted; reboot required");
+            release_unstarted_operation();
+            return tk::OtaStartResult::Unavailable;
+        }
         const auto ticket = ++s_deferred_serial;
-        s_deferred_check.capture = {origin, pr, ota_get_channel()};
-        publish_operation_start(false);
+        s_deferred_check.capture = {origin, pr, captured, generation};
+        if (!publish_operation_start(false, captured, generation)) {
+            release_unstarted_operation();
+            return tk::OtaStartResult::Unavailable;
+        }
         s_deferred_check.ticket = ticket;
         tk::ota::memory_checkpoint("http_req", ticket, origin);
         if (httpd_queue_work(server, ota_check_after_http_work,
@@ -1264,9 +1376,45 @@ tk::OtaStartResult ota_check_start(unsigned pr_number) {
     const uint64_t origin = operation_now(nullptr);
     return launch_operation(origin, pr_number, false);
 }
-tk::OtaStartResult ota_start(unsigned pr_number) {
+tk::OtaStartResult ota_start(unsigned pr_number, std::string_view offer_id) {
     const uint64_t origin = operation_now(nullptr);
-    return launch_operation(origin, pr_number, true);
+    using Result = tk::OtaStartResult;
+    if (!ensure_lock()) return Result::Unavailable;
+    const auto admission = reserve_operation(pr_number, true);
+    if (admission != Result::Started) return admission;
+    OtaCheckResult expected{};
+    uint32_t captured = 0;
+    bool matches = false;
+    {
+        tk::SemGuard guard(s_lock.load(std::memory_order_acquire));
+        if (guard) {
+            captured = s_ota_channel.load(std::memory_order_acquire);
+            matches = tk::ota_offer_id_valid(offer_id) && offer_id == s_status.offer_id.data() &&
+                s_status.target_pr == pr_number && s_status.generation == s_offer_serial.load(std::memory_order_acquire) &&
+                tk::ota_offer_current(s_status.channel_state, captured, s_status.generation, s_status.update_available);
+            if (matches) {
+                expected.current = s_status.current;
+                expected.available = s_status.available;
+                expected.manifest_sha256 = s_status.manifest_sha256;
+                expected.notes_sha256 = s_status.notes_sha256;
+                expected.image_sha256 = s_status.image_sha256;
+                expected.image_bytes = s_status.image_bytes;
+            }
+        }
+    }
+    if (!matches) {
+        release_unstarted_operation();
+        return Result::OfferChanged; // Never erase another client's valid successor offer.
+    }
+    const auto generation = advance_offer_generation(); // A confirmed offer is consumed once.
+    if (generation == UINT32_MAX) {
+        set_check_error("update offer identity exhausted; reboot required");
+        release_unstarted_operation();
+        return Result::Unavailable;
+    }
+    OtaOperation* operation = nullptr;
+    const auto prepared = prepare_owned_operation(origin, pr_number, captured, true, operation, generation, &expected);
+    return prepared == Result::Started ? launch_coordinator(operation, true) : prepared;
 }
 
 OtaCheckResult ota_check(unsigned pr_number) {
@@ -1295,6 +1443,6 @@ OtaCheckResult ota_check(unsigned pr_number) {
         result.ok = result.update_available = false; result.reason = "update check failed unexpectedly";
     }
     finish_check(*operation, result);
-    set_check_done(result); // The public blocking API must not leave its initial Checking state.
+    set_check_done(result, *operation); // The public blocking API must not leave its initial Checking state.
     return result;
 }

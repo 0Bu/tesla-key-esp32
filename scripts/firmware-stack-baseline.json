@@ -41,7 +41,8 @@
           "/COMPONENT_MAIN_DIR/http_config.cpp :: tk::MqttProbeResult mqtt_probe_broker(const std::string&)": 288
         },
         "CMakeFiles/__idf_main.dir/http_ota.cpp.su": {
-          "/COMPONENT_MAIN_DIR/http_ota.cpp :: esp_err_t handle_ota_changelog(GuardedReq)": 1072
+          "/COMPONENT_MAIN_DIR/http_ota.cpp :: esp_err_t handle_ota_changelog(GuardedReq)": 1216,
+          "/COMPONENT_MAIN_DIR/http_ota.cpp :: esp_err_t handle_ota_status(GuardedReq)": 384
         },
         "CMakeFiles/__idf_main.dir/http_server.cpp.su": {
           "/COMPONENT_MAIN_DIR/http_server.cpp :: bool browser_mutation_allowed(httpd_req_t*)": 432,
@@ -74,12 +75,16 @@
         "CMakeFiles/__idf_main.dir/ota_coordinator.cpp.su": {},
         "CMakeFiles/__idf_main.dir/ota_http.cpp.su": {},
         "CMakeFiles/__idf_main.dir/ota_transport.cpp.su": {
-          "/COMPONENT_MAIN_DIR/ota_transport.cpp :: void tk::ota::run_network_worker(Job&, const NetRuntime&)": 400
+          "/COMPONENT_MAIN_DIR/ota_transport.cpp :: void tk::ota::run_network_worker(Job&, const NetRuntime&)": 464
         },
         "CMakeFiles/__idf_main.dir/ota_update.cpp.su": {
           "/COMPONENT_MAIN_DIR/ota_update.cpp :: OtaCheckResult perform_check(OtaOperation&, unsigned int)": 1584,
-          "/COMPONENT_MAIN_DIR/ota_update.cpp :: OtaOperation::OtaOperation(uint64_t, unsigned int, tk::OtaChannel, bool)": 256,
-          "/COMPONENT_MAIN_DIR/ota_update.cpp :: void ota_task_impl(OtaOperation&)": 336
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: OtaStatus ota_get_status()": 368,
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: bool publish_operation_start(bool, uint32_t, uint32_t, const OtaCheckResult*)": 352,
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: tk::OtaStartResult ota_start(unsigned int, std::string_view)": 288,
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: void run_coordinator_task(void*, bool)": 512,
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: void set_check_done(const OtaCheckResult&, const OtaOperation&)": 384,
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: void set_check_error(const char*)": 368
         },
         "CMakeFiles/__idf_main.dir/ota_writer.cpp.su": {},
         "CMakeFiles/__idf_main.dir/provisioning.cpp.su": {
@@ -155,7 +160,8 @@
           "/COMPONENT_MAIN_DIR/http_config.cpp :: tk::MqttProbeResult mqtt_probe_broker(const std::string&)": 288
         },
         "CMakeFiles/__idf_main.dir/http_ota.cpp.su": {
-          "/COMPONENT_MAIN_DIR/http_ota.cpp :: esp_err_t handle_ota_changelog(GuardedReq)": 1072
+          "/COMPONENT_MAIN_DIR/http_ota.cpp :: esp_err_t handle_ota_changelog(GuardedReq)": 1216,
+          "/COMPONENT_MAIN_DIR/http_ota.cpp :: esp_err_t handle_ota_status(GuardedReq)": 384
         },
         "CMakeFiles/__idf_main.dir/http_server.cpp.su": {
           "/COMPONENT_MAIN_DIR/http_server.cpp :: bool browser_mutation_allowed(httpd_req_t*)": 432,
@@ -189,12 +195,16 @@
         "CMakeFiles/__idf_main.dir/ota_coordinator.cpp.su": {},
         "CMakeFiles/__idf_main.dir/ota_http.cpp.su": {},
         "CMakeFiles/__idf_main.dir/ota_transport.cpp.su": {
-          "/COMPONENT_MAIN_DIR/ota_transport.cpp :: void tk::ota::run_network_worker(Job&, const NetRuntime&)": 400
+          "/COMPONENT_MAIN_DIR/ota_transport.cpp :: void tk::ota::run_network_worker(Job&, const NetRuntime&)": 464
         },
         "CMakeFiles/__idf_main.dir/ota_update.cpp.su": {
           "/COMPONENT_MAIN_DIR/ota_update.cpp :: OtaCheckResult perform_check(OtaOperation&, unsigned int)": 1584,
-          "/COMPONENT_MAIN_DIR/ota_update.cpp :: OtaOperation::OtaOperation(uint64_t, unsigned int, tk::OtaChannel, bool)": 256,
-          "/COMPONENT_MAIN_DIR/ota_update.cpp :: void ota_task_impl(OtaOperation&)": 336
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: OtaStatus ota_get_status()": 368,
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: bool publish_operation_start(bool, uint32_t, uint32_t, const OtaCheckResult*)": 352,
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: tk::OtaStartResult ota_start(unsigned int, std::string_view)": 288,
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: void run_coordinator_task(void*, bool)": 512,
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: void set_check_done(const OtaCheckResult&, const OtaOperation&)": 384,
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: void set_check_error(const char*)": 368
         },
         "CMakeFiles/__idf_main.dir/ota_writer.cpp.su": {},
         "CMakeFiles/__idf_main.dir/provisioning.cpp.su": {
@@ -268,7 +278,9 @@
           "/COMPONENT_MAIN_DIR/http_config.cpp :: tk::MqttProbeResult mqtt_probe_broker(const std::string&)": 272
         },
         "CMakeFiles/__idf_main.dir/http_ota.cpp.su": {
-          "/COMPONENT_MAIN_DIR/http_ota.cpp :: esp_err_t handle_ota_changelog(GuardedReq)": 1056
+          "/COMPONENT_MAIN_DIR/http_ota.cpp :: esp_err_t handle_ota_changelog(GuardedReq)": 1200,
+          "/COMPONENT_MAIN_DIR/http_ota.cpp :: esp_err_t handle_ota_check(GuardedReq)": 272,
+          "/COMPONENT_MAIN_DIR/http_ota.cpp :: esp_err_t handle_ota_status(GuardedReq)": 400
         },
         "CMakeFiles/__idf_main.dir/http_server.cpp.su": {
           "/COMPONENT_MAIN_DIR/http_server.cpp :: bool browser_mutation_allowed(httpd_req_t*)": 400,
@@ -300,12 +312,16 @@
         "CMakeFiles/__idf_main.dir/ota_coordinator.cpp.su": {},
         "CMakeFiles/__idf_main.dir/ota_http.cpp.su": {},
         "CMakeFiles/__idf_main.dir/ota_transport.cpp.su": {
-          "/COMPONENT_MAIN_DIR/ota_transport.cpp :: void tk::ota::run_network_worker(Job&, const NetRuntime&)": 400
+          "/COMPONENT_MAIN_DIR/ota_transport.cpp :: void tk::ota::run_network_worker(Job&, const NetRuntime&)": 480
         },
         "CMakeFiles/__idf_main.dir/ota_update.cpp.su": {
           "/COMPONENT_MAIN_DIR/ota_update.cpp :: OtaCheckResult perform_check(OtaOperation&, unsigned int)": 1456,
-          "/COMPONENT_MAIN_DIR/ota_update.cpp :: OtaOperation::OtaOperation(uint64_t, unsigned int, tk::OtaChannel, bool)": 256,
-          "/COMPONENT_MAIN_DIR/ota_update.cpp :: void ota_task_impl(OtaOperation&)": 320
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: OtaStatus ota_get_status()": 352,
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: bool publish_operation_start(bool, uint32_t, uint32_t, const OtaCheckResult*)": 368,
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: tk::OtaStartResult ota_start(unsigned int, std::string_view)": 256,
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: void run_coordinator_task(void*, bool)": 528,
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: void set_check_done(const OtaCheckResult&, const OtaOperation&)": 384,
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: void set_check_error(const char*)": 336
         },
         "CMakeFiles/__idf_main.dir/ota_writer.cpp.su": {},
         "CMakeFiles/__idf_main.dir/provisioning.cpp.su": {
@@ -376,7 +392,9 @@
           "/COMPONENT_MAIN_DIR/http_config.cpp :: tk::MqttProbeResult mqtt_probe_broker(const std::string&)": 272
         },
         "CMakeFiles/__idf_main.dir/http_ota.cpp.su": {
-          "/COMPONENT_MAIN_DIR/http_ota.cpp :: esp_err_t handle_ota_changelog(GuardedReq)": 1056
+          "/COMPONENT_MAIN_DIR/http_ota.cpp :: esp_err_t handle_ota_changelog(GuardedReq)": 1200,
+          "/COMPONENT_MAIN_DIR/http_ota.cpp :: esp_err_t handle_ota_check(GuardedReq)": 272,
+          "/COMPONENT_MAIN_DIR/http_ota.cpp :: esp_err_t handle_ota_status(GuardedReq)": 400
         },
         "CMakeFiles/__idf_main.dir/http_server.cpp.su": {
           "/COMPONENT_MAIN_DIR/http_server.cpp :: bool browser_mutation_allowed(httpd_req_t*)": 400,
@@ -409,12 +427,16 @@
         "CMakeFiles/__idf_main.dir/ota_coordinator.cpp.su": {},
         "CMakeFiles/__idf_main.dir/ota_http.cpp.su": {},
         "CMakeFiles/__idf_main.dir/ota_transport.cpp.su": {
-          "/COMPONENT_MAIN_DIR/ota_transport.cpp :: void tk::ota::run_network_worker(Job&, const NetRuntime&)": 400
+          "/COMPONENT_MAIN_DIR/ota_transport.cpp :: void tk::ota::run_network_worker(Job&, const NetRuntime&)": 480
         },
         "CMakeFiles/__idf_main.dir/ota_update.cpp.su": {
           "/COMPONENT_MAIN_DIR/ota_update.cpp :: OtaCheckResult perform_check(OtaOperation&, unsigned int)": 1568,
-          "/COMPONENT_MAIN_DIR/ota_update.cpp :: OtaOperation::OtaOperation(uint64_t, unsigned int, tk::OtaChannel, bool)": 256,
-          "/COMPONENT_MAIN_DIR/ota_update.cpp :: void ota_task_impl(OtaOperation&)": 320
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: OtaStatus ota_get_status()": 352,
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: bool publish_operation_start(bool, uint32_t, uint32_t, const OtaCheckResult*)": 368,
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: tk::OtaStartResult ota_start(unsigned int, std::string_view)": 272,
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: void run_coordinator_task(void*, bool)": 528,
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: void set_check_done(const OtaCheckResult&, const OtaOperation&)": 384,
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: void set_check_error(const char*)": 352
         },
         "CMakeFiles/__idf_main.dir/ota_writer.cpp.su": {},
         "CMakeFiles/__idf_main.dir/provisioning.cpp.su": {

@@ -14,6 +14,10 @@ static_assert(kPrefixBytes <= 512);
 Effect error(esp_err_t result) noexcept {
     return result == ESP_OK ? Effect::Ok : result == ESP_ERR_NO_MEM ? Effect::NoMemory : Effect::Failed;
 }
+Effect hash_error(psa_status_t result) noexcept {
+    return result == PSA_SUCCESS ? Effect::Ok :
+        result == PSA_ERROR_INSUFFICIENT_MEMORY ? Effect::NoMemory : Effect::Failed;
+}
 }
 Effects RawWriter::effects() noexcept {
     return {this,kPrefixBytes,prefix,begin,write,end,select,abort,quiescent,release};
@@ -49,6 +53,7 @@ Effect RawWriter::prefix(void* p,const std::uint8_t* data,std::size_t n) noexcep
     } else {
         if (!tk::canonical_ota_version(available) || !tk::canonical_ota_version(expected) ||
             !tk::canonical_ota_version(current) || available != expected ||
+            !s.policy_.expected_bytes || s.policy_.expected_bytes > tk::kOtaUploadMaxBytes ||
             !tk::is_ota_update_available(available,current,s.policy_.target_pr,s.policy_.channel))
             return Effect::Failed;
     }
@@ -62,6 +67,12 @@ Effect RawWriter::prefix(void* p,const std::uint8_t* data,std::size_t n) noexcep
 Effect RawWriter::begin(void* p) noexcept {
     auto& s = self(p);
     if (!s.partition_ || s.handle_ || s.uncertain_) return Effect::Failed;
+    if (!s.policy_.direct_upload) {
+        auto status = psa_crypto_init();
+        s.hash_live_ = true; // Even a failed setup is explicitly aborted before lease release.
+        if (status == PSA_SUCCESS) status = psa_hash_setup(&s.hash_, PSA_ALG_SHA_256);
+        if (status != PSA_SUCCESS) return hash_error(status);
+    }
     // At this pin a failing begin may already publish a registered handle. Retain it for abort.
     const auto result = esp_ota_begin(s.partition_,OTA_WITH_SEQUENTIAL_WRITES,&s.handle_);
     if (result == ESP_OK && !s.handle_) { s.uncertain_ = true; return Effect::Uncertain; }
@@ -70,11 +81,26 @@ Effect RawWriter::begin(void* p) noexcept {
 Effect RawWriter::write(void* p,const std::uint8_t* data,std::size_t n) noexcept {
     auto& s = self(p);
     if (!s.handle_ || s.uncertain_ || !data || !n || n > kBlockBytes) return Effect::Failed;
+    if (!s.policy_.direct_upload) {
+        if (!s.hash_live_ || n > s.policy_.expected_bytes - s.received_) return Effect::Failed;
+        const auto status = psa_hash_update(&s.hash_, data, n);
+        if (status != PSA_SUCCESS) return hash_error(status);
+        s.received_ += static_cast<uint32_t>(n);
+    }
     return error(esp_ota_write(s.handle_,data,n));
 }
 Effect RawWriter::end(void* p) noexcept {
     auto& s = self(p);
     if (!s.handle_ || s.uncertain_) return Effect::Failed;
+    if (!s.policy_.direct_upload) {
+        if (!s.hash_live_ || s.received_ != s.policy_.expected_bytes) return Effect::Failed;
+        Digest actual{};
+        size_t written = 0;
+        const auto status = psa_hash_finish(&s.hash_, actual.data(), actual.size(), &written);
+        if (status != PSA_SUCCESS) return hash_error(status);
+        s.hash_live_ = false;
+        if (written != actual.size() || actual != s.policy_.expected_sha256) return Effect::Failed;
+    }
     const auto h = s.handle_;
     s.handle_ = 0; // SDK consumes the registered handle even on verification failure.
     const auto result = esp_ota_end(h);
@@ -93,6 +119,10 @@ Effect RawWriter::select(void* p) noexcept {
 bool RawWriter::abort(void* p) noexcept {
     auto& s = self(p);
     if (s.uncertain_) return false;
+    if (s.hash_live_) {
+        if (psa_hash_abort(&s.hash_) != PSA_SUCCESS) { s.uncertain_ = true; return false; }
+        s.hash_live_ = false;
+    }
     if (!s.handle_) return true;
     const auto h = s.handle_;
     const auto result = esp_ota_abort(h);
@@ -102,7 +132,7 @@ bool RawWriter::abort(void* p) noexcept {
 }
 bool RawWriter::quiescent(void* p) noexcept {
     const auto& s = self(p);
-    return !s.handle_ && !s.uncertain_;
+    return !s.handle_ && !s.uncertain_ && !s.hash_live_;
 }
 bool RawWriter::release(void* p) noexcept {
     auto& s = self(p);
