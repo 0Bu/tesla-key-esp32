@@ -216,6 +216,11 @@ request to a known device address can still trigger this foreground read. See [s
 | `GET /api/proxy/1/version` | `{version, platform}` (`"ESP32"`/`"ESP32-S3"`/`"ESP32-C3"`/`"ESP32-C6"`). |
 | `POST /mcp` | MCP server for AI agents (Streamable HTTP, stateless JSON-RPC 2.0; `GET` → `405`, no SSE): [MCP.md](MCP.md). |
 
+PR previews selected with `pr=<N>` retain numeric-core downgrade protection: a preview based on
+an older `major.minor.patch` cannot replace a newer Development core by OTA or Dev upload. Use
+the preview's [signed USB installer](USER_GUIDE.md#updates-and-recovery) in that case. Equal or
+newer preview cores remain subject to the normal OTA checks.
+
 MQTT and Syslog request-body/schema errors are returned before loading stored configuration.
 Changed MQTT/Syslog saves reserve the restart owner before writing; an occupied owner returns `409`
 without saving. A successful save returns `firmware_verification`: `already_valid`,
@@ -496,7 +501,8 @@ retains its existing semantics.
 `sys.runtime_state` is `booting`, `ready`, `safe_mode` or `fatal`. Fatal services remain stopped for this process; a status endpoint exists only if HTTP startup succeeded. `sys.fatal_component` appears only for Fatal and names the first bounded component category (`clock`, `nvs`, `configuration`, `identity`, `bluetooth`, `http`, `network`, `vehicle`, `ota`, `heap_supervisor`, `application` or `unknown`). State and category come from one atomic cached snapshot; these fields do not probe storage/OTA metadata, restart, send a key or contact the vehicle.
 
 `sys.diag_dropped_lines` counts capture attempts lost to an unavailable or busy diagnostic ring;
-`syslog.dropped_lines` counts full-queue losses. Both are boot-local unsigned counters modulo 2^32,
+`syslog.dropped_lines` counts local losses from a full queue, unresolved DNS, packet encoding,
+socket/send failures and failed boot/crash replay. Both are boot-local unsigned counters modulo 2^32,
 omitted at zero. Clearing the ring does not reset the loss counter. Neither proves UDP delivery.
 
 `ble.rssi` is a live-link sample while connected. During failed connection attempts it may
@@ -560,8 +566,9 @@ the field and entity IDs stay stable.
 
 All state topics are retained JSON. Numeric fields appear only when the car reported them, so an
 unseen value shows as *unknown* in HA, not a phantom `0`; range, rate and odometer are converted to
-metric (km, km/h). An invalid or initially empty cache publishes retained `{}` once to clear stale
-readings, then stays quiet until valid data returns. While a parked car sleeps, ordinary source polls pause and MQTT keeps serving
+metric (km, km/h). An invalid or initially empty cache publishes retained `{}` once per connection
+to clear stale readings; reconnecting rearms that clear. It then stays quiet until valid data returns.
+While a parked car sleeps, ordinary source polls pause and MQTT keeps serving
 last-known values until the next successful relevant poll. Charge and drive can also refresh on
 the wake/bootstrap one-shot outside an active window. These topics carry no per-domain age;
 broker publication or link state alone does not establish each retained field's freshness.
