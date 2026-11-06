@@ -67,7 +67,11 @@ ctest --test-dir build_mock --output-on-failure
 ```
 
 CI splits host evidence into `logic-test` and `logic-harness`; both run alongside producer and
-independent per-target compiles, and final `build` fails unless both host jobs succeeded. Python gates use
+independent per-target compiles, and final `build` fails unless both host jobs succeeded. Full
+repository/agent preflight runs in `logic-harness` beside the mock suite. The harness no longer repeats
+the shared version, size, Pages, changelog and build-gate self-tests; their mandatory owner remains
+the full host build-contract gate. The harness retains its unique IDF checks. Independent assembly uses the prepared release version and can finish
+before `build`; publication still requires both joins and their exact-source byte comparison. Python gates use
 `scripts/with-host-python.sh` (Python ≥3.11). Linux sanitizer
 checks use ASan, UBSan and LSan, with deliberate tripwires proving the detectors work, plus a fixed-seed
 20,000-case fuzz corpus. Local host evidence is distinct from remote CI.

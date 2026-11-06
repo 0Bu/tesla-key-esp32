@@ -648,12 +648,12 @@ def validate(root: Path) -> None:
     # `failed=1`, an early `exit 0`, an extra command). A non-fatal job would hide the verdict.
     require(gate_step.rstrip("\n") == BUILD_NEEDS_GATE.rstrip("\n"),
             "build.yml:build need-result check must equal the reviewed gate exactly")
-    # The four independent legs only need the run mode/version (prepare), so they run concurrently
-    # with the producer builds; the join needs both the producer's display version and every leg.
+    # Both independent stages use prepare's exact source/version decision. Their evidence can
+    # finish before the producer/host gate; only publish joins both successful authorities.
     require(job_has_need(build["independent-rebuild-target"], "prepare"),
             "build.yml:independent-rebuild-target must need prepare")
-    require(job_has_need(build["independent-rebuild"], "build"),
-            "build.yml:independent-rebuild must need build")
+    require(job_has_need(build["independent-rebuild"], "prepare"),
+            "build.yml:independent-rebuild must need prepare")
     require(job_has_need(build["independent-rebuild"], "independent-rebuild-target"),
             "build.yml:independent-rebuild must need independent-rebuild-target")
     require(job_has_need(build["publish"], "build") and
@@ -664,15 +664,17 @@ def validate(root: Path) -> None:
         "build.yml:deploy must need both build and successful immutable Release publication",
     )
     host_model = workflow_model(root / ".github/workflows/build.yml", contents["build.yml"])["jobs"]
+    require(host_model["independent-rebuild"].get("needs") == ["prepare", "independent-rebuild-target"],
+            "build.yml:independent-rebuild must join only prepare and all independent targets")
     full = "steps.scope.outputs.profile == 'full'"
     runtime = full + " || steps.scope.outputs.profile == 'runtime'"
     selected = "steps.scope.outputs.profile == 'runtime' || steps.scope.outputs.profile == 'browser'"
     conditions = {
-        "logic-test": {"Validate runner-neutral agent configuration": full,
-                       "Validate repository syntax, links and workflow policy": full,
-                       "Validate repository without repeating unrelated validator self-tests": "steps.scope.outputs.profile != 'full'",
+        "logic-test": {"Validate repository without repeating unrelated validator self-tests": "steps.scope.outputs.profile != 'full'",
                        "Run host-side logic tests": full, "Run selected strict host feedback": selected},
-        "logic-harness": {"Run tesla-ble integration harness": runtime,
+        "logic-harness": {"Validate runner-neutral agent configuration": full,
+                          "Validate repository syntax, links and workflow policy": full,
+                          "Run tesla-ble integration harness": runtime,
                           "Prove and run Linux memory-safety instrumentation": runtime,
                           "Test ESP-IDF build contracts": full, "Test the PR-gate command matcher": full},
     }
@@ -698,13 +700,30 @@ def validate(root: Path) -> None:
             "build.yml:logic-test must run the fail-closed host gate")
     require("./scripts/run-mock-tests.sh --require-all" in build["logic-test"],
             "build.yml:logic-test must run the fail-closed host gate")
-    require("./scripts/repo-lint.sh" in build["logic-test"],
-            "build.yml:logic-test must run offline repository lint")
+    for label, command in (
+        ("Validate runner-neutral agent configuration", "./tools/agent-config/selftest.sh"),
+        ("Validate repository syntax, links and workflow policy", "./scripts/repo-lint.sh"),
+    ):
+        matches = [(name, step) for name in ("logic-test", "logic-harness")
+                   for step in host_model[name]["steps"] if step.get("run") == command]
+        require(len(matches) == 1 and matches[0][0] == "logic-harness"
+                and matches[0][1].get("name") == label,
+                "build.yml: full repository/agent preflight must run once in logic-harness")
     require("./scripts/run-sanitizer-tests.sh --self-test" in build["logic-harness"] and
             "./scripts/run-sanitizer-tests.sh" in build["logic-harness"],
-            "build.yml:logic-test must prove and run ASan/UBSan/LSan")
-    require("python3 scripts/check-build-gate-contract.py --self-test" in build["logic-harness"],
-            "build.yml:logic-test must run the mutation-tested four-target build contract")
+            "build.yml:logic-harness must prove and run ASan/UBSan/LSan")
+    unique_contract_steps = [step for step in host_model["logic-harness"]["steps"]
+                             if step.get("name") == "Test ESP-IDF build contracts"]
+    require(len(unique_contract_steps) == 1 and unique_contract_steps[0].get("run", "").strip() ==
+            './scripts/ci-build-all.sh --self-test\n'
+            'python3 scripts/check-sdkconfig-defaults.py --self-test\n'
+            'python3 tools/agent-hooks/agent_hook.py build-efficiency --self-test\n'
+            'test "$(./scripts/idf-version.sh)" = v6.1',
+            "build.yml:logic-harness must retain exactly the unique ESP-IDF contract checks")
+    for name in ("select-release-version.sh", "report-firmware-size.py", "check-dev-pages.py",
+                 "wait-pages-build.py", "generate-ota-changelog.py", "check-build-gate-contract.py"):
+        require(f"scripts/{name} --self-test" not in contents["build.yml"],
+                "build.yml: shared self-tests belong only to the mandatory full host build-contract gate")
     build_target_refs = re.findall(
         r"^\s+ref:\s*([^\n#]+?)\s*$", build["build-target"], re.MULTILINE
     )
@@ -785,11 +804,13 @@ def validate(root: Path) -> None:
         and "python3 scripts/check-build-artifact-inventory.py" in join
         and "--write --artifact-root . --source-root ." in join
         and '--expected-source-sha "$SOURCE_SHA" --version "$DISPLAY_VERSION"' in join
-        and "needs.build.outputs.mode != 'test'" in join
-        and "needs.build.outputs.firmware == 'yes'" in join
+        and "needs.prepare.outputs.mode != 'test'" in join
+        and "needs.prepare.outputs.firmware == 'yes'" in join
+        and join.count("DISPLAY_VERSION: ${{ needs.prepare.outputs.release-version }}") == 2
+        and "needs.build." not in join
         and "name: firmware-independent-rebuild" in join,
         "build.yml:independent-rebuild must bind the independent legs to the exact source and "
-        "producer version",
+        "prepared release version",
     )
     require("environment: firmware-signing" in build["publish"],
             "build.yml:publish must retain the signing environment")
@@ -1759,9 +1780,13 @@ def self_test(root: Path) -> None:
          "fetch PR merge parents"),
         ("sanitizers", "build.yml", "./scripts/run-sanitizer-tests.sh --self-test",
          "true", "ASan/UBSan/LSan"),
-        ("four-target-contract", "build.yml",
-         "python3 scripts/check-build-gate-contract.py --self-test",
-         "true", "four-target build contract"),
+        ("unique-build-contract", "build.yml",
+         "python3 scripts/check-sdkconfig-defaults.py --self-test",
+         "true", "unique ESP-IDF contract checks"),
+        ("repository-preflight-masked", "build.yml", "run: ./scripts/repo-lint.sh\n",
+         "run: ./scripts/repo-lint.sh || true\n", "preflight must run once in logic-harness"),
+        ("agent-preflight-dropped", "build.yml", "run: ./tools/agent-config/selftest.sh\n",
+         "run: true\n", "preflight must run once in logic-harness"),
         ("unprivileged-secret", "build.yml",
          "      contents: read\n    steps:\n",
          "      contents: read\n    env:\n      LEAK: ${{ secrets.OTA_SIGNING_KEY }}\n    steps:\n",
@@ -1987,8 +2012,21 @@ def self_test(root: Path) -> None:
          "            --verify --artifact-root . --source-root . \\\n",
          "must bind the independent legs"),
         ("independent-join-legs", "build.yml",
-         "    needs: [build, independent-rebuild-target]\n", "    needs: build\n",
+         "    needs: [prepare, independent-rebuild-target]\n", "    needs: prepare\n",
          "must need independent-rebuild-target"),
+        ("independent-join-prepare", "build.yml",
+         "    needs: [prepare, independent-rebuild-target]\n", "    needs: independent-rebuild-target\n",
+         "independent-rebuild must need prepare"),
+        ("independent-join-serial", "build.yml",
+         "    needs: [prepare, independent-rebuild-target]\n",
+         "    needs: [prepare, build, independent-rebuild-target]\n",
+         "must join only prepare and all independent targets"),
+        ("independent-join-version", "build.yml",
+         "      - name: Apply the prepared exact display-version stamp\n"
+         "        env:\n          DISPLAY_VERSION: ${{ needs.prepare.outputs.release-version }}",
+         "      - name: Apply the prepared exact display-version stamp\n"
+         "        env:\n          DISPLAY_VERSION: ${{ needs.build.outputs.display-version }}",
+         "must bind the independent legs"),
         ("independent-legs-need-prepare", "build.yml",
          "    needs: prepare\n    if: >-\n      github.ref == 'refs/heads/main'\n",
          "    needs: build\n    if: >-\n      github.ref == 'refs/heads/main'\n",

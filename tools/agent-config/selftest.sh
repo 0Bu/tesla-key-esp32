@@ -320,15 +320,27 @@ perl -0pi -e 's/a merge still needs the user/a merge needs the user/' "$fixture/
 expect_failure "ci-heal exception without the merge bound" "$fixture" "ci-heal-exception-bounded"
 
 fixture="$WORK/multi-target-publication-dag"; make_fixture "$fixture"
-perl -0pi -e 's/build -> independent-rebuild -> publish ->/build -> publish ->/' \
+perl -0pi -e 's/protected publish job needs\\n  both successful joins/protected publish job needs\\n  only the producer join/' \
   "$fixture/.agents/subagents.json"
 expect_failure "multi-target publication DAG" "$fixture" \
   "multi-target reviewer is missing the independent-rebuild/publication DAG contract"
 
 fixture="$WORK/multi-target-independent-legs"; make_fixture "$fixture"
-perl -0pi -e 's/independent-rebuild needs build and every independent-rebuild-target leg/independent-rebuild needs build/' \
+perl -0pi -e 's/independent-rebuild needs prepare and every independent-rebuild-target leg/independent-rebuild needs prepare/' \
   "$fixture/.agents/subagents.json"
 expect_failure "multi-target independent-leg dependency" "$fixture" \
+  "multi-target reviewer is missing the independent-rebuild/publication DAG contract"
+
+fixture="$WORK/multi-target-independent-prepare"; make_fixture "$fixture"
+perl -0pi -e 's/independent-rebuild needs prepare and every independent-rebuild-target leg/independent-rebuild needs every independent-rebuild-target leg/' \
+  "$fixture/.agents/subagents.json"
+expect_failure "multi-target prepared-version dependency" "$fixture" \
+  "multi-target reviewer is missing the independent-rebuild/publication DAG contract"
+
+fixture="$WORK/multi-target-pre-key-compare"; make_fixture "$fixture"
+perl -0pi -e 's/compares complete exact-source inventories and bytes before key use/compares complete exact-source inventories and bytes after key use/' \
+  "$fixture/.agents/subagents.json"
+expect_failure "multi-target pre-key byte comparison" "$fixture" \
   "multi-target reviewer is missing the independent-rebuild/publication DAG contract"
 
 fixture="$WORK/multi-target-host-gate"; make_fixture "$fixture"
