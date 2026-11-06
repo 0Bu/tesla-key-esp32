@@ -161,6 +161,13 @@ authenticate bytes, not freshness; app-descriptor/channel checks enforce version
 No eFuse anti-rollback is burned. Pending images retain rollback until runtime health is proven;
 [Architecture](ARCHITECTURE.md#ota-self-update) owns confirmation rules and allowed channel transitions.
 
+Feed installs also require a current checked offer ID bound to channel revision, PR, version,
+selected notes and manifest/image SHA-256 and size. Channel changes and replacement checks
+invalidate old confirmations; candidate changes require another check. The received image must
+match the confirmed bytes before SDK signature verification. The opaque ID prevents accidental
+cross-client substitution; it is not authentication, a secret or a CSRF credential. Hashes bind
+an unsigned manifest's claims and do not replace the pinned RSA authority.
+
 In `dev`, a LAN peer can also supply a raw signed app through `POST /ota/upload` without
 publishing it to a feed. This uses the same trusted RSA signature, target/slot validation,
 operation exclusion, probation and health/rollback checks. It accepts an equal/newer canonical

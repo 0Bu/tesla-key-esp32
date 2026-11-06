@@ -24,6 +24,19 @@ from typing import Any
 TARGETS = ("esp32", "esp32s3", "esp32c3", "esp32c6")
 COMPILE_SUFFIXES = {".c", ".cc", ".cpp", ".cxx", ".s"}
 MAIN_SOURCE_SUFFIXES = {".c", ".cc", ".cpp", ".cxx"}
+OTA_SIZE_SOURCES = frozenset({
+    "main/http_ota.cpp", "main/ota_update.cpp", "main/ota_transport.cpp",
+    "main/ota_http.cpp", "main/ota_coordinator.cpp", "main/ota_writer.cpp",
+})
+OTA_SIZE_COMPILE_BLOCK = '''set_source_files_properties(
+    "http_ota.cpp"
+    "ota_update.cpp"
+    "ota_transport.cpp"
+    "ota_http.cpp"
+    "ota_coordinator.cpp"
+    "ota_writer.cpp"
+    PROPERTIES COMPILE_OPTIONS "-Os"
+)'''
 MANAGED_COMPONENTS = {
     "espressif__cjson",
     "espressif__mdns",
@@ -1261,6 +1274,7 @@ def validate_effective_optimization(
     target: str,
     config: dict[str, str],
     build_root: Path,
+    source_root: Path,
     idf_root: Path | None,
     project_name: str,
 ) -> None:
@@ -1268,7 +1282,15 @@ def validate_effective_optimization(
     expected = ["-Og"]
     anchor = f"project_elf_src_{target}.c"
     sdk_relative = relative_to(source, idf_root / "components") if idf_root else None
-    if relative_to(source, build_root) == Path(anchor):
+    local_source = relative_to(source, source_root)
+    ota_owner_prefix = "esp-idf/main/CMakeFiles/__idf_main.dir/"
+    if local_source is not None and local_source.as_posix() in OTA_SIZE_SOURCES:
+        if output != ota_owner_prefix + local_source.name + ".obj":
+            raise SemanticsError(f"OTA size source has unexpected output owner: {file_name}")
+        expected = ["-Og", "-Os"]
+    elif output in {ota_owner_prefix + Path(name).name + ".obj" for name in OTA_SIZE_SOURCES}:
+        raise SemanticsError(f"OTA optimisation owner lacks its exact project source: {file_name}")
+    elif relative_to(source, build_root) == Path(anchor):
         # The existing source/output, empty-byte and producer checks admit only this anchor.
         if output != f"CMakeFiles/{project_name}.elf.dir/{anchor}.obj":
             raise SemanticsError(f"generated project ELF source has unexpected output: {file_name}")
@@ -1543,6 +1565,9 @@ def validate_main_cmake_build_surface(source_root: Path) -> None:
         spec.loader.exec_module(maintenance)
         cmake = maintenance.normal_component_text(source_root, cmake)
     code = re.sub(r"#[^\n]*", "", cmake)
+    if code.count(OTA_SIZE_COMPILE_BLOCK) != 1:
+        raise SemanticsError("main CMake exact OTA size profile drifted")
+    code = code.replace(OTA_SIZE_COMPILE_BLOCK, "", 1)
     commands = tuple(
         match.group(1).lower()
         for match in re.finditer(r"(?im)^[ \t]*([A-Za-z_]\w*)\s*\(", code)
@@ -2321,7 +2346,7 @@ def validate(
 
         if source.suffix.lower() in MAIN_SOURCE_SUFFIXES:
             validate_effective_optimization(
-                file_name, source, output, tokens, target, config, build_root, idf_root, project_name
+                file_name, source, output, tokens, target, config, build_root, source_root, idf_root, project_name
             )
         if not is_literal_main_source:
             continue
@@ -2412,6 +2437,21 @@ def self_test_build_graph_contract(repository_root: Path) -> None:
         shutil.copy2(repository_root / "scripts/config_repair_contract.py", cmake_source / "scripts/config_repair_contract.py")
         validate_root_cmake_link_surface(cmake_source)
         validate_main_cmake_build_surface(cmake_source)
+        main_cmake = cmake_source / "main/CMakeLists.txt"
+        main_cmake_text = main_cmake.read_text(encoding="utf-8")
+        for label, changed in (
+            ("missing OTA profile", main_cmake_text.replace(OTA_SIZE_COMPILE_BLOCK, "")),
+            ("duplicate OTA profile", main_cmake_text + "\n" + OTA_SIZE_COMPILE_BLOCK),
+            ("extra OTA source", main_cmake_text.replace('PROPERTIES COMPILE_OPTIONS "-Os"',
+                '"vehicle_ctrl.cpp"\n    PROPERTIES COMPILE_OPTIONS "-Os"')),
+            ("OTA override", main_cmake_text.replace('PROPERTIES COMPILE_OPTIONS "-Os"',
+                'PROPERTIES COMPILE_OPTIONS "-O3"')),
+            ("additional source property", main_cmake_text +
+                '\nset_source_files_properties("net.cpp" PROPERTIES COMPILE_OPTIONS "-Os")\n'),
+        ):
+            main_cmake.write_text(changed, encoding="utf-8")
+            rejected(label, "main CMake", lambda: validate_main_cmake_build_surface(cmake_source))
+        main_cmake.write_text(main_cmake_text, encoding="utf-8")
         root_cmake = cmake_source / "CMakeLists.txt"
         root_cmake_text = root_cmake.read_text(encoding="utf-8")
         validate_tesla_ble_log_level(["-DTESLA_BLE_LOG_LEVEL=2"])
@@ -3032,6 +3072,15 @@ def self_test_fast_paths() -> None:
 
 def self_test_optimization_contract() -> None:
     """Exercise validate() with matching compile-database and mocked actual Ninja vectors."""
+    def rejected_ota(label: str, expected: str, call: Callable[[], None]) -> None:
+        try:
+            call()
+        except SemanticsError as exc:
+            if expected not in str(exc):
+                raise AssertionError(f"{label} failed for the wrong reason: {exc}") from exc
+        else:
+            raise AssertionError(f"{label} mutation was accepted")
+
     with tempfile.TemporaryDirectory() as directory:
         work = Path(directory).resolve()
         root, build, sdk = work / "source", work / "build", work / "sdk"
@@ -3112,7 +3161,13 @@ def self_test_optimization_contract() -> None:
             except SemanticsError as exc:
                 assert error is not None and error in str(exc), (target, rows, error, str(exc))
             else:
-                assert error is None and count == 1, (target, rows, error, count)
+                expected_count = 1 + sum(
+                    1 for candidate, _, _ in rows
+                    if candidate.parent == root / "main" and candidate.name in {
+                        Path(name).name for name in OTA_SIZE_SOURCES
+                    }
+                )
+                assert error is None and count == expected_count, (target, rows, error, count)
 
         old_idf = os.environ.get("IDF_PATH")
         os.environ["IDF_PATH"] = str(sdk)
@@ -3163,6 +3218,31 @@ def self_test_optimization_contract() -> None:
                 check(target, [(anchor, repair_owner, [])], error="unexpected output")
                 for flags in ([], ["-Os"], ["-Og", "-O2"], ["-Og", "-Og"]):
                     check(target, [(ordinary, ordinary_owner, flags)], error="effective optimisation")
+                # Execute the same full compile/Ninja validator for every admitted project
+                # source. A matching basename or main-component owner alone grants no exception.
+                main_cmake = root / "main/CMakeLists.txt"
+                original_cmake = main_cmake.read_text(encoding="utf-8")
+                for local_name in sorted(OTA_SIZE_SOURCES):
+                    ota_source = root / local_name
+                    ota_source.write_text("int ota_fixture;\n", encoding="utf-8")
+                    ota_output = "esp-idf/main/CMakeFiles/__idf_main.dir/" + ota_source.name + ".obj"
+                    main_cmake.write_text(
+                        'idf_component_register(\n    SRCS\n        "sample.cpp"\n        "' +
+                        ota_source.name + '"\n    INCLUDE_DIRS\n        "."\n)\n', encoding="utf-8")
+                    check(target, [(ota_source, ota_output, ["-Og", "-Os", "-fstack-usage"])])
+                    for bad in ([], ["-Og"], ["-Os"], ["-Os", "-Og"], ["-Og", "-O2"],
+                                ["-Og", "-Os", "-Os"], ["-Og", "-Og", "-Os"],
+                                ["-Og", "-O3", "-Os"]):
+                        check(target, [(ota_source, ota_output, bad+["-fstack-usage"])], error="effective optimisation")
+                    rejected_ota("OTA exact source owner", "unexpected output owner",
+                        lambda: validate_effective_optimization(str(ota_source), ota_source,
+                            "evil/" + ota_output, ["-Og", "-Os"], target, {}, build, root, sdk,
+                            "tesla-key-esp32"))
+                    other = root / "main/other" / ota_source.name
+                    rejected_ota("OTA basename cannot grant size profile", "lacks its exact project source",
+                        lambda: validate_effective_optimization(str(other), other,
+                            ota_output, ["-Og", "-Os"], target, {}, build, root, sdk, "tesla-key-esp32"))
+                main_cmake.write_text(original_cmake, encoding="utf-8")
                 for source, output, _ in crypto_rows:
                     for flags in (["-Og"], ["-Os"], ["-Os", "-Og"], ["-Og", "-Os", "-Os"],
                                   ["-Og", "-O3", "-Os"], ["-Og", "-Og", "-Os"]):
@@ -4060,7 +4140,7 @@ def main() -> int:
     except (OSError, UnicodeError, ValueError, SemanticsError) as exc:
         print(f"effective build semantics failed: {exc}", file=sys.stderr)
         return 1
-    print(f"effective build semantics: PASS ({args.target}, {checked} main translation units at -Og)")
+    print(f"effective build semantics: PASS ({args.target}, {checked} main translation units, closed -Og/OTA-size policy)")
     return 0
 
 

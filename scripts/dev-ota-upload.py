@@ -606,7 +606,9 @@ def validate_device(board: dict, status: dict, ota: dict) -> None:
     if not (isinstance(system, dict) and system.get("board_mac") == board["board_mac"] and
             ota.get("project") == PROJECT and ota.get("target") == board["target"]):
         raise IdentityMismatch("physical board/project/chip identity mismatch")
-    require(status.get("ota", {}).get("channel") == "dev" and ota.get("channel") == "dev", "saved OTA channel must already be dev")
+    require(status.get("ota", {}).get("channel") == "dev" and
+            ota.get("configured_channel", ota.get("channel")) == "dev",
+            "saved OTA channel must already be dev")
     require(ota.get("busy") is False and ota.get("verification") == "stable", "OTA is busy or firmware verification is pending/unknown")
     require(system.get("safe_mode") is False and system.get("runtime_state") == "ready", "board boot health is not ready")
     largest, required = system.get("largest_block"), ota.get("recovery_required_bytes")

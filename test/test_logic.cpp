@@ -1289,6 +1289,49 @@ static void test_ota_contract() {
 static void test_ota_channel() {
     using tk::OtaChannel;
 
+    const uint32_t release = 0;
+    const auto dev = tk::ota_changed_channel_state(release, OtaChannel::Dev);
+    const auto returned = tk::ota_changed_channel_state(dev, OtaChannel::Release);
+    CHECK(dev == 3 && returned == 4);
+    CHECK(tk::ota_changed_channel_state(dev, OtaChannel::Dev) == dev);
+    CHECK(tk::ota_offer_current(release, release, 1, true));
+    CHECK(!tk::ota_offer_current(release, dev, 1, true));
+    CHECK(!tk::ota_offer_current(release, returned, 1, true)); // ABA never revives an offer.
+    CHECK(!tk::ota_offer_current(dev, dev, 0, true));
+    CHECK(!tk::ota_offer_current(dev, dev, UINT32_MAX, true));
+    CHECK(!tk::ota_offer_current(dev, dev, 1, false));
+    const auto exhausted = tk::ota_changed_channel_state(tk::kOtaChannelRevisionMask, OtaChannel::Dev);
+    CHECK(exhausted == UINT32_MAX && tk::ota_channel_in_state(exhausted) == OtaChannel::Dev);
+    CHECK(!tk::ota_offer_current(exhausted, exhausted, 1, true));
+    CHECK((tk::ota_changed_channel_state(exhausted, OtaChannel::Release) & tk::kOtaChannelExhausted) != 0);
+    CHECK(tk::ota_next_offer_generation(0) == 1);
+    CHECK(tk::ota_next_offer_generation(UINT32_MAX - 2) == UINT32_MAX - 1);
+    CHECK(tk::ota_next_offer_generation(UINT32_MAX - 1) == UINT32_MAX);
+    CHECK(tk::ota_next_offer_generation(UINT32_MAX) == UINT32_MAX);
+    std::array<char, 25> id{}, other{};
+    CHECK(tk::format_ota_offer_id(id, 0x123456789abcdef0ULL, 1));
+    CHECK_STR(id.data(), "123456789abcdef000000001");
+    CHECK(tk::ota_offer_id_valid(id.data()));
+    CHECK(tk::format_ota_offer_id(other, 0x123456789abcdef1ULL, 1) && other != id);
+    CHECK(tk::format_ota_offer_id(other, 0x123456789abcdef0ULL, 2) && other != id);
+    CHECK(!tk::format_ota_offer_id(other, 0, 1));
+    CHECK(!tk::format_ota_offer_id(other, 1, 0));
+    CHECK(!tk::format_ota_offer_id(other, 1, UINT32_MAX));
+    for (const auto text : {"", "1234", "123456789abcdef000000000", "123456789abcdef0ffffffff",
+                            "123456789ABCDEF000000001", "123456789abcdef00000000g"})
+        CHECK(!tk::ota_offer_id_valid(text));
+    const auto query = tk::ota_offer_query_parameter("pr=42&offer=123456789abcdef000000001");
+    CHECK(query.present && query.valid && query.value == id.data());
+    CHECK(!tk::ota_offer_query_parameter("pr=42").present);
+    CHECK(!tk::ota_offer_query_parameter("offer").valid);
+    CHECK(!tk::ota_offer_query_parameter("offer=x&OFFER=y").valid);
+    std::array<uint8_t, 32> hash{};
+    CHECK(tk::parse_ota_sha256("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", hash));
+    CHECK(hash[0] == 1 && hash[31] == 0xef);
+    CHECK(!tk::parse_ota_sha256("g123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", hash));
+    CHECK(hash == (std::array<uint8_t, 32>{}));
+    CHECK(!tk::parse_ota_sha256("0123", hash));
+
     // Names and validation
     CHECK(std::string(tk::ota_channel_name(OtaChannel::Release)) == "release");
     CHECK(std::string(tk::ota_channel_name(OtaChannel::Dev)) == "dev");

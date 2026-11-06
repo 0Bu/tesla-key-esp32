@@ -270,8 +270,9 @@ Do not choose OTA as a fallback or infer it from release/merge approval. Only ru
 the user explicitly authorizes OTA to the identified device. The selected run publishes the manifest
 through the sole branch-backed Pages authority — `gh-pages:/dev/` for the Dev channel, or
 `gh-pages:/` accepted against the immutable Release for the stable channel — and the device sees it
-only while its configured OTA channel matches (`/ota/status` reports `channel` as `dev` or
-`release`). Changing the device's channel is a separate configuration change that needs its own
+only while its configured OTA channel matches (`/ota/status` reports `configured_channel` as
+`dev` or `release`). The completed offer's `channel` identifies its checked source separately.
+Changing the device's channel is a separate configuration change that needs its own
 approval. The check is asynchronous, so bind its completed status to the artifact's exact `VERSION`
 and `CHANNEL` before authorizing the POST. A stale/different manifest,
 an error, an unexpected state or a timeout is a hard stop:
@@ -304,7 +305,8 @@ while (( SECONDS < CHECK_DEADLINE )); do
       exit 1 ;;
     idle)
       printf '%s' "$OTA_JSON" | jq -e --arg v "$VERSION" --arg c "$CHANNEL" \
-        '.update_available == true and .available == $v and .channel == $c' >/dev/null || {
+        '.update_available == true and .available == $v and .channel == $c and
+         (.offer_id | type == "string" and test("^[0-9a-f]{24}$"))' >/dev/null || {
         echo "REFUSING: OTA manifest is not an available $CHANNEL-channel update for exact version $VERSION" >&2
         exit 1
       }
@@ -314,9 +316,10 @@ while (( SECONDS < CHECK_DEADLINE )); do
   esac
 done
 [ "$OTA_READY" -eq 1 ] || { echo "REFUSING: OTA check timed out" >&2; exit 1; }
+OFFER_ID=$(printf '%s' "$OTA_JSON" | jq -r .offer_id)
 
 UPDATE_JSON=$(curl --connect-timeout 5 --max-time 10 -fsS -X POST \
-  "http://$DEVICE_IP/ota/update")
+  "http://$DEVICE_IP/ota/update?offer=$OFFER_ID")
 printf '%s' "$UPDATE_JSON" | jq -e '.result == true' >/dev/null || {
   echo "REFUSING: OTA update did not start" >&2; exit 1;
 }
@@ -324,7 +327,9 @@ DELIVERY=ota
 ```
 
 The device requires exact manifest/image version identity, selected channel/PR eligibility and a
-valid RSA signature. Eligibility includes the documented same-core preview/Dev and return-to-Release
+valid RSA signature. The checked offer ID is consumed once; a channel change, another check or
+changed candidate requires a fresh check and confirmation, never an automatic install retry.
+Eligibility includes the documented same-core preview/Dev and return-to-Release
 exceptions in `docs/ARCHITECTURE.md`. Rollback stays armed until the image has run 90 s with
 admitted runtime, a healthy NimBLE host, a proven network lease and an INTERNAL largest block
 meeting the shared `ImageConfirmation` policy in

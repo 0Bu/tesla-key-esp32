@@ -425,7 +425,7 @@ class LocalOtaTests(unittest.TestCase):
 
     def test_dev_stable_idle_runtime_and_internal_memory_are_mandatory(self):
         self.ready_fixture()
-        for field, value in (("channel", "release"), ("busy", True), ("verification", "pending_verify"),
+        for field, value in (("channel", "release"), ("configured_channel", "release"), ("busy", True), ("verification", "pending_verify"),
                              ("verification", "unknown"), ("recovery_required_bytes", 0), ("target", "esp32c3")):
             with self.subTest(field=field, value=value):
                 candidate = copy.deepcopy(self.before_ota)
@@ -442,6 +442,13 @@ class LocalOtaTests(unittest.TestCase):
         self.ready_fixture()
         with patch.object(ota, "exchange", side_effect=AssertionError("offline check contacted device")):
             self.case.ready()
+
+    def test_saved_channel_is_distinct_from_checked_offer_source(self):
+        self.before_ota.update(configured_channel="dev", channel="release")
+        ota.validate_device(self.case.plan["board"], self.before_status, self.before_ota)
+        self.before_ota.update(configured_channel="release", channel="dev")
+        with self.assertRaises(ota.Refused):
+            ota.validate_device(self.case.plan["board"], self.before_status, self.before_ota)
 
     def test_inventory_change_during_preflight_stops_before_upload_attempt(self):
         self.ready_fixture()

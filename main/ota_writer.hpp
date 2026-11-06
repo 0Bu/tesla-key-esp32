@@ -1,6 +1,7 @@
 #pragma once
 #include "ota_coordinator.hpp"
 #include "logic/ota_contract.hpp"
+#include "ota_hash.hpp"
 #include <esp_ota_ops.h>
 #include <esp_app_desc.h>
 #include <esp_image_format.h>
@@ -12,6 +13,8 @@ struct ImagePolicy {
     unsigned target_pr{0};
     tk::OtaChannel channel{tk::OtaChannel::Release};
     bool direct_upload{false};
+    Digest expected_sha256{};
+    uint32_t expected_bytes{0};
 };
 // Actual raw-OTA adapter. Only the application coordinator receives its Effects table.
 // The caller supplies the existing owner-checked Ota-lease callback, never the network worker.
@@ -25,7 +28,7 @@ public:
     RawWriter& operator=(RawWriter&&) = delete;
     Effects effects() noexcept;
     bool configure(ImagePolicy policy) noexcept {
-        if (handle_ || partition_ || uncertain_ || validated_) return false;
+        if (handle_ || partition_ || uncertain_ || validated_ || hash_live_) return false;
         policy_ = policy; return true;
     }
 private:
@@ -44,5 +47,8 @@ private:
     void* owner_;
     bool(*release_)(void*) noexcept;
     bool uncertain_{false}, validated_{false};
+    psa_hash_operation_t hash_ = PSA_HASH_OPERATION_INIT;
+    uint32_t received_{0};
+    bool hash_live_{false};
 };
 } // namespace tk::ota

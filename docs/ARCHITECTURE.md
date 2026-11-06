@@ -249,6 +249,24 @@ they do not measure a universal peak or establish a safe allocation floor.
 
 ### Transport, manifest and version validation
 
+Each feed check captures the channel and a nonwrapping channel revision at admission. A real
+channel change invalidates completed and in-flight offers, including a change away and back;
+an unchanged save is a no-op. A separately owned nonwrapping generation advances for each
+accepted check, install or upload. Exhaustion disables feed offers until reboot rather than
+reusing an identity. A random per-boot nonce plus generation forms the opaque offer ID.
+The status mutex publishes bounded POD channel/PR/version, selected notes and candidate hashes
+as one record. Readers expose an offer only while both captured revision and generation match;
+`configured_channel` remains distinct from the checked source channel.
+
+Feed installation requires that exact offer ID and PR under the operation owner. Acceptance
+consumes the offer once and copies its manifest, selected-note and image SHA-256 plus size into
+the owned operation. A fresh metadata check must reproduce all those fields before image
+download; a mismatch withdraws the offer without writing. The raw writer streams SHA-256 and
+counts the exact signed app bytes before the mandatory SDK signature verification and boot
+selection. Hash setup/update/finish failure follows the same abort/quarantine ownership rules.
+No unsigned manifest can change the firmware-owned download URL or partition. Direct signed
+Dev upload remains the explicit manifest-free path and invalidates any old feed offer.
+
 The incremental parser caps total headers at 8192 bytes, 64 fields, 64 field-name bytes, 1023
 field-value bytes, chunk metadata at 65536 bytes and chunk lines at 256 bytes; it permits at most
 two interim responses and ten redirects. URLs/locations use 1024-byte storage, and metadata bodies
@@ -259,7 +277,9 @@ Manifest intake reserves one bounded body (8192 B). Non-chunked data needs posit
 Content-Length and exact completion; chunked data needs non-empty bounded complete transport.
 Negative/early-zero reads and truncation fail. Before cJSON, the allocation-free gate requires valid
 UTF-8/escapes, ≤16 levels, no U+0000 and one fully consumed document. The root has unique keys and
-exactly one string version. Versions use a no-leading-zero numeric core, optional
+exactly one string version. The selected app part must occur exactly once with unique object
+keys, the expected path, offset `0x20000`, bounded integral size and lowercase SHA-256.
+Version-only manifests are refused. Versions use a no-leading-zero numeric core, optional
 `[0-9A-Za-z.-]+` suffix and ≤31 bytes; numeric cores compare as digit spans without overflow.
 Release body storage before copying version fields.
 
@@ -392,7 +412,7 @@ The optional T-Dongle-S3 ST7735 uses the shared cache-only `UiSnapshot` and pure
 presenter. BOOT rotates landscape 160×80/portrait 80×160 and their flips; `disp_rot` persists and
 migrates legacy `disp_flip`. The panel has a printable ASCII font; each unsupported UTF-8 byte
 becomes a blank cell. The portrait battery interior leaves room for number outlines. The
-[test guide](../test/README.md#whats-covered) owns presenter, font, text-primitive and frame-layout
+[test guide](../test/README.md#logic-ble-protocol-and-presentation) owns presenter, font, text-primitive and frame-layout
 coverage. Those checks and the preview montages do not establish complete-frame pixel equality,
 physical animation or glyph legibility.
 
@@ -1053,7 +1073,7 @@ snapshots as leaves; do not call network, storage, logging or an external sink u
 | diagnostic `s_mtx` | ring bytes, append/clear generation and sink snapshots; capture uses zero wait and counts dropped lines, sinks run after unlock |
 | Syslog `s_status_mtx` | resolved/reachable/error snapshot; error strings may allocate, so RAII releases on failure |
 | Syslog queue and `s_ping` | the boot-published fixed queue lives until reboot; persistent generation-owned ping completion is not deleted/reused until its exact end acknowledgement |
-| OTA `s_lock` | bounded `OtaStatusPod` copy/update; string conversion and SDK/network/storage work run after unlock |
+| OTA `s_lock` | bounded POD status/offer/notes copy/update; hashing and SDK/network/storage work run after unlock |
 | OTA shared operation gate | mutually exclusive Ota, IdentityMutation, FaultRestart, HealthCommit or ConfigRestart owner; refusals do not acquire another owner's operation |
 | heap-trend `mutex()` | retained ring adoption, carry, seal and bounded snapshots; adoption logging runs after unlock, with no NVS or network operation under this lock |
 
@@ -1130,7 +1150,7 @@ review generated `sdkconfig` when changing the SDK or target configuration.
 | `app_main` | `CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192` | startup and ownership publication |
 | NimBLE host | `CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=8192` | GAP/GATT/lifecycle callbacks; Link/RX adapters copy bounded bytes/barriers into the static mailbox, remaining callbacks use zero-wait locks |
 | primary HTTP server | `http_server.cpp`: `config.stack_size=8192` | synchronous REST/MCP/UI/diagnostic handlers |
-| setup HTTP server | `provisioning.cpp`: unchanged `HTTPD_DEFAULT_CONFIG()` stack | setup form handlers, while the vehicle stack is down |
+| setup HTTP server | `provisioning.cpp`: `hcfg.stack_size=6144` | setup form handlers, while the vehicle stack is down |
 | ESP timer task | `CONFIG_ESP_TIMER_TASK_STACK_SIZE=3584` | `ble_scan` timeout callback (not an ISR or the FreeRTOS timer service) |
 | default event loop | `CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=2304` | WiFi/IP/Ethernet lifecycle callbacks |
 | ESP-MQTT client tasks | locked component `MQTT_TASK_STACK`, default 6144; project does not override | publisher events and the transient configuration broker-probe callback in `http_config.cpp` |

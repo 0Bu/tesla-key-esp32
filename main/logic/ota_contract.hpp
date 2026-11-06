@@ -20,13 +20,14 @@ inline constexpr bool ota_https_url(std::string_view url) {
     return url.size() > 8 && url.substr(0, 8) == "https://";
 }
 
-enum class OtaStartResult : uint8_t { Started, Busy, PendingVerification, Unavailable, InternalError, NoMemory };
+enum class OtaStartResult : uint8_t { Started, Busy, PendingVerification, Unavailable, InternalError, NoMemory, OfferChanged };
 
 inline constexpr int ota_start_http_status(OtaStartResult result) {
     switch (result) {
         case OtaStartResult::Started: return 200;
         case OtaStartResult::Busy:
-        case OtaStartResult::PendingVerification: return 409;
+        case OtaStartResult::PendingVerification:
+        case OtaStartResult::OfferChanged: return 409;
         case OtaStartResult::InternalError: return 500;
         case OtaStartResult::NoMemory: return 503;
         default: return 503;
@@ -40,6 +41,7 @@ inline constexpr const char* ota_start_reason(OtaStartResult result, bool check)
         case OtaStartResult::PendingVerification: return "running firmware is still pending verification";
         case OtaStartResult::InternalError: return check ? "could not start update check" : "could not start OTA task";
         case OtaStartResult::NoMemory: return "not enough memory for update";
+        case OtaStartResult::OfferChanged: return "update offer changed; check again and confirm the new offer";
         default: return "OTA service or firmware verification state is unavailable";
     }
 }
@@ -229,6 +231,75 @@ enum class OtaChannel : uint8_t {
     Release = 0,
     Dev = 1,
 };
+
+// One atomic word binds a channel to its nonwrapping revision. An ABA channel change
+// cannot restore a previous offer. Exhaustion keeps the selected channel usable for raw
+// uploads, but permanently disables feed offers until a new boot.
+inline constexpr uint32_t kOtaChannelExhausted = 0x80000000u;
+inline constexpr uint32_t kOtaChannelRevisionMask = 0x7ffffffeu;
+inline constexpr OtaChannel ota_channel_in_state(uint32_t state) noexcept {
+    return (state & 1u) ? OtaChannel::Dev : OtaChannel::Release;
+}
+inline constexpr uint32_t ota_changed_channel_state(uint32_t state, OtaChannel channel) noexcept {
+    if (ota_channel_in_state(state) == channel) return state;
+    const uint32_t revision = state & kOtaChannelRevisionMask;
+    const uint32_t next = (state & kOtaChannelExhausted) || revision == kOtaChannelRevisionMask
+        ? revision | kOtaChannelExhausted : revision + 2u;
+    return next | (channel == OtaChannel::Dev ? 1u : 0u);
+}
+inline constexpr bool ota_offer_current(uint32_t captured, uint32_t current,
+                                        uint32_t generation, bool available) noexcept {
+    return available && generation != 0 && generation != UINT32_MAX &&
+           !(current & kOtaChannelExhausted) && captured == current;
+}
+inline constexpr uint32_t ota_next_offer_generation(uint32_t previous) noexcept {
+    return previous >= UINT32_MAX - 1u ? UINT32_MAX : previous + 1u;
+}
+inline constexpr int ota_hex_digit(char c) noexcept {
+    return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1;
+}
+inline bool ota_offer_id_valid(std::string_view id) noexcept {
+    if (id.size() != 24) return false;
+    uint32_t generation = 0;
+    for (size_t i = 0; i < id.size(); ++i) {
+        if (ota_hex_digit(id[i]) < 0) return false;
+        if (i >= 16) generation = (generation << 4) | static_cast<uint32_t>(ota_hex_digit(id[i]));
+    }
+    return generation != 0 && generation != UINT32_MAX;
+}
+inline OtaQueryParameter ota_offer_query_parameter(std::string_view query) noexcept {
+    OtaQueryParameter found{};
+    while (!query.empty()) {
+        const auto end = query.find('&');
+        const auto item = ota_query_parameter(query.substr(0, end), "offer");
+        if (item.present) {
+            if (found.present) { found.valid = false; return found; }
+            found = item;
+        }
+        if (end == std::string_view::npos) break;
+        query.remove_prefix(end + 1);
+    }
+    return found;
+}
+inline bool format_ota_offer_id(std::array<char, 25>& out, uint64_t boot,
+                                uint32_t generation) noexcept {
+    out.fill('\0');
+    if (!boot || !generation || generation == UINT32_MAX) return false;
+    constexpr char hex[] = "0123456789abcdef";
+    for (size_t i = 0; i < 16; ++i) out[i] = hex[(boot >> ((15 - i) * 4)) & 15u];
+    for (size_t i = 0; i < 8; ++i) out[16 + i] = hex[(generation >> ((7 - i) * 4)) & 15u];
+    return true;
+}
+inline bool parse_ota_sha256(std::string_view text, std::array<uint8_t, 32>& out) noexcept {
+    out.fill(0);
+    if (text.size() != 64) return false;
+    for (size_t i = 0; i < out.size(); ++i) {
+        const int high = ota_hex_digit(text[i * 2]), low = ota_hex_digit(text[i * 2 + 1]);
+        if (high < 0 || low < 0) { out.fill(0); return false; }
+        out[i] = static_cast<uint8_t>((high << 4) | low);
+    }
+    return true;
+}
 
 inline constexpr const char* kOtaDevSubdir = "dev";
 

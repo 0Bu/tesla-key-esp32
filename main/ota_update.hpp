@@ -14,24 +14,30 @@
 enum class OtaState { Idle, Checking, Downloading, Done, Error };
 
 struct OtaStatus {
-    OtaState    state;
-    int         progress;          // 0–100 during download
-    std::string message;
-    std::string available;         // latest version seen by the last check (if any)
-    bool        update_available;  // last check found a newer version
+    OtaState    state{OtaState::Idle};
+    int         progress{0};       // 0–100 during download
+    std::array<char, 96> message{};
+    std::array<char, 32> available{}; // version from the coherent checked offer
+    bool        update_available{false};
     bool        upload{false};     // raw upload; no feed offer or target version is implied
-    std::string current;           // running version at the last check
-    std::string channel;           // active update channel ("release" or "dev")
+    std::array<char, 32> current{};
+    tk::OtaChannel channel{tk::OtaChannel::Release}; // checked source, not a later setting
+    tk::OtaChannel configured_channel{tk::OtaChannel::Release};
     unsigned    target_pr{0};      // 0 for main channel, >0 if PR preview channel
+    std::array<char, 25> offer_id{}; // boot nonce plus a nonwrapping check generation
+    std::array<uint8_t, 32> image_sha256{};
+    uint32_t image_bytes{0};
 };
 
 struct OtaCheckResult {
-    bool        ok;                 // check completed (manifest fetched + parsed)
-    bool        update_available;   // eligible update available
-    std::string current;
-    std::string available;
-    std::string reason;
+    bool        ok{false};
+    bool        update_available{false};
+    std::array<char, 32> current{};
+    std::array<char, 32> available{};
+    const char* reason{"update check failed"}; // static diagnostic text; no result allocation
     unsigned    target_pr{0};
+    std::array<uint8_t, 32> manifest_sha256{}, notes_sha256{}, image_sha256{};
+    uint32_t image_bytes{0};
 };
 
 // Fetch the manifest and compare versions. Blocking background coordinator API; the separate
@@ -54,7 +60,7 @@ tk::OtaStartResult ota_check_start_after_http(unsigned pr_number, void* server) 
 
 // Kick off a background download+install task. Refuse pending/unknown image verification before
 // creating a worker or starting HTTPS; inspect the SDK state under the operation gate.
-tk::OtaStartResult ota_start(unsigned pr_number = 0);
+tk::OtaStartResult ota_start(unsigned pr_number = 0, std::string_view offer_id = {});
 
 struct httpd_req;
 // HTTP-handler-only signed app upload. A successful async copy sets handed_off before
@@ -74,12 +80,11 @@ tk::OtaChannel ota_get_channel();
 void ota_set_channel(tk::OtaChannel channel);
 
 // Retrieve latest changelog text for offered update (returns true if available).
-bool ota_get_changelog(char* out, size_t max_len, size_t& out_len);
+bool ota_get_changelog(char* out, size_t max_len, size_t& out_len,
+                       std::string_view offer_id = {}, bool* stale = nullptr);
 
-// Is a check or download task running right now? Deliberately separate from ota_get_status():
-// that one copies std::strings, so on an exhausted heap it can THROW — unusable for the heap
-// watchdog, whose whole job is to run when allocation is failing. This reads one atomic and
-// allocates nothing, so it is safe from any task at any heap level.
+// Is a check or download task running right now? The watchdog uses this allocation-free atomic
+// read instead of taking the status mutex or copying the bounded status record.
 bool ota_is_busy();
 
 // Is an active OTA download or flash-write installation running right now?

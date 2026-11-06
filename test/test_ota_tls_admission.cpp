@@ -4,6 +4,8 @@
 #include "ota_recovery_memory.hpp"
 #include "ota_writer.hpp"
 #include "ota_manifest.hpp"
+#include "ota_hash.hpp"
+#include <esp_random.h>
 #include "logic/json_syntax.hpp"
 #include "logic/ota_changelog_range.hpp"
 #include "logic/tls_memory.hpp"
@@ -38,6 +40,7 @@
 #include <type_traits>
 #include <vector>
 
+uint32_t esp_random(){ return 0x12345678; } // Passive deterministic boot nonce, no entropy claim.
 namespace fixture { void observe_body_allocation(std::size_t); }
 static std::atomic<bool> fail_body_reserve{false};
 void* operator new(std::size_t n) {
@@ -141,12 +144,13 @@ int queries=0;
 TaskFunction_t selected_task=nullptr;
 void* selected_argument=nullptr;
 unsigned selected_stack=0,selected_priority=0;
-std::string manifest="{\"version\":\"1.6.3\"}";
+std::string manifest;
 std::string changelog="{\"version\":\"1.6.3\",\"changelog\":\"A change\"}";
 unsigned changelog_status=200;
 int raw_end_error=ESP_OK,raw_select_error=ESP_OK;
 std::string terminal_case;
 std::string image_version="1.6.3",extra_header;
+int image_mutation=0;
 struct TlsConnection {std::string request,response;size_t offset=0;};
 TlsConnection connection;
 esp_tls_t tls{};
@@ -160,7 +164,18 @@ std::string image_body(){
  std::snprintf(desc.project_name,sizeof(desc.project_name),"tesla-key-esp32");
  std::memcpy(result.data(),&image,sizeof(image));
  std::memcpy(result.data()+sizeof(image)+sizeof(esp_image_segment_header_t),&desc,sizeof(desc));
+ if(image_mutation==1)result[900]^=1;
+ if(image_mutation==2)result.pop_back();
+ if(image_mutation==3)result+='x';
  return result;
+}
+std::string selected_manifest(std::string_view version="1.6.3"){
+ const auto image=image_body();tk::ota::Digest digest{};
+ CHECK(tk::ota::sha256(image.data(),image.size(),digest)==PSA_SUCCESS);
+ constexpr char hex[]="0123456789abcdef";std::string hash;
+ for(auto b:digest){hash+=hex[b>>4];hash+=hex[b&15];}
+ return "{\"version\":\""+std::string(version)+"\",\"builds\":[{\"parts\":[{\"path\":\"tesla-key-esp32.bin\",\"offset\":131072,\"size\":"+
+  std::to_string(image.size())+",\"sha256\":\""+hash+"\"}]}]}";
 }
 void join_worker(){if(worker.joinable())worker.join();}
 [[noreturn]] void check_uncertain_terminal();
@@ -372,7 +387,7 @@ void esp_restart(){
   CHECK(fixture::upload_status=="200 OK"&&fixture::upload_reply.find("true")!=std::string::npos);
   CHECK(fixture::init_calls==0&&fixture::connects==0&&fixture::written_image==fixture::upload_body);
   const auto status=ota_get_status();
-  CHECK(status.upload&&status.available.empty()&&!status.update_available&&status.target_pr==0);
+  CHECK(status.upload&&(status.available[0] == 0)&&!status.update_available&&status.target_pr==0);
  }
  CHECK(ota_is_busy()&&s_operation_gate.state()==tk::OtaIdentityGateState::Ota);
  CHECK(ota_get_state()==OtaState::Done);
@@ -415,7 +430,7 @@ void check_effect_admission(){
  if(terminal_case=="upload-uncertain"){
   CHECK(async_copies==1&&async_completions==1&&init_calls==0);
   CHECK(upload_reply.find("\"outcome\":\"unknown\"")!=std::string::npos);
-  CHECK(ota_get_status().message=="upload uncertain; do not retry");
+  CHECK(std::string_view(ota_get_status().message.data())=="upload uncertain; do not retry");
  }
  std::cout<<"OTA uncertain selection parked with owner retained; checks "<<checks<<'\n'<<std::flush;
  std::_Exit(0); // Separate irreversible-effect fixture, not leak/task-reclamation proof.
@@ -445,8 +460,8 @@ void reset(std::initializer_list<size_t> samples={65536}){
  queued_http_work=nullptr;queued_http_argument=nullptr;queue_calls=0;
  queue_ok=true;queue_throw_before=queue_throw_after=queue_inline=http_request_live=throw_entry_sample=require_error_owner=false;
  hold_connect=release_connect=connect_entered=hold_image_read=image_read_entered=false;changelog_status=200;raw_end_error=raw_select_error=ESP_OK;
- image_version="1.6.3";extra_header.clear();inactive={ESP_PARTITION_TYPE_APP,0,0x20000,0x1f0000};
- manifest="{\"version\":\"1.6.3\"}";changelog="{\"version\":\"1.6.3\",\"changelog\":\"A change\"}";
+ image_version="1.6.3";image_mutation=0;extra_header.clear();inactive={ESP_PARTITION_TYPE_APP,0,0x20000,0x1f0000};
+ manifest=selected_manifest("1.6.3");changelog="{\"version\":\"1.6.3\",\"changelog\":\"A change\"}";
  std::snprintf(running_description.version,sizeof(running_description.version),"1.6.2");
  ota_set_channel(tk::OtaChannel::Release);
  async_copy_ok=true;async_copies=async_completions=upload_reads=0;upload_cursor=0;upload_fail_at=-1;
@@ -454,6 +469,16 @@ void reset(std::initializer_list<size_t> samples={65536}){
  upload_body.clear();upload_reply.clear();upload_status.clear();written_image.clear();
 }
 void run_selected(){CHECK(selected_task);auto task=selected_task;auto* arg=selected_argument;selected_task=nullptr;task(arg);}
+std::string confirmed_offer;
+void reset_for_image(std::initializer_list<size_t> samples={65536},unsigned pr=0){
+ reset();
+ if(pr){manifest=selected_manifest("1.6.3-PR-"+std::to_string(pr));changelog="{}";}
+ const auto result=ota_check(pr);join_worker();CHECK(result.ok&&result.update_available);
+ const auto status=ota_get_status();CHECK(status.offer_id[0]);confirmed_offer=status.offer_id.data();
+ reset(samples); // Reset passive effect counters only; channel/offer state remains production-owned.
+ CHECK(ota_get_status().offer_id.data()==confirmed_offer);
+}
+tk::OtaStartResult start_confirmed(unsigned pr=0){return ota_start(pr,confirmed_offer);}
 void upload_checks(){
  using R=tk::OtaStartResult;
  reset();httpd_req_t req{&http_server_marker,1024};bool handed=false;
@@ -476,12 +501,12 @@ void upload_checks(){
  for(bool checked:{false,true}){
   reset();publish_check_status(OtaStatusPod{});
   if(checked){
-   manifest="{\"version\":\"1.6.3-PR-42\"}";
+   manifest=selected_manifest("1.6.3-PR-42");
    changelog="{\"version\":\"1.6.3-PR-42\",\"changelog\":\"Old feed notes\"}";
    const auto result=ota_check(42);join_worker();
    CHECK(result.ok&&result.update_available);
    const auto status=ota_get_status();
-   CHECK(!status.upload&&status.update_available&&status.target_pr==42&&!status.available.empty());
+   CHECK(!status.upload&&status.update_available&&status.target_pr==42&&!(status.available[0] == 0));
    char notes[64];size_t len=0;CHECK(ota_get_changelog(notes,sizeof(notes),len)&&len>0);
   }
   ota_set_channel(tk::OtaChannel::Dev);upload_body=image_body();upload_fail_at=10;
@@ -489,13 +514,13 @@ void upload_checks(){
   CHECK(ota_upload_start(&req,handed)==R::Started&&handed);
   const auto status=ota_get_status();
   CHECK(status.upload&&status.state==OtaState::Downloading);
-  CHECK(status.available.empty()&&!status.update_available&&status.target_pr==0);
+  CHECK((status.available[0] == 0)&&!status.update_available&&status.target_pr==0);
   char notes[64];size_t len=99;CHECK(!ota_get_changelog(notes,sizeof(notes),len)&&len==0);
   run_selected();
   CHECK(ota_get_status().state==OtaState::Error&&ota_get_status().upload);
-  CHECK(ota_get_status().available.empty()&&!ota_get_status().update_available);
+  CHECK((ota_get_status().available[0] == 0)&&!ota_get_status().update_available);
   CHECK(connects==old_connects&&async_completions==1&&!ota_is_busy());
-  manifest="{\"version\":\"1.6.3\"}";changelog="{\"version\":\"1.6.3\",\"changelog\":\"Feed notes\"}";
+  manifest=selected_manifest("1.6.3");changelog="{\"version\":\"1.6.3\",\"changelog\":\"Feed notes\"}";
   ota_set_channel(tk::OtaChannel::Release);
   CHECK(ota_check(0).ok);join_worker();
   CHECK(!ota_get_status().upload&&ota_get_status().update_available);
@@ -539,7 +564,7 @@ void run_queued_http(){
 }
 void deferred_http_checks(){
  reset();now=100;http_request_live=true;entry_largest=57344;
- manifest="{\"version\":\"1.6.3-PR-400\"}";
+ manifest=selected_manifest("1.6.3-PR-400");
  changelog="{\"version\":\"1.6.3-PR-400\",\"changelog\":\"A change\"}";
  CHECK(ota_check_start_after_http(400,&http_server_marker)==tk::OtaStartResult::Started);
  CHECK(queue_calls==1&&queued_http_work&&entry_heap_reads==0&&!s_operation.load());
@@ -575,7 +600,7 @@ void deferred_http_checks(){
  CHECK(ota_check_start_after_http(0,&http_server_marker)==tk::OtaStartResult::Started);
  CHECK(entry_heap_reads==0);http_request_live=false;run_queued_http();
  CHECK(entry_heap_reads==1&&!selected_task&&!s_operation.load()&&init_calls==0&&!ota_is_busy());
- CHECK(ota_get_status().message==kOtaNoMemory&&!ota_get_status().update_available);
+ CHECK(std::string_view(ota_get_status().message.data())==kOtaNoMemory&&!ota_get_status().update_available);
 
  reset();queue_ok=false;http_request_live=true;
  CHECK(ota_check_start_after_http(0,&http_server_marker)==tk::OtaStartResult::Unavailable);
@@ -590,7 +615,7 @@ void deferred_http_checks(){
  CHECK(ota_check_start_after_http(0,&http_server_marker)==tk::OtaStartResult::Started);
  http_request_live=false;now=deadline;run_queued_http();
  CHECK(entry_heap_reads==0&&!selected_task&&!s_operation.load()&&init_calls==0&&!ota_is_busy());
- CHECK(ota_get_state()==OtaState::Error&&ota_get_status().message.find("deadline")!=std::string::npos);
+ CHECK(ota_get_state()==OtaState::Error&&std::string_view(ota_get_status().message.data()).find("deadline")!=std::string::npos);
 
  reset();http_request_live=true;
  CHECK(ota_check_start_after_http(0,&http_server_marker)==tk::OtaStartResult::Started);
@@ -629,21 +654,21 @@ void deferred_http_checks(){
 void memory_checks(){
  for(auto samples:{std::vector<size_t>{18444},{65536,18444},{65536,65536,18444},{65536,65536,65536,18444}}){
   reset();largest_samples=samples;const auto r=ota_check(0);join_worker();
-  CHECK(!r.ok&&!r.update_available&&r.reason==kOtaNoMemory&&begins==0&&selectors==0);
+  CHECK(!r.ok&&!r.update_available&&std::string_view(r.reason)==kOtaNoMemory&&begins==0&&selectors==0);
   CHECK(connects<=1&&destroys==init_calls); // pre-init refusal needs no cleanup; init-null is separate.
  }
  reset({18444});CHECK(ota_check_start(400)==tk::OtaStartResult::Started);run_selected();join_worker();
- CHECK(ota_get_status().message==kOtaNoMemory&&!ota_get_status().update_available&&init_calls==0);
+ CHECK(std::string_view(ota_get_status().message.data())==kOtaNoMemory&&!ota_get_status().update_available&&init_calls==0);
  reset({65536,18444});auto r=ota_check(0);join_worker();CHECK(!r.ok&&init_calls==1&&connects==0&&destroys==1);
- reset();init_null=true;r=ota_check(0);join_worker();CHECK(!r.ok&&r.reason==kOtaNoMemory&&connects==0&&destroys==0);
- reset();connect_ok=false;r=ota_check(0);join_worker();CHECK(!r.ok&&r.reason!="not enough memory for update");
- reset();fail_body_reserve=true;r=ota_check(0);join_worker();CHECK(!r.ok&&r.reason==kOtaNoMemory&&init_calls==0);
+ reset();init_null=true;r=ota_check(0);join_worker();CHECK(!r.ok&&std::string_view(r.reason)==kOtaNoMemory&&connects==0&&destroys==0);
+ reset();connect_ok=false;r=ota_check(0);join_worker();CHECK(!r.ok&&std::string_view(r.reason)!="not enough memory for update");
+ reset();fail_body_reserve=true;r=ota_check(0);join_worker();CHECK(!r.ok&&std::string_view(r.reason)==kOtaNoMemory&&init_calls==0);
  reset();changelog_status=404;r=ota_check(0);join_worker();CHECK(r.ok&&r.update_available&&connects==2);
- reset();r=ota_check(0);join_worker();CHECK(r.ok&&r.current=="1.6.2"&&r.available=="1.6.3"&&r.update_available);
+ reset();r=ota_check(0);join_worker();CHECK(r.ok&&std::string_view(r.current.data())=="1.6.2"&&std::string_view(r.available.data())=="1.6.3"&&r.update_available);
 }
 void manifest_lifetime_checks(){
  reset();
- manifest="{\"version\":\"1.6.3\",\"parts\":[";
+ manifest=selected_manifest();manifest.pop_back();manifest+=",\"parts\":[";
  for(unsigned i=0;i<16;++i){
   if(i)manifest+=',';
   manifest+="{\"path\":\"part-"+std::to_string(i)+".bin\",\"size\":1024,\"sha256\":\""+std::string(64,'a')+"\"}";
@@ -655,7 +680,7 @@ void manifest_lifetime_checks(){
  track_manifest_lifetime=true;
  const auto result=ota_check(0);join_worker();
  track_manifest_lifetime=false;
- CHECK(result.ok&&result.update_available&&result.available=="1.6.3");
+ CHECK(result.ok&&result.update_available&&std::string_view(result.available.data())=="1.6.3");
  CHECK(manifest_allocations>=64&&live_manifest_allocations==0&&body_allocations==2);
  CHECK(connects==2&&begins==0&&writes==0&&selectors==0);
  cJSON_InitHooks(nullptr);
@@ -663,35 +688,42 @@ void manifest_lifetime_checks(){
 void recovery_policy_checks(){
  for(size_t observed:{size_t(12344),size_t(12345),size_t(12346)}){
   reset({observed});recovery_required=12345;const auto result=ota_check(0);join_worker();
-  if(observed==12344){CHECK(!result.ok&&result.reason==kOtaNoMemory&&init_calls==0&&connects==0&&destroys==0);}
+  if(observed==12344){CHECK(!result.ok&&std::string_view(result.reason)==kOtaNoMemory&&init_calls==0&&connects==0&&destroys==0);}
   else{CHECK(result.ok&&result.update_available&&init_calls==2&&connects==2&&destroys==2);}
   CHECK(begins==0&&selectors==0);
  }
  reset({12345,12344});recovery_required=12345;auto result=ota_check(0);join_worker();
- CHECK(!result.ok&&result.reason==kOtaNoMemory&&init_calls==1&&connects==0&&destroys==1);
+ CHECK(!result.ok&&std::string_view(result.reason)==kOtaNoMemory&&init_calls==1&&connects==0&&destroys==1);
  for(size_t observed:{size_t(12344),size_t(12345),size_t(12346)}){
-  reset({65536,65536,65536,65536,observed,observed});recovery_required=12345;
+  reset_for_image({65536,65536,65536,65536,observed,observed});recovery_required=12345;
   raw_end_error=ESP_ERR_OTA_VALIDATE_FAILED; // No committed/restart terminal in this returning fixture.
-  CHECK(ota_start(0)==tk::OtaStartResult::Started);run_selected();join_worker();
-  if(observed==12344){CHECK(init_calls==2&&connects==2&&begins==0&&ends==0&&ota_get_status().message==kOtaNoMemory);}
+  CHECK(start_confirmed()==tk::OtaStartResult::Started);run_selected();join_worker();
+  if(observed==12344){CHECK(init_calls==2&&connects==2&&begins==0&&ends==0&&std::string_view(ota_get_status().message.data())==kOtaNoMemory);}
   else{CHECK(init_calls==3&&connects==3&&begins==1&&ends==1);}
   CHECK(selectors==0&&!ota_is_busy());
  }
  reset({SIZE_MAX});recovery_required=0;result=ota_check(0);join_worker();
- CHECK(!result.ok&&result.reason==kOtaNoMemory&&init_calls==0&&connects==0);
+ CHECK(!result.ok&&std::string_view(result.reason)==kOtaNoMemory&&init_calls==0&&connects==0);
  reset(); // Preserve record-capacity/default regression cases as their own matrix.
 }
 void entry_recovery_checks(){
  for(int shape:{0,1,2}){
+  if(shape==2){
+   reset_for_image({65536},400);entry_required=12345;entry_largest=12344;
+   CHECK(start_confirmed(400)==tk::OtaStartResult::NoMemory);
+   CHECK(entry_heap_reads==1&&begins==0&&selectors==0&&!ota_is_busy());
+   CHECK(!ota_get_status().update_available);
+   continue;
+  }
   reset();entry_required=12345;entry_largest=12344;
   OtaStatusPod stale{};stale.update_available=true;stale.target_pr=7;
   copy_status_text(stale.available,"1.9.9");publish_check_status(stale);
   s_target_pr.store(7,std::memory_order_release);
-  if(shape==0){const auto r=ota_check(400);CHECK(!r.ok&&!r.update_available&&r.reason==kOtaNoMemory&&r.target_pr==400);}
+  if(shape==0){const auto r=ota_check(400);CHECK(!r.ok&&!r.update_available&&std::string_view(r.reason)==kOtaNoMemory&&r.target_pr==400);}
   else CHECK((shape==1?ota_check_start(400):ota_start(400))==tk::OtaStartResult::NoMemory);
   const auto status=ota_get_status();
-  CHECK(status.state==OtaState::Error&&status.message==kOtaNoMemory&&!status.update_available);
-  CHECK(status.target_pr==400&&status.available.empty());
+  CHECK(status.state==OtaState::Error&&std::string_view(status.message.data())==kOtaNoMemory&&!status.update_available);
+  CHECK(status.target_pr==400&&(status.available[0] == 0));
   CHECK(entry_heap_reads==1&&largest_cursor==0&&!selected_task&&!s_operation.load());
   CHECK(init_calls==0&&connects==0&&begins==0&&selectors==0&&!ota_is_busy());
   CHECK(s_operation_gate.state()==tk::OtaIdentityGateState::Idle);
@@ -727,14 +759,15 @@ void admission_checks(){
  reset();if(auto* mutex=s_lock.exchange(nullptr))vSemaphoreDelete(mutex);lock_ok=false;
  CHECK(ota_check_start(0)==tk::OtaStartResult::Unavailable&&!selected_task&&init_calls==0);
  lock_ok=true;
- for(auto start:{ota_check_start,ota_start}){
+ for(bool image:{false,true}){
+  auto start=[image](unsigned pr){return image?ota_start(pr,confirmed_offer):ota_check_start(pr);};
   for(auto owner:{tk::OtaIdentityGateState::Ota,tk::OtaIdentityGateState::IdentityMutation,
                  tk::OtaIdentityGateState::FaultRestart,tk::OtaIdentityGateState::HealthCommit,
                  tk::OtaIdentityGateState::ConfigRestart}){
    reset();CHECK(s_operation_gate.try_begin(owner));CHECK(start(400)==tk::OtaStartResult::Busy);
    CHECK(!selected_task&&init_calls==0&&s_operation_gate.state()==owner);CHECK(s_operation_gate.finish(owner));
   }
-  reset();create_ok=false;CHECK(start(0)==tk::OtaStartResult::InternalError);
+  if(image)reset_for_image();else reset();create_ok=false;CHECK(start(0)==tk::OtaStartResult::InternalError);
   CHECK(!ota_is_busy()&&init_calls==0);
  }
  for(auto raw:{ESP_OTA_IMG_NEW,ESP_OTA_IMG_PENDING_VERIFY}){
@@ -753,7 +786,7 @@ void quarantine_checks(){
  reset();hold_connect=true;
  const auto r=ota_check(0);
  {std::unique_lock<std::mutex> lock(connection_mutex);CHECK(connect_entered);}
- CHECK(!r.ok&&r.reason=="update check deadline reached"&&!ota_is_busy()&&begins==0);
+ CHECK(!r.ok&&std::string_view(r.reason)=="update check deadline reached"&&!ota_is_busy()&&begins==0);
  CHECK(s_operation.load()&&s_operation.load()->job.retired()&&!s_operation.load()->coordinator.can_reclaim());
  CHECK(s_operation_gate.try_begin(tk::OtaIdentityGateState::Ota));
  CHECK(!ordinary_recovery_reference_ready_owned(tk::OtaIdentityGateState::Ota));
@@ -769,15 +802,15 @@ void raw_memory_checks(){
  // Real RawWriter invokes each passive SDK effect once; write failure must abort a live
  // handle, whereas esp_ota_end consumes that handle even when it returns NO_MEM.
  for(int call:{1,2}){
-  reset();raw_write_error_at=call;raw_write_error=ESP_ERR_NO_MEM;
-  CHECK(ota_start(0)==tk::OtaStartResult::Started);run_selected();join_worker();
-  CHECK(ota_get_status().message==kOtaNoMemory&&!ota_get_status().update_available);
+  reset_for_image();raw_write_error_at=call;raw_write_error=ESP_ERR_NO_MEM;
+  CHECK(start_confirmed()==tk::OtaStartResult::Started);run_selected();join_worker();
+  CHECK(std::string_view(ota_get_status().message.data())==kOtaNoMemory&&!ota_get_status().update_available);
   CHECK(begins==1&&writes==call&&aborts==1&&ends==0&&selectors==0&&restart_calls==0);
   CHECK(!raw_handle_live&&!ota_is_busy());
  }
- reset();raw_end_error=ESP_ERR_NO_MEM;
- CHECK(ota_start(0)==tk::OtaStartResult::Started);run_selected();join_worker();
- CHECK(ota_get_status().message==kOtaNoMemory&&!ota_get_status().update_available);
+ reset_for_image();raw_end_error=ESP_ERR_NO_MEM;
+ CHECK(start_confirmed()==tk::OtaStartResult::Started);run_selected();join_worker();
+ CHECK(std::string_view(ota_get_status().message.data())==kOtaNoMemory&&!ota_get_status().update_available);
  CHECK(begins==1&&writes>0&&ends==1&&aborts==0&&selectors==0&&restart_calls==0);
  CHECK(!raw_handle_live&&!ota_is_busy());
 }
@@ -790,7 +823,7 @@ void checkpoint_semantics_checks(){
  tk::ota::memory_checkpoint("ordinary_probe",19,29);
  rows=records();CHECK(rows.size()==2&&rows[1].largest==diagnostic_largest&&largest_cursor==0);
  reset({65536,18444});auto result=ota_check(0);join_worker();rows=records();
- CHECK(!result.ok&&result.reason==kOtaNoMemory&&init_calls==1&&connects==0&&destroys==1);
+ CHECK(!result.ok&&std::string_view(result.reason)==kOtaNoMemory&&init_calls==1&&connects==0&&destroys==1);
  CHECK(largest_cursor==2&&phase_count(rows,"tls_pre_init")==1&&phase_count(rows,"tls_post_context")==1);
  for(const auto& row:rows){
   if(std::strcmp(row.phase,"tls_pre_init")==0)CHECK(row.largest==65536);
@@ -831,8 +864,8 @@ void checkpoint_semantics_checks(){
  reset();
 }
 void budget_checks(){
- reset();jump_image_clock=reject_late_effect=true;
- CHECK(ota_start(0)==tk::OtaStartResult::Started);
+ reset_for_image();jump_image_clock=reject_late_effect=true;
+ CHECK(start_confirmed()==tk::OtaStartResult::Started);
  CHECK(s_operation.load()&&s_operation.load()->job.deadline_ms>30000);
  run_selected();join_worker();auto* operation=s_operation.load();CHECK(operation);
  // The worker's original maximum remains live at 30s. Only the coordinator's real
@@ -844,7 +877,7 @@ void budget_checks(){
 }
 void cleanup_cas_checks(){
  reset();cleanup_hook_armed=true;const auto result=ota_check(0);
- CHECK(!result.ok&&result.reason=="update check deadline reached"&&cleanup_hook_entered);
+ CHECK(!result.ok&&std::string_view(result.reason)=="update check deadline reached"&&cleanup_hook_entered);
  const auto stop=std::chrono::steady_clock::now()+std::chrono::seconds(2);
  while(!worker_returned&&!worker_paused_after_cleanup&&std::chrono::steady_clock::now()<stop)
   std::this_thread::yield();
@@ -874,25 +907,25 @@ void cleanup_cas_checks(){
 }
 void image_checks(){
  for(const char* bad:{"1.6.4","1.6.2","01.6.3"}){
-  reset();image_version=bad;CHECK(ota_start(0)==tk::OtaStartResult::Started);run_selected();join_worker();
+  reset_for_image();image_version=bad;CHECK(start_confirmed()==tk::OtaStartResult::Started);run_selected();join_worker();
   CHECK(begins==0&&writes==0&&ends==0&&selectors==0&&!ota_is_busy());
  }
- reset();inactive.address=0x9000;CHECK(ota_start(0)==tk::OtaStartResult::Started);run_selected();join_worker();
+ reset_for_image();inactive.address=0x9000;CHECK(start_confirmed()==tk::OtaStartResult::Started);run_selected();join_worker();
  CHECK(begins==0&&writes==0&&ends==0&&selectors==0&&!ota_is_busy());
- reset();hold_image_read=true;
- CHECK(ota_start(0)==tk::OtaStartResult::Started);run_selected();
+ reset_for_image();hold_image_read=true;
+ CHECK(start_confirmed()==tk::OtaStartResult::Started);run_selected();
  {std::unique_lock<std::mutex> lock(connection_mutex);CHECK(image_read_entered);}
  CHECK(begins==1&&writes>0&&aborts==1&&ends==0&&selectors==0&&!ota_is_busy());
  CHECK(s_operation.load()->job.retired()&&!s_operation.load()->coordinator.can_reclaim());
  CHECK(ota_start(0)==tk::OtaStartResult::Busy);const int prior_writes=writes.load();
  {std::lock_guard<std::mutex> lock(connection_mutex);release_connect=true;}connection_ready.notify_all();join_worker();
  CHECK(writes==prior_writes&&aborts==1&&ends==0&&selectors==0);
- reset();raw_end_error=ESP_ERR_OTA_VALIDATE_FAILED;
- CHECK(ota_start(0)==tk::OtaStartResult::Started);run_selected();join_worker();
+ reset_for_image();raw_end_error=ESP_ERR_OTA_VALIDATE_FAILED;
+ CHECK(start_confirmed()==tk::OtaStartResult::Started);run_selected();join_worker();
  CHECK(begins==1&&writes>0&&ends==1&&selectors==0&&!ota_is_busy());
- reset({65536,65536,65536,65536,18444});
- CHECK(ota_start(0)==tk::OtaStartResult::Started);run_selected();join_worker();
- CHECK(ota_get_status().message==kOtaNoMemory&&begins==0&&selectors==0&&!ota_is_busy());
+ reset_for_image({65536,65536,65536,65536,18444});
+ CHECK(start_confirmed()==tk::OtaStartResult::Started);run_selected();join_worker();
+ CHECK(std::string_view(ota_get_status().message.data())==kOtaNoMemory&&begins==0&&selectors==0&&!ota_is_busy());
 }
 // A real atomic backing with a false trait executes the actual non-lock-free branch on host.
 // The competing phase writer is an unconditional effect; it does not mirror transport decisions.
@@ -922,13 +955,14 @@ void control_rmw_concurrency_checks(){
  }
 }
 }
+#include "ota_offer_http_fixture.hpp"
 int main(int argc,char** argv){
  using namespace fixture;
  static_assert(!std::is_copy_constructible_v<tk::ota::RawWriter> &&
                !std::is_move_constructible_v<tk::ota::RawWriter>);
  terminal_case=argc==2?argv[1]:"normal";
  if(terminal_case=="commit"){
-  reset();CHECK(ota_start(0)==tk::OtaStartResult::Started);run_selected();CHECK(false);
+  reset_for_image();CHECK(start_confirmed()==tk::OtaStartResult::Started);run_selected();CHECK(false);
  }
  if(terminal_case=="upload-commit"||terminal_case=="upload-uncertain"){
   reset();ota_set_channel(tk::OtaChannel::Dev);upload_body=image_body();
@@ -940,7 +974,7 @@ int main(int argc,char** argv){
   run_selected();CHECK(false);
  }
  if(terminal_case=="uncertain"){
-  reset();raw_select_error=ESP_FAIL;CHECK(ota_start(0)==tk::OtaStartResult::Started);run_selected();CHECK(false);
+  reset_for_image();raw_select_error=ESP_FAIL;CHECK(start_confirmed()==tk::OtaStartResult::Started);run_selected();CHECK(false);
  }
  if(terminal_case=="cleanup-failed")cleanup_failed_checks();
  if(terminal_case=="deferred-inline"){
@@ -958,11 +992,15 @@ int main(int argc,char** argv){
   std::_Exit(0); // A possibly created coordinator still owns its Operation.
  }
  if(terminal_case=="budget")budget_checks();
+ else if(terminal_case=="offer-exhaustion"||terminal_case=="channel-exhaustion")
+  exhaustion_checks(terminal_case=="channel-exhaustion");
+ else if(terminal_case=="image-binding")image_binding_checks();
  else if(terminal_case=="cleanup-cas")cleanup_cas_checks();
  else {
   CHECK(terminal_case=="normal");
   deferred_http_checks();memory_checks();manifest_lifetime_checks();recovery_policy_checks();entry_recovery_checks();parser_checks();admission_checks();quarantine_checks();image_checks();raw_memory_checks();
   upload_checks();
+  offer_binding_checks();dev_preview_binding_checks();hash_binding_checks();image_binding_checks();
   checkpoint_semantics_checks();
   control_rmw_concurrency_checks();
  }
