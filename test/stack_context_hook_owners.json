@@ -84,31 +84,11 @@
     },
     {
       "kind": "task",
-      "path": "main/display.cpp",
-      "entry": "display_task",
-      "context": "Display",
-      "entrySample": true,
-      "iteration": "for (;;) {",
-      "boundaryScope": true,
-      "terminalDeleteExplicit": true
-    },
-    {
-      "kind": "task",
       "path": "main/net.cpp",
       "entry": "net_watchdog_task",
       "context": "NetWatchdog",
       "entrySample": true,
       "iteration": "for (;;) {",
-      "boundaryScope": true,
-      "terminalDeleteExplicit": true
-    },
-    {
-      "kind": "task",
-      "path": "main/led_status.cpp",
-      "entry": "led_task",
-      "context": "Led",
-      "entrySample": true,
-      "iteration": "for (uint32_t frame = 0;; frame = (frame + 1) % kSampleEveryFrames) {",
       "boundaryScope": true,
       "terminalDeleteExplicit": true
     },
@@ -414,7 +394,7 @@
       "qualification": "Actual coordinator-caller aggregate, not the network task or a dedicated SDK task."
     }
   ],
-  "laneCount": 27,
+  "laneCount": 25,
   "ownerRows": 44,
   "baselineTaskEntries": 14,
   "baselineCallbackEntries": 21,

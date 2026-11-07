@@ -122,7 +122,7 @@ no automatic retry, alternate board or OTA fallback. Release serial handles befo
 Within 60 seconds, require the exact version/platform from the flashed artifact and the same
 physical board. Compare pre/post identity and retained configuration fingerprints without exposing
 secrets. Then run the planned tests for the changed behavior: success and rejection cases, relevant
-HTTP schemas/errors, offline fault injection, display preview or MQTT observations as applicable.
+HTTP schemas/errors, offline fault injection or MQTT observations as applicable.
 Use bounded tests and only their authorized effects. An unpaired bench cannot prove vehicle pairing,
 key reuse, sleep/wake, charge commands or production behavior; record these as **not run**.
 

@@ -4,7 +4,7 @@
 #include "logic/net_link.hpp"
 
 // The firmware's ONE network-transport seam. Everything above it — the HTTP server, MQTT,
-// syslog, mDNS, SNTP, OTA, the display and the LED — asks these questions and never touches
+// Syslog, mDNS, SNTP and OTA — asks these questions and never touches
 // esp_wifi (or, from the Ethernet backend, esp_eth) directly.
 //
 // Before this existed the answers were WiFi-shaped: a hand-declared `wifi_is_connected()`
@@ -14,8 +14,7 @@
 // wrong the moment it was not.
 //
 // Link-state snapshots use atomic loads with the default sequentially consistent ordering.
-// They are available before net_init(), so display and LED tasks can render "searching" while
-// the link starts. Transport-specific readings use the initialization/lease guards below.
+// They are available before net_init(). Transport-specific readings use the guards below.
 namespace tk {
 
 // One-time bring-up of the shared substrate every transport needs: esp_netif and the default
@@ -81,12 +80,6 @@ NetLink net_kind();
 // of esp_netif_get_handle_from_ifkey(): the ifkey differs per transport ("WIFI_STA_DEF" vs
 // "ETH_DEF"), and a hardcoded one turns into a null deref the day the other is in use.
 esp_netif_t* net_active_netif();
-
-// Does this board HAVE an Ethernet interface at all — independent of whether it currently
-// holds a lease? Answers the question net_kind() cannot while the link is still coming up:
-// what is this device WAITING for. The display uses it to label its search animation
-// ("LAN …" vs "WiFi …"); false on every board without the Ethernet backend compiled in.
-bool net_eth_present();
 
 // Cumulative RE-establishments of the link since boot; the first lease of a boot is NOT
 // counted, so a healthy device reports 0 rather than a permanent 1 that would hide a real

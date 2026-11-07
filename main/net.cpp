@@ -89,7 +89,7 @@ static esp_err_t net_init_substrate(const char** failed_component) {
 }
 
 // ── shared link state ─────────────────────────────────────────────────────────
-// Written on the event-loop task, read from the http / mqtt / display / led tasks. Atomics,
+// Written on the event-loop task, read from the HTTP / MQTT tasks. Atomics,
 // not volatile: the readers need the happens-before edge, not merely a non-elided load.
 
 static std::atomic<NetLink>  s_kind{NetLink::None};
@@ -100,14 +100,11 @@ static std::atomic<unsigned> s_reconnects{0};
 // tolerate a netif that went down between the read and the call (they return an error).
 static std::atomic<esp_netif_t*> s_active_netif{nullptr};
 
-// Set once at boot by the Ethernet backend when it finds its controller. Kept here rather
-// than behind an #ifdef in every caller: the presenters ask "does this board have a wire?"
-// and must compile identically on a build with no Ethernet support at all.
+// Set at boot when the Ethernet backend identifies its controller.
 static std::atomic<bool> s_eth_present{false};
 // Detection survives construction fallback; only successful driver activation can recover a lease.
 static std::atomic<bool> s_eth_started{false};
 
-bool         net_eth_present()    { return s_eth_present.load(); }
 bool         net_eth_started()    { return s_eth_started.load(); }
 bool         net_is_up()          { return s_kind.load() != NetLink::None; }
 NetLink      net_kind()           { return s_kind.load(); }
@@ -125,8 +122,8 @@ static std::atomic<bool> s_wifi_ever_up{false};
 // boot falls back to WiFi with the Ethernet driver still running, so a cable plugged in later
 // brings the wire up ALONGSIDE the radio. s_kind is therefore DERIVED from these rather than
 // written directly — the earlier "last event wins" version had a real hole: unplugging that
-// cable cleared the link for everything above the seam (syslog stopped, the display showed
-// "searching", MQTT dropped the RSSI) while a perfectly healthy WiFi lease was still in hand.
+// cable cleared the link for everything above the seam (Syslog stopped and MQTT dropped RSSI)
+// while a healthy WiFi lease was still in hand.
 static std::atomic<bool> s_wifi_lease{false};
 static std::atomic<bool> s_eth_lease{false};
 // Two 16-bit generations share one lock-free 32-bit atomic. Narrow atomic fetch_add can pull
@@ -405,7 +402,7 @@ bool net_wifi_station_started() { return s_sta_started.load(); }
 // ── WiFi-only readings ────────────────────────────────────────────────────────
 // Both readers require a WiFi lease, even when Ethernet carries the default route. A generic
 // "network up" flag cannot establish that the station is safe to query. Keep the guard here
-// so status, MQTT and display consumers do not re-derive it.
+// so status and MQTT consumers do not re-derive it.
 
 bool net_wifi_signal(int* rssi_dbm, char* ssid) {
     // Gated on the WiFi LEASE, not on net_kind(): a board that fell back to WiFi and later had a
@@ -663,10 +660,8 @@ static bool w5500_read_common(spi_device_handle_t dev, uint16_t reg, uint8_t* ou
 bool net_eth_probe() {
     if (s_eth_present.load() && s_spi_bus_up) return true;
 
-    // NEVER probe on the T-Dongle-S3. Its ST7735 sits on MOSI 3 / SCK 5 / CS 4 — GPIO5 is
-    // literally the pin this probe would drive as SPI clock. The display has not claimed the bus
-    // yet at this point in boot, so the fight would not show up here; it would show up later as
-    // a panel that never initialises, which is a miserable thing to debug.
+    // The T-Dongle-S3 panel remains wired to GPIO5, the first W5500 candidate clock.
+    // Skip the probe before it drives those pins.
     if (board_is_t_dongle_s3()) {
         ESP_LOGI(TAG, "T-Dongle-S3 detected — skipping the W5500 probe (its panel owns GPIO5)");
         return false;

@@ -10,7 +10,7 @@
 //
 // HTTP/provisioning and boot rollback own coherent credential/service snapshots. Other records
 // remain separate because their writer or recovery lifetime differs: BLE discovery owns ble_mac;
-// clock paths own last_time; reboot producers own reboot_why; the display owns disp_rot; vin_txn
+// clock paths own last_time; reboot producers own reboot_why; vin_txn
 // and boot_fails are recovery journals/latches. last_time is only a restored wall-clock estimate,
 // not proof that vehicle-relative sessions can be reused. The exact registry is nvs_contract.hpp.
 #include <array>
@@ -37,7 +37,7 @@ inline uint32_t config_crc32(const uint8_t* data, size_t len) {
 }
 
 // The credential/service fields persisted as ONE atomic blob. NOT `ble_mac`, `last_time`,
-// `reboot_why` or `disp_rot` — see the ownership note in the header block.
+// `reboot_why` — see the ownership note in the header block.
 struct ConfigBlob {
     // WiFi credentials, as the setup portal and the STA path use them.
     std::string wifi_ssid;

@@ -380,14 +380,6 @@ void ota_set_channel(tk::OtaChannel channel) {
     }
 }
 
-OtaState ota_get_state() {
-    SemaphoreHandle_t lock = ensure_lock();
-    if (!lock) return OtaState::Error;
-    tk::SemGuard guard(lock);
-    if (!guard) return OtaState::Error;
-    return s_status.state;
-}
-
 OtaStatus ota_get_status() {
     SemaphoreHandle_t lock = ensure_lock();
     if (!lock) return unavailable_status_snapshot();

@@ -76,7 +76,6 @@ if [ "$REQUIRE_ALL" = 1 ]; then
     need_tool node
     gate_file "$TIMEOUT_RUNNER"
     for required in \
-        scripts/check-display-sim-parity.sh \
         scripts/run-local-checks.py \
         scripts/check-change-scope.py \
         test/test_change_scope.py \
@@ -179,10 +178,8 @@ if [ "$REQUIRE_ALL" = 1 ]; then
         test/web_ui_http.test.mjs \
         test/tesla_protocol_vectors.test.mjs \
         scripts/check-ble-row-parity.sh \
+        test/web_presentation_reference.hpp \
         test/ble_row_golden_dump.cpp \
-        test/display_golden_dump.cpp \
-        test/test_display_parity_contract.py \
-        test/test_led_driver_contract.py \
         test/config_repair_cases.hpp \
         test/generate_config_repair_backend.py \
         test/config_repair_backend_cases.json \
@@ -215,7 +212,6 @@ if [ "$REQUIRE_ALL" = 1 ]; then
         test/test_identity_recovery_contract.py \
         test/identity_recovery_process.py \
         test/identity_recovery_omission_cases.json \
-        main/display_font.h \
         tools/ble_row_parity.js \
         scripts/run-browser-tests-linux.sh \
         tools/browser/Dockerfile \
@@ -309,11 +305,8 @@ else
     done
 fi
 
-# Display sim ↔ C++ presenter parity: confirm tools/display_sim.py's decide() still matches
-# the firmware's tk::display::compose() (so the pixel sim can't silently drift from display.cpp).
-# Skipped only where python3 is unavailable — the C++ logic tests above are the hard gate.
+# Python runtime and repository checks.
 if command -v python3 >/dev/null 2>&1; then
-    run_gate "display simulator parity" 120 scripts/check-display-sim-parity.sh
     run_gate "provisioning tests" 120 python3 test/test_provision.py
     run_gate "capture wake tests" 120 python3 test/test_capture_wake.py
     run_gate "evcc vehicle YAML and actual jq state mapping" 120 ruby test/test_evcc_vehicle.rb
@@ -333,7 +326,6 @@ if command -v python3 >/dev/null 2>&1; then
     gate_group=browser
     run_gate "CSS bytes and actual inline generation" 120 python3 test/test_inline_assets.py
     gate_group=runtime
-    run_gate "optional LED driver decisions and GPIO" 120 python3 test/test_led_driver_contract.py
     run_gate "cached identity recovery and actual restart owner" 120 python3 test/test_identity_recovery_contract.py
     run_gate "locked cJSON intake and OOM" 120 bash test/run-cjson-oom-tests.sh
     run_gate "retained MQTT JSON and discovery registry" 120 bash test/run-mqtt-json-publish-tests.sh

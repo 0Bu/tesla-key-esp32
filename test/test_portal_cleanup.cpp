@@ -47,8 +47,9 @@ namespace tk {
 enum class StackWatch { Main };
 struct StackWatchScope { explicit StackWatchScope(StackWatch) {} };
 static bool net_wifi_station_started() { return station; }
-[[maybe_unused]] static bool net_eth_present() { return ethernet; }
 [[maybe_unused]] static bool net_eth_started() { return ethernet_started; }
+// Negative control: a successful probe alone cannot recover a lease.
+[[maybe_unused]] static bool detected_eth_hardware() { return ethernet; }
 static bool net_is_up() { return now_us >= 2000000; }
 static void net_wifi_retry_station() { CHECK(station); ++attempt_calls; }
 }

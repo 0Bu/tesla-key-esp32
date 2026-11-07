@@ -109,10 +109,6 @@
       "test": "test/test_logic.cpp",
       "evidence": "test_http_origin("
     },
-    "display_model.hpp": {
-      "test": "test/test_logic.cpp",
-      "evidence": "test_display_model("
-    },
     "effect_reply.hpp": {
       "test": "test/test_logic.cpp",
       "evidence": "test_effect_reply("
@@ -176,14 +172,6 @@
     "key_rotation.hpp": {
       "test": "test/test_logic.cpp",
       "evidence": "test_key_rotation("
-    },
-    "led_driver.hpp": {
-      "test": "test/test_logic.cpp",
-      "evidence": "test_led_driver("
-    },
-    "led_status.hpp": {
-      "test": "test/test_logic.cpp",
-      "evidence": "test_led("
     },
     "link_state.hpp": {
       "test": "test/test_logic.cpp",
@@ -277,10 +265,6 @@
       "test": "test/test_logic.cpp",
       "evidence": "test_setup_portal("
     },
-    "soc_gradient.hpp": {
-      "test": "test/test_logic.cpp",
-      "evidence": "test_display_helpers("
-    },
     "stack_context.hpp": {
       "test": "test/test_logic.cpp",
       "evidence": "test_stack_context_logic("
@@ -316,10 +300,6 @@
     "tls_memory.hpp": {
       "test": "test/test_logic.cpp",
       "evidence": "test_tls_memory("
-    },
-    "ui_state.hpp": {
-      "test": "test/test_logic.cpp",
-      "evidence": "test_display_helpers("
     },
     "units.hpp": {
       "test": "test/test_logic.cpp",

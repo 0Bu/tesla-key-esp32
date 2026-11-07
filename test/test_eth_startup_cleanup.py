@@ -104,7 +104,7 @@ def main() -> None:
             ("portal-stop-failure-ignored", replace_once(portal_body,
              "stop_wifi != ESP_OK && stop_wifi != ESP_ERR_WIFI_NOT_STARTED", "stop_wifi != ESP_OK && false"), True),
             ("portal-physical-detection-as-recovery", replace_once(portal_body,
-             "!tk::net_eth_started()", "!tk::net_eth_present()"), True),
+             "!tk::net_eth_started()", "!tk::detected_eth_hardware()"), True),
             ("portal-restored-positive", portal_body, False),
         ):
             fixture = directory / label

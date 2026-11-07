@@ -9,7 +9,7 @@ namespace tk::nvs_contract {
 // ESP-IDF limits both NVS namespace and entry names to 15 bytes. This is the single,
 // hardware-free inventory for every record owned by the firmware or by the pinned tesla-ble
 // StorageAdapter contract. Runtime access through NvsStorageAdapter is fail-closed against this
-// table; direct U8 display migration access is separately pinned by the static host gate.
+// table; the static host gate pins direct calls.
 inline constexpr char kConfigNamespace[] = "tesla_cfg";
 inline constexpr char kTeslaBleNamespace[] = "tesla_ble";
 
@@ -24,8 +24,6 @@ inline constexpr char kVinTransition[] = "vin_txn";
 inline constexpr char kBleMac[] = "ble_mac";
 inline constexpr char kRebootReason[] = "reboot_why";
 inline constexpr char kBootFailures[] = "boot_fails";
-inline constexpr char kDisplayRotation[] = "disp_rot";
-inline constexpr char kLegacyDisplayFlip[] = "disp_flip";
 
 inline constexpr char kPrivateKey[] = "private_key";
 inline constexpr char kSessionVcsec[] = "session_vcsec";
@@ -35,7 +33,7 @@ inline constexpr char kKeyCreated[] = "key_created";
 inline constexpr char kKeyRotation[] = "key_rotate";
 
 enum class Namespace { Config, TeslaBle, Unknown };
-enum class StorageApi { Blob, String, RawBlob, DirectU8 };
+enum class StorageApi { Blob, String, RawBlob };
 enum class Owner {
     ConfigHttp,
     LegacyConfigMirror,
@@ -44,7 +42,6 @@ enum class Owner {
     BleDiscovery,
     HeapWatchdog,
     BootGuard,
-    Display,
     TeslaBleLibrary,
     Pairing,
     KeyRotation,
@@ -54,7 +51,6 @@ enum class Retention {
     LegacyDowngradeMirror,
     ReplaceableCache,
     RecoveryJournal,
-    MigrationOnly,
 };
 
 struct Entry {
@@ -70,7 +66,7 @@ struct Entry {
 // ConfigHttp remains the ordinary logical cfg owner. The default-off physical maintenance
 // actor is separately registered by check-nvs-contract.py with exactly one cfg set/commit;
 // it adds no key/schema and has no write access to identity, journals, sessions or mirrors.
-inline constexpr std::array<Entry, 19> kEntries{{
+inline constexpr std::array<Entry, 17> kEntries{{
     {Namespace::Config, kConfigBlob, kConfigBlob, StorageApi::RawBlob,
      Owner::ConfigHttp, Retention::DurableAcrossOta, true},
     {Namespace::Config, kLegacyWifiSsid, kLegacyWifiSsid, StorageApi::String,
@@ -93,11 +89,6 @@ inline constexpr std::array<Entry, 19> kEntries{{
      Owner::HeapWatchdog, Retention::RecoveryJournal, false},
     {Namespace::Config, kBootFailures, kBootFailures, StorageApi::String,
      Owner::BootGuard, Retention::RecoveryJournal, false},
-    {Namespace::Config, kDisplayRotation, kDisplayRotation, StorageApi::DirectU8,
-     Owner::Display, Retention::DurableAcrossOta, false},
-    {Namespace::Config, kLegacyDisplayFlip, kLegacyDisplayFlip, StorageApi::DirectU8,
-     Owner::Display, Retention::MigrationOnly, false},
-
     {Namespace::TeslaBle, kPrivateKey, kPrivateKey, StorageApi::Blob,
      Owner::TeslaBleLibrary, Retention::DurableAcrossOta, true},
     {Namespace::TeslaBle, kSessionVcsec, "sess_vcsec", StorageApi::Blob,

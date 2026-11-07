@@ -116,7 +116,7 @@ void offer_binding_checks(){
   else manifest+=" ";
   json=request_offer(handle_ota_update,"offer="+confirmed_offer);CHECK(response_status==200);
   CHECK(selected_task);run_selected();join_worker();
-  CHECK(ota_get_state()==OtaState::Error&&begins==0&&writes==0&&ends==0&&selectors==0&&connects==2);
+  CHECK(ota_get_status().state==OtaState::Error&&begins==0&&writes==0&&ends==0&&selectors==0&&connects==2);
   refused_offer("offer="+confirmed_offer);
  }
  // PR identity is captured, not taken from another client's current query.
@@ -150,7 +150,7 @@ void dev_preview_binding_checks(){
  manifest=selected_manifest(image_version);changelog="{}";
  CHECK(ota_check_start_after_http(0,&http_server_marker)==tk::OtaStartResult::Started);
  change_channel(tk::OtaChannel::Release);run_queued_http();run_selected();join_worker();
- CHECK(ota_get_state()==OtaState::Error&&!ota_get_status().update_available);
+ CHECK(ota_get_status().state==OtaState::Error&&!ota_get_status().update_available);
  CHECK(ota_get_status().channel==tk::OtaChannel::Dev&&ota_get_status().configured_channel==tk::OtaChannel::Release);
  CHECK(begins==0&&writes==0&&selectors==0);
  reset();
@@ -176,7 +176,7 @@ void image_binding_checks(){
   raw_end_error=ESP_ERR_OTA_VALIDATE_FAILED; // An omitted hash guard must fail the end-count assertion.
   CHECK(start_confirmed()==tk::OtaStartResult::Started);run_selected();join_worker();
   CHECK(begins==1&&writes>0&&ends==0&&selectors==0&&aborts==1&&!raw_handle_live&&!ota_is_busy());
-  CHECK(ota_get_state()==OtaState::Error&&!ota_get_status().update_available);
+  CHECK(ota_get_status().state==OtaState::Error&&!ota_get_status().update_available);
  }
  // The manifest's byte count is independent of its digest: correct bytes/hash but a
  // different declared count must still refuse before SDK end and boot selection.

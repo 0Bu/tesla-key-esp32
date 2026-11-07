@@ -1619,7 +1619,7 @@ int main() {
         const auto* quantum = cJSON_GetObjectItemCaseSensitive(sys, "stack_min_free_quantum_bytes");
         CHECK(cJSON_IsNumber(quantum) && quantum->valuedouble == 256);
         const auto* samples = cJSON_GetObjectItemCaseSensitive(sys, "stack_min_free_bytes");
-        CHECK(cJSON_IsObject(samples) && cJSON_GetArraySize(samples) == 27);
+        CHECK(cJSON_IsObject(samples) && cJSON_GetArraySize(samples) == 25);
         for (unsigned slot = 0; slot < tk::kStackContextCount; ++slot) {
             const char* key = tk::stack_context_name(static_cast<tk::StackContext>(slot));
             const auto* sample = cJSON_GetObjectItemCaseSensitive(samples, key);
@@ -1634,7 +1634,7 @@ int main() {
         status_snapshot_fixture::next = {};
         // Literal codec values independently distinguish measured zero, unknown and saturation.
         status_snapshot_fixture::next[0] = 1;
-        status_snapshot_fixture::next[5] = 63u << 6;
+        status_snapshot_fixture::next[4] = 63u << 24;  // ota_parser, lane 24
         const size_t before = status_snapshot_fixture::calls;
         tk::JsonOwner status(tk::emit_status_object(inputs));
         CHECK(status_snapshot_fixture::calls == before + 1);
@@ -1642,7 +1642,7 @@ int main() {
         const auto* sys = cJSON_GetObjectItemCaseSensitive(status.get(), "sys");
         CHECK(cJSON_IsObject(sys));
         const auto* samples = cJSON_GetObjectItemCaseSensitive(sys, "stack_min_free_bytes");
-        CHECK(cJSON_IsObject(samples) && cJSON_GetArraySize(samples) == 27);
+        CHECK(cJSON_IsObject(samples) && cJSON_GetArraySize(samples) == 25);
         const auto* zero = cJSON_GetObjectItemCaseSensitive(samples, "httpd");
         const auto* unknown = cJSON_GetObjectItemCaseSensitive(samples, "vehicle");
         const auto* saturated = cJSON_GetObjectItemCaseSensitive(samples, "ota_parser");

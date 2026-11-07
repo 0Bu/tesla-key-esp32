@@ -9,12 +9,10 @@
 // boards (M5Stack AtomS3 Lite + ATOMIC PoE Base and Waveshare ESP32-S3-ETH),
 // each detected at boot by net_eth_probe()'s candidate table (main/logic/eth_board.hpp).
 //
-// The detector lives here, not in display.cpp where it started, because it now has TWO callers
-// that must agree: the display (may I drive the panel?) and the Ethernet backend (may I run the
-// W5500 SPI probe?). Those two questions overlap on the T-Dongle-S3, whose panel sits on
-// MOSI 3 / SCK 5 / CS 4 — GPIO5 is the SAME pin the AtomPoE base uses for SPI clock (the probe's
-// primary candidate). Two independent copies of "which board is this" would eventually answer
-// differently, and the failure would be a bus fight on a shared pin.
+// The Ethernet backend must recognize the T-Dongle-S3 before probing W5500 candidates.
+// Its physical panel still occupies MOSI 3 / SCK 5 / CS 4 even though the firmware no longer
+// drives it; GPIO5 is also the AtomPoE candidate clock. Keep this guard to avoid driving the
+// dongle's hardware during Ethernet discovery.
 namespace tk {
 
 // True on the LilyGo T-Dongle-S3. Probed ONCE (the result is cached) and only on esp32s3;
