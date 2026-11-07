@@ -82,6 +82,8 @@ console.error = function() {
 '''
     # JSON text is script-safe even when a source comment contains an HTML end tag.
     prelude += "\nwindow.__browserGateRawCss = " + json.dumps(raw_css.decode("utf-8") + no_animation).replace("<", "\\u003c") + ";\n"
+    evcc_example = (ROOT / "docs/examples/evcc-custom-vehicle.yaml").read_bytes().decode("utf-8")
+    prelude += "window.__browserGateEvccExample = " + json.dumps(evcc_example).replace("<", "\\u003c") + ";\n"
     checks = r'''
 ;(async function browserGate() {
   const failures = [];
@@ -316,6 +318,74 @@ console.error = function() {
     otaCard.style.width = "";
     closeOtaModal(false);
     check(window.__browserGateFetchCalls === 2, "reading notes does not contact the device");
+
+    // evcc pill and sheet: the documented example with this lease and VIN, unwrapped YAML that
+    // scrolls inside the sheet, and a read-only field copy without the asynchronous Clipboard API.
+    const ticks = async count => { for (let i = 0; i < count; i++) await Promise.resolve(); };
+    const evccVin = "5YJ3E1EA1JF000001";
+    const evccText = window.__browserGateEvccExample.replace(/^(#[^\n]*\n)+/, "")
+      .split("DEVICE_HOST").join("192.0.2.10").split("REPLACE_WITH_VIN").join(evccVin);
+    check(evccText.startsWith("title:") && !/DEVICE_HOST|REPLACE_WITH_VIN/.test(evccText), "evcc example fixture");
+    render({vin: evccVin, ip: "192.0.2.10", key_present: true, paired: true, paired_at: 1781222400});
+    const evccPill = document.getElementById("evccBtn"), vinPencil = document.getElementById("vinBtn");
+    const vehicleRow = document.getElementById("rowVeh");
+    check(getComputedStyle(evccPill).display !== "none", "evcc pill is visible with a VIN and lease");
+    check(evccPill.textContent.trim() === "evcc" && !evccPill.disabled, "evcc pill is named by its visible text");
+    const pillBox = evccPill.getBoundingClientRect(), pencilBox = vinPencil.getBoundingClientRect();
+    const vehicleBox = vehicleRow.getBoundingClientRect();
+    check(pillBox.width >= 44 && pillBox.height >= 44, "evcc pill keeps a 44 px target");
+    check(pillBox.right <= pencilBox.left + 1 && pillBox.left >= vehicleBox.left && pencilBox.right <= vehicleBox.right + 1,
+          "evcc pill sits beside the VIN pencil inside the row");
+    check(Math.abs(pillBox.top + pillBox.bottom - pencilBox.top - pencilBox.bottom) <= 2, "evcc pill is centred with the pencil");
+    check(vehicleRow.scrollWidth <= vehicleRow.clientWidth + 1, "vehicle row does not overflow with the pill");
+    const vinValue = document.getElementById("vehVal");
+    check(vinValue.scrollWidth <= vinValue.clientWidth + 1, "the full VIN stays visible beside the pill");
+    textContrast(evccPill.querySelector(".chip-badge"), "evcc pill");
+    evccPill.focus();
+    evccPill.click();
+    const askModal = document.getElementById("askModal"), askDetail = document.getElementById("askDetail");
+    const askCard = document.querySelector("#askModal .sheet"), askOk = document.getElementById("askOk");
+    check(!askModal.classList.contains("hide"), "evcc pill opens the sheet");
+    check(askDetail.textContent === evccText, "evcc sheet shows the documented example with IP and VIN");
+    check(getComputedStyle(askDetail).whiteSpace === "pre", "evcc YAML keeps its lines and indentation");
+    check(askDetail.scrollWidth > askDetail.clientWidth, "long YAML lines scroll inside the code box");
+    textContrast(askDetail, "evcc YAML");
+    check(document.activeElement === askOk && askOk.textContent === "Copy", "Copy starts focused");
+    const evccCardBox = askCard.getBoundingClientRect();
+    check(evccCardBox.left >= 0 && evccCardBox.right <= innerWidth + 1 && evccCardBox.top >= 0 &&
+          evccCardBox.bottom <= innerHeight + 1, "evcc sheet stays inside the viewport");
+    check(askCard.scrollHeight <= askCard.clientHeight + 1, "evcc sheet needs no outer scrolling");
+    for (const id of ["askCancel", "askOk"]) {
+      const box = document.getElementById(id).getBoundingClientRect();
+      check(box.top >= evccCardBox.top && box.bottom <= evccCardBox.bottom, "evcc actions stay visible: " + id);
+    }
+    check(document.documentElement.scrollWidth <= innerWidth + 1, "evcc sheet causes no page overflow");
+    const copies = [];
+    for (const accepted of [false, true]) {
+      document.execCommand = function(command) {
+        const field = document.activeElement;
+        copies.push(command === "copy" && field && field.tagName === "TEXTAREA" && field.readOnly
+          ? field.value.slice(field.selectionStart, field.selectionEnd) : null);
+        return accepted;
+      };
+      askOk.click();
+      await ticks(4);
+      const notice = toastRegion.querySelector('[data-key="evcc"]');
+      check(copies.at(-1) === evccText, "copy selects exactly the shown text in a read-only field");
+      check(!document.querySelector("body > textarea"), "temporary copy field is removed");
+      check(notice && notice.classList.contains(accepted ? "ok" : "err"), "copy outcome is reported");
+      check(askModal.classList.contains("hide") === accepted, accepted ? "copy closes the sheet" : "failed copy keeps the text open");
+    }
+    check(document.activeElement === evccPill, "focus returns to the evcc pill");
+    evccPill.click();
+    document.dispatchEvent(new KeyboardEvent("keydown", {key: "Escape", bubbles: true}));
+    check(askModal.classList.contains("hide") && document.activeElement === evccPill, "Escape closes the evcc sheet");
+    evccPill.click();
+    document.getElementById("askCancel").click();
+    await ticks(4);
+    check(askModal.classList.contains("hide") && document.activeElement === evccPill, "Close closes the evcc sheet");
+    delete document.execCommand;
+    check(copies.length === 2 && window.__browserGateFetchCalls === 2, "Escape and Close copy nothing; no device request");
 
     const offlineFetch = window.fetch, originalPoll = poll;
     poll = function() {};
