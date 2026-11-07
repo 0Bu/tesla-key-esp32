@@ -270,11 +270,11 @@ esp_err_t handle_command(GuardedReq rq) {
     tk::CommandNoOp no_op = tk::CommandNoOp::None;
     bool ok = execute_vehicle_command(*g_vehicle, info->kind, ival, bval, &no_op);
     if (ok) rq.reply()->state.succeeded(); // before fallible/global error-text sampling
-    // On failure, distinguish "the car rejected it" (we got an error reply, e.g.
-    // "complete") from "the car was unreachable" (no reply / timed out). The former
-    // carries the real Tesla reason; only the latter is an in-range problem. The text
-    // selection is shared with the MCP tools/call result (logic/mcp.hpp) so the two
-    // paths can never report the same outcome differently.
+    // Preserve the available diagnostic text for a rejection or reachability failure.
+    // Like MCP tools/call, REST uses the command result text for the diagnostic.
+    // The shared last error is sampled after the command completes and is used
+    // only to explain the outcome. The request-local result above is the source
+    // of truth for the HTTP success status.
     std::string err = g_vehicle->last_command_error();
     return send_command_result(rq, ok, cmd, vin, err, no_op);
 }

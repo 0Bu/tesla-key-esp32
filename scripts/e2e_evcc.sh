@@ -242,10 +242,11 @@ def unique_object(pairs):
     return obj
 
 try:
-    envelope = json.load(sys.stdin, object_pairs_hook=unique_object)["response"]
-    charge = envelope["response"]["charge_state"]
-    amps, limit = charge["charge_amps"], charge["charge_limit_soc"]
-    if (envelope["result"] is not True or type(amps) is not int or not 0 <= amps <= 48
+    snapshot = json.load(sys.stdin, object_pairs_hook=unique_object)
+    charge, age = snapshot["vehicle"], snapshot["charge_age_s"]
+    amps, limit = charge["amps"], charge["charge_limit"]
+    if (snapshot["link"] != "awake" or type(age) is not int or not 0 <= age <= 30
+            or type(amps) is not int or not 0 <= amps <= 48
             or type(limit) is not int or not 50 <= limit <= 100):
         sys.exit(1)
 except (ValueError, TypeError, KeyError):
@@ -572,12 +573,13 @@ PY
     echo "self_test FAILED: malformed or unhandled evcc data error accepted" >&2
     exit 1
   fi
-  local good_baseline='{"response":{"result":true,"response":{"charge_state":{"charge_amps":0,"charge_limit_soc":80}}}}'
+  local good_baseline='{"link":"awake","charge_age_s":30,"vehicle":{"amps":0,"charge_limit":80}}'
   [ "$(evcc_charge_baseline <<< "$good_baseline")" = "0 80" ] || exit 1
-  for mock_body in 'ErrAsleep' 'ErrMustRetry' "${good_baseline/true/false}" \
-    '{"response":{"result":true,"response":{"charge_state":{"charge_amps":null,"charge_limit_soc":80}}}}' \
-    '{"response":{"result":true,"response":{"charge_state":{"charge_amps":49,"charge_limit_soc":80}}}}' \
-    '{"response":{"result":true,"response":{"charge_state":{"charge_amps":0,"charge_limit_soc":false}}}}'; do
+  for mock_body in 'ErrAsleep' 'ErrMustRetry' "${good_baseline/awake/idle}" "${good_baseline/30/31}" \
+    '{"link":"awake","vehicle":{"amps":0,"charge_limit":80}}' \
+    '{"link":"awake","charge_age_s":0,"vehicle":{"amps":null,"charge_limit":80}}' \
+    '{"link":"awake","charge_age_s":0,"vehicle":{"amps":49,"charge_limit":80}}' \
+    '{"link":"awake","charge_age_s":0,"vehicle":{"amps":0,"charge_limit":false}}'; do
     if evcc_charge_baseline <<< "$mock_body"; then
       echo "self_test FAILED: unsafe current/limit baseline accepted" >&2
       exit 1
@@ -773,12 +775,12 @@ echo "$BC" | grep -q '"result":true' && ok "body_controller_state ok" || echo " 
 if [ "$RUN_COMMANDS" = 1 ]; then
   hdr "4. Commands (write path → signed BLE → car)"
 
-  # Wake is already an explicit part of this command test. Obtain the baseline
-  # afterwards, when the active window makes a successful charge read freshness-bounded.
+  # Already-awake wake requests can succeed without opening the active window.
+  # Use /status for the current/limit and age of one coherent ChargeState snapshot.
   before_wake_fail=$fail
   evcc_wake_up
   if [ "$fail" -eq "$before_wake_fail" ] &&
-     BASELINE_JSON="$(kex "wget -qO- --timeout=$TIMEOUT '$ESC_BASE/api/1/vehicles/$ESC_VIN/vehicle_data?endpoints=charge_state' 2>/dev/null")" &&
+     BASELINE_JSON="$(kex "wget -qO- --timeout=$TIMEOUT '$ESC_BASE/status?redact=1' 2>/dev/null")" &&
      BASELINE="$(evcc_charge_baseline <<< "$BASELINE_JSON")"; then
     read -r CUR_AMPS CUR_LIM <<< "$BASELINE"
     echo "  baseline: charge_amps=$CUR_AMPS  charge_limit_soc=$CUR_LIM"
