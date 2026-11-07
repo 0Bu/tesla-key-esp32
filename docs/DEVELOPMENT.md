@@ -392,6 +392,12 @@ See [API](API.md#direct-signed-firmware-upload) and [security](SECURITY.md#ota-s
 
 ### Served Pages acceptance
 
+The assembler emits an empty `.nojekyll`, and every shared branch-publisher mode maintains it at
+the branch root. Pages therefore serves the already-built static files without a Jekyll rebuild.
+The explicit build request is retained because a `GITHUB_TOKEN` branch push does not trigger Pages.
+This removes redundant site processing; GitHub's deployment queue and CDN propagation remain
+external waits and still require the same acceptance checks.
+
 Stable and Dev acceptance first observe the latest Pages build with up to 32 status reads at fixed
 10-second intervals (the same 310-second waiting span). This avoids up to 60 seconds of readiness
 detection lag from exponential polling. Queued/building, failed
@@ -438,7 +444,10 @@ python3 scripts/recover-release-pages.py --run-id <original-run-id>
 After the recovery is authorized, add `--publish` to the same invocation. The helper downloads
 the exact unexpired signed artifact and checks its API-authenticated ZIP digest before extraction.
 It preserves the original HTML/JavaScript, firmware and changelog; it does not rebuild current
-documentation under an old source SHA. It requires the latest immutable Release, exact tag/source,
+documentation under an old source SHA. The candidate must equal the entire original site plus
+exactly one empty root `.nojekyll` control file, including when the original predates that marker.
+An unsafe original marker or any changed, missing or extra payload is rejected.
+It requires the latest immutable Release, exact tag/source,
 source ancestry and successful original host/rebuild/signature gates. A later publish-job failure
 is recoverable only when all critical pre-publication steps succeeded; cancelled runs are refused.
 Explicitly attested key-free immutable reuse is also accepted. Every branch retry repeats these

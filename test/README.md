@@ -77,7 +77,9 @@ checks use ASan, UBSan and LSan, with deliberate tripwires proving the detectors
 20,000-case fuzz corpus. Local host evidence is distinct from remote CI.
 
 The build-contract suite runs the real Pages assembler with and without a published ref using its
-invoking Bash, including macOS Bash 3.2.
+invoking Bash, including macOS Bash 3.2. Output-only corruption cases restore independent copies
+of one validated site instead of rebuilding identical inputs; missing/extra-target cases still
+invoke the actual assembler.
 
 
 ### Browser prerequisites
@@ -115,7 +117,10 @@ The canonical runner owns the complete invocation list; these groups identify th
 | HTTP security contract and UI request tests | Actual POST gate ordering, bounded provenance headers, socket/live-mDNS ownership, diagnostic Host checks, redaction selectors, exact UI proof header, no CORS grant and both anti-framing headers; 16 source mutations must fail. IPv6 enablement is rejected; these checks do not establish live network/browser attack behavior. |
 | `test_runtime_boundary_contract.py` | Shipped CMake source closure and actual task/callback registration; contained or mechanically bounded C boundaries; fixed mailbox/completion ownership, no forbidden work under locks, production JSON/OTA/MQTT wiring and closed source/flag surface |
 | `test_ble_lifecycle.py` | Actual BLE scan, deferred termination, pending-service and failed-connect bodies against passive RTOS/NimBLE doubles: mutex contention, generation replacement, retry exhaustion and retired-link repair. This is host interleaving evidence, not a radio or vehicle test. |
-| `test_release_pages_recovery.py` | Authenticated original ZIP, immutable/latest/source/run authority, all four producer and independent targets, full host gates, key-removal/reuse evidence and exact candidate-site bytes. Passive API/Git and publisher controls; no real key, Release or Pages mutation. |
+| `test_ci_checkout.py` | Real local Git fetches with and without blob filtering: complete history/tags, offline exact-source archive and metadata reads, and omitted unrelated historical Pages payloads. No GitHub access. |
+| `test_pages_publish_control.py` | Empty, regular, single-link root `.nojekyll` creation and idempotence; refusal of nonempty files, directories, links and FIFOs without changing their targets. |
+| `test_pages_publish.py` | Actual branch publisher against disposable local Git repositories: filesystem failures, stale-source and concurrent-push retries, static marker preservation and effective guard omission. Each case copies independent object stores/refs/worktrees from one source fixture without hardlinks. Shell pass-throughs avoid Python startup for ordinary Git calls; fault injection retains its Python owner. A refusing sentinel checks remote isolation and real Git exit-status propagation. |
+| `test_release_pages_recovery.py` | Authenticated original ZIP, immutable/latest/source/run authority, all four producer and independent targets, full host gates, key-removal/reuse evidence and exact candidate-site bytes plus only the empty root control marker. Legacy/current artifacts and changed/extra payload rejection. Passive API/Git and publisher controls; no real key, Release or Pages mutation. |
 | `test_charge_presentation.py` | Compiled actual cache/indicator methods with passive RTOS facades: coherent value/stamp, tick zero/wrap, missing sample, lock failure and post-unlock publication. Pure status fixtures independently age charge while common contact stays fresh; browser fixtures verify the retained-data presentation without commands. |
 | `test_command_outcomes.py` | Actual start/stop/default producers and enqueue helpers feed the real runner with passive RTOS/completion/builders. All three actual admission blocks reject positive budgets exhausted during mutex acquisition; individual guard omissions restore the invalid enqueue. Matching, inverse, default, missing-counter and unauthenticated outcomes retain one callback and no additional payload. Pure runner tests cover queued-ID policy guards, slot reuse and expired/cancelled/cleared requests; actual REST/MCP emitters print and reparse their completion results. No live command or cryptographic frame is sent. |
 | `test_patch_incremental.py` | Shipped CMake admission block and unchanged validator functions with synthetic digest constants; ordinary incremental input/inventory changes stop before the forced compiler, while valid revalidation proceeds. Does not compile tesla-ble or establish real dependency bytes. |

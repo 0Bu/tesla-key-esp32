@@ -15,6 +15,13 @@ PUBLISHER = REPO / "scripts/publish-pages-branch.sh"
 
 
 class PagesPublishTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.source_fixture = tempfile.TemporaryDirectory(prefix="pages-publish-source-")
+        cls.addClassCleanup(cls.source_fixture.cleanup)
+        cls.source_template = Path(cls.source_fixture.name)
+        cls.template_source_sha = None
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="pages-publish-contract-")
         self.addCleanup(self.temp.cleanup)
@@ -40,20 +47,46 @@ class PagesPublishTest(unittest.TestCase):
                         TMPDIR=str(self.root / "work"))
         for name in ["rm", "mkdir", "mv"]:
             self.env["TEST_REAL_" + name.upper()] = shutil.which(name)
-        self.git_run("init", "--bare", "--quiet", str(self.remote))
-        self.git_run("init", "--quiet", str(self.seed))
-        self.git_run("-C", str(self.seed), "symbolic-ref", "HEAD", "refs/heads/main")
-        self.git_run("-C", str(self.seed), "config", "user.name", "github-actions[bot]")
-        self.git_run("-C", str(self.seed), "config", "user.email",
-                     "41898282+github-actions[bot]@users.noreply.github.com")
-        (self.seed / "SOURCE_ONLY").write_text("must not enter Pages\n")
-        self.seed_commit("main fixture")
-        self.git_run("-C", str(self.seed), "push", "--quiet", str(self.remote), "HEAD:main")
-        self.source_sha = self.git_run("-C", str(self.seed), "rev-parse", "HEAD").stdout.strip()
+        if self.template_source_sha is None:
+            self.git_run("init", "--bare", "--quiet", str(self.remote))
+            self.git_run("init", "--quiet", str(self.seed))
+            self.git_run("-C", str(self.seed), "symbolic-ref", "HEAD", "refs/heads/main")
+            self.git_run("-C", str(self.seed), "config", "user.name", "github-actions[bot]")
+            self.git_run("-C", str(self.seed), "config", "user.email",
+                         "41898282+github-actions[bot]@users.noreply.github.com")
+            (self.seed / "SOURCE_ONLY").write_text("must not enter Pages\n")
+            self.seed_commit("main fixture")
+            self.git_run("-C", str(self.seed), "push", "--quiet", str(self.remote), "HEAD:main")
+            self.git_run("--git-dir", str(self.remote), "symbolic-ref", "HEAD", "refs/heads/main")
+            source = self.git_run("-C", str(self.seed), "rev-parse", "HEAD").stdout.strip()
+            shutil.copytree(self.remote, self.source_template / "remote.git")
+            shutil.copytree(self.seed, self.source_template / "seed")
+            type(self).template_source_sha = source
+        else:
+            # Independent object stores/refs/worktrees: copy2 does not create hardlinks.
+            shutil.copytree(self.source_template / "remote.git", self.remote)
+            shutil.copytree(self.source_template / "seed", self.seed)
+        self.source_sha = self.template_source_sha
         self.env.update(SOURCE_SHA=self.source_sha, TEST_SEED=str(self.seed),
                         TEST_CONFLICT_MARKER=str(self.root / "conflict"))
-        self.git_run("--git-dir", str(self.remote), "symbolic-ref", "HEAD", "refs/heads/main")
-        self.write_shim("git", """
+        # Pass-throughs need only shell builtins; Python retains all fault injection.
+        self.write_shell_shim("git", """
+cmd=$1
+if [ "$cmd" = -C ]; then cmd=$3; fi
+case "$TEST_FAULT:$cmd" in
+  clone:clone|checkout:checkout|git_rm:rm|ls_files:ls-files|diff:diff|main_read:ls-remote|main_read_second:ls-remote|newer_dev:push|pages_conflict:push|main_read_second:push)
+    exec "${0%/*}/git-fault" "$@" ;;
+esac
+printf 'git %s\\n' "$cmd" >> "$TEST_CALLS" || exit 1
+case "$cmd" in
+  clone|push|ls-remote)
+    owned=0
+    for arg; do [ "$arg" != "$TEST_REMOTE" ] || owned=1; done
+    [ "$owned" = 1 ] || { echo 'refusing non-fixture Git remote' >&2; exit 1; } ;;
+esac
+exec "$TEST_REAL_GIT" "$@"
+""")
+        self.write_shim("git-fault", """
 import os, sys
 args = sys.argv[1:]
 cmd = args[2] if args[:1] == ["-C"] else args[0]
@@ -150,6 +183,11 @@ for child in src.iterdir():
         path.write_text("#!" + sys.executable + "\n" + code)
         path.chmod(0o700)
 
+    def write_shell_shim(self, name, code):
+        path = self.bin / name
+        path.write_text("#!/bin/sh\n" + code)
+        path.chmod(0o700)
+
     def git_run(self, *args, check=True):
         return subprocess.run([self.git, *args], env=self.env, check=check,
                               capture_output=True, text=True)
@@ -193,6 +231,23 @@ for child in src.iterdir():
         self.assertNotIn("git push", self.calls.read_text())
         self.assertNotIn("pages POST", self.calls.read_text())
 
+    def test_git_shim_keeps_remote_scope_and_real_exit_status(self):
+        # A refusing sentinel replaces real Git, so even an omitted guard cannot use a network.
+        self.write_shell_shim("git-sentinel", "echo real-git-called >&2\nexit 37\n")
+        environment = dict(self.env, TEST_REAL_GIT=str(self.bin / "git-sentinel"))
+        for operation in ("clone", "push", "ls-remote"):
+            for remote, status, message in ((str(self.remote), 37, "real-git-called"),
+                                             ("https://foreign.invalid/repo", 1, "refusing non-fixture Git remote")):
+                result = subprocess.run([str(self.bin / "git"), operation, remote],
+                                        env=environment, capture_output=True, text=True, timeout=3)
+                self.assertEqual(result.returncode, status)
+                self.assertEqual(result.stderr.strip(), message)
+        result = subprocess.run([str(self.bin / "git"), "clone", str(self.remote)],
+                                env=dict(environment, TEST_CALLS=str(self.root)),
+                                capture_output=True, text=True, timeout=3)
+        self.assertEqual(result.returncode, 1)
+        self.assertNotIn("real-git-called", result.stderr)
+
     def test_preview_filesystem_failures(self):
         self.existing_pages()
         for fault in ["preview_remove", "preview_remove_noop", "stage_remove",
@@ -203,6 +258,25 @@ for child in src.iterdir():
     def test_dev_directory_failure(self):
         self.existing_pages()
         self.assert_failure_before_publish("dev", "dev_mkdir")
+
+    def test_static_control_survives_all_channel_mutations(self):
+        self.existing_pages()
+        self.dev_manifest()
+        for mode in ("dev", "pr", "rm", "root"):
+            with self.subTest(mode=mode):
+                result = self.publish(mode)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.git_run("--git-dir", str(self.remote), "show", "gh-pages:.nojekyll").stdout, "")
+                expected = "new preview\n" if mode == "root" else "old root\n"
+                self.assertEqual(self.git_run("--git-dir", str(self.remote), "show", "gh-pages:index.html").stdout, expected)
+                self.assertEqual(self.git_run("--git-dir", str(self.remote), "show", "gh-pages:dev/index.html").stdout, "new preview\n")
+
+    def test_nonempty_global_control_refuses_before_publish(self):
+        self.existing_pages()
+        (self.seed / ".nojekyll").write_bytes(b"must not truncate")
+        self.seed_commit("Unsafe publication marker fixture")
+        self.git_run("-C", str(self.seed), "push", "--quiet", str(self.remote), "HEAD:gh-pages")
+        self.assert_failure_before_publish("pr", "")
 
     def dev_manifest(self, sha=None):
         (self.site / "manifest.json").write_text(json.dumps(
@@ -291,7 +365,7 @@ for child in src.iterdir():
     def test_successful_first_preview_has_no_main_files(self):
         self.assertEqual(self.publish().returncode, 0)
         paths = self.git_run("--git-dir", str(self.remote), "ls-tree", "-r", "--name-only", "gh-pages").stdout
-        self.assertEqual(paths, "PR/42/index.html\n")
+        self.assertEqual(paths, ".nojekyll\nPR/42/index.html\n")
 
     def test_channel_refuses_empty_remote_without_main(self):
         empty = self.root / "empty.git"
@@ -303,7 +377,7 @@ for child in src.iterdir():
         self.assert_failure_before_publish("dev", "")
         self.assertEqual(self.publish("pr").returncode, 0)
         paths = self.git_run("--git-dir", str(empty), "ls-tree", "-r", "--name-only", "gh-pages").stdout
-        self.assertEqual(paths, "PR/42/index.html\nPR/42/manifest.json\n")
+        self.assertEqual(paths, ".nojekyll\nPR/42/index.html\nPR/42/manifest.json\n")
 
     def test_root_candidate_identity_and_main_admission(self):
         self.existing_pages()
@@ -380,6 +454,7 @@ for child in src.iterdir():
         needle = '  case "$mode" in root|root-recovery|dev) ;; *) return 0 ;; esac'
         self.assertEqual(source.count(needle), 1)
         mutant = self.root / "publisher-with-root-guard-omitted.sh"
+        shutil.copy2(REPO / "scripts/pages_publish_control.py", self.root)
         mutant.write_text(source.replace(needle, '  case "$mode" in root-recovery|dev) ;; *) return 0 ;; esac'))
         mutant.chmod(0o700)
         victim = PagesPublishTest("test_root_retry_refuses_newer_main")

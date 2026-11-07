@@ -124,6 +124,7 @@ REQUIRED_FILES = (
     ".github/workflows/signed-pr-preview.yml",
     ".github/workflows/pr-preview-cleanup.yml",
     "scripts/build-pages.sh",
+    "scripts/pages_publish_control.py",
     "scripts/check-dependency-contract.py",
     "scripts/check-build-artifact-inventory.py",
     "scripts/check-bench-acceptance.py",

@@ -8,7 +8,7 @@ def main() -> None:
     for mode in ['candidate','missing-generator','generator-delegation-omission','wrong-generated-version','validation-omission','restored']:
      with tempfile.TemporaryDirectory(prefix='f107-assembler-offline-') as directory:
       root=Path(directory);repo=root/'repo';repo.mkdir();(repo/'scripts').mkdir()
-      for n in ['build-pages.sh','verify-vendored-esptool-js.sh','check-pages-manifest.py','check-otadata-contract.py','generate-ota-changelog.py']:
+      for n in ['build-pages.sh','verify-vendored-esptool-js.sh','check-pages-manifest.py','check-otadata-contract.py','generate-ota-changelog.py','pages_publish_control.py']:
        shutil.copy2(R/'scripts'/n,repo/'scripts'/n)
       shutil.copytree(R/'docs',repo/'docs');shutil.copy2(R/'LICENSE',repo/'LICENSE')
       env={k:v for k,v in os.environ.items() if not k.startswith(('GIT_','GH_','GITHUB_','OTA_SIGNING_'))}
