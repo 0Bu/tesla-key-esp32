@@ -9,7 +9,7 @@ set -euo pipefail
 contract_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 VERSION_RE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
 SELF_TEST_PYTHON=""  # Set only by this script's isolated --self-test fixture.
-RELEVANT_RE='^(cmake/admit-dependency-sources\.cmake$|scripts/dependency_source\.py$|scripts/nanopb-source\.json$|main/|patches/tesla-ble/|docs/(index\.html|installer-bootstrap\.mjs|serial-port-release\.mjs|web-installer\.mjs|vendor/|[^./][^/]*\.md$)|CMakeLists\.txt$|sdkconfig\.defaults(\.[a-z0-9]+)?$|dependencies\.lock\.[a-z0-9]+$|esp-idf-toolchain\.txt$|partitions\.csv$|version\.txt$|\.github/workflows/(build|signed-pr-preview|pr-preview-cleanup)\.yml$|scripts/firmware-(size|stack)-baseline\.json$|scripts/ota-signing-public-key\.sha256$|scripts/tesla-ble-patch-state\.json$|scripts/(ci-build-all|ci-build-verify|ci-sign-artifacts|next-version|select-release-version|release-relevance|test-release-contract|check-reproducible-build|idf-docker|idf-version|prefetch-idf-image|build-pages|publish-pages-branch|apply-tesla-ble-patches)\.sh$|scripts/(check-idf-container-mounts|apply-tesla-ble-patches|check-build-artifact-inventory|check-build-gate-contract|check-pages-manifest|check-pages-source|wait-pages-build|check-dev-pages|check-release-pages-bytes|check-release-assets|check-signed-root-inventory|prepare-reused-release|recover-release-pages|check-published-release|check-firmware-artifacts|check-partition-contract|check-dependency-contract|check-otadata-contract|check-build-semantics|check-stack-usage|check-sdkconfig-defaults|report-firmware-size|generate-ota-changelog)\.py$)'
+RELEVANT_RE='^(cmake/admit-dependency-sources\.cmake$|scripts/dependency_source\.py$|scripts/nanopb-source\.json$|main/|patches/tesla-ble/|docs/(index\.html|installer-bootstrap\.mjs|serial-port-release\.mjs|web-installer\.mjs|vendor/|[^./][^/]*\.md$)|CMakeLists\.txt$|sdkconfig\.defaults(\.[a-z0-9]+)?$|dependencies\.lock\.[a-z0-9]+$|esp-idf-toolchain\.txt$|partitions\.csv$|version\.txt$|\.github/workflows/(build|signed-pr-preview|pr-preview-cleanup)\.yml$|scripts/firmware-(size|stack)-baseline\.json$|scripts/ota-signing-public-key\.sha256$|scripts/tesla-ble-patch-state\.json$|scripts/(ci-build-all|ci-build-verify|ci-sign-artifacts|next-version|select-release-version|release-relevance|test-release-contract|check-reproducible-build|idf-docker|idf-version|prefetch-idf-image|build-pages|publish-pages-branch|apply-tesla-ble-patches)\.sh$|scripts/(check-idf-container-mounts|apply-tesla-ble-patches|check-build-artifact-inventory|check-build-gate-contract|check-pages-manifest|check-pages-source|pages_publish_control|wait-pages-build|check-dev-pages|check-release-pages-bytes|check-release-assets|check-signed-root-inventory|prepare-reused-release|recover-release-pages|check-published-release|check-firmware-artifacts|check-partition-contract|check-dependency-contract|check-otadata-contract|check-build-semantics|check-stack-usage|check-sdkconfig-defaults|report-firmware-size|generate-ota-changelog)\.py$)'
 
 validate_sha() {
   local repo_root="$1" sha="$2"
@@ -711,7 +711,7 @@ with open(p, "r+", encoding="utf-8") as f:
   # filename: a name drift here would let its change bypass the cumulative release decision.
   mkdir -p "$tmp/scripts"
   local contract_path
-  for contract_path in scripts/check-idf-container-mounts.py scripts/apply-tesla-ble-patches.py scripts/tesla-ble-patch-state.json scripts/wait-pages-build.py scripts/prefetch-idf-image.sh; do
+  for contract_path in scripts/check-idf-container-mounts.py scripts/apply-tesla-ble-patches.py scripts/tesla-ble-patch-state.json scripts/wait-pages-build.py scripts/prefetch-idf-image.sh scripts/pages_publish_control.py; do
     printf '%s\n' "$contract_path" | grep -Eq "$RELEVANT_RE" || {
       echo "build admission input is not release-relevant: $contract_path" >&2; return 1;
     }
@@ -953,7 +953,7 @@ with open(p, "r+", encoding="utf-8") as f:
       && "$(git -C "$builder_repo" rev-parse --verify "${sha_c}^{commit}")" == "$sha_c" ]] || return 1
   rm -rf -- "$builder_repo/scripts" "$builder_repo/docs"
   mkdir -p "$builder_repo/scripts"
-  for builder_input in build-pages.sh verify-vendored-esptool-js.sh check-pages-manifest.py check-otadata-contract.py generate-ota-changelog.py; do
+  for builder_input in build-pages.sh pages_publish_control.py verify-vendored-esptool-js.sh check-pages-manifest.py check-otadata-contract.py generate-ota-changelog.py; do
     cp -p "$contract_root/scripts/$builder_input" "$builder_repo/scripts/$builder_input"
   done
   cp -pR "$contract_root/docs" "$builder_repo/docs"

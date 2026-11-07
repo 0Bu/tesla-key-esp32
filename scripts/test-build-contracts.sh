@@ -142,6 +142,14 @@ grep -Fq "invalid display version" "$signer_error" || {
 
 FIRMWARE_STAGE_DIR="$stage" "$repo_root/scripts/build-pages.sh" "$site" 1.2.3 "$sha" >/dev/null
 python3 "$repo_root/scripts/check-pages-manifest.py" "$site" --source-sha "$sha" --version 1.2.3 >/dev/null
+# Later cases mutate only this output, not the canonical assembler inputs. Restore independent
+# copies of the validated snapshot instead of rebuilding the same site four more times.
+canonical_site="$temp/canonical-site"
+cp -R "$site" "$canonical_site"
+restore_site() {
+  rm -rf -- "$site"
+  cp -R "$canonical_site" "$site"
+}
 python3 - "$site/manifest.json" <<'PY'
 import json
 from pathlib import Path
@@ -157,7 +165,7 @@ if python3 "$repo_root/scripts/check-pages-manifest.py" "$site" \
   echo "manifest version self-test failed: non-canonical leading-zero version accepted" >&2
   exit 1
 fi
-FIRMWARE_STAGE_DIR="$stage" "$repo_root/scripts/build-pages.sh" "$site" 1.2.3 "$sha" >/dev/null
+restore_site
 python3 - "$site/manifest.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -186,7 +194,7 @@ if python3 "$repo_root/scripts/check-pages-manifest.py" "$site" \
   echo "manifest otadata semantic self-test failed: non-erased bytes accepted" >&2
   exit 1
 fi
-FIRMWARE_STAGE_DIR="$stage" "$repo_root/scripts/build-pages.sh" "$site" 1.2.3 "$sha" >/dev/null
+restore_site
 
 # Model the four exact versioned merged.bin assets attached to a GitHub Release, then prove every
 # one of the 16 Pages parts is the byte-identical slice at its declared flash offset.
@@ -355,7 +363,7 @@ if python3 "$repo_root/scripts/check-release-pages-bytes.py" "$site" "$release" 
 fi
 
 # Restore the canonical snapshot for the remaining manifest integrity cases.
-FIRMWARE_STAGE_DIR="$stage" "$repo_root/scripts/build-pages.sh" "$site" 1.2.3 "$sha" >/dev/null
+restore_site
 
 mv "$stage/esp32c6" "$temp/esp32c6"
 if FIRMWARE_STAGE_DIR="$stage" "$repo_root/scripts/build-pages.sh" "$site" 1.2.3 "$sha" >/dev/null 2>&1; then
@@ -371,7 +379,7 @@ if FIRMWARE_STAGE_DIR="$stage" "$repo_root/scripts/build-pages.sh" "$site" 1.2.3
 fi
 rmdir "$stage/esp32c5"
 
-FIRMWARE_STAGE_DIR="$stage" "$repo_root/scripts/build-pages.sh" "$site" 1.2.3 "$sha" >/dev/null
+restore_site
 printf x >> "$site/tesla-key-esp32.bin"
 if python3 "$repo_root/scripts/check-pages-manifest.py" "$site" >/dev/null 2>&1; then
   echo "manifest digest/length self-test failed: tampered file accepted" >&2

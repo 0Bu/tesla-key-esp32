@@ -244,11 +244,17 @@ def verify(artifact: Path, run_id: int, candidate: Path | None = None,
     release_contract.validate_full_release(release, artifact, version, source,
                                            "published-immutable", expected_pin)
     original = artifact / "_site"
+    try:
+        control = sibling("pages_publish_control")
+        control.check_marker(original)
+        expected_site = control.expected_site(snapshot_tree(original))
+    except (OSError, ValueError) as error:
+        raise RecoveryError(str(error)) from error
     sibling("check-pages-manifest").validate(original, source, version)
     sibling("check-release-pages-bytes").verify(original, artifact, version)
     sibling("generate-ota-changelog").validate_document_bytes((original / "changelog.json").read_bytes(), version)
     if candidate is not None:
-        require(snapshot_tree(candidate, frozenset({".git", "PR", "dev"})) == snapshot_tree(original),
+        require(snapshot_tree(candidate, frozenset({".git", "PR", "dev"})) == expected_site,
                 "recovery candidate differs from the original signed site")
     pages_url = sibling("check-pages-source").validate(api("pages"))
     return release, source, version, pages_url

@@ -598,11 +598,13 @@ jobs:
       BUMP: ${{ needs.build.outputs.bump }}
       REQUESTED_RELEASE_VERSION: ${{ needs.build.outputs.exact-version }}
     steps:
-      # Checkout only the exact main commit that produced the unsigned data artifact.
+      # Keep complete history/tags and the full exact-source tree, without downloading unrelated
+      # historical payload blobs. Compiler checkouts remain unfiltered for read-only containers.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
+          filter: blob:none
           persist-credentials: false
 
       - name: Bind publish job to current main
@@ -1010,6 +1012,7 @@ jobs:
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
+          filter: blob:none
           persist-credentials: false
 
       - name: Download exact signed Release and Pages candidate

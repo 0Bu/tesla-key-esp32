@@ -477,12 +477,23 @@ for attempt in 1 2 3 4 5; do
   git -C "$work" config user.name  "github-actions[bot]"
   git -C "$work" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
+  # The marker is global publication control, not another channel's installer payload.
+  # Reject unsafe existing entries before rsync can replace them; legacy root sites may
+  # remove the empty marker during --delete, so ensure it again before staging any write.
+  if ! python3 "$(dirname "${BASH_SOURCE[0]}")/pages_publish_control.py" "$work"; then
+    rm -rf "$work"
+    exit 1
+  fi
   if ! apply_changes "$work"; then
     echo "ERROR: failed to apply changes" >&2
     rm -rf "$work"
     exit 1
   fi
 
+  if ! python3 "$(dirname "${BASH_SOURCE[0]}")/pages_publish_control.py" "$work"; then
+    rm -rf "$work"
+    exit 1
+  fi
   if ! git -C "$work" add -A; then
     echo "ERROR: git add failed" >&2
     rm -rf "$work"
