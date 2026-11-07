@@ -396,6 +396,11 @@ OtaStatus ota_get_status() {
     snapshot.configured_channel = tk::ota_channel_in_state(configured);
     if (snapshot.generation != latest || !tk::ota_offer_current(snapshot.channel_state, configured, snapshot.generation,
                                snapshot.update_available)) {
+        // A withdrawn completed offer must not keep reading as "update available".
+        if (snapshot.update_available) {
+            snapshot.offer_changed = true;
+            copy_status_text(snapshot.message, tk::ota_start_reason(tk::OtaStartResult::OfferChanged, false));
+        }
         snapshot.update_available = false;
         if (snapshot.upload || (snapshot.state != OtaState::Downloading && snapshot.state != OtaState::Done))
             snapshot.available.fill('\0');
@@ -488,10 +493,13 @@ static void publish_check_status(const OtaStatusPod& candidate, bool keep_upload
     if (!candidate.update_available) set_changelog_locked(nullptr);
 }
 
-static void set_check_error(const char* message) noexcept {
+// Every error names the channel its owner captured. Generation zero never forms an offer.
+static void set_check_error(const char* message, uint32_t channel_state) noexcept {
     OtaStatusPod candidate{};
     candidate.state = OtaState::Error;
     candidate.target_pr = s_target_pr.load(std::memory_order_relaxed);
+    candidate.channel_state = channel_state;
+    candidate.channel = tk::ota_channel_in_state(channel_state);
     copy_status_text(candidate.message, message);
     const std::string_view current = running_version();
     copy_status_text(candidate.current, current.data());
@@ -875,8 +883,9 @@ static void set_check_done(const OtaCheckResult& r, const OtaOperation& operatio
 static void ota_task_impl(OtaOperation& operation) {
     const OtaCheckResult pre = perform_check(operation, operation.target_pr);
     if (!pre.ok || !pre.update_available) {
-        set_check_done(pre, operation); // Fresh failures/OOM withdraw any earlier offer.
-        if (pre.ok) set_state(OtaState::Error, 0, "no newer version available");
+        // One publication: install polling must never read an intermediate Idle record as success.
+        if (pre.ok) set_check_error("no newer version available", operation.channel_state);
+        else set_check_done(pre, operation); // Fresh failures/OOM withdraw any earlier offer.
         return;
     }
     if (operation.channel_state != s_ota_channel.load(std::memory_order_acquire) ||
@@ -884,7 +893,7 @@ static void ota_task_impl(OtaOperation& operation) {
         pre.manifest_sha256 != operation.expected.manifest_sha256 ||
         pre.notes_sha256 != operation.expected.notes_sha256 ||
         pre.image_sha256 != operation.expected.image_sha256 || pre.image_bytes != operation.expected.image_bytes) {
-        set_check_error(tk::ota_start_reason(tk::OtaStartResult::OfferChanged, false));
+        set_check_error(tk::ota_start_reason(tk::OtaStartResult::OfferChanged, false), operation.channel_state);
         operation.coordinator.cancel(tk::ota::Outcome::ProtocolError);
         return; // No image transfer, raw write or boot selection for a replaced candidate.
     }
@@ -897,7 +906,7 @@ static void ota_task_impl(OtaOperation& operation) {
     policy.expected_bytes = operation.expected.image_bytes;
     if (!operation.writer.configure(policy)) {
         operation.coordinator.cancel(tk::ota::Outcome::InvalidState);
-        set_check_error("could not configure image policy"); return;
+        set_check_error("could not configure image policy", operation.channel_state); return;
     }
     const std::string firmware_url = resolve_firmware_url(operation.target_pr, operation.channel);
     tk::ota::HttpLimits limits{kMaximumImageBytes};
@@ -906,7 +915,8 @@ static void ota_task_impl(OtaOperation& operation) {
     if (!operation.coordinator.start(firmware_url.c_str(), limits, true)) {
         const bool expired = !operation.budget.live(operation_now(nullptr));
         operation.coordinator.cancel(expired ? tk::ota::Outcome::Deadline : tk::ota::Outcome::ProtocolError);
-        set_check_error(expired ? "update deadline reached" : "could not start download"); return;
+        set_check_error(expired ? "update deadline reached" : "could not start download", operation.channel_state);
+        return;
     }
     for (;;) {
         tk::StackWatchScope f135_ota_chunk_exit(tk::StackWatch::OtaWriter);
@@ -922,7 +932,7 @@ static void ota_task_impl(OtaOperation& operation) {
             set_check_error(state == tk::ota::Outcome::NoMemory ? kOtaNoMemory :
                             state == tk::ota::Outcome::Deadline ? "update deadline reached" :
                             state == tk::ota::Outcome::WriterUncertain ? "update outcome is uncertain" :
-                            "download or image validation failed");
+                            "download or image validation failed", operation.channel_state);
             return;
         }
         const uint64_t total = operation.coordinator.declared_size();
@@ -1000,12 +1010,12 @@ static void ota_upload_impl(OtaOperation& operation) {
     policy.direct_upload = true;
     const auto current = running_version();
     if (!tk::canonical_ota_version(current) || current.size() >= sizeof(policy.current)) {
-        set_check_error("invalid firmware version"); return;
+        set_check_error("invalid firmware version", operation.channel_state); return;
     }
     std::memcpy(policy.current, current.data(), current.size());
     if (ota_get_channel() != tk::OtaChannel::Dev || !operation.writer.configure(policy) ||
         !operation.coordinator.start_upload(req->content_len)) {
-        set_check_error("upload refused"); return;
+        set_check_error("upload refused", operation.channel_state); return;
     }
     size_t received = 0;
     while (received < req->content_len) {
@@ -1014,16 +1024,16 @@ static void ota_upload_impl(OtaOperation& operation) {
             ota_get_channel() != tk::OtaChannel::Dev ||
             !operation.budget.live(operation_now(nullptr))) {
             operation.coordinator.cancel(tk::ota::Outcome::Deadline);
-            set_check_error("upload aborted"); return;
+            set_check_error("upload aborted", operation.channel_state); return;
         }
         const size_t want = std::min(operation.job.block.size(), req->content_len - received);
         const int count = httpd_req_recv(req, reinterpret_cast<char*>(operation.job.block.data()), want);
         if (count <= 0 || static_cast<size_t>(count) > want) {
             operation.coordinator.cancel(tk::ota::Outcome::NetworkError);
-            set_check_error("upload interrupted"); return;
+            set_check_error("upload interrupted", operation.channel_state); return;
         }
         if (!operation.coordinator.upload(operation.job.block.data(), static_cast<size_t>(count))) {
-            set_check_error("upload validation failed"); return;
+            set_check_error("upload validation failed", operation.channel_state); return;
         }
         received += static_cast<size_t>(count);
         set_state(OtaState::Downloading, static_cast<int>(received * 100 / req->content_len), "uploading", true);
@@ -1031,13 +1041,13 @@ static void ota_upload_impl(OtaOperation& operation) {
     if (s_heap_abort_requested.load(std::memory_order_acquire) ||
         ota_get_channel() != tk::OtaChannel::Dev) {
         operation.coordinator.cancel(tk::ota::Outcome::Deadline);
-        set_check_error("upload aborted"); return;
+        set_check_error("upload aborted", operation.channel_state); return;
     }
     operation.coordinator.finish_upload(); // Same SDK signature check and boot selection as pull OTA.
     if (operation.coordinator.outcome() != tk::ota::Outcome::Committed) {
         set_check_error(operation.coordinator.outcome() == tk::ota::Outcome::WriterUncertain
             ? "upload uncertain; do not retry"
-            : "upload validation failed"); return;
+            : "upload validation failed", operation.channel_state); return;
     }
     set_state(OtaState::Done, 100, "update complete — rebooting", true);
     finish_upload_request(operation, true);
@@ -1053,7 +1063,8 @@ static void run_coordinator_task(void* argument, bool image) noexcept {
         if (operation.upload_request) ota_upload_impl(operation);
         else if (!start_network_task(operation)) set_check_error(
             operation.coordinator.outcome() == tk::ota::Outcome::Deadline
-                ? "update deadline reached during setup" : "could not start network task");
+                ? "update deadline reached during setup" : "could not start network task",
+            operation.channel_state);
         else if (image) ota_task_impl(operation);
         else {
             auto result = perform_check(operation, operation.target_pr);
@@ -1062,10 +1073,10 @@ static void run_coordinator_task(void* argument, bool image) noexcept {
         }
     } catch (const std::bad_alloc&) {
         operation.coordinator.cancel(tk::ota::Outcome::NoMemory);
-        set_check_error(kOtaNoMemory);
+        set_check_error(kOtaNoMemory, operation.channel_state);
     } catch (...) {
         operation.coordinator.cancel(tk::ota::Outcome::NetworkError);
-        set_check_error("update operation failed unexpectedly");
+        set_check_error("update operation failed unexpectedly", operation.channel_state);
     }
     if (operation.upload_request) {
         finish_upload_request(operation, false);
@@ -1171,7 +1182,7 @@ static tk::OtaStartResult prepare_owned_operation(uint64_t origin, unsigned pr,
     tk::ota::memory_checkpoint("before_operation", 1, origin, entry_largest);
     if (!tk::ota_recovery_memory_affordable(entry_largest,
             tk::ota_recovery_required_bytes(tk::OtaRecoveryUse::OperationEntry))) {
-        set_check_error(kOtaNoMemory); // Withdraw any older offer while this owner is still held.
+        set_check_error(kOtaNoMemory, channel_state); // Withdraw any older offer under this owner.
         release_unstarted_operation();
         return Result::NoMemory;
     }
@@ -1181,7 +1192,7 @@ static tk::OtaStartResult prepare_owned_operation(uint64_t origin, unsigned pr,
     }
     operation = new (std::nothrow) OtaOperation(origin, pr, tk::ota_channel_in_state(channel_state), image);
     if (!operation) {
-        set_check_error(kOtaNoMemory);
+        set_check_error(kOtaNoMemory, channel_state);
         release_unstarted_operation();
         return Result::InternalError;
     }
@@ -1198,7 +1209,7 @@ static tk::OtaStartResult prepare_owned_operation(uint64_t origin, unsigned pr,
     s_operation.store(operation, std::memory_order_release);
     tk::ota::memory_checkpoint("operation_ready", operation->job.generation, operation->job.started_ms);
     } catch (...) {
-        set_check_error(kOtaNoMemory); // Publish under this owner, before any lease release.
+        set_check_error(kOtaNoMemory, channel_state); // Publish under this owner before lease release.
         if (operation) {
             acknowledge_no_network_task(*operation);
             operation->coordinator.cancel(tk::ota::Outcome::NoMemory);
@@ -1220,7 +1231,7 @@ static tk::OtaStartResult prepare_operation(uint64_t origin, unsigned pr, bool i
     const auto captured = s_ota_channel.load(std::memory_order_acquire);
     const auto generation = advance_offer_generation();
     if ((captured & tk::kOtaChannelExhausted) || generation == UINT32_MAX) {
-        set_check_error("update offer identity exhausted; reboot required");
+        set_check_error("update offer identity exhausted; reboot required", captured);
         release_unstarted_operation();
         return tk::OtaStartResult::Unavailable;
     }
@@ -1233,7 +1244,7 @@ static tk::OtaStartResult launch_coordinator(OtaOperation* operation, bool image
         ? xTaskCreate(ota_task, "ota", kOtaTaskStackBytes, operation, tk::kPrioOta, nullptr)
         : xTaskCreate(ota_check_task, "ota_chk", kOtaTaskStackBytes, operation, tk::kPrioOtaCheck, nullptr);
     if (created != pdPASS) {
-        set_check_error("could not start OTA coordinator task");
+        set_check_error("could not start OTA coordinator task", operation->channel_state);
         finish_upload_request(*operation, false, "500 Internal Server Error");
         acknowledge_no_network_task(*operation);
         operation->coordinator.cancel(tk::ota::Outcome::NoMemory);
@@ -1241,7 +1252,7 @@ static tk::OtaStartResult launch_coordinator(OtaOperation* operation, bool image
         return tk::OtaStartResult::InternalError;
     }
     } catch (...) {
-        set_check_error("OTA task creation outcome is uncertain");
+        set_check_error("OTA task creation outcome is uncertain", operation->channel_state);
         return tk::OtaStartResult::InternalError; // No false Ack, delete or owner release.
     }
     return tk::OtaStartResult::Started;
@@ -1264,7 +1275,7 @@ tk::OtaStartResult ota_upload_start(httpd_req_t* request, bool& handed_off) noex
         httpd_req_async_handler_begin(request, &operation->upload_request) != ESP_OK) {
         acknowledge_no_network_task(*operation);
         operation->coordinator.cancel(tk::ota::Outcome::NoMemory);
-        set_check_error("upload request unavailable");
+        set_check_error("upload request unavailable", captured);
         complete_operation(*operation);
         return Result::NoMemory;
     }
@@ -1300,10 +1311,11 @@ static void ota_check_after_http_work(void* argument) noexcept {
         if (token == 0 || token != s_deferred_check.ticket) return;
         const DeferredCheckCapture captured = s_deferred_check.capture;
         s_deferred_check.ticket = 0;
-        // No access to shared capture after retirement/release: a successor may replace it.
+        // Use the local copy after retirement/release. Only this HTTP task writes the capture, so a
+        // successor can replace it only after this callback returns.
         if (s_heap_abort_requested.load(std::memory_order_acquire) ||
             !operation_budget(captured.origin, false).live(operation_now(nullptr))) {
-            set_check_error("update deadline reached during setup");
+            set_check_error("update deadline reached during setup", captured.channel_state);
             release_unstarted_operation();
             return;
         }
@@ -1313,24 +1325,26 @@ static void ota_check_after_http_work(void* argument) noexcept {
             (void)launch_coordinator(operation, false);
     } catch (...) {
         // Never infer a failed queue/task creation from an exception, fabricate Ack or release
-        // authority that a possibly started coordinator can still use.
-        set_check_error("update operation failed unexpectedly");
+        // authority that a possibly started coordinator can still use. The capture is still this
+        // callback's: its same-task successor cannot run before return (see above).
+        set_check_error("update operation failed unexpectedly", s_deferred_check.capture.channel_state);
     }
 }
 
 tk::OtaStartResult ota_check_start_after_http(unsigned pr, void* server) noexcept {
     const uint64_t origin = operation_now(nullptr);
     bool held = false;
+    uint32_t captured = 0;
     try {
         if (!server || s_deferred_serial == kDeferredTicketLimit - 1 || !ensure_lock())
             return tk::OtaStartResult::Unavailable;
         const auto reserved = reserve_operation(pr, false);
         if (reserved != tk::OtaStartResult::Started) return reserved;
+        captured = s_ota_channel.load(std::memory_order_acquire);
         held = true;
-        const auto captured = s_ota_channel.load(std::memory_order_acquire);
         const auto generation = advance_offer_generation();
         if ((captured & tk::kOtaChannelExhausted) || generation == UINT32_MAX) {
-            set_check_error("update offer identity exhausted; reboot required");
+            set_check_error("update offer identity exhausted; reboot required", captured);
             release_unstarted_operation();
             return tk::OtaStartResult::Unavailable;
         }
@@ -1345,14 +1359,14 @@ tk::OtaStartResult ota_check_start_after_http(unsigned pr, void* server) noexcep
         if (httpd_queue_work(server, ota_check_after_http_work,
                 reinterpret_cast<void*>(static_cast<std::uintptr_t>(ticket))) != ESP_OK) {
             s_deferred_check.ticket = 0;
-            set_check_error(tk::ota_start_reason(tk::OtaStartResult::Unavailable, true));
+            set_check_error(tk::ota_start_reason(tk::OtaStartResult::Unavailable, true), captured);
             release_unstarted_operation();
             return tk::OtaStartResult::Unavailable;
         }
         return tk::OtaStartResult::Started; // Accepted queue, not allocation/TLS admission.
     } catch (...) {
         if (held) {
-            set_check_error("update operation failed unexpectedly");
+            set_check_error("update operation failed unexpectedly", captured);
             // Same-server work cannot run inline/concurrently with this handler. No Operation
             // exists yet: revoke this nonreused token before release. Even if SDK submission
             // succeeded before throwing, its later callback cannot match a successor's token.
@@ -1400,7 +1414,7 @@ tk::OtaStartResult ota_start(unsigned pr_number, std::string_view offer_id) {
     }
     const auto generation = advance_offer_generation(); // A confirmed offer is consumed once.
     if (generation == UINT32_MAX) {
-        set_check_error("update offer identity exhausted; reboot required");
+        set_check_error("update offer identity exhausted; reboot required", captured);
         release_unstarted_operation();
         return Result::Unavailable;
     }
