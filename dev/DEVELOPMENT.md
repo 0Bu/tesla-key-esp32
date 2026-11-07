@@ -205,9 +205,7 @@ neither accesses a Docker daemon nor establishes actual container resource enfor
 
 CI computes cumulative firmware relevance once in `prepare`, conservatively building when the
 published baseline cannot be verified. Target jobs consume that scheduling decision; signing and
-publication revalidate current source and authority at their own boundaries. The primary S3 leg
-checks the optional LED variant once. Independent main rebuilds use `--skip-led-variant` and
-reproduce all four published images without recompiling the unshipped variant.
+publication revalidate current source and authority at their own boundaries. The primary matrix verifies all four supported targets. Independent main builds use the same target defaults.
 
 PR feedback is selected by `scripts/check-change-scope.py`: ordinary Markdown-only changes use repository
 lint without firmware compilation; browser changes use strict browser checks; firmware source uses
