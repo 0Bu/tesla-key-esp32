@@ -270,6 +270,10 @@ runners, then join their complete inventory before the protected compare/sign st
 Selected PR feedback cannot authorize signing: eligible previews require additional complete
 host/protocol acceptance before the protected job. Main and manual publication always run full
 checks. Local cached successes are never consumed as publication or independent review evidence.
+Only the protected publisher and key-free deploy checkouts use `filter: blob:none`: they retain
+complete history/tags and hydrate the entire exact-source tree, omitting unrelated historical blobs.
+Compiler and host checkouts remain self-contained for historical reads in read-only containers.
+No Git history access or lazy fetch occurs while the signing key is provisioned.
 
 | Phase | Required proof and authority |
 |---|---|
@@ -312,6 +316,12 @@ attempt and unchanged-byte build request repeats that authority check, including
 No build, signing key, re-signing or Release mutation is available in this mode. An expired original
 artifact or changed authority stops recovery; [the runbook](DEVELOPMENT.md#recover-a-published-stable-site)
 owns its separately authorized invocation. First publication and Dev retain current-main equality.
+The shared publisher owns one empty, regular root `.nojekyll` marker so GitHub serves the assembled
+static site without rebuilding it through Jekyll. Every channel mutation validates it before and
+after staging; existing nonempty, linked or nonregular entries stop publication. Legacy recovery
+permits exactly this empty control file in addition to the complete original authenticated site.
+No original payload byte is excluded from comparison or regenerated. Build requests, readiness
+polling and complete public-byte acceptance remain required.
 Cumulative relevance reads the manifest and changelog from one exact branch commit. Stable
 acceptance binds firmware to an immutable Release/tag; Dev checks its declared sizes/hashes without
 requiring a Release. Both require exact served changelog bytes. Absent Dev authority falls back to
