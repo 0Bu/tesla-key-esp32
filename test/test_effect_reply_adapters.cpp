@@ -905,7 +905,9 @@ int main() {
         const int count=effect_allocations; CHECK(count>0);
         for (int failure=1; failure<=count; ++failure) {
             reset(handler); ntp_synced=false; allocation_fault_index=failure;
-            CHECK(handle_all(&req)==0); CHECK(response_status==200); CHECK(response_attempts==1);
+            CHECK(handle_all(&req)==0);
+            CHECK(response_status==(handler==handle_command && !start_ok ? 502 : 200));
+            CHECK(response_attempts==1);
             const auto json=reply_json(); CHECK(json);
             const auto* p=handler==mcp_command?cJSON_GetObjectItemCaseSensitive(json.get(),"result"):payload(json);
             const auto* degraded=cJSON_GetObjectItemCaseSensitive(p,"reply_degraded"); CHECK(cJSON_IsTrue(degraded));
