@@ -522,10 +522,11 @@ Two-client cases cover channel ABA, same-channel no-op, superseding checks, boun
 missing/stale/duplicate IDs and mismatched PRs with zero image effects. Current Release, Dev and PR
 offers assert the exact returned status and bound notes; an old ID cannot read a same-channel
 successor's notes. Immediate and deferred checks changed before completion assert the returned
-status, source/configured channels and notes. Deferred memory/queue/deadline/task refusals, also
-after a later setting change, check entry memory/task failures, upload refusals and failures,
-replaced or no-longer-newer Dev installs and exhaustion keep their captured source. A completed
-offer withdrawn by a channel change, including ABA, reports `offer_changed`. Same-version manifest
+status, source/configured channels and notes. These keep their captured source: deferred memory,
+queue, deadline and task-creation refusals (memory, deadline and task creation also after a later
+setting change); ordinary-check entry memory and task-creation failures; upload refusals and
+failures; replaced or no-longer-newer Dev installs; and identity exhaustion. A completed offer
+withdrawn by a channel change, including ABA, reports `offer_changed`. Same-version manifest
 and selected-note changes refuse before image transfer. Dev and PR candidates reach mandatory
 SDK verification, and both generation/channel exhaustion remain fail-closed while signed direct
 upload stays available. Altered payloads and short/long images never reach SDK end/selection.
