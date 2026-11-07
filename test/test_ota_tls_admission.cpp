@@ -566,6 +566,29 @@ void run_queued_http(){
  CHECK(queued_http_work);auto work=queued_http_work;void* argument=queued_http_argument;
  queued_http_work=nullptr;queued_http_argument=nullptr;work(argument);
 }
+// Pre-coordinator errors keep the captured Dev source; Release is the zero default.
+void dev_source_error_checks(){
+ auto dev_error=[](std::string_view message){
+  const auto status=ota_get_status();
+  CHECK(status.state==OtaState::Error&&status.channel==tk::OtaChannel::Dev);
+  CHECK(status.configured_channel==tk::OtaChannel::Dev&&!status.update_available&&!status.offer_changed);
+  CHECK(std::string_view(status.message.data())==message&&!ota_is_busy()&&begins==0&&selectors==0);
+ };
+ reset();ota_set_channel(tk::OtaChannel::Dev);http_request_live=true;entry_largest=57344;
+ CHECK(ota_check_start_after_http(0,&http_server_marker)==tk::OtaStartResult::Started);
+ http_request_live=false;run_queued_http();dev_error(kOtaNoMemory);
+ reset();ota_set_channel(tk::OtaChannel::Dev);queue_ok=false;
+ CHECK(ota_check_start_after_http(0,&http_server_marker)==tk::OtaStartResult::Unavailable);
+ dev_error(tk::ota_start_reason(tk::OtaStartResult::Unavailable,true));
+ reset();ota_set_channel(tk::OtaChannel::Dev);now=50;
+ CHECK(ota_check_start_after_http(0,&http_server_marker)==tk::OtaStartResult::Started);
+ now=operation_budget(50,false).deadline();run_queued_http();dev_error("update deadline reached during setup");
+ reset();ota_set_channel(tk::OtaChannel::Dev);entry_largest=1;
+ CHECK(ota_check_start(0)==tk::OtaStartResult::NoMemory);dev_error(kOtaNoMemory);
+ reset();ota_set_channel(tk::OtaChannel::Dev);create_ok=false;
+ CHECK(ota_check_start(0)==tk::OtaStartResult::InternalError);dev_error("could not start OTA coordinator task");
+ reset();
+}
 void deferred_http_checks(){
  reset();now=100;http_request_live=true;entry_largest=57344;
  manifest=selected_manifest("1.6.3-PR-400");
@@ -590,7 +613,7 @@ void deferred_http_checks(){
  const auto published=ota_get_status();
  CHECK(published.state==OtaState::Error&&!published.update_available&&published.available[0]==0);
  CHECK(published.channel==tk::OtaChannel::Release&&published.configured_channel==tk::OtaChannel::Dev);
- CHECK(published.target_pr==400&&published.offer_id[0]==0&&published.image_bytes==0);
+ CHECK(published.target_pr==400&&published.offer_id[0]==0&&published.image_bytes==0&&!published.offer_changed);
  CHECK(std::string_view(published.message.data())=="update channel changed; check again");
  {char notes[64];size_t len=99;CHECK(!ota_get_changelog(notes,sizeof(notes),len)&&len==0);}
 
@@ -1009,7 +1032,7 @@ int main(int argc,char** argv){
  else if(terminal_case=="cleanup-cas")cleanup_cas_checks();
  else {
   CHECK(terminal_case=="normal");
-  deferred_http_checks();memory_checks();manifest_lifetime_checks();recovery_policy_checks();entry_recovery_checks();parser_checks();admission_checks();quarantine_checks();image_checks();raw_memory_checks();
+  deferred_http_checks();dev_source_error_checks();memory_checks();manifest_lifetime_checks();recovery_policy_checks();entry_recovery_checks();parser_checks();admission_checks();quarantine_checks();image_checks();raw_memory_checks();
   upload_checks();
   offer_binding_checks();dev_preview_binding_checks();hash_binding_checks();image_binding_checks();
   checkpoint_semantics_checks();

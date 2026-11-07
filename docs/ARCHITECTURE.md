@@ -257,8 +257,8 @@ reusing an identity. A random per-boot nonce plus generation forms the opaque of
 The status mutex publishes bounded POD channel/PR/version, selected notes and candidate hashes
 as one record. Readers expose an offer only while both captured revision and generation match;
 `configured_channel` remains distinct from the checked source channel. Error records carry their
-owner's captured channel, never a default or the later setting. A reader masks a withdrawn
-completed offer and replaces its stale "update available" message with the offer-changed reason.
+owner's captured channel, never a default or the later setting. The reader alone derives the
+[withdrawn-offer status](API.md#management) from a record that is no longer current.
 
 Feed installation requires that exact offer ID and PR under the operation owner. Acceptance
 consumes the offer once and copies its manifest, selected-note and image SHA-256 plus size into

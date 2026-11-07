@@ -20,6 +20,7 @@ struct OtaStatus {
     std::array<char, 32> available{}; // version from the coherent checked offer
     bool        update_available{false};
     bool        upload{false};     // raw upload; no feed offer or target version is implied
+    bool        offer_changed{false}; // reader-only: a published offer is no longer current
     std::array<char, 32> current{};
     tk::OtaChannel channel{tk::OtaChannel::Release}; // checked source, not a later setting
     tk::OtaChannel configured_channel{tk::OtaChannel::Release};

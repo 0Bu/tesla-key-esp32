@@ -405,8 +405,10 @@ OtaStatus ota_get_status() {
     if (snapshot.generation != latest || !tk::ota_offer_current(snapshot.channel_state, configured, snapshot.generation,
                                snapshot.update_available)) {
         // A withdrawn completed offer must not keep reading as "update available".
-        if (snapshot.update_available)
+        if (snapshot.update_available) {
+            snapshot.offer_changed = true;
             copy_status_text(snapshot.message, tk::ota_start_reason(tk::OtaStartResult::OfferChanged, false));
+        }
         snapshot.update_available = false;
         if (snapshot.upload || (snapshot.state != OtaState::Downloading && snapshot.state != OtaState::Done))
             snapshot.available.fill('\0');
@@ -1316,7 +1318,8 @@ static void ota_check_after_http_work(void* argument) noexcept {
         if (token == 0 || token != s_deferred_check.ticket) return;
         const DeferredCheckCapture captured = s_deferred_check.capture;
         s_deferred_check.ticket = 0;
-        // No access to shared capture after retirement/release: a successor may replace it.
+        // Use the local copy after retirement/release. Only this HTTP task writes the capture, so a
+        // successor can replace it only after this callback returns.
         if (s_heap_abort_requested.load(std::memory_order_acquire) ||
             !operation_budget(captured.origin, false).live(operation_now(nullptr))) {
             set_check_error("update deadline reached during setup", captured.channel_state);
@@ -1329,8 +1332,8 @@ static void ota_check_after_http_work(void* argument) noexcept {
             (void)launch_coordinator(operation, false);
     } catch (...) {
         // Never infer a failed queue/task creation from an exception, fabricate Ack or release
-        // authority that a possibly started coordinator can still use. Only this same HTTP task
-        // writes the capture, so no successor can replace its source before this callback returns.
+        // authority that a possibly started coordinator can still use. The capture is still this
+        // callback's: its same-task successor cannot run before return (see above).
         set_check_error("update operation failed unexpectedly", s_deferred_check.capture.channel_state);
     }
 }

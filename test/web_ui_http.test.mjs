@@ -46,6 +46,32 @@ test("Release remains Release when another client selects Dev", async () => {
   context.closeOtaModal(false);await opened;
 });
 
+test("an offer withdrawn by another client's channel change is never reported up to date", async () => {
+  const { context, element } = loadUi();
+  const calls = [];
+  context.fetch = async url => {
+    calls.push(url);
+    if (url.startsWith("/ota/check")) return { ok: true, status: 200, async json() { return { started: true }; } };
+    if (url.startsWith("/ota/status")) return { ok: true, status: 200, async json() {
+      return { state: "idle", update_available: false, offer_changed: true, progress: 0,
+        message: "update offer changed; check again and confirm the new offer", available: "",
+        current: "1.5.0", channel: "release", configured_channel: "dev", offer_id: "" };
+    } };
+    return { ok: true, status: 200, async json() { return {}; } };
+  };
+  await context.otaCheck();
+  assert.equal(context.otaOffer, null); assert.equal(context.otaAvail, null); assert.equal(context.otaBusy, false);
+  assert.match(element("toasts").children[0].innerHTML, /Update offer changed/);
+  assert.doesNotMatch(element("toasts").children[0].innerHTML, /up to date/);
+  assert.equal(calls.some(url => url.startsWith("/ota/changelog") || url.startsWith("/ota/update")), false);
+  // The withdrawal flag is fail-closed: it cannot accompany a current offer or carry false.
+  for (const status of [offered({ offer_changed: true }),
+    { state: "idle", update_available: false, progress: 0, message: "", available: "", current: "1.5.0", offer_changed: false }]) {
+    context.fetch = async () => ({ ok: true, status: 200, async json() { return status; } });
+    await assert.rejects(context.otaStatus(), /invalid OTA status response/);
+  }
+});
+
 test("stale bound notes require another check and cannot reach confirmation or install", async () => {
   const { context, element } = loadUi();seedOffer(context);const calls = [];
   context.fetch = async url => {calls.push(url);return {ok:false,status:409};};

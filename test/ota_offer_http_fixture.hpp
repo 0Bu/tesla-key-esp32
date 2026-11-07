@@ -75,8 +75,11 @@ std::string_view json_text(const tk::JsonOwner& json,const char* name){
  CHECK(cJSON_IsString(item));return item->valuestring;
 }
 // Externally returned status and notes for a source whose offer must not be current.
-void no_current_offer(const char* state,const char* source,const char* configured,const char* message){
+void no_current_offer(const char* state,const char* source,const char* configured,const char* message,
+                      bool withdrawn=false){
  const auto json=request_offer(handle_ota_status);CHECK(response_status==200&&json);
+ const cJSON* changed=cJSON_GetObjectItemCaseSensitive(json.get(),"offer_changed");
+ CHECK(withdrawn?cJSON_IsTrue(changed):changed==nullptr);
  CHECK(json_text(json,"state")==state&&json_text(json,"channel")==source);
  CHECK(json_text(json,"configured_channel")==configured&&json_text(json,"message")==message);
  CHECK(json_text(json,"available").empty()&&json_text(json,"offer_id").empty());
@@ -113,7 +116,7 @@ void offer_binding_checks(){
  CHECK(std::string_view(cJSON_GetObjectItemCaseSensitive(json.get(),"configured_channel")->valuestring)=="dev");
  // The withdrawn completed offer no longer reads as an available update.
  const char* changed=tk::ota_start_reason(tk::OtaStartResult::OfferChanged,false);
- no_current_offer("idle","release","dev",changed);
+ no_current_offer("idle","release","dev",changed,true);
  auto notes=request_offer(handle_ota_changelog,"offer="+first);CHECK(response_status==409&&notes);
  change_channel(tk::OtaChannel::Release);refused_offer("offer="+first);
  // A new check by B replaces A's ID even when the candidate bytes are identical.
@@ -235,8 +238,10 @@ void exhaustion_checks(bool channel){
  }else{
   s_offer_serial.store(UINT32_MAX-1u,std::memory_order_release);
  }
+ ota_set_channel(tk::OtaChannel::Dev); // Exhaustion still names the captured source.
  CHECK(ota_check_start()==tk::OtaStartResult::Unavailable);
  CHECK(!ota_get_status().update_available&&ota_get_status().offer_id[0]==0);
+ CHECK(ota_get_status().channel==tk::OtaChannel::Dev&&ota_get_status().state==OtaState::Error);
  CHECK(ota_check_start()==tk::OtaStartResult::Unavailable);
  refused_offer("offer="+old);
  CHECK(init_calls==0&&begins==0&&selectors==0&&!s_operation.load());
