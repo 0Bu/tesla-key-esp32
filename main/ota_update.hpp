@@ -20,13 +20,13 @@ struct OtaStatus {
     std::array<char, 32> available{}; // version from the coherent checked offer
     bool        update_available{false};
     bool        upload{false};     // raw upload; no feed offer or target version is implied
-    bool        offer_changed{false}; // reader-only: a published offer is no longer current
     std::array<char, 32> current{};
     tk::OtaChannel channel{tk::OtaChannel::Release}; // checked source, not a later setting
     tk::OtaChannel configured_channel{tk::OtaChannel::Release};
     unsigned    target_pr{0};      // 0 for main channel, >0 if PR preview channel
     std::array<char, 25> offer_id{}; // boot nonce plus a nonwrapping check generation
     std::array<uint8_t, 32> image_sha256{};
+    bool offer_changed{false}; // reader-only withdrawal flag; uses existing alignment padding
     uint32_t image_bytes{0};
 };
 
