@@ -385,6 +385,8 @@ def probe_browser_invocations(source: str) -> None:
                         prefix + ["python3", "test/test_eth_startup_cleanup.py"],
                         prefix + ["scripts/release-relevance.sh", "--self-test"],
                         prefix + ["scripts/test-build-contracts.sh", "--build-and-manifest"],
+                        prefix + ["python3", "test/test_ci_checkout.py"],
+                        prefix + ["python3", "test/test_pages_publish_control.py"],
                         prefix + ["python3", "test/test_release_pages_recovery.py"],
                         prefix + ["python3", "test/test_ble_lifecycle.py"],
                         prefix + ["bash", "test/run-mqtt-json-publish-tests.sh"],
@@ -599,6 +601,8 @@ def validate(root: Path) -> None:
     require(run_mock.count(relevance_gate) == 1 and run_mock.count(build_gate) == 1,
             "strict browser invocation flow: release/build profile gates or exact arguments are missing")
     for command in (
+        'run_gate "exact-source filtered publication checkout" 120 python3 test/test_ci_checkout.py',
+        'run_gate "static Pages publication control" 120 python3 test/test_pages_publish_control.py',
         'run_gate "immutable Release Pages recovery" 120 python3 test/test_release_pages_recovery.py',
         'run_gate "BLE lifecycle retirement and deferred intent" 120 python3 test/test_ble_lifecycle.py',
         'run_gate "retained MQTT JSON and discovery registry" 120 bash test/run-mqtt-json-publish-tests.sh',
@@ -706,6 +710,9 @@ def validate(root: Path) -> None:
         "cmake/admit-dependency-sources.cmake",
         "test/test_dependency_guards.py",
         "scripts/release-relevance.sh",
+        "scripts/pages_publish_control.py",
+        "test/test_ci_checkout.py",
+        "test/test_pages_publish_control.py",
         "scripts/test-build-contracts.sh",
         "scripts/check-host-gate-contract.py",
         "scripts/check-logic-test-ownership.py",
@@ -1486,6 +1493,8 @@ def self_test(root: Path) -> None:
                         '    exit 0\n' + command, '    (' + command.strip() + ') || true', command + ' &'):
             mutations.append(("scripts/run-mock-tests.sh", command, changed, "strict browser invocation flow"))
     for command in (
+        '    run_gate "exact-source filtered publication checkout" 120 python3 test/test_ci_checkout.py',
+        '    run_gate "static Pages publication control" 120 python3 test/test_pages_publish_control.py',
         '    run_gate "immutable Release Pages recovery" 120 python3 test/test_release_pages_recovery.py',
         '    run_gate "BLE lifecycle retirement and deferred intent" 120 python3 test/test_ble_lifecycle.py',
         '    run_gate "retained MQTT JSON and discovery registry" 120 bash test/run-mqtt-json-publish-tests.sh',

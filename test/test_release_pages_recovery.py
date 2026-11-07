@@ -99,10 +99,11 @@ class Recovery(unittest.TestCase):
 
     def verify(self, **kwargs):
         changes = kwargs.pop('changes', {})
+        artifact = kwargs.pop('artifact', self.artifact)
         pin = kwargs.pop('expected_pin', self.pin)
         api, command = self.clients(**changes)
         with api, command, patch.dict(os.environ, {}, clear=True):
-            return m.verify(self.artifact, 123, expected_pin=pin, archive_digest=self.digest, **kwargs)
+            return m.verify(artifact, 123, expected_pin=pin, archive_digest=self.digest, **kwargs)
 
     def test_published_source_after_main_advanced_and_refusals(self):
         self.assertEqual(self.verify()[1:3], (SOURCE, VERSION))
@@ -174,6 +175,8 @@ class Recovery(unittest.TestCase):
     def test_candidate_site_changes_and_aliases_are_rejected(self):
         candidate = self.work / 'candidate'
         m.write_snapshot(m.snapshot_tree(self.artifact / '_site'), candidate)
+        with self.assertRaises(m.RecoveryError): self.verify(candidate=candidate)
+        m.sibling('pages_publish_control').ensure_static_site(candidate)
         self.verify(candidate=candidate)
         (candidate / 'installer-bootstrap.mjs').write_text('modified after validation')
         with self.assertRaises(m.RecoveryError): self.verify(candidate=candidate)
@@ -188,6 +191,31 @@ class Recovery(unittest.TestCase):
                            ('GITHUB_SERVER_URL', 'https://foreign.invalid'), ('GITHUB_REPOSITORY', 'foreign/repo')]:
             with self.subTest(key=key), patch.dict(os.environ, {key: value}, clear=True), self.assertRaises(m.RecoveryError):
                 m.validate_environment()
+
+    def test_only_empty_marker_is_added_to_legacy_or_current_site(self):
+        with tempfile.TemporaryDirectory(dir=self.work) as temporary:
+            root = Path(temporary); original = root / 'artifact'; candidate = root / 'candidate'
+            m.write_snapshot(m.snapshot_tree(self.artifact), original)
+            payload = m.snapshot_tree(original / '_site')
+            m.write_snapshot({**payload, '.nojekyll': b''}, candidate)
+            self.verify(artifact=original, candidate=candidate)
+            self.assertFalse((original / '_site/.nojekyll').exists())
+            (original / '_site/.nojekyll').write_bytes(b'')
+            self.verify(artifact=original, candidate=candidate)
+            (original / '_site/.nojekyll').write_bytes(b'not empty')
+            with self.assertRaises(m.RecoveryError): self.verify(artifact=original, candidate=candidate)
+            (original / '_site/.nojekyll').unlink()
+            (original / '_site/.nojekyll').mkdir()
+            with self.assertRaises(m.RecoveryError): self.verify(artifact=original, candidate=candidate)
+            (original / '_site/.nojekyll').rmdir()
+            for name in ('.nojekyll', '.unexpected', 'index.html', 'installer-bootstrap.mjs',
+                         'manifest.json', 'changelog.json', next(key for key in payload if key.endswith('.bin'))):
+                with self.subTest(name=name):
+                    path = candidate / name; before = path.read_bytes() if path.exists() else None
+                    path.write_bytes(b'changed')
+                    with self.assertRaises(m.RecoveryError): self.verify(artifact=original, candidate=candidate)
+                    if before is None: path.unlink()
+                    else: path.write_bytes(before)
 
     def test_actual_cli_authenticates_archive_before_validators_or_publication(self):
         api, command = self.clients()

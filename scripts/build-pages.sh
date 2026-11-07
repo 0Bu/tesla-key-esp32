@@ -95,6 +95,7 @@ actual_sorted="$(find "$fw" -mindepth 1 -maxdepth 1 -type d -exec basename {} \;
 
 rm -rf -- "$out"
 mkdir -p "$out"
+python3 "$repo_root/scripts/pages_publish_control.py" "$out"
 
 cp "$docs/index.html" "$docs/installer-bootstrap.mjs" \
   "$docs/serial-port-release.mjs" "$docs/web-installer.mjs" "$out/"

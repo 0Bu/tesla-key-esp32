@@ -21,7 +21,7 @@ def check(shell: str) -> None:
         for name in (
             "build-pages.sh", "verify-vendored-esptool-js.sh",
             "check-pages-manifest.py", "check-otadata-contract.py",
-            "generate-ota-changelog.py",
+            "generate-ota-changelog.py", "pages_publish_control.py",
         ):
             shutil.copy2(root / "scripts" / name, scripts / name)
         shutil.copytree(root / "docs", fixture / "docs")
@@ -64,6 +64,7 @@ def check(shell: str) -> None:
                     f"{result.stdout}\n{result.stderr}"
                 )
             manifest = json.loads((output / "manifest.json").read_text())
+            assert (output / ".nojekyll").is_file() and (output / ".nojekyll").read_bytes() == b""
             assert manifest["sourceSha"] == source_sha
             assert len(manifest["builds"]) == 4
             assert sum(len(build["parts"]) for build in manifest["builds"]) == 16

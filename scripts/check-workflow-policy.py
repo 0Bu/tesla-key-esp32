@@ -211,8 +211,8 @@ SIGNING_ENVIRONMENT_JOBS = {
 # Signing, publication, preview eligibility and cleanup bodies are reviewed as complete units.
 # Scalar/step semantics below remain explanatory; exact bodies also close narrow-scanner gaps.
 EXPECTED_PRIVILEGED_JOB_SHA256 = {
-    ('build.yml', 'publish'): "68ff37c2955715396fd0df6e79018025b1132a212c796a6f77652d482b07db31",
-    ('build.yml', 'deploy'): "c0c682f2ad561332c6184726c704753d3fa15962b964d0a9b22cda62befe6952",
+    ('build.yml', 'publish'): "937f48cf5e333b950ab165483ec557cd3a04390db92dd5887868230a14f19f96",
+    ('build.yml', 'deploy'): "c6400a38c054e4c28a3694df6cbf3bdc5411c20691d4dfa93b3d9308f29b6370",
     ('signed-pr-preview.yml', 'sign-preview'): "2222beed0b8590b49bf7299032e20ce763342a31846e7824b93bef07b191d761",
     ('signed-pr-preview.yml', 'validate'): "adf2cdb72c38f71415d7e1b71b43f4af0806d706589a09805eab13d0da021cb6",
     ('pr-preview-cleanup.yml', 'cleanup-event'): "c36a5602067c24346a24d2c431e4bec2860de35cc0101ee0d11113b30367890b",
@@ -1143,6 +1143,18 @@ def validate(root: Path) -> None:
         "build.yml:logic-test must fetch PR merge parents for commit whitespace validation",
     )
 
+    for label, job in host_model.items():
+        checkouts = [step for step in job.get("steps", [])
+                     if str(step.get("uses", "")).startswith("actions/checkout@")]
+        if label in ("publish", "deploy"):
+            require(len(checkouts) == 1 and checkouts[0].get("with") == {
+                "ref": "${{ github.sha }}", "fetch-depth": "0", "filter": "blob:none",
+                "persist-credentials": "false"},
+                "build.yml: publication checkout must retain exact source/full history and filter only blobs")
+        else:
+            require(all("filter" not in step.get("with", {}) for step in checkouts),
+                    "build.yml: compiler and host checkouts must retain self-contained historical blobs")
+
     signed_text = contents.get("signed-pr-preview.yml", "")
     signed = jobs_by_file.get("signed-pr-preview.yml")
     require(
@@ -1602,6 +1614,11 @@ def self_test(root: Path) -> None:
     )
     current_renovate_action = renovate_actions[0]
     mutations = [
+        ("publication-filter-missing", "build.yml", "          filter: blob:none\n", "", "publication checkout must retain exact source/full history"),
+        ("publication-filter-changed", "build.yml", "          filter: blob:none\n", "          filter: tree:0\n", "publication checkout must retain exact source/full history"),
+        ("publication-history-shallow", "build.yml", "          fetch-depth: 0\n          filter: blob:none", "          fetch-depth: 1\n          filter: blob:none", "publication checkout must retain exact source/full history"),
+        ("publication-sparse-tree", "build.yml", "          filter: blob:none\n", "          filter: blob:none\n          sparse-checkout: scripts\n", "publication checkout must retain exact source/full history"),
+        ("compiler-history-filtered", "build.yml", "          ref: ${{ github.event.pull_request.head.sha || github.sha }}\n          fetch-depth: 0", "          ref: ${{ github.event.pull_request.head.sha || github.sha }}\n          fetch-depth: 0\n          filter: blob:none", "compiler and host checkouts must retain self-contained historical blobs"),
         ("gh-slurp-jq", "signed-pr-preview.yml", "gh api --paginate --slurp", "gh api --jq . --paginate --slurp", "--slurp cannot use --jq"),
         ("gh-slurp-template", "signed-pr-preview.yml", "gh api --paginate --slurp", "gh api --template '{{.}}' --paginate --slurp", "--slurp cannot use --jq"),
         ("gh-slurp-short-jq", "signed-pr-preview.yml", "gh api --paginate --slurp", "gh api -q . --paginate --slurp", "--slurp cannot use --jq"),
@@ -1942,19 +1959,22 @@ def self_test(root: Path) -> None:
          "key/sign/Release mutation must be create-only"),
         ("privileged-checkout-ref", "build.yml",
          "          ref: ${{ github.sha }}\n          fetch-depth: 0\n"
+         "          filter: blob:none\n"
          "          persist-credentials: false\n\n"
          "      - name: Bind publish job to current main",
          "          ref: refs/heads/main\n          fetch-depth: 0\n"
+         "          filter: blob:none\n"
          "          persist-credentials: false\n\n"
          "      - name: Bind publish job to current main",
          "checkout must be exact-SHA"),
         ("privileged-checkout-path", "build.yml",
-         "          fetch-depth: 0\n          persist-credentials: false\n\n"
+         "          fetch-depth: 0\n          filter: blob:none\n          persist-credentials: false\n\n"
          "      - name: Bind publish job to current main",
          "          fetch-depth: 0\n          path: _alternate\n"
+         "          filter: blob:none\n"
          "          persist-credentials: false\n\n"
          "      - name: Bind publish job to current main",
-         "exact privileged job schema drift"),
+         "publication checkout must retain exact source/full history"),
         ("privileged-persist-credentials", "build.yml",
          "          persist-credentials: false\n\n"
          "      - name: Bind publish job to current main",
