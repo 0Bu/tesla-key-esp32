@@ -24,7 +24,7 @@ struct ChargeStateResult {
     // Numeric fields carry presence flags like the telemetry structs below: the car omits
     // values it has no reading for (proto3 optional). The display paths (MQTT/HA, /status)
     // emit a field only when present so it renders "unknown"/omitted, not a phantom 0. The
-    // evcc-facing /api path is the deliberate exception — it always emits every field.
+    // evcc-facing /api path always emits every key and uses null for unavailable control values.
     float       battery_level{0};        bool has_battery_level{false};
     float       usable_battery_level{0}; bool has_usable_battery_level{false};
     float       charge_limit_soc{0};     bool has_charge_limit_soc{false};
@@ -125,19 +125,28 @@ inline const char* vehicle_charging_state(const ChargeStateResult& cs, LinkState
     return cs.charging_state.empty() ? "Unknown" : cs.charging_state.c_str();
 }
 
-// Serialize charge_state for GET /api/1/vehicles/{VIN}/vehicle_data
-// Shape mirrors Tesla Fleet API / TeslaBleHttpProxy: always emits every field so evcc
-// parsing floats/ints never hits a missing key. On failure/omission, cs is zero-initialised
-// and minutes_to_full_charge emits 0 (where evcc's > 0 guard correctly yields "").
+// Serialize charge_state for GET /api/1/vehicles/{VIN}/vehicle_data. Keep every key.
+// The stock evcc template reads the three control numbers independently. JSON null makes
+// that getter fail without replacing real zero readings or hiding other known fields.
+// The zero-initialized generic error envelope still has its legacy numeric placeholders.
 template <typename Emitter>
 void emit_vehicle_charge_state(const ChargeStateResult& cs, LinkState link, Emitter& e) {
     e.str("charging_state", vehicle_charging_state(cs, link));
-    e.num("battery_level",          vehicle_data_number(cs.battery_level));
+    if (!cs.valid || (cs.has_battery_level && cs.battery_level >= 0 && cs.battery_level <= 100))
+        e.num("battery_level", vehicle_data_number(cs.battery_level));
+    else
+        e.null("battery_level");
     e.num("usable_battery_level",   vehicle_data_number(cs.has_usable_battery_level ? cs.usable_battery_level : cs.battery_level));
-    e.num("charge_limit_soc",       vehicle_data_number(cs.charge_limit_soc));
+    if (!cs.valid || (cs.has_charge_limit_soc && cs.charge_limit_soc > 0 && cs.charge_limit_soc <= 100))
+        e.num("charge_limit_soc", vehicle_data_number(cs.charge_limit_soc));
+    else
+        e.null("charge_limit_soc");
     e.num("charger_power",          vehicle_data_number(cs.charger_power));
     e.num("charge_rate",            vehicle_data_number(cs.charge_rate));
-    e.num("charge_amps",            cs.charging_amps);
+    if (!cs.valid || (cs.has_charging_amps && cs.charging_amps >= 0))
+        e.num("charge_amps", cs.charging_amps);
+    else
+        e.null("charge_amps");
     e.num("charge_energy_added",    vehicle_data_number(cs.charge_energy_added));
     e.num("battery_range",          vehicle_data_number(cs.battery_range));
     e.num("minutes_to_full_charge", cs.minutes_to_full_charge);
@@ -204,17 +213,20 @@ inline VehicleDriveData vehicle_drive_data(const DriveStateResult& drive) noexce
     return {drive.valid, drive.has_odometer, drive.odometer_km};
 }
 
-// Emit exactly one typed number, "odometer", in MILES (TeslaBleHttpProxy shape): evcc's template
-// scales by 1.60934 and rejects <= 0, so an absent odometer emits 0.
-template <typename Emitter>
-void emit_vehicle_drive_state(const VehicleDriveData& dr, Emitter& e) {
-    e.num("odometer", vehicle_data_number(dr.has_odometer ? static_cast<float>(km_to_mi(dr.odometer_km)) : 0.0f));
+// evcc's odometer reader requires positive, finite miles. Use the same value for the JSON
+// and the availability check. The odometer is last-known, without an age cutoff.
+inline double vehicle_drive_odometer_miles(const VehicleDriveData& drive) noexcept {
+    if (!drive.valid || !drive.has_odometer || drive.odometer_km <= 0) return 0.0;
+    return vehicle_data_number(static_cast<float>(km_to_mi(drive.odometer_km)));
 }
 
-// Last-known semantics: the odometer only grows, so freshness comes from the in-window rotation
-// and the wake/bootstrap one-shot rather than an age limit.
+template <typename Emitter>
+void emit_vehicle_drive_state(const VehicleDriveData& drive, Emitter& e) {
+    e.num("odometer", vehicle_drive_odometer_miles(drive));
+}
+
 inline bool vehicle_drive_available(const VehicleDriveData& drive) noexcept {
-    return drive.valid && drive.has_odometer;
+    return vehicle_drive_odometer_miles(drive) > 0.0;
 }
 
 // Domain selection bits for vehicle_data endpoints.
@@ -323,6 +335,28 @@ inline bool vehicle_data_available(const VehicleDataEndpoints& endpoints,
     return !endpoints.empty() && !endpoints.has_unsupported &&
            (!endpoints.charge_state || charge_ok) && (!endpoints.climate_state || climate_ok) &&
            (!endpoints.drive_state || drive_ok);
+}
+
+// evcc reads each domain separately. A plain error token is meaningful only for a
+// missing sample on that path. Keep the structured error for mixed requests, stale
+// active feedback, invalid samples and unknown or unreachable vehicles.
+inline const char* evcc_vehicle_data_error(const VehicleDataEndpoints& endpoints, LinkState link,
+                                          bool missing_charge, bool missing_climate,
+                                          bool missing_drive) noexcept {
+    if (endpoints.has_unsupported ||
+        int(endpoints.charge_state) + int(endpoints.climate_state) + int(endpoints.drive_state) != 1)
+        return nullptr;
+
+    const bool charge_pending = endpoints.charge_state && missing_charge;
+    if (link == LinkState::Asleep &&
+        (charge_pending || (endpoints.climate_state && missing_climate) ||
+         (endpoints.drive_state && missing_drive)))
+        return "ErrAsleep";
+
+    // The charge bootstrap can populate an empty cache once the reachable car is awake.
+    if (charge_pending && (link == LinkState::Idle || link == LinkState::Awake))
+        return "ErrMustRetry";
+    return nullptr;
 }
 
 // Usable battery level with fallback to nominal battery level when tag 115 is omitted.
