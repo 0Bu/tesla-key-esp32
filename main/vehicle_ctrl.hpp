@@ -22,7 +22,6 @@
 #include "logic/connect_outcome.hpp"
 #include "logic/charge_control.hpp"
 #include "logic/link_state.hpp"
-#include "logic/ui_state.hpp"
 #include "logic/vin_transition.hpp"
 #include "logic/task_start_gate.hpp"
 #include "logic/ble_deferred_event.hpp"
@@ -110,12 +109,6 @@ public:
     }
     TirePressureResult  get_cached_tires()    { return copy_locked_(last_known_tires_); }
     ClosuresStateResult get_cached_closures() { return copy_locked_(last_known_closures_); }
-
-    // Vehicle-owned half of the on-device status-indicator input (the ST7735 display and the
-    // APA102 LED) — see logic/ui_state.hpp. Collects link_state / ble_* / cached charge in ONE
-    // pass so a presenter never mixes state from different instants across a frame. The caller
-    // fills WiFi fields (esp_wifi) and `paired` from a ≤1 Hz durable-record or usable-RAM sample.
-    tk::UiSnapshot ui_snapshot();
 
     // Seconds since the last *live* infotainment data (charge/climate/drive/tires/
     // closures) was received, written to `out`. Returns false if nothing has been

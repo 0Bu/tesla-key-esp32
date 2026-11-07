@@ -36,6 +36,7 @@
 #include "logic/uptime.hpp"
 #include "logic/iteration_fault.hpp"
 #include "logic/link_state.hpp"
+#include "logic/net_link.hpp"
 #include "logic/target.hpp"
 #include "logic/mcp.hpp"
 #include "logic/command_registry.hpp"
@@ -43,12 +44,7 @@
 #include "logic/vcsec_response.hpp"
 #include "logic/status_model.hpp"
 #include "logic/command_result.hpp"
-#include "logic/ui_state.hpp"
-#include "logic/display_model.hpp"
 #include "logic/eth_board.hpp"
-#include "logic/soc_gradient.hpp"
-#include "logic/led_status.hpp"
-#include "logic/led_driver.hpp"
 #include "logic/syslog_policy.hpp"
 #include "logic/syslog_start_gate.hpp"
 #include "logic/connect_outcome.hpp"
@@ -2571,8 +2567,6 @@ static void test_status_model() {
         "sys.stack_min_free_bytes.mqtt=1024\n"
         "sys.stack_min_free_bytes.main=null\n"
         "sys.stack_min_free_bytes.heap_supervisor=null\n"
-        "sys.stack_min_free_bytes.display=null\n"
-        "sys.stack_min_free_bytes.led=null\n"
         "sys.stack_min_free_bytes.ota_check=null\n"
         "sys.stack_min_free_bytes.ota_writer=null\n"
         "sys.stack_min_free_bytes.ota_gate=null\n"
@@ -2699,8 +2693,6 @@ static void test_status_model() {
         "sys.stack_min_free_bytes.mqtt=null\n"
         "sys.stack_min_free_bytes.main=null\n"
         "sys.stack_min_free_bytes.heap_supervisor=null\n"
-        "sys.stack_min_free_bytes.display=null\n"
-        "sys.stack_min_free_bytes.led=null\n"
         "sys.stack_min_free_bytes.ota_check=null\n"
         "sys.stack_min_free_bytes.ota_writer=null\n"
         "sys.stack_min_free_bytes.ota_gate=null\n"
@@ -2816,8 +2808,6 @@ static void test_status_model() {
         "sys.stack_min_free_bytes.mqtt=null\n"
         "sys.stack_min_free_bytes.main=null\n"
         "sys.stack_min_free_bytes.heap_supervisor=null\n"
-        "sys.stack_min_free_bytes.display=null\n"
-        "sys.stack_min_free_bytes.led=null\n"
         "sys.stack_min_free_bytes.ota_check=null\n"
         "sys.stack_min_free_bytes.ota_writer=null\n"
         "sys.stack_min_free_bytes.ota_gate=null\n"
@@ -2896,8 +2886,6 @@ static void test_status_model() {
         "sys.stack_min_free_bytes.mqtt=null\n"
         "sys.stack_min_free_bytes.main=null\n"
         "sys.stack_min_free_bytes.heap_supervisor=null\n"
-        "sys.stack_min_free_bytes.display=null\n"
-        "sys.stack_min_free_bytes.led=null\n"
         "sys.stack_min_free_bytes.ota_check=null\n"
         "sys.stack_min_free_bytes.ota_writer=null\n"
         "sys.stack_min_free_bytes.ota_gate=null\n"
@@ -3000,8 +2988,6 @@ static void test_status_model() {
         "sys.stack_min_free_bytes.mqtt=null\n"
         "sys.stack_min_free_bytes.main=null\n"
         "sys.stack_min_free_bytes.heap_supervisor=null\n"
-        "sys.stack_min_free_bytes.display=null\n"
-        "sys.stack_min_free_bytes.led=null\n"
         "sys.stack_min_free_bytes.ota_check=null\n"
         "sys.stack_min_free_bytes.ota_writer=null\n"
         "sys.stack_min_free_bytes.ota_gate=null\n"
@@ -3469,318 +3455,6 @@ static void test_vehicle_data() {
         // Mixed supported and unsupported
         ep = tk::parse_vehicle_data_endpoints("endpoints=charge_state;unknown_state");
         CHECK(ep.has_unsupported && ep.empty());
-    }
-}
-
-// ─── on-device display presenter (logic/display_model.hpp <- display.cpp compose()) ──────
-namespace dm = tk::display;
-
-// Build a UiSnapshot tersely for the presenter tests.
-static tk::UiSnapshot us(tk::LinkState ls, bool net_up, bool ble_conn, bool paired,
-                         bool have_soc, int soc, bool charging) {
-    tk::UiSnapshot s;
-    s.link_state     = ls;
-    s.net            = net_up ? tk::NetLink::Wifi : tk::NetLink::None;
-    s.ble_connected  = ble_conn;
-    s.paired         = paired;
-    s.have_soc       = have_soc;
-    s.soc            = soc;
-    s.charging       = charging;
-    return s;
-}
-
-static void test_display_helpers() {
-    // RSSI → 0..4 bars, at and around every threshold.
-    CHECK(dm::rssi_bars(-50) == 4);  CHECK(dm::rssi_bars(-55) == 4);  CHECK(dm::rssi_bars(-56) == 3);
-    CHECK(dm::rssi_bars(-65) == 3);  CHECK(dm::rssi_bars(-66) == 2);
-    CHECK(dm::rssi_bars(-75) == 2);  CHECK(dm::rssi_bars(-76) == 1);
-    CHECK(dm::rssi_bars(-85) == 1);  CHECK(dm::rssi_bars(-86) == 0);  CHECK(dm::rssi_bars(-99) == 0);
-
-    // Text width: 5px glyph + 1px gap = 6 px/char, times the scale.
-    CHECK(dm::text_w("",     2) == 0);
-    CHECK(dm::text_w("A",    2) == 12);
-    CHECK(dm::text_w("WiFi", 2) == 48);
-
-    // SoC gradient: the five stops land on exact colours (mirrors soc_rgb()).
-    int r, g, b;
-    tk::soc_rgb(0,   r, g, b); CHECK(r == 231 && g ==  76 && b == 60);
-    tk::soc_rgb(18,  r, g, b); CHECK(r == 240 && g == 190 && b == 40);
-    tk::soc_rgb(45,  r, g, b); CHECK(r == 120 && g == 200 && b == 90);
-    tk::soc_rgb(80,  r, g, b); CHECK(r ==  60 && g == 175 && b == 80);
-    tk::soc_rgb(100, r, g, b); CHECK(r ==  30 && g == 140 && b == 60);
-    // Out-of-range clamps to the endpoints, not past them.
-    tk::soc_rgb(-5,  r, g, b); CHECK(r == 231 && g ==  76 && b == 60);
-    tk::soc_rgb(150, r, g, b); CHECK(r ==  30 && g == 140 && b == 60);
-
-    // SSID marquee ping-pong (span 10, pause 8, speed 2 → travel 5, period 26).
-    CHECK(dm::scroll_offset(0,  10) == 0);    // paused at the start
-    CHECK(dm::scroll_offset(7,  10) == 0);    // still in the start pause
-    CHECK(dm::scroll_offset(10, 10) == 4);    // scrolling out
-    CHECK(dm::scroll_offset(15, 10) == 10);   // paused at the end (fully revealed)
-    CHECK(dm::scroll_offset(200, 0) == 0);    // nothing to scroll
-}
-
-static void test_display_model() {
-    using LS = tk::LinkState;
-
-    // Recovery overrides every vehicle/connectivity combination without showing charge or
-    // pairing. It uses the full SSID row and only the existing marquee can animate it.
-    for (LS link : {LS::Unknown, LS::Idle, LS::Awake, LS::Asleep, LS::Unreachable})
-        for (auto net : {tk::NetLink::None, tk::NetLink::Wifi, tk::NetLink::Eth})
-            for (bool ble : {false, true}) for (bool paired : {false, true})
-                for (bool soc : {false, true}) for (bool eth : {false, true})
-                    for (auto orient : {dm::Orient::Landscape, dm::Orient::Portrait}) {
-                        auto s = us(link, true, ble, paired, soc, 55, true);
-                        s.net = net; s.eth_present = eth;
-                        const auto m = dm::compose(s, 0, orient, true);
-                        CHECK(m.hero == dm::Hero::SafeMode);
-                        CHECK(!m.show_ble && !m.ble_glyph_on && m.ble_bars == 0);
-                        CHECK(m.soc == 0 && !m.asleep && !m.show_bolt);
-                        CHECK(m.fill_r == 0 && m.fill_g == 0 && m.fill_b == 0);
-                        CHECK(m.show_wifi == (net == tk::NetLink::Wifi));
-                        CHECK(m.show_lan == (net == tk::NetLink::Eth));
-                        CHECK(m.animating == m.ssid_scrolling);
-                        if (net == tk::NetLink::Wifi)
-                            CHECK(m.ssid_avail == (orient == dm::Orient::Portrait ? 72 : 130));
-                    }
-
-    // ── priority ladder: network search > pairing > BLE search > battery ──
-    // No lease ⇒ NetSearch, whatever else is true.
-    CHECK(dm::compose(us(LS::Awake, /*net*/false, /*ble*/true, /*paired*/true,
-                         /*soc?*/true, 50, false), 0).hero == dm::Hero::NetSearch);
-    // WiFi up, BLE link up but not yet paired ⇒ Pairing.
-    CHECK(dm::compose(us(LS::Idle, true, /*ble*/true, /*paired*/false,
-                         false, 0, false), 0).hero == dm::Hero::Pairing);
-    // WiFi up, no BLE link, no usable SoC ⇒ BLE search.
-    CHECK(dm::compose(us(LS::Unknown, true, /*ble*/false, false,
-                         /*soc?*/false, 0, false), 0).hero == dm::Hero::BleSearch);
-    // Unreachable overrides a stale cached SoC ⇒ still BLE search, never battery.
-    CHECK(dm::compose(us(LS::Unreachable, true, false, true,
-                         /*soc?*/true, 50, false), 0).hero == dm::Hero::BleSearch);
-    // WiFi up, reachable, have SoC ⇒ Battery.
-    CHECK(dm::compose(us(LS::Idle, true, true, true, true, 50, false), 0).hero == dm::Hero::Battery);
-
-    // ── header indicator visibility (a search hero hides its own small indicator) ──
-    dm::Model wifi_s = dm::compose(us(LS::Unknown, false, false, false, false, 0, false), 0);
-    CHECK(!wifi_s.show_wifi && wifi_s.show_ble);          // WiFi hero: wifi hidden, ble shown
-    dm::Model ble_s = dm::compose(us(LS::Unknown, true, false, false, false, 0, false), 0);
-    CHECK(ble_s.show_wifi && !ble_s.show_ble);            // BLE hero: ble hidden, wifi shown
-    dm::Model batt = dm::compose(us(LS::Idle, true, true, true, true, 50, false), 0);
-    CHECK(batt.show_wifi && batt.show_ble);               // battery: both shown
-
-    // ── SSID available width: wider when the BLE header is absent (BLE-search hero) ──
-    CHECK(ble_s.ssid_avail == 130);                       // 158 - 28
-    CHECK(batt.ssid_avail  ==  98);                       // 158 - 28 - 32
-
-    // ── BLE header bars: 0 without a live RSSI, mapped when present ──
-    tk::UiSnapshot rssi_snap = us(LS::Idle, true, true, true, true, 50, false);
-    rssi_snap.ble_rssi_valid = true; rssi_snap.ble_rssi = -60;
-    dm::Model rssi_m = dm::compose(rssi_snap, 0);
-    CHECK(rssi_m.ble_bars == 3 && rssi_m.ble_glyph_on);
-    CHECK(dm::compose(us(LS::Idle, true, true, true, true, 50, false), 0).ble_bars == 0);  // no RSSI
-
-    // ── battery fill colour, SoC clamp, and the charging bolt ──
-    dm::Model full = dm::compose(us(LS::Idle, true, true, true, true, 150, /*charging*/true), 0);
-    CHECK(full.soc == 100);                               // clamped
-    CHECK(!full.show_bolt);                               // no bolt at 100%
-    dm::Model chg = dm::compose(us(LS::Idle, true, true, true, true, 80, /*charging*/true), 0);
-    CHECK(chg.show_bolt);                                 // charging below 100% ⇒ bolt
-    CHECK(chg.fill_r == 60 && chg.fill_g == 175 && chg.fill_b == 80);   // soc 80 → the 0.80 gradient stop
-
-    // Asleep dims the fill toward the panel colour AND suppresses the bolt even when charging.
-    dm::Model slp = dm::compose(us(LS::Asleep, true, true, true, true, 80, /*charging*/true), 0);
-    CHECK(slp.asleep && !slp.show_bolt);
-    int br, bg, bb; tk::soc_rgb(80, br, bg, bb);
-    CHECK(slp.fill_r == dm::lerp8(br, dm::kAsleepDimR, 0.5f));
-    CHECK(slp.fill_g == dm::lerp8(bg, dm::kAsleepDimG, 0.5f));
-    CHECK(slp.fill_b == dm::lerp8(bb, dm::kAsleepDimB, 0.5f));
-
-    // ── animating: search/pairing heroes always; battery only while the SSID scrolls ──
-    CHECK(wifi_s.animating);
-    CHECK(dm::compose(us(LS::Idle, true, true, false, false, 0, false), 0).animating);  // pairing
-    CHECK(ble_s.animating);
-    CHECK(!batt.animating);                               // short SSID ("") ⇒ static battery
-    tk::UiSnapshot long_ssid = us(LS::Idle, true, true, true, true, 50, false);
-    std::strcpy(long_ssid.ssid, "AVeryLongNetworkNameXYZ");   // > 98 px at scale 2 ⇒ marquee
-    dm::Model scr = dm::compose(long_ssid, 10);
-    CHECK(scr.ssid_scrolling && scr.animating);
-    for (auto orient : {dm::Orient::Landscape, dm::Orient::Portrait}) {
-        const auto recovery = dm::compose(long_ssid, 10, orient, true);
-        CHECK(recovery.hero == dm::Hero::SafeMode && recovery.ssid_scrolling && recovery.animating);
-    }
-
-
-    // ── portrait orientation (BOOT-rotated 80x160) — only the SSID geometry differs ──
-    // The SSID gets its own header row, full width (72px) at scale 1, independent of the BLE cluster.
-    dm::Model p_batt = dm::compose(us(LS::Idle, true, true, true, true, 50, false), 0, dm::Orient::Portrait);
-    dm::Model p_ble  = dm::compose(us(LS::Unknown, true, false, false, false, 0, false), 0, dm::Orient::Portrait);
-    CHECK(p_batt.ssid_avail == 72 && p_ble.ssid_avail == 72);   // same avail with or without BLE indicator
-    // A 12-char SSID fits portrait's dedicated row (72px at scale 1) but scrolls landscape (144px > 98 at scale 2).
-    tk::UiSnapshot mid_ssid = us(LS::Idle, true, true, true, true, 50, false);
-    std::strcpy(mid_ssid.ssid, "TwelveCharSS");                // 12 ch → 72px (portrait fits) / 144px (landscape scrolls)
-    CHECK(!dm::compose(mid_ssid, 10, dm::Orient::Portrait).ssid_scrolling);
-    CHECK( dm::compose(mid_ssid, 10, dm::Orient::Landscape).ssid_scrolling);
-    tk::UiSnapshot long_p = us(LS::Idle, true, true, true, true, 50, false);
-    std::strcpy(long_p.ssid, "ThirteenChars");                 // 13 ch → 78px > 72 ⇒ portrait marquee too
-    CHECK(dm::compose(long_p, 10, dm::Orient::Portrait).ssid_scrolling);
-    // Orientation changes ONLY the SSID geometry — the hero/battery decisions are identical.
-    CHECK(p_batt.hero == batt.hero && p_batt.soc == batt.soc);
-    CHECK(p_batt.fill_r == batt.fill_r && p_batt.fill_g == batt.fill_g && p_batt.fill_b == batt.fill_b);
-}
-
-// ─── status LED priority ladder (logic/led_status.hpp <- shared UiSnapshot + LedAlerts) ──
-// The LED reads the SAME tk::UiSnapshot the display presenter does (one input contract), plus
-// a tiny LED-only LedAlerts for its latched error/warn/OTA tiers. Base = healthy, parked
-// (Idle), paired, 55 % SoC, network up, no alerts; each case flips one field to prove the ladder
-// picks the right colour/animation and that a higher tier wins.
-static tk::UiSnapshot led_snap() {
-    tk::UiSnapshot s;
-    s.net        = tk::NetLink::Wifi;
-    s.link_state = tk::LinkState::Idle;
-    s.paired     = true;
-    s.have_soc   = true;
-    s.soc        = 55;
-    return s;
-}
-static void test_led() {
-    using C = tk::LedColor;
-    using A = tk::LedAnim;
-    const tk::LedAlerts none;   // no latched alerts
-
-    // Parked with a known SoC → dimmed gradient, steady.
-    CHECK(tk::led_pattern(led_snap(), none) == (tk::LedPattern{C::SocGradient, A::Solid, true}));
-    // Full charge reads as steady green (still dim/resting).
-    { auto s = led_snap(); s.soc = 100; CHECK(tk::led_pattern(s, none) == (tk::LedPattern{C::Green, A::Solid, true})); }
-    // Awake is also a "have live reading" state → gradient, not search.
-    { auto s = led_snap(); s.link_state = tk::LinkState::Awake; CHECK(tk::led_pattern(s, none).color == C::SocGradient); }
-
-    // Charging outranks the static SoC display (green swell).
-    { auto s = led_snap(); s.link_state = tk::LinkState::Awake; s.charging = true; CHECK(tk::led_pattern(s, none) == (tk::LedPattern{C::Green, A::Breathe, false})); }
-
-    // Cached charging never promotes a sleeping, uncertain or merely reachable vehicle.
-    for (auto link : {tk::LinkState::Asleep, tk::LinkState::Unknown,
-                      tk::LinkState::Unreachable, tk::LinkState::Idle}) {
-        auto snapshot = led_snap(); snapshot.link_state = link;
-        const auto resting = tk::led_pattern(snapshot, none);
-        snapshot.charging = true;
-        CHECK(tk::led_pattern(snapshot, none) == resting);
-    }
-    { auto snapshot = led_snap(); snapshot.link_state = tk::LinkState::Awake;
-      snapshot.have_soc = false; snapshot.charging = true;
-      CHECK(tk::led_pattern(snapshot, none).color == C::Teal); }
-
-    // Asleep → LED off entirely.
-    { auto s = led_snap(); s.link_state = tk::LinkState::Asleep; s.have_soc = false;
-      CHECK(tk::led_pattern(s, none) == (tk::LedPattern{C::Off, A::Off, false})); }
-
-    // Pairing: BLE up but no session → magenta pulse. Outranks charging/SoC.
-    { auto s = led_snap(); s.paired = false; s.ble_connected = true; s.charging = true;
-      CHECK(tk::led_pattern(s, none) == (tk::LedPattern{C::Magenta, A::Pulse, false})); }
-
-    // Network search: no LAN → blue breathe, and it outranks pairing/charging below it.
-    // Transport-blind by design: an Ethernet board with no lease must reach the SAME tier.
-    { auto s = led_snap(); s.net = tk::NetLink::None; s.ble_connected = true; s.paired = false;
-      CHECK(tk::led_pattern(s, none) == (tk::LedPattern{C::Blue, A::Breathe, false})); }
-    { auto s = led_snap(); s.net = tk::NetLink::None; s.eth_present = true;
-      CHECK(tk::led_pattern(s, none) == (tk::LedPattern{C::Blue, A::Breathe, false})); }
-
-    // Searching for the car: reachable readings absent → teal breathe.
-    { auto s = led_snap(); s.link_state = tk::LinkState::Unreachable;
-      CHECK(tk::led_pattern(s, none) == (tk::LedPattern{C::Teal, A::Breathe, false})); }
-    // A stale SoC while Unreachable must NOT show as a live gradient — still searching.
-    { auto s = led_snap(); s.link_state = tk::LinkState::Unreachable; s.have_soc = true; s.soc = 80;
-      CHECK(tk::led_pattern(s, none).color == C::Teal); }
-
-    // ── LED-only latched alerts (top of the ladder), passed via LedAlerts ──
-    // Warning (repeated connect failures) → amber blink, above WiFi/pairing.
-    { auto s = led_snap(); s.net = tk::NetLink::None; tk::LedAlerts a; a.warn = true;
-      CHECK(tk::led_pattern(s, a) == (tk::LedPattern{C::Amber, A::Blink, false})); }
-    // OTA download → blue pulse, above the warning.
-    { tk::LedAlerts a; a.ota_downloading = true; a.warn = true;
-      CHECK(tk::led_pattern(led_snap(), a) == (tk::LedPattern{C::Blue, A::Pulse, false})); }
-    // Error is the top of the ladder — beats OTA, warn, charging, everything.
-    { auto s = led_snap(); s.charging = true; tk::LedAlerts a; a.error = true; a.ota_downloading = true; a.warn = true;
-      CHECK(tk::led_pattern(s, a) == (tk::LedPattern{C::Red, A::Blink, false})); }
-}
-
-static void test_led_driver() {
-    using namespace tk;
-    for (bool ota : {false, true}) for (auto net : {NetLink::None, NetLink::Wifi, NetLink::Eth}) {
-        LedLatches recovery{};
-        const auto alerts = led_sample_alerts(recovery, 100, false, false, ota, 0, true);
-        CHECK(alerts.error && !alerts.warn);
-        auto snapshot = us(LinkState::Awake, true, true, true, true, 55, true);
-        snapshot.net = net;
-        const auto pattern = led_pattern(snapshot, alerts);
-        CHECK(pattern.color == LedColor::Red && pattern.anim == LedAnim::Blink && !pattern.dim);
-        CHECK(led_sample_alerts(recovery, 15'000'099, false, false, false, 0).error);
-        CHECK(!led_sample_alerts(recovery, 15'000'100, false, false, false, 0).error);
-        CHECK(led_sample_alerts(recovery, UINT64_MAX, false, false, false, 0, true).error);
-    }
-    LedLatches state{};
-    CHECK(!led_sample_alerts(state, 0, false, false, false, 2).error);
-    CHECK(!led_sample_alerts(state, 0, false, false, false, 2).warn);
-    // Normal-mode error causes refresh the same 15s hold; warnings have an independent 10s hold.
-    for (const bool ota_error : {false, true}) {
-        state = {};
-        auto alerts = led_sample_alerts(state, 100, !ota_error, ota_error, false, 3);
-        CHECK(alerts.error && alerts.warn && !alerts.ota_downloading);
-        alerts = led_sample_alerts(state, 10'000'099, false, false, true, 2);
-        CHECK(alerts.error && alerts.warn && alerts.ota_downloading);
-        alerts = led_sample_alerts(state, 10'000'100, false, false, false, 0);
-        CHECK(alerts.error && !alerts.warn && !alerts.ota_downloading);
-        CHECK(led_sample_alerts(state, 15'000'099, false, false, false, 0).error);
-        CHECK(!led_sample_alerts(state, 15'000'100, false, false, false, 0).error);
-    }
-    // Repeated faults extend the hold; intervening healthy samples do not clear it early.
-    for (uint64_t cycle = 0; cycle < 3; ++cycle) {
-        const uint64_t start = 20'000'000 + cycle * 40'000'000;
-        CHECK(led_sample_alerts(state, start, true, false, false, 3).error);
-        CHECK(led_sample_alerts(state, start + 5'000'000, true, false, false, 3).warn);
-        CHECK(led_sample_alerts(state, start + 15'000'000, false, false, false, 0).error);
-        CHECK(!led_sample_alerts(state, start + 15'000'000, false, false, false, 0).warn);
-        CHECK(!led_sample_alerts(state, start + 20'000'000, false, false, false, 0).error);
-    }
-    state = {};
-    CHECK(led_sample_alerts(state, UINT64_MAX, true, false, false, UINT32_MAX).error);
-    CHECK(state.error_until == UINT64_MAX && state.warn_until == UINT64_MAX);
-
-    const LedRgb red = led_color_rgb(LedColor::Red, 55);
-    CHECK(red.r == 255 && red.g == 0 && red.b == 0);
-    const auto low = led_color_rgb(LedColor::SocGradient, -100);
-    const auto high = led_color_rgb(LedColor::SocGradient, 200);
-    CHECK(low.r == 231 && low.g == 76 && low.b == 60);
-    CHECK(high.r == 30 && high.g == 140 && high.b == 60);
-    const auto dim = led_frame_rgb({LedColor::Green, LedAnim::Solid, true}, 55, 0);
-    CHECK(dim.r == 0 && dim.g == 66 && dim.b == 12);
-    const auto off = led_frame_rgb({LedColor::Red, LedAnim::Off, false}, 55, 0);
-    CHECK(off.r == 0 && off.g == 0 && off.b == 0);
-    CHECK(led_animation_factor(LedAnim::Blink, 0.0f) == 1.0f);
-    CHECK(led_animation_factor(LedAnim::Blink, 0.449f) == 1.0f);
-    CHECK(led_animation_factor(LedAnim::Blink, 0.45f) == 0.0f);
-    CHECK(led_animation_factor(LedAnim::Blink, 0.9f) == 1.0f);
-    CHECK(std::fabs(led_animation_factor(LedAnim::Breathe, 0.65f) - 1.0f) < 0.00001f);
-    CHECK(std::fabs(led_animation_factor(LedAnim::Breathe, 1.95f) - 0.15f) < 0.00001f);
-    CHECK(std::fabs(led_animation_factor(LedAnim::Pulse, 0.0f) - 0.08f) < 0.00001f);
-    CHECK(std::fabs(led_animation_factor(LedAnim::Pulse, 0.132f) - 1.0f) < 0.00001f);
-    CHECK(std::fabs(led_animation_factor(LedAnim::Pulse, 0.66f) - 0.08f) < 0.00001f);
-    for (const auto animation : {LedAnim::Off, LedAnim::Solid, LedAnim::Breathe,
-                                  LedAnim::Pulse, LedAnim::Blink}) {
-        for (int tick = 0; tick < 10'000; ++tick) {
-            const float factor = led_animation_factor(animation, tick * 0.033f);
-            CHECK(std::isfinite(factor) && factor >= 0 && factor <= 1);
-        }
-    }
-    for (const int brightness : {-100, 0, 1, 8, 31, 32, 100}) {
-        for (int channel = 0; channel < 256; ++channel) {
-            const LedRgb rgb{static_cast<uint8_t>(channel), 0x65, 0xa7};
-            const auto frame = led_apa102_frame(rgb, brightness);
-            CHECK(frame.size() == 12);
-            CHECK(frame[0] == 0 && frame[1] == 0 && frame[2] == 0 && frame[3] == 0);
-            CHECK(frame[4] == (brightness < 1 ? 0xe1 : brightness > 31 ? 0xff : 0xe0 | brightness));
-            CHECK(frame[5] == 0xa7 && frame[6] == 0x65 && frame[7] == channel);
-            CHECK(frame[8] == 0xff && frame[9] == 0xff && frame[10] == 0xff && frame[11] == 0xff);
-        }
     }
 }
 
@@ -4645,13 +4319,6 @@ static void test_active_window() {
     CHECK(!mcp_integer_syntax(std::numeric_limits<double>::infinity()));
     CHECK(mqtt_probe_http_status(MqttProbeResult::TlsFailed) == 502);
     CHECK(std::strstr(mqtt_probe_reason(MqttProbeResult::TlsFailed), "TLS") != nullptr);
-    for (auto animation : {LedAnim::Breathe, LedAnim::Pulse, LedAnim::Blink}) {
-        const uint64_t period = animation == LedAnim::Breathe ? 2600000ULL :
-                                animation == LedAnim::Pulse ? 1100000ULL : 900000ULL;
-        CHECK_NEAR(led_animation_seconds(animation, period * 100000000ULL + 123456ULL),
-                   led_animation_seconds(animation, 123456ULL));
-        CHECK_NEAR(led_animation_seconds(animation, period), 0.0);
-    }
     // A recent command opens the window regardless of charging/contact.
     CHECK(active_window_open({/*recent_cmd*/true, false, false, 0}) == true);
     CHECK(active_window_open({true, false, true, 999999}) == true);
@@ -11375,13 +11042,13 @@ static void test_shared_unhealthy_restart_ledger() {
 static void test_stack_context_logic() {
     namespace sc = tk::stack_sample;
     constexpr const char* expected_names[] = {
-        "httpd", "vehicle", "auto_pair", "mqtt", "main", "heap_supervisor", "display", "led",
+        "httpd", "vehicle", "auto_pair", "mqtt", "main", "heap_supervisor",
         "ota_check", "ota_writer", "ota_gate", "net_watchdog", "syslog", "captive_dns", "captive_http",
         "wifi_event", "eth_event", "mqtt_event", "mqtt_probe_event", "nimble_host", "ble_scan_timer",
         "diag_log_callback", "sntp_sync", "ping_net", "ping_syslog", "ota_network", "ota_parser",
     };
-    static_assert(sizeof(expected_names) / sizeof(expected_names[0]) == 27);
-    CHECK(tk::kStackContextCount == 27 && sizeof(sc::Snapshot) == 24);
+    static_assert(sizeof(expected_names) / sizeof(expected_names[0]) == 25);
+    CHECK(tk::kStackContextCount == 25 && sizeof(sc::Snapshot) == 24);
     CHECK(sc::kQuantumBytes == 256 && sc::kSaturationBytes == 15872);
     CHECK(!sc::decode(0).sampled && !sc::decode(64).sampled);
     CHECK(sc::encode(0) == 1 && sc::encode(255) == 1 && sc::encode(256) == 2);
@@ -11604,10 +11271,6 @@ int main() {
     test_vehicle_data_logic();
     test_status_model();
     test_vehicle_data();
-    test_display_helpers();
-    test_display_model();
-    test_led();
-    test_led_driver();
     test_ota_lifetime();
     test_ota_control_rmw();
     test_heap_watchdog();

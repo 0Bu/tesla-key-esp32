@@ -58,13 +58,13 @@ preservation requirements cover those records as well; they are outside the appl
 | `tesla_cfg/ble_mac` | BLE discovery | replaceable cache |
 | `tesla_cfg/reboot_why` | independent heap supervisor | recovery journal |
 | `tesla_cfg/boot_fails` | boot guard | recovery journal |
-| `tesla_cfg/disp_rot` | display | durable across OTA |
-| `tesla_cfg/disp_flip` | display | read-only legacy migration |
 | `tesla_ble/private_key` | pinned tesla-ble library | durable across OTA |
 | `tesla_ble/session_vcsec` (`sess_vcsec`), `session_infotainment` (`sess_info`) | pinned tesla-ble library | replaceable session cache |
 | `tesla_ble/paired_at` | pairing | replaceable metadata |
 | `tesla_ble/key_created` | pairing | durable across OTA |
 | `tesla_ble/key_rotate` | key rotation | recovery journal |
+
+Legacy `tesla_cfg/disp_rot` and `tesla_cfg/disp_flip` values are ignored and left in NVS.
 
 OTA, verified signed app-only USB delivery and installer **Flash** preserve NVS. The installer
 offers **Flash** only when the device's own partition table places `nvs` at `0x9000`/`0x6000` and

@@ -12,7 +12,6 @@
 #include "logic/boot_guard.hpp"
 #include "diag_crash.hpp"
 #include "task_config.hpp"
-#include <cmath>
 #include <cstring>
 #include <esp_log.h>
 #include <esp_timer.h>
@@ -442,27 +441,4 @@ ChargeStateResult VehicleController::get_cached_charge_with_age(bool& have_age, 
     }
     if (have_age) age_s = (xTaskGetTickCount() - sample) / configTICK_RATE_HZ;
     return charge;
-}
-
-// Assemble the vehicle-owned half of the on-device indicators' input snapshot (see
-// logic/ui_state.hpp). One pass over link_state / ble_* / the cached charge — the charge
-// copy and its timestamp are taken together under cache_mutex_ — so a presenter reads one
-// consistent view instead of racing five separate accessors across a frame. `soc` is left
-// RAW (the presenter clamps); `paired` and the wifi_* fields are filled by the caller.
-tk::UiSnapshot VehicleController::ui_snapshot() {
-    tk::UiSnapshot s;
-    bool have_age = false;
-    uint32_t age_s = 0;
-    ChargeStateResult cs = get_cached_charge_with_age(have_age, age_s);
-    s.have_soc  = cs.valid && (cs.has_usable_battery_level || cs.has_battery_level);
-    s.soc       = static_cast<int>(lroundf(tk::effective_usable_soc(cs)));
-    s.link_state    = link_state();
-    s.charging = s.link_state == tk::LinkState::Awake &&
-                 tk::charge_sample_fresh(cs.valid, have_age, age_s) &&
-                 cs.charging_state == "Charging";
-    s.ble_connected = ble_connected();
-    int8_t rssi = 0;
-    s.ble_rssi_valid = s.ble_connected && ble_rssi(rssi);
-    s.ble_rssi       = rssi;
-    return s;
 }

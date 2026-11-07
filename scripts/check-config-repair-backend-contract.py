@@ -3,7 +3,7 @@
 from pathlib import Path
 import hashlib
 ROOT=Path(__file__).resolve().parents[1]
-PROGRAMS={'main/config_repair.cpp': '6f4696daf2b02353d4ff45a24ac0cee8dd9254880afbaccc44fa46c865c206f7', 'main/config_repair_console.cpp': '17447049158c527c88c1a075a095302089c0589e51a5a5309b103863902d9b0e', 'main/config_repair_store.hpp': '287144d0fb35b6f1ed449b248fc6cccf7c76f528c6cf976731aa8c977b10dba9', 'main/logic/config_repair.hpp': 'eb1db2ab7aec9763db4f76272bc174d67df53a7f845371f01f25e7912e5ec0e8', 'main/logic/nvs_contract.hpp': 'af21cca072f70db29d2718e4cacb1a4dfbdff2566e850be0112e1110efb74560'}
+PROGRAMS={'main/config_repair.cpp': '6f4696daf2b02353d4ff45a24ac0cee8dd9254880afbaccc44fa46c865c206f7', 'main/config_repair_console.cpp': '17447049158c527c88c1a075a095302089c0589e51a5a5309b103863902d9b0e', 'main/config_repair_store.hpp': '287144d0fb35b6f1ed449b248fc6cccf7c76f528c6cf976731aa8c977b10dba9', 'main/logic/config_repair.hpp': 'eb1db2ab7aec9763db4f76272bc174d67df53a7f845371f01f25e7912e5ec0e8', 'main/logic/nvs_contract.hpp': '68b0716ae98ed8e4a4a95a500bb081d7439e1afd7b4b0c3ad35df98c6bcff76a'}
 def check():
  for name,digest in PROGRAMS.items():
   if hashlib.sha256((ROOT/name).read_bytes()).hexdigest()!=digest:

@@ -101,7 +101,7 @@ if (mismatches.length) {
 
 console.log(`OK  app.js bleRowFromStatus() matches the C++ presenter on ${checked} golden vectors`);
 
-// The second golden comes from the actual native SoC/RSSI helpers, not another JS table.
+// The second golden comes from the C++ SoC/RSSI reference, not another JS table.
 const webBegin='/* WEB_PRESENTERS_BEGIN */', webEnd='/* WEB_PRESENTERS_END */';
 if (app.split(webBegin).length!==2 || app.split(webEnd).length!==2 || app.indexOf(webBegin)>=app.indexOf(webEnd))
   throw new Error('web presenter parity markers missing or ambiguous');
@@ -134,4 +134,4 @@ for(const line of webLines){
 }
 if(counts.soc!==303 || counts.rssi!==258 || counts.warn!==1)
   throw new Error('incomplete web presenter golden: '+JSON.stringify(counts));
-console.log('OK app.js SoC, RSSI glyphs and warning threshold match native helpers on 562 golden vectors');
+console.log('OK app.js SoC, RSSI glyphs and warning threshold match reference values on 562 golden vectors');

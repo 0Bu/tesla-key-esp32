@@ -11,8 +11,7 @@
 #include "logic/ble_row.hpp"
 #include "logic/link_state.hpp"
 
-#include "logic/display_model.hpp"
-#include "logic/soc_gradient.hpp"
+#include "web_presentation_reference.hpp"
 
 #include <cstdio>
 #include <cstring>
@@ -33,17 +32,17 @@ int main(int argc, char** argv) {
     if (argc==2 && std::strcmp(argv[1],"--web-presenters")==0) {
         std::printf("kind\tinput\tr\tg\tb\n");
         for (int soc=-100;soc<=200;++soc) {
-            int r,g,b;tk::soc_rgb(soc,r,g,b);
+            int r,g,b;web_reference::soc_rgb(soc,r,g,b);
             std::printf("soc\t%d\t%d\t%d\t%d\n",soc,r,g,b);
         }
         for (int soc : {std::numeric_limits<int>::min(),std::numeric_limits<int>::max()}) {
-            int r,g,b;tk::soc_rgb(soc,r,g,b);
+            int r,g,b;web_reference::soc_rgb(soc,r,g,b);
             std::printf("soc\t%d\t%d\t%d\t%d\n",soc,r,g,b);
         }
         for (int rssi=-128;rssi<=127;++rssi)
-            std::printf("rssi\t%d\t%d\t0\t0\n",rssi,tk::display::rssi_bars(rssi));
+            std::printf("rssi\t%d\t%d\t0\t0\n",rssi,web_reference::rssi_bars(rssi));
         for (int rssi : {std::numeric_limits<int>::min(),std::numeric_limits<int>::max()})
-            std::printf("rssi\t%d\t%d\t0\t0\n",rssi,tk::display::rssi_bars(rssi));
+            std::printf("rssi\t%d\t%d\t0\t0\n",rssi,web_reference::rssi_bars(rssi));
         std::printf("warn\t0\t%u\t0\t0\n",static_cast<unsigned>(b::kConnectFailWarn));
         return 0;
     }

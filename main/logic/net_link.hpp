@@ -19,12 +19,11 @@
 //      `if` buried in a task loop; here it is a function with cases in test/test_logic.cpp.
 //
 // Pure data + pure functions — no IDF types, no heap — so both are host-tested without a
-// board, the same contract logic/link_state.hpp and logic/ui_state.hpp hold.
+// board, the same contract logic/link_state.hpp holds.
 namespace tk {
 
-// Which transport currently carries the default route. `None` means "no lease" — the state
-// the display renders as a search animation and the LED as a blue breathe; it is NOT an
-// error, it is the normal first seconds of a boot.
+// Which transport currently carries the default route. `None` means "no lease", which is
+// normal during the first seconds of a boot.
 //
 // Deliberately not a bool: the presenters need to tell WiFi from Ethernet (RSSI and an SSID
 // exist only for the former), and /status has to name the transport for a remote triage.
@@ -87,12 +86,12 @@ inline const char* net_link_str(NetLink k) {
 // 50), so net.cpp raises the Ethernet netif's priority when it creates it. That governs the
 // DEFAULT route, i.e. off-link traffic; on-link traffic follows netif_list order regardless —
 // see the kEthRoutePrio comment in net.cpp for what that does and does not buy. This function
-// picks what the DEVICE reports about itself (/status.ip, the watchdog's gateway, the display),
+// picks what the DEVICE reports about itself (/status.ip and the watchdog's gateway),
 // and those must agree with each other whatever the routing table does with same-subnet peers.
 //
 // This is a function, not two lines at a call site, because the "last event wins" version it
 // replaces had a real hole: unplugging that cable cleared the link for EVERYTHING above the
-// transport seam — syslog stopped, the display showed "searching", MQTT dropped the RSSI —
+// transport seam — Syslog stopped and MQTT dropped the RSSI —
 // while a perfectly healthy WiFi lease was still in hand. A rule with two inputs and three
 // outcomes belongs where it can be enumerated.
 inline NetLink net_link_active(bool eth_lease, bool wifi_lease) {

@@ -24,7 +24,7 @@ a real Linux browser: on macOS it delegates that gate to Docker, never native Ch
        `--all` does not run Linux sanitizers, which retain their separate mandatory handoff gate.
 
 2. **Full Host Suite (`scripts/run-mock-tests.sh`)**:
-   - Runs CMake host tests, display simulator parity check, and JS protocol vectors:
+   - Runs CMake host tests, browser BLE-row parity check, and JS protocol vectors:
      ```bash
      scripts/run-mock-tests.sh
      ```

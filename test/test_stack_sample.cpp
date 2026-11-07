@@ -82,7 +82,7 @@ static void deterministic_competing_updates() {
 
 static void actual_shell_and_threads() {
     static constexpr const char* names[] = {
-        "httpd", "vehicle", "auto_pair", "mqtt", "main", "heap_supervisor", "display", "led",
+        "httpd", "vehicle", "auto_pair", "mqtt", "main", "heap_supervisor",
         "ota_check", "ota_writer", "ota_gate", "net_watchdog", "syslog", "captive_dns",
         "captive_http", "wifi_event", "eth_event", "mqtt_event", "mqtt_probe_event",
         "nimble_host", "ble_scan_timer", "diag_log_callback", "sntp_sync", "ping_net", "ping_syslog", "ota_network", "ota_parser"};

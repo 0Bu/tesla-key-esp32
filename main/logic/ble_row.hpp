@@ -2,8 +2,7 @@
 // What the web UI's Bluetooth connection row shows: which of its five states it is in, and
 // which countdown (if any) belongs beside that state. Pure, IDF-free, host-tested
 // (test/test_logic.cpp), and parity-checked against the JavaScript that actually runs in the
-// browser (scripts/check-ble-row-parity.sh) — the same arrangement `display_model.hpp` has
-// with `tools/display_sim.py`.
+// browser (scripts/check-ble-row-parity.sh).
 //
 // NOTE this header is a SPEC, not runtime code: no firmware translation unit includes it. Its
 // only consumers are test/test_logic.cpp and test/ble_row_golden_dump.cpp — the browser is what
@@ -11,10 +10,9 @@
 // flash, and "wiring it up" somewhere in main/ would be a misunderstanding, not a fix.
 //
 // WHY THIS EXISTS. The row is the one UI surface whose "what to show" decision used to live
-// inline in app.js, where nothing could test it. The display and the status LED both got a
-// presenter (`display_model.hpp`, `led_status.hpp`); this row did not, and it is exactly where
-// three rounds of user-visible bugs landed — a label naming one phase while the number beside
-// it counted down another, and labels left with no countdown at all.
+// inline in app.js, where nothing could test it. Three rounds of user-visible bugs landed here:
+// a label naming one phase while the number beside it counted down another, and labels left
+// with no countdown at all.
 //
 // NOTHING SITS BETWEEN /status AND THE DECISION. decide() takes the raw fields as they arrive
 // (`RowStatus`) and does its own deriving, so the JS mirror is one function from JSON to verdict

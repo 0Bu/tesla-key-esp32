@@ -32,8 +32,7 @@ const char* NvsStorageAdapter::map_key(std::string_view key,
                                       tk::nvs_contract::StorageApi api,
                                       bool erase_any_api) const {
     const auto* entry = tk::nvs_contract::find(ns_kind_, key);
-    if (!entry || (!erase_any_api && entry->api != api) ||
-        entry->api == tk::nvs_contract::StorageApi::DirectU8) {
+    if (!entry || (!erase_any_api && entry->api != api)) {
         ESP_LOGE(TAG, "refusing unregistered NVS key/API in namespace '%s'", ns_ ? ns_ : "?");
         return nullptr;
     }

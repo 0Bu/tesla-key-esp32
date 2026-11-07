@@ -21,6 +21,6 @@ and build/installer consumers. Adding an omitted target requires upstream suppor
 ## Consequences
 
 Existing C5 installations keep running but receive no new manifest/image; they are not modified.
-T-Dongle-S3 display/LED support stays. Upstream v6.1.1 declares C5, satisfying the library prerequisite only. Reintroduction still
+This decision originally retained T-Dongle-S3 indicators, which were subsequently retired. Upstream v6.1.1 declares C5, satisfying the library prerequisite only. Reintroduction still
 requires firmware, signed-size/partition and hardware acceptance, not bypassing enforcement. Decision-time size figures are historical; current headroom comes
 from generated size artifacts.
