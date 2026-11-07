@@ -23,9 +23,7 @@ TASKS = {
     'dns_task': ('main/provisioning.cpp', 'CaptiveDns', 'while (!s_dns_stop.load()) {'),
     'loop_task_fn_': ('main/vehicle_telemetry.cpp', 'Vehicle', 'while (true) {'),
     'auto_pair_task_fn_': ('main/vehicle_pairing.cpp', 'AutoPair', 'while (true) {'),
-    'display_task': ('main/display.cpp', 'Display', 'for (;;) {'),
     'net_watchdog_task': ('main/net.cpp', 'NetWatchdog', 'for (;;) {'),
-    'led_task': ('main/led_status.cpp', 'Led', 'for (uint32_t frame = 0;; frame = (frame + 1) % kSampleEveryFrames) {'),
     'nimble_host_task': ('main/ble_client.cpp', 'NimbleHost', None),
     'ota_network_task': ('main/ota_transport.cpp', 'OtaNetwork', None),
 }
@@ -62,8 +60,8 @@ CALLBACKS = {
 
 }
 NESTED = {'ble_link_event_cb_', 'ble_rx_event_cb_'}
-CONTEXTS = ['Httpd', 'Vehicle', 'AutoPair', 'Mqtt', 'Main', 'HeapSupervisor', 'Display',
-            'Led', 'OtaCheck', 'OtaWriter', 'OtaGate', 'NetWatchdog', 'Syslog',
+CONTEXTS = ['Httpd', 'Vehicle', 'AutoPair', 'Mqtt', 'Main', 'HeapSupervisor',
+            'OtaCheck', 'OtaWriter', 'OtaGate', 'NetWatchdog', 'Syslog',
             'CaptiveDns', 'CaptiveHttp', 'WifiEvent', 'EthEvent', 'MqttEvent',
             'MqttProbeEvent', 'NimbleHost', 'BleScanTimer', 'DiagLogCallback',
             'SntpSync', 'PingNet', 'PingSyslog', 'OtaNetwork', 'OtaParser']
@@ -116,9 +114,9 @@ def contract(parts, owners, helpers):
         ('ble_link_event_cb_', 'main/vehicle_ctrl.cpp', 'NimbleHost'),
         ('ble_rx_event_cb_', 'main/vehicle_ctrl.cpp', 'NimbleHost')}
     actual = {(r['entry'], r['path'], r['context']) for r in owners['rows']}
-    require(actual == expected and len(owners['rows']) == len(expected) == 46,
-            'exact 46 owner rows, no duplicate/missing route')
-    require({r['context'] for r in owners['rows']} == set(CONTEXTS), 'all 27 lanes mapped')
+    require(actual == expected and len(owners['rows']) == len(expected) == 44,
+            'exact 44 owner rows, no duplicate/missing route')
+    require({r['context'] for r in owners['rows']} == set(CONTEXTS), 'all 25 lanes mapped')
     enum = re.search(r'enum class StackContext[^\{]*\{(.*?)\};',
                      parts['main/logic/stack_context.hpp'], re.S)
     require(enum is not None, 'actual core enum')
@@ -256,7 +254,7 @@ def main(root, self_test):
             except AssertionError:
                 continue
             raise AssertionError('valid source omission passed: ' + label)
-    print('stack context source contract: exact27 lanes/46 owner rows; source-only PASS')
+    print('stack context source contract: exact 25 lanes/44 owner rows; source-only PASS')
 
 
 if __name__ == '__main__':

@@ -273,7 +273,7 @@ static void test_nvs_contract() {
     // Exact namespace/key/owner/API/retention inventory. This deliberately duplicates the
     // production table as a test oracle: adding, deleting, moving or reclassifying a record must
     // update an explicit gate rather than silently expanding the persistence surface.
-    constexpr std::array<NC::Entry, 19> expected{{
+    constexpr std::array<NC::Entry, 17> expected{{
         {NC::Namespace::Config, "cfg", "cfg", NC::StorageApi::RawBlob,
          NC::Owner::ConfigHttp, NC::Retention::DurableAcrossOta, true},
         {NC::Namespace::Config, "wifi_ssid", "wifi_ssid", NC::StorageApi::String,
@@ -296,10 +296,6 @@ static void test_nvs_contract() {
          NC::Owner::HeapWatchdog, NC::Retention::RecoveryJournal, false},
         {NC::Namespace::Config, "boot_fails", "boot_fails", NC::StorageApi::String,
          NC::Owner::BootGuard, NC::Retention::RecoveryJournal, false},
-        {NC::Namespace::Config, "disp_rot", "disp_rot", NC::StorageApi::DirectU8,
-         NC::Owner::Display, NC::Retention::DurableAcrossOta, false},
-        {NC::Namespace::Config, "disp_flip", "disp_flip", NC::StorageApi::DirectU8,
-         NC::Owner::Display, NC::Retention::MigrationOnly, false},
         {NC::Namespace::TeslaBle, "private_key", "private_key", NC::StorageApi::Blob,
          NC::Owner::TeslaBleLibrary, NC::Retention::DurableAcrossOta, true},
         {NC::Namespace::TeslaBle, "session_vcsec", "sess_vcsec", NC::StorageApi::Blob,
@@ -407,7 +403,7 @@ static void test_registered_physical_key_mapping(NvsStorageAdapter& config,
             CHECK(nvs_call_log.size() == 1);
             check_last_call("get_blob", namespace_name(entry.name_space), entry.stored_key.data());
         } else {
-            CHECK(entry.api == NC::StorageApi::DirectU8);
+            CHECK(false);  // Every registered storage API must be exercised above.
         }
     }
 }
@@ -460,7 +456,7 @@ static void test_adapter_no_call_guards(NvsStorageAdapter& config,
         });
     }
 
-    for (const char* key : {NC::kDisplayRotation, NC::kPrivateKey, "unknown",
+    for (const char* key : {"disp_rot", "disp_flip", NC::kPrivateKey, "unknown",
                             "abcdefghijklmnop"}) {
         check_rejected_without_nvs([&] { return config.remove(key); });
     }

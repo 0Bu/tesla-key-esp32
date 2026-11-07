@@ -3,7 +3,7 @@
 #include <cstdint>
 
 // Pure, hardware-free decisions shared by firmware and host tests. No IDF/FreeRTOS/NimBLE/NVS/
-// cJSON dependencies. runtime_fault_log.hpp delegates here for vehicle/display/LED catch paths.
+// cJSON dependencies. runtime_fault_log.hpp delegates here for vehicle task catch paths.
 namespace tk {
 
 struct IterationFaultLog {

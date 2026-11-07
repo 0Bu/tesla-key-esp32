@@ -181,12 +181,6 @@ ASAN_OPTIONS="$asan_options" UBSAN_OPTIONS="$ubsan_options" \
     LSAN_OPTIONS="$lsan_options" CC="$CC" CXX="$CXX" MQTT_JSON_SANITIZE=1 bash test/run-mqtt-json-publish-tests.sh
 
 ASAN_OPTIONS="$asan_options" UBSAN_OPTIONS="$ubsan_options" \
-    LSAN_OPTIONS="$lsan_options" CXX="$CXX" python3 test/test_led_driver_contract.py --sanitize
-
-ASAN_OPTIONS="$asan_options" UBSAN_OPTIONS="$ubsan_options" \
-    LSAN_OPTIONS="$lsan_options" CXX="$CXX" python3 test/test_display_parity_contract.py --render-only --sanitize
-
-ASAN_OPTIONS="$asan_options" UBSAN_OPTIONS="$ubsan_options" \
     LSAN_OPTIONS="$lsan_options" CXX="$CXX" python3 test/test_f137_host.py --source . --sanitize --execute-controlled-host-only
 
 ASAN_OPTIONS="$asan_options" UBSAN_OPTIONS="$ubsan_options" \

@@ -87,7 +87,7 @@ const canonicalSkills = directoryNames(".agents/skills");
 
 const highRiskSkills = new Set(["deploy", "deploy-bench", "flash-esp32", "ship", "usb-recovery"]);
 const readOnlySkills = new Set([
-  "device-diag", "display-preview", "mock-test", "ota-release-verify", "pr-hygiene", "project-review",
+  "device-diag", "mock-test", "ota-release-verify", "pr-hygiene", "project-review",
   "skill-audit", "vehicle-command-audit",
 ]);
 const ownerContracts = new Map([
@@ -116,20 +116,19 @@ const usbNoApprovalNeeded = /(?:live verification|HTTP requests?|(?:GET|POST|HTT
 const usbOtaNotStateChanging = /(?:GET|POST) \/ota\/check[^.!?]*(?:is not|isn't|not) state-changing/i;
 const usbAbsentApprovalProceeds = /(?:(?:approval|authorization)[^.!?]*(?:absent|missing|not obtained)|without (?:separate )?(?:approval|authorization))[^.!?]*(?:continue|proceed|run|contact|send|request)/i;
 const reviewedSkillSha256 = new Map([
-  ["add-logic-test", "4c0e000699ca232284208952f642dd5e037286a716ea85e5d302ae4bea1ffb42"],
+  ["add-logic-test", "aa979b5d1ac176c36d738bbe2644e0cbba9da7f4d584048dd01344f5eecacd9c"],
   ["ci-heal", "dc84639ff9ac74ba436e994a653447d45eec85f63615a53851642ce08ed11128"],
   ["deploy", "9b77db37a67bf60fa234e49ca29e6740fb14100db11d4b00f20be9529507a503"],
-  ["deploy-bench", "3910491d1c3c295a8c91c36627b656b29d8f41257ea2c8f5fc15c4bb149d58cf"],
+  ["deploy-bench", "e0743614829c67f387c1795d34409ca4d44fa5e034a30df6258179e93af67b02"],
   ["device-diag", "d08f2540c21aa540a2d287d9139fdcce34abcd2214aa816684507b1747aa5fa7"],
-  ["display-preview", "15e387aa51913799ca08e7aedbcaaf247c341e6f1535244a89d5744d860259a0"],
   ["feature-docs", "fed1863c2a2e3b24598f2b9d41219d09aaecd67da7aa32c628f090cabec76e90"],
   ["flash-esp32", "9f1b5078410c1d1eb1b0489a1d68898f4313f2a5ac09bcd955cee7f6e3546444"],
-  ["mock-test", "8b0f472daff9e8e6e8a0a38a50bf168182dc63e58c03b461524e14c346d109d0"],
+  ["mock-test", "df0295017539d7f9d0d0e7df35806dd00938439c8892471d6c103804a0c4a636"],
   ["ota-release-verify", "52a09232386f75c8382abbab08243b9a2b292e6b42a4f146c994343a22e4f433"],
   ["pr-hygiene", "1f12e067bba7d7ee60e30da296e0436b9754a01b42813cfa472e2455130181ed"],
-  ["project-review", "b1e144671ecdb5ed8e86c966901969074e8661bb0fa5f71e133923eabfb87c23"],
+  ["project-review", "a8ce72fcd32985067249e14fc319d43d5d329f23103ae718c1b2f86652a83bfe"],
   ["ship", "6d1705802ee9de4cd91f722f2e0bbf298baa859d279b895d16bb4a3e51a51005"],
-  ["skill-audit", "965d43e8820a728ede255da0cd14bb18b46f1d3df223ea6b0e378205d2141436"],
+  ["skill-audit", "43aa6ecf3129dd0ca7b7f84581dd36d84f0de6ca3ecbed187fb4393ee69ace40"],
   ["usb-recovery", "1716017ae820abf46b2f8012749b753396ab07dca07c16ef015daea7a11d0676"],
   ["vehicle-command-audit", "c620e6ab777d5017c4402a8bbcca1105b4271ac13e02f0bf22f7196b121c7702"],
 ]);

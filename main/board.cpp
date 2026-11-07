@@ -44,8 +44,8 @@ static bool probe_t_dongle_s3() {
 }
 
 bool board_is_t_dongle_s3() {
-    // Cached: the probe drives pull modes on six GPIOs, and re-running it after the display has
-    // claimed the bus would be both pointless and rude. A function-local static is initialised
+    // Cached: the probe changes pull modes on six GPIOs and must not run again after Ethernet
+    // has claimed the bus. A function-local static is initialised
     // exactly once, thread-safely, at the first call.
     static const bool s_is_dongle = probe_t_dongle_s3();
     return s_is_dongle;

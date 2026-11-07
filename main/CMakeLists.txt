@@ -42,8 +42,6 @@ idf_component_register(
         "ota_writer.cpp"
         "mqtt_ha.cpp"
         "syslog.cpp"
-        "display.cpp"
-        "led_status.cpp"
     INCLUDE_DIRS
         "."
     EMBED_FILES

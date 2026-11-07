@@ -787,8 +787,6 @@ def validate(root: Path) -> None:
         )
     require(
         "./scripts/ci-build-all.sh" in leg
-        and "--skip-led-variant" in leg
-        and "--skip-led-variant" not in build["build-target"]
         and '--target "${{ matrix.target }}"' in leg
         and '"${{ github.sha }}"' in leg
         and '"${{ needs.prepare.outputs.release-version }}"' in leg
@@ -1628,7 +1626,6 @@ def self_test(root: Path) -> None:
         ("preview-full-host-suite", "signed-pr-preview.yml", "suite: [logic, protocol]", "suite: [logic]", "both suites before signing"),
         ("main-host-coverage", "build.yml", "if: steps.scope.outputs.profile == 'full'\n        run: ./scripts/run-mock-tests.sh --require-all", "if: false\n        run: ./scripts/run-mock-tests.sh --require-all", "full main/publication coverage"),
         ("feedback-wrong-event", "build.yml", "EVENT_NAME: ${{ github.event_name }}\n          BASE_SHA:", "EVENT_NAME: pull_request\n          BASE_SHA:", "feedback selection must be unconditional"),
-        ("independent-led-duplicate", "build.yml", "            --skip-led-variant\n", "", "must rebuild one target"),
         ("prepared-relevance-missing", "build.yml", "firmware: ${{ steps.changes.outputs.firmware }}", "firmware: no", "cumulative fail-closed firmware decision"),
         ("prepared-relevance-stale", "build.yml", "FIRMWARE_RELEVANT: ${{ needs.prepare.outputs.firmware }}", "FIRMWARE_RELEVANT: no", "consume the prepared firmware decision"),
         ("preview-target-omission", "signed-pr-preview.yml", "target: [esp32, esp32s3, esp32c3, esp32c6]", "target: [esp32, esp32s3, esp32c3]", "exact four-target matrix"),

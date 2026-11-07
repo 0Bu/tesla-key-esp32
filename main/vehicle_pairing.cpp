@@ -841,7 +841,7 @@ bool VehicleController::has_key() {
 
 bool VehicleController::has_session() {
     // Existence probe only — see has_key(). The adapter caches this declared session key after
-    // the first successful probe and updates it on save/remove, so both the display/LED sampling
+    // the first successful probe and updates it on save/remove, so repeated status sampling
     // and the 50 ms vehicle loop avoid repeated NVS reads.
     return storage_ && storage_->blob_exists(tk::nvs_contract::kSessionVcsec);
 }

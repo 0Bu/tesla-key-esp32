@@ -41,8 +41,6 @@
 #include "ota_update.hpp"
 #include "mqtt_ha.hpp"
 #include "syslog.hpp"
-#include "display.hpp"
-#include "led_status.hpp"
 #include "time_sync.hpp"
 #include "logic/bootlog.hpp"
 #include "logic/device_hostname.hpp"
@@ -980,19 +978,6 @@ extern "C" void app_main() {
     } else {
         ESP_LOGW(TAG, "SAFE MODE — MQTT bridge not started");
     }
-
-    // On-device status display (LilyGo T-Dongle-S3). No-op unless the board
-    // build selects CONFIG_TESLA_DISPLAY_ENABLED — and on esp32s3 also a no-op unless the
-    // T-Dongle-S3 is auto-detected (a generic ESP32-S3 has no panel). Reads only cached
-    // state (never wakes the car) in its own task, so it can't queue behind a BLE poll.
-    display_start(vehicle);
-    log_heap("display");
-
-    // On-device status LED (LilyGo T-Dongle underside APA102). No-op unless the board build
-    // selects CONFIG_TESLA_LED_ENABLED; reads only cached state via the same UiSnapshot the
-    // display uses (never wakes the car), independent of the display / MQTT.
-    led_status_start(vehicle);
-    log_heap("led");
 
     // LAN connectivity watchdog: forces the active transport to re-establish if the link
     // silently dies, including the "ghost association" case that fires no disconnect event

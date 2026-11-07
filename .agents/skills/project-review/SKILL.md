@@ -88,7 +88,7 @@ current implementation. These are review questions, not substitute implementatio
 
 | Area | Required checks |
 |---|---|
-| Sleep/wake | Cached status/MQTT/display never wake; NO_WAKE background polls pause under commands; non-waking VCSEC GET_STATUS health probe does not open Infotainment; fresh-contact charging and recent-command active window; debounce, retry and episode quiescence survive repeated cycles. |
+| Sleep/wake | Cached status and MQTT never wake; NO_WAKE background polls pause under commands; non-waking VCSEC GET_STATUS health probe does not open Infotainment; fresh-contact charging and recent-command active window; debounce, retry and episode quiescence survive repeated cycles. |
 | Link/presentation | One link-state owner; live Infotainment proves awake, debounced VCSEC proves sleep, reachability proves idle; unknown/unreachable and last-known labels remain honest across UI/MQTT/API; phase timers/presenter mirrors agree. |
 | Commands/protocol | One registry/dispatcher; required/optional bounds and REST/MCP differences; complete fixed evcc charge_state versus optional status/MQTT fields and imperial versus metric units; Charging-Manager feasibility; request UUID/replay/authentication binding, initialized-secret admission and fail-closed encrypted VCSEC before telemetry; late completion generation/lifetime; charging-current ACK plus fresh exact readback. |
 | Heap/locks | INTERNAL largest block, bounded payloads, all allocation outcomes and unwind paths; RAII ordering; no Vehicle lock while waiting; POD callbacks/zero-wait host locks; parse after unlock; sticky JSON with exactly one failure reply and no partial retained publish. |
@@ -106,7 +106,7 @@ For every changed contract, follow **all** its consumers:
 | Change | Also inspect |
 |---|---|
 | Route/command/argument | Route table, common registry, executor, REST/MCP schemas, web UI, API/MCP docs and host fixtures |
-| Telemetry/status field | Parser/presence/cache, status emitter, MQTT payload/discovery, UI/display snapshot, API docs and golden/OOM tests |
+| Telemetry/status field | Parser/presence/cache, status emitter, MQTT payload/discovery, web UI, API docs and golden/OOM tests |
 | State/timer/task | Owner/lock/atomic model, runtime admission, all consumers, repeated-cycle tests, architecture and any presenter parity |
 | Persistent record/config | NVS registry/oracle, storage adapter, journals/rollback, provisioning, retention table, UI and privacy exports |
 | Target/dependency/patch | All lockfiles/defaults, root CMake, patch application, vectors/harness, build/sign/manifest/reproducibility, ADR departures and skills |

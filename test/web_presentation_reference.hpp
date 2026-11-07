@@ -3,13 +3,8 @@
 #include <cstdint>
 #include <cmath>
 
-// Single source of truth for the state-of-charge colour ramp — red → amber → light-green →
-// green → deep-green over 0..100 %. Shared by the ST7735 battery fill (logic/display_model.hpp)
-// and the underside status LED (logic/led_driver.hpp) so the panel and the LED show the SAME
-// colour for a given charge. The browser mirrors this function under the native/JS presenter
-// parity gate (scripts/check-ble-row-parity.sh). Pure and
-// host-tested; output is 8-bit RGB (0..255) per channel, clamped to 0..100 %.
-namespace tk {
+// C++ reference for the web UI battery colour and RSSI glyph parity vectors.
+namespace web_reference {
 
 struct SocGradStop { float p; uint8_t r, g, b; };
 inline constexpr SocGradStop kSocGrad[] = {
@@ -35,4 +30,12 @@ inline void soc_rgb(int soc, int& r, int& g, int& b) {
     r = kSocGrad[n - 1].r; g = kSocGrad[n - 1].g; b = kSocGrad[n - 1].b;
 }
 
-}  // namespace tk
+inline int rssi_bars(int rssi) {
+    if (rssi >= -55) return 4;
+    if (rssi >= -65) return 3;
+    if (rssi >= -75) return 2;
+    if (rssi >= -85) return 1;
+    return 0;
+}
+
+}  // namespace web_reference

@@ -27,9 +27,6 @@ EXPECTED_DIRECT_CALLS = {
         "get_blob": 6, "commit": 4, "get_str": 4, "set_blob": 2,
         "close": 1, "open": 1, "erase_key": 1, "set_str": 1,
     }),
-    "main/display.cpp": Counter({
-        "open": 2, "get_u8": 2, "close": 2, "set_u8": 1, "commit": 1,
-    }),
     # Boot performs one non-destructive partition initialization. It deliberately has no
     # erase-and-retry fallback: this partition owns WiFi, VIN, the vehicle private key and BLE
     # sessions, so format/capacity errors are recovery evidence rather than erase authority.
@@ -212,22 +209,6 @@ def extract_method_body(text: str, method: str) -> str:
     raise ContractError(f"NVS adapter method body is unbalanced: {method}")
 
 
-def extract_free_function_body(text: str, function: str) -> str:
-    code = cpp_code_only(text)
-    match = re.search(rf"\b{re.escape(function)}\s*\(\s*(?:int\s+\w+)?\s*\)\s*\{{", code)
-    require(match is not None, f"direct NVS owner function drifted: {function}")
-    opening = code.find("{", match.start())
-    depth = 0
-    for index in range(opening, len(code)):
-        if code[index] == "{":
-            depth += 1
-        elif code[index] == "}":
-            depth -= 1
-            if depth == 0:
-                return text[opening + 1:index]
-    raise ContractError(f"direct NVS owner function body is unbalanced: {function}")
-
-
 EXPECTED = (
     ("Config", "cfg", "cfg", "RawBlob", "ConfigHttp", "DurableAcrossOta", True),
     ("Config", "wifi_ssid", "wifi_ssid", "String", "LegacyConfigMirror", "LegacyDowngradeMirror", True),
@@ -240,8 +221,6 @@ EXPECTED = (
     ("Config", "ble_mac", "ble_mac", "String", "BleDiscovery", "ReplaceableCache", True),
     ("Config", "reboot_why", "reboot_why", "String", "HeapWatchdog", "RecoveryJournal", False),
     ("Config", "boot_fails", "boot_fails", "String", "BootGuard", "RecoveryJournal", False),
-    ("Config", "disp_rot", "disp_rot", "DirectU8", "Display", "DurableAcrossOta", False),
-    ("Config", "disp_flip", "disp_flip", "DirectU8", "Display", "MigrationOnly", False),
     ("TeslaBle", "private_key", "private_key", "Blob", "TeslaBleLibrary", "DurableAcrossOta", True),
     ("TeslaBle", "session_vcsec", "sess_vcsec", "Blob", "TeslaBleLibrary", "ReplaceableCache", True),
     ("TeslaBle", "session_infotainment", "sess_info", "Blob", "TeslaBleLibrary", "ReplaceableCache", True),
@@ -323,35 +302,6 @@ def validate_adapter_methods(adapter: str) -> None:
                 f"NVS load_str lost atomic exception containment: {token}")
 
 
-def validate_display_direct_u8(display: str) -> None:
-    load = token_signature(extract_free_function_body(display, "load_disp_rot"))
-    save = token_signature(extract_free_function_body(display, "save_disp_rot"))
-    load_tuples = (
-        "nvs_open(tk::nvs_contract::kConfigNamespace,NVS_READONLY,&h)",
-        "nvs_get_u8(h,tk::nvs_contract::kDisplayRotation,&rot)",
-        "nvs_get_u8(h,tk::nvs_contract::kLegacyDisplayFlip,&flip)",
-        "nvs_close(h)",
-    )
-    save_tuples = (
-        "nvs_open(tk::nvs_contract::kConfigNamespace,NVS_READWRITE,&h)",
-        "nvs_set_u8(h,tk::nvs_contract::kDisplayRotation,",
-        "nvs_commit(h)",
-        "nvs_close(h)",
-    )
-    for value in load_tuples:
-        require(load.count(value) == 1,
-                f"display load DirectU8 operation/namespace/key/mode tuple drifted: {value}")
-    for value in save_tuples:
-        require(save.count(value) == 1,
-                f"display save DirectU8 operation/namespace/key/mode tuple drifted: {value}")
-    require([load.index(value) for value in load_tuples] ==
-            sorted(load.index(value) for value in load_tuples),
-            "display load DirectU8 operations are out of order")
-    require([save.index(value) for value in save_tuples] ==
-            sorted(save.index(value) for value in save_tuples),
-            "display save DirectU8 operations are out of order")
-
-
 def validate_direct_call_inventory(main: Path) -> None:
     direct_re = re.compile(r"\bnvs_([A-Za-z0-9_]+)\s*\(")
     identifier_re = re.compile(r"\bnvs_([A-Za-z0-9_]+)\b")
@@ -391,15 +341,15 @@ def validate(root: Path) -> None:
     for namespace, logical_key, stored_key, *_ in rows:
         validate_physical_name(namespace, logical_key, stored_key)
     require(rows == EXPECTED,
-            "NVS registry differs from the exact 19-entry namespace/key/owner/API/retention contract")
+            "NVS registry differs from the exact 17-entry namespace/key/owner/API/retention contract")
     require('kConfigNamespace[] = "tesla_cfg"' in header and
             'kTeslaBleNamespace[] = "tesla_ble"' in header,
             "NVS namespace spelling drifted")
 
     require("nvs_contract::find(ns_kind_, key)" in adapter,
             "NVS adapter does not resolve every access through the production registry")
-    require("entry->api != api" in adapter and "StorageApi::DirectU8" in adapter,
-            "NVS adapter does not reject wrong API/direct-U8 access")
+    require("entry->api != api" in adapter,
+            "NVS adapter does not reject wrong API access")
     require("return nullptr;" in adapter and "Namespace::Unknown" in adapter,
             "NVS adapter is not fail-closed for unknown keys/namespaces")
     require("entry.stored_key.size() > 15" in cpp_code_only(header),
@@ -417,8 +367,6 @@ def validate(root: Path) -> None:
                 f"production NVS access bypasses registry constants: {path.relative_to(root)}")
         require(literal_namespace_constructions(text) == 0,
                 f"production NVS namespace bypasses registry constants: {path.relative_to(root)}")
-    display = (main / "display.cpp").read_text(encoding="utf-8")
-    validate_display_direct_u8(display)
     repair = (main / "config_repair_store.hpp").read_text(encoding="utf-8")
     repair_code = cpp_code_only(repair)
     require(repair_code.count("NVS_READWRITE") == 1 and
@@ -454,13 +402,13 @@ def self_test(root: Path) -> None:
         ("main/config_repair_store.hpp", "write_used_=true;", "write_used_=false;", "cfg-only"),
         ("main/logic/nvs_contract.hpp",
          '{Namespace::Config, kLastTime, kLastTime, StorageApi::String,',
-         '{Namespace::Config, kLastTime, "last_time_2", StorageApi::String,', "exact 19-entry"),
+         '{Namespace::Config, kLastTime, "last_time_2", StorageApi::String,', "exact 17-entry"),
         ("main/logic/nvs_contract.hpp", "kPrivateKey, kPrivateKey, StorageApi::Blob",
          'kPrivateKey, "private_key_1234", StorageApi::Blob', "15 bytes"),
         ("main/logic/nvs_contract.hpp", "Namespace::TeslaBle, kPrivateKey",
-         "Namespace::Config, kPrivateKey", "exact 19-entry"),
+         "Namespace::Config, kPrivateKey", "exact 17-entry"),
         ("main/logic/nvs_contract.hpp", 'kSessionInfotainment, "sess_info"',
-         'kSessionInfotainment, "sess_other"', "exact 19-entry"),
+         'kSessionInfotainment, "sess_other"', "exact 17-entry"),
         ("main/logic/nvs_contract.hpp", "entry.stored_key.size() > 15",
          "entry.stored_key.size() > 14", "exactly 15 bytes"),
         ("main/nvs_storage.cpp", "return nullptr;", "return key.data();", "fail-closed"),
@@ -476,22 +424,6 @@ def self_test(root: Path) -> None:
          "Method-to-StorageApi"),
         ("main/nvs_storage.cpp", "        out.swap(candidate);",
          "        out = candidate;", "atomic exception containment"),
-        ("main/display.cpp",
-         "nvs_open(tk::nvs_contract::kConfigNamespace, NVS_READONLY, &h)",
-         "nvs_open(tk::nvs_contract::kTeslaBleNamespace, NVS_READONLY, &h)",
-         "display load DirectU8"),
-        ("main/display.cpp",
-         "nvs_set_u8(h, tk::nvs_contract::kDisplayRotation,",
-         "nvs_set_u8(h, tk::nvs_contract::kLegacyDisplayFlip,",
-         "display save DirectU8"),
-        ("main/display.cpp",
-         "        nvs_set_u8(h, tk::nvs_contract::kDisplayRotation, (uint8_t)(rot & 3));\n"
-         "        nvs_commit(h);",
-         "        nvs_commit(h);\n"
-         "        nvs_set_u8(h, tk::nvs_contract::kDisplayRotation, (uint8_t)(rot & 3));",
-         "out of order"),
-        ("main/display.cpp", "nvs_commit(h);", "nvs_commit(h);\n        nvs_commit(h);",
-         "display save DirectU8"),
         ("main/main.cpp", "tk::nvs_contract::kLastTime,",
          '"rogue_time",', "bypasses registry"),
     )

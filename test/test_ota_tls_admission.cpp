@@ -390,7 +390,7 @@ void esp_restart(){
   CHECK(status.upload&&(status.available[0] == 0)&&!status.update_available&&status.target_pr==0);
  }
  CHECK(ota_is_busy()&&s_operation_gate.state()==tk::OtaIdentityGateState::Ota);
- CHECK(ota_get_state()==OtaState::Done);
+ CHECK(ota_get_status().state==OtaState::Done);
  // Exits only the disposable terminal-effect fixture; this is not a task-lifetime/LSan claim.
  std::cout<<"OTA terminal committed owner retained; checks "<<fixture::checks<<'\n'<<std::flush;
  std::_Exit(0);
@@ -425,7 +425,7 @@ void check_effect_admission(){
 }
 [[noreturn]] void check_uncertain_terminal(){
  CHECK(selectors==1&&ends==1&&restart_calls==0&&ota_is_busy());
- CHECK(s_operation_gate.state()==tk::OtaIdentityGateState::Ota&&ota_get_state()==OtaState::Error);
+ CHECK(s_operation_gate.state()==tk::OtaIdentityGateState::Ota&&ota_get_status().state==OtaState::Error);
  CHECK(s_operation.load()&&!s_operation.load()->coordinator.writer_lease_released());
  if(terminal_case=="upload-uncertain"){
   CHECK(async_copies==1&&async_completions==1&&init_calls==0);
@@ -490,10 +490,10 @@ void upload_checks(){
  }
  reset();ota_set_channel(tk::OtaChannel::Dev);entry_largest=1;
  CHECK(ota_upload_start(&req,handed)==R::NoMemory&&!handed&&!ota_is_busy());
- CHECK(ota_get_state()==OtaState::Error&&ota_get_status().channel==tk::OtaChannel::Dev);
+ CHECK(ota_get_status().state==OtaState::Error&&ota_get_status().channel==tk::OtaChannel::Dev);
  reset();ota_set_channel(tk::OtaChannel::Dev);async_copy_ok=false;
  CHECK(ota_upload_start(&req,handed)==R::NoMemory&&!handed&&!ota_is_busy()&&async_copies==0);
- CHECK(ota_get_state()==OtaState::Error&&ota_get_status().channel==tk::OtaChannel::Dev);
+ CHECK(ota_get_status().state==OtaState::Error&&ota_get_status().channel==tk::OtaChannel::Dev);
  reset();ota_set_channel(tk::OtaChannel::Dev);create_ok=false;
  CHECK(ota_upload_start(&req,handed)==R::InternalError&&handed&&!ota_is_busy());
  CHECK(async_copies==1&&async_completions==1&&begins==0);
@@ -551,7 +551,7 @@ void upload_checks(){
   run_selected();
   CHECK(!ota_is_busy()&&!raw_handle_live&&async_completions==1);
   CHECK(selectors==0&&restart_calls==0&&init_calls==0&&connects==0);
-  CHECK(upload_status=="400 Bad Request"&&ota_get_state()==OtaState::Error);
+  CHECK(upload_status=="400 Bad Request"&&ota_get_status().state==OtaState::Error);
   // An error names the captured upload source even after a later Release setting.
   CHECK(ota_get_status().channel==tk::OtaChannel::Dev&&ota_get_status().upload);
   CHECK(ota_get_status().configured_channel==(scenario==6?tk::OtaChannel::Release:tk::OtaChannel::Dev));
@@ -615,7 +615,7 @@ void deferred_http_checks(){
  CHECK(ota_check_start_after_http(400,&http_server_marker)==tk::OtaStartResult::Started);
  CHECK(queue_calls==1&&queued_http_work&&entry_heap_reads==0&&!s_operation.load());
  CHECK(!selected_task&&init_calls==0&&ota_is_busy()&&!ota_is_updating());
- CHECK(ota_get_state()==OtaState::Checking&&s_operation_gate.state()==tk::OtaIdentityGateState::Ota);
+ CHECK(ota_get_status().state==OtaState::Checking&&s_operation_gate.state()==tk::OtaIdentityGateState::Ota);
  CHECK(ota_check_start(0)==tk::OtaStartResult::Busy&&ota_start(0)==tk::OtaStartResult::Busy);
  CHECK(queries==0&&entry_heap_reads==0);
  auto stale_work=queued_http_work;void* stale_argument=queued_http_argument;
@@ -658,7 +658,7 @@ void deferred_http_checks(){
  reset();queue_ok=false;http_request_live=true;
  CHECK(ota_check_start_after_http(0,&http_server_marker)==tk::OtaStartResult::Unavailable);
  CHECK(queue_calls==1&&!queued_http_work&&!ota_is_busy()&&entry_heap_reads==0&&!s_operation.load());
- CHECK(ota_get_state()==OtaState::Error&&s_operation_gate.state()==tk::OtaIdentityGateState::Idle);
+ CHECK(ota_get_status().state==OtaState::Error&&s_operation_gate.state()==tk::OtaIdentityGateState::Idle);
  http_request_live=false;
  reset();CHECK(ota_check_start_after_http(0,nullptr)==tk::OtaStartResult::Unavailable);
  CHECK(queue_calls==0&&!ota_is_busy()&&entry_heap_reads==0);
@@ -668,7 +668,7 @@ void deferred_http_checks(){
  CHECK(ota_check_start_after_http(0,&http_server_marker)==tk::OtaStartResult::Started);
  http_request_live=false;now=deadline;run_queued_http();
  CHECK(entry_heap_reads==0&&!selected_task&&!s_operation.load()&&init_calls==0&&!ota_is_busy());
- CHECK(ota_get_state()==OtaState::Error&&std::string_view(ota_get_status().message.data()).find("deadline")!=std::string::npos);
+ CHECK(ota_get_status().state==OtaState::Error&&std::string_view(ota_get_status().message.data()).find("deadline")!=std::string::npos);
 
  reset();http_request_live=true;
  CHECK(ota_check_start_after_http(0,&http_server_marker)==tk::OtaStartResult::Started);
@@ -697,7 +697,7 @@ void deferred_http_checks(){
  reset();CHECK(ota_check_start_after_http(0,&http_server_marker)==tk::OtaStartResult::Started);
  throw_entry_sample=true;require_error_owner=true;run_queued_http();
  throw_entry_sample=require_error_owner=false;
- CHECK(!ota_is_busy()&&!selected_task&&init_calls==0&&ota_get_state()==OtaState::Error);
+ CHECK(!ota_is_busy()&&!selected_task&&init_calls==0&&ota_get_status().state==OtaState::Error);
 
  reset();const auto serial=s_deferred_serial;s_deferred_serial=kDeferredTicketLimit-1;
  CHECK(ota_check_start_after_http(0,&http_server_marker)==tk::OtaStartResult::Unavailable);
@@ -946,7 +946,7 @@ void cleanup_cas_checks(){
  reset();const auto first=ota_check(0);join_worker();CHECK(first.ok&&first.update_available);
  reset();changelog_destroy_fails=true;const auto result=ota_check(0);join_worker();
  CHECK(!result.ok&&!result.update_available);
- CHECK(ota_get_state()==OtaState::Error&&!ota_get_status().update_available);
+ CHECK(ota_get_status().state==OtaState::Error&&!ota_get_status().update_available);
  auto* operation=s_operation.load();CHECK(operation);
  CHECK(operation->job.retired()&&operation->job.phase()==tk::ota::Phase::CleanupFailed);
  CHECK(operation->coordinator.writer_lease_released()&&operation->coordinator_done.load());
@@ -1039,7 +1039,7 @@ int main(int argc,char** argv){
   reset();CHECK(ota_check_start_after_http(0,&http_server_marker)==tk::OtaStartResult::Started);
   throw_create=true;run_queued_http();
   CHECK(ota_is_busy()&&s_operation.load()&&!s_operation.load()->coordinator_done.load());
-  CHECK(s_deferred_check.ticket==0&&ota_get_state()==OtaState::Error);
+  CHECK(s_deferred_check.ticket==0&&ota_get_status().state==OtaState::Error);
   CHECK(init_calls==0&&ota_check_start(0)==tk::OtaStartResult::Busy);
   std::cout<<"OTA uncertain deferred coordinator retained owner; checks "<<checks<<'\n'<<std::flush;
   std::_Exit(0); // A possibly created coordinator still owns its Operation.

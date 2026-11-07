@@ -34,7 +34,8 @@ def markdown_files(root: Path) -> list[Path]:
         )
         paths = [root / value.decode("utf-8") for value in result.stdout.split(b"\0") if value]
         if paths:
-            return paths
+            # The index still lists unstaged deletions. Keep broken symlinks visible.
+            return [path for path in paths if path.exists() or path.is_symlink()]
     except (OSError, subprocess.CalledProcessError, UnicodeDecodeError):
         pass
     return [

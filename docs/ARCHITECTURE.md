@@ -10,7 +10,7 @@ concurrency. [API](API.md) owns external fields; [Security](SECURITY.md) owns tr
 | Orchestration | `vehicle_ctrl.*`, `vehicle_commands.cpp`, `vehicle_pairing.cpp`, `vehicle_telemetry.cpp` | Client/session access, serialized commands, pairing, caches |
 | Decisions | `main/logic/` | Hardware-free bounded state machines and validation |
 | HTTP/MCP | `http_server.cpp`, `http_*.cpp`, `mcp_server.cpp`, `command_exec.cpp` | Contained routing, validation, cache reads, shared command dispatch |
-| Presentation | `main/www/`, `display.cpp`, `led_status.cpp`, `mqtt_ha.cpp` | Cached snapshots; no hidden vehicle wake path |
+| Presentation | `main/www/`, `mqtt_ha.cpp` | Cached snapshots; no hidden vehicle wake path |
 | Platform | `main.cpp`, `net.cpp`, `ota_update.cpp`, `safe_mode.cpp` | Startup admission, connectivity, update/recovery |
 
 ## Repository agent architecture
@@ -409,45 +409,6 @@ retires `key_created` before clearing its journal because the timestamp cannot b
 VIN transitions use
 `vin_txn` so power loss cannot pair a new VIN with an old key/session.
 
-## On-device display and status LED
-
-The optional T-Dongle-S3 ST7735 uses the shared cache-only `UiSnapshot` and pure `display_model.hpp`
-presenter. BOOT rotates landscape 160×80/portrait 80×160 and their flips; `disp_rot` persists and
-migrates legacy `disp_flip`. The panel has a printable ASCII font; each unsupported UTF-8 byte
-becomes a blank cell. The portrait battery interior leaves room for number outlines. The
-[test guide](../test/README.md#logic-ble-protocol-and-presentation) owns presenter, font, text-primitive and frame-layout
-coverage. Those checks and the preview montages do not establish complete-frame pixel equality,
-physical animation or glyph legibility.
-
-Once the display has started, SafeMode overrides connection, pairing and charge heroes, hides the
-BLE header and shows "SAFE MODE" with "Open web UI" or, without a network lease, "Check network". Its latched input comes from `safe_mode_active()`;
-frame assembly bypasses the vehicle cache in recovery. Network header and SSID scrolling remain
-available; recovery itself is static. This presentation does not alter the boot latch, start vehicle
-work, issue a command or provide an initial-portal screen before display startup.
-Landscape geometry is hardware verified; portrait orientation still needs on-device confirmation.
-
-Auto-detection requires ≥4 of 6 TF-socket pull-up pins high; other S3 boards do not allocate the
-~25 KiB framebuffer or drive display pins. SPI is 40 MHz, BOOT GPIO0, backlight active-low.
-The optional APA102 (DI40/CI39) uses the same snapshot, shared SoC gradient and latched alerts.
-Charging requires Awake plus a known SoC; a retained charging flag cannot override Asleep or
-an uncertain link. At snapshot time, `charging` also requires a valid timestamped charge sample
-at most 30 seconds old. A failed current WiFi signal read
-uses the same network-search downgrade as the panel. Independent sampling and alert priorities
-can still produce different frames.
-
-Once the LED task has started, latched SafeMode takes priority over network, charging and OTA
-indications and blinks red. Recovery sampling reads the latch without consulting the vehicle cache,
-durable sessions or the OTA status mutex. It uses the existing error hold; this does not change
-startup order, enable the optional LED by default or provide a signal before that task starts.
-
-`logic/led_driver.hpp` owns the 15 s error/10 s warning holds, animation factors and 12-byte
-APA102 frame. The task samples alerts about once a second and sends frames about 30 times a
-second. Pixel transport is heap-free and disabled by default. The LED's OTA read copies only a
-state enum; initial mutex creation and session-presence probes can still allocate. Neither
-renderer wakes the car. The sampling helper isolates its snapshot temporary from the persistent
-render-loop frame; this does not prove composed stack headroom. The S3 primary CI leg additionally compiles the enabled
-LED task in isolation; that unsigned variant never enters publication artifacts or changes defaults.
-
 ## Home Assistant MQTT bridge
 
 `mqtt_ha.cpp` reads caches in its own task and subscribes to no command topics. Configuration is in
@@ -641,7 +602,7 @@ association that never answers therefore stays unrecovered rather than inheritin
 
 ## Sleep / link-state (the single source of truth)
 
-`VehicleController::link_state()` supplies the web UI, `/status`, MCP, MQTT, the display and LED, the
+`VehicleController::link_state()` supplies the web UI, `/status`, MCP, MQTT, the
 `wake_up` decision and the unreachable override of the REST `charging_state`:
 
 | State | Proof |
@@ -697,7 +658,7 @@ invalid without confirmation. An uncertain SDK rollback effect retains the lease
 metadata releases it and parks with existing diagnostics rather than entering a reboot loop.
 VIN-journal repair and automatic WiFi rollback hold ConfigRestart across their entire mutation and
 committed restart; neither can confirm an image. Initial-key recovery retains its existing identity
-owner without recursively acquiring another lease. Optional MQTT/Syslog/display/LED
+owner without recursively acquiring another lease. Optional MQTT and Syslog
 contain start failures, unwind partial resources and report disabled status.
 
 Fatal diagnostics use only the sinks already started: an NVS failure can halt before networking,
@@ -749,7 +710,7 @@ resets or firmware rollback do not repair shared NVS. Preserve failure evidence 
 
 ### Live stack-headroom evidence
 
-`stack_watch.cpp` caches current-task historical high-water samples in 27 explicit context lanes.
+`stack_watch.cpp` caches current-task historical high-water samples in 25 explicit context lanes.
 The 24-byte bank publishes packed lanes with strong compare-exchange, recomputing after contention.
 On the single-core C3, the pinned SDK implements 32-bit atomics with short interrupt-masked POD
 operations; other targets require always-lock-free 32-bit atomics. Stack queries happen before
@@ -770,7 +731,7 @@ flag/TLS or foreign task handle is added. Unsafe/unexercised contexts remain unk
 work, caller-held SDK-lock cost, task frames, RAM/Flash and measured target minima require their
 own acceptance; configured stack sizes, finite source checks and host measurements cannot prove
 them. The supervisor's separate exact own-stack field keeps its existing semantics.
-All 27 contexts are present in status and MQTT; never-sampled contexts are null. A measured
+All 25 contexts are present in status and MQTT; never-sampled contexts are null. A measured
 zero lower bound represents 0–255 free bytes and does not by itself prove stack overflow.
 The OTA network task has its own lane. Parser callbacks execute in their coordinator caller
 and use a separate OtaParser entry-context aggregate, not the network-task lane.
@@ -884,7 +845,7 @@ Link loss, identity cleanup and authenticated domain repair invalidate the affec
 Ordinary command cancellation preserves it. Temporary identity admission failure hides the cache
 until rollback restores the same identity; a new identity cannot inherit the old metadata.
 `session_available` reports usable VCSEC RAM only. The supervisor, background eligibility and
-UI/display/LED presentation accept durable presence or usable VCSEC RAM, while retaining their
+UI presentation accepts durable presence or usable VCSEC RAM while retaining its
 existing recovery, sleep, wake and foreground arbitration. Infotainment availability is diagnostic
 only. Public `paired` and its guarded timestamp remain durable facts; persistence errors add no
 manual key action or automatic storage retry.
@@ -1086,7 +1047,7 @@ records and the ping end acknowledgement separately own their asynchronous lifet
 
 ### Task fault containment and explicit watchdog retirement
 
-Vehicle, display and LED iteration catches retain task-owned fault-report state across successful
+Vehicle iteration catches retain task-owned fault-report state across successful
 iterations. The first fault logs immediately; later reports are at least 30 monotonic seconds apart
 and include a saturating suppressed-error count. The shared helper advances state before calling
 the sink and contains sink exceptions without changing task delays or arbitration. An outer
@@ -1129,11 +1090,9 @@ The narrative inventory requires review alongside source changes; it is not gene
 | `auto_pair` | `kPrioAutoPair` = 4 | 8192 | `vehicle_ctrl.cpp` (fn: `vehicle_pairing.cpp`) | pairing supervisor: status/health probes and bounded automatic same-key enrollment |
 | `net_wd` | `kPrioWifiWatchdog` = 4 | 3072 | `net.cpp` | ghost-link watchdog (forces the active transport to re-establish, never reboots) |
 | `mqtt_pub` | `kPrioMqttPub` = 4 | 6144 | `mqtt_ha.cpp` | MQTT/HA publisher (reads the caches) |
-| `display` | `kPrioDisplay` = 3 | 6144 | `display.cpp` | ST7735 renderer (`CONFIG_TESLA_DISPLAY_ENABLED` builds) |
 | `ota_gate` | `kPrioOtaGate` = 3 | 3072 | `main.cpp` | one-shot OTA rollback health gate (polls every 5 s; commits on proven link and the shared `ImageConfirmation` INTERNAL-largest requirement from `logic/ota_recovery_memory.hpp` past 90 s under the shared owner, gives up at 600 s) |
 | `heapsup` | `kPrioHeapSupervisor` = 4 | 3072 | `heap_supervisor.cpp` | essential early independent INTERNAL heap sampling/recovery and qualified healthy-counter maintenance; own stack observation, no Vehicle handle |
 | `syslog_task` | `kPrioSyslog` = 3 | 6144 | `syslog.cpp` | best-effort UDP Syslog forwarder (opt-in; degraded-not-fatal on a failed start) |
-| `led` | `kPrioLed` = 2 | 3072 | `led_status.cpp` | APA102 status LED (`CONFIG_TESLA_LED_ENABLED` builds) |
 
 The two OTA allocations reuse the existing per-role 8192-byte value. Concurrent coordinator plus
 network stacks, dynamic operation, TLS peak, new translation units and composed frames need
@@ -1176,7 +1135,7 @@ A change in memory order requires review of both producer and consumer.
 
 ### Exception containment (normative)
 
-Exceptions cannot escape C/RTOS frames. Vehicle, MQTT, display and LED loops contain expected
+Exceptions cannot escape C/RTOS frames. Vehicle and MQTT loops contain expected
 iteration failures with RAII cleanup and retry delays; their outer task boundaries may still stop.
 The network watchdog has an outer terminal catch and deletes its task after an unexpected
 exception; it does not automatically resume. One-shot OTA jobs publish terminal error. Callbacks catch locally or

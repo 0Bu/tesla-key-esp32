@@ -1252,7 +1252,7 @@ def run_stop_logic_tests(_: argparse.Namespace) -> int:
         return 0
     root = HOOK_ROOT
     if shutil.which("git"):
-        watch_paths = ["main/", "test/", "tools/display_sim.py"]
+        watch_paths = ["main/", "test/"]
         unstaged = subprocess.run(
             ["git", "-C", str(root), "diff", "--quiet", "--", *watch_paths],
             check=False,

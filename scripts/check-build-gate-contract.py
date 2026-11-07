@@ -151,7 +151,6 @@ REQUIRED_FILES = (
     "scripts/tesla-ble-patch-state.json",
     "scripts/precheck-firmware.sh",
     "scripts/ci-build-all.sh",
-    "scripts/ci-build-led-variant.sh",
     "scripts/ci-build-verify.sh",
     "scripts/ci-sign-artifacts.sh",
     "scripts/report-firmware-size.py",
@@ -333,21 +332,6 @@ def validate(root: Path) -> None:
         read(root, relative)
 
     build_all = read(root, "scripts/ci-build-all.sh")
-    led_variant = read(root, "scripts/ci-build-led-variant.sh")
-    led_call = 'if [[ "$skip_led_variant" -eq 0 && ( -z "$target_override" || "$target_override" == esp32s3 ) ]]; then\n  bash scripts/ci-build-led-variant.sh "$version" dist/esp32s3/sdkconfig.esp32s3\nfi'
-    require(build_all.count(led_call) == 1 and
-            build_all.index(led_call) > build_all.index("# EXACT_FOUR_TARGETS_END budget") and
-            all(token in led_variant for token in (
-                "source.replace(disabled, 'CONFIG_TESLA_LED_ENABLED=y')",
-                "'CONFIG_TESLA_LED_DI_GPIO=40'", "'CONFIG_TESLA_LED_CI_GPIO=39'",
-                "'CONFIG_TESLA_LED_BRIGHTNESS=8'", 'assert lines.count(wanted) == 1',
-                '--bootloader "$work/build/bootloader/bootloader.bin" --app "$work/build/tesla-key-esp32.bin"',
-                'python3 scripts/check-sdkconfig-defaults.py --target esp32s3',
-                'python3 scripts/check-build-semantics.py --target esp32s3',
-                'python3 scripts/check-stack-usage.py --target esp32s3',
-                '--baseline scripts/firmware-stack-baseline.json',
-                "assert 'led_task' in symbols")),
-            "optional LED SDK variant is missing or does not verify its enabled task/configuration")
     idf_docker = read(root, "scripts/idf-docker.sh")
     dependency_contract = read(root, "scripts/check-dependency-contract.py")
     patch_applier = read(root, "scripts/apply-tesla-ble-patches.py")
@@ -1475,17 +1459,6 @@ def self_test(root: Path) -> None:
         ("served-preview-host-controls", "scripts/run-mock-tests.sh",
          'run_gate "served PR preview and removal acceptance" 120 python3 test/test_pr_preview_served.py',
          "true # removed preview controls", "served preview controls"),
-        ("led-sdk-unsigned-cli", "scripts/ci-build-led-variant.sh",
-         '--bootloader "$work/build/bootloader/bootloader.bin" --app "$work/build/tesla-key-esp32.bin"',
-         '--app-only --app "$work/build/tesla-key-esp32.bin"', "optional LED SDK variant"),
-        ("led-sdk-call", "scripts/ci-build-all.sh",
-         '  bash scripts/ci-build-led-variant.sh "$version" dist/esp32s3/sdkconfig.esp32s3',
-         '  true # removed LED SDK compile', "optional LED SDK variant"),
-        ("led-sdk-disabled", "scripts/ci-build-led-variant.sh",
-         "source.replace(disabled, 'CONFIG_TESLA_LED_ENABLED=y')",
-         "source.replace(disabled, 'CONFIG_TESLA_LED_ENABLED=n')", "optional LED SDK variant"),
-        ("led-sdk-task-missing", "scripts/ci-build-led-variant.sh",
-         "assert 'led_task' in symbols", "assert True", "optional LED SDK variant"),
         ("patch-incremental-input-dependencies", "CMakeLists.txt",
          'CMAKE_CONFIGURE_DEPENDS ${TESLA_BLE_CONFIGURE_INPUTS}',
          'CMAKE_CONFIGURE_DEPENDS', "incremental configure dependencies"),

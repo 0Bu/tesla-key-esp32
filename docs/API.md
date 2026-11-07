@@ -494,7 +494,7 @@ gate refuses the request before any save.
 | `sys` | Always present: `{board_mac, free_heap, min_free_heap, largest_block, uptime_s, wifi_reconnects, reset_reason, safe_mode, runtime_state, fatal_component?, diag_dropped_lines?, stack_min_free_quantum_bytes, stack_min_free_bytes:{<context>:number|null}}`. |
 | `last_crash` | `reason`, `reason_code`, `fault`, `coredump` plus `artifact_present`, `raw_available`, `query_error`, `foreign_dump`, `checksum_verified`, `dump_identity` (`current`/`foreign`/`unverified`), and `summary_available`. A summary emits numeric `pc` (including zero), optional `task`/hex-string `backtrace`, and `corrupted`/`truncated`/`isr`; `elf_sha256` and `dump_elf_sha256` distinguish running and dump builds. Present for undismissed faults, artifacts or query errors. |
 
-`sys.stack_min_free_quantum_bytes` is 256. `sys.stack_min_free_bytes` always contains the 27
+`sys.stack_min_free_quantum_bytes` is 256. `sys.stack_min_free_bytes` always contains the 25
 [registered contexts](../main/logic/stack_context.hpp). A never-sampled context is `null`; a number
 is a conservative historical lower bound in bytes, rounded down to a multiple of 256. Thus 0
 means a real observation in 0–255 bytes, not an unsampled context or proof of an overflow.
