@@ -68,10 +68,6 @@ struct httpd_req;
 // The caller must skip its ordinary body-retirement/response path when handed_off is true.
 tk::OtaStartResult ota_upload_start(httpd_req* request, bool& handed_off) noexcept;
 
-// State-only snapshot for cosmetic indicators; no OtaStatus/string materialization.
-// The shared status mutex may be created on first use. Unavailable locking reports Error.
-OtaState ota_get_state();
-
 // Snapshot of the current OTA state (for GET /ota/status polling).
 OtaStatus ota_get_status();
 

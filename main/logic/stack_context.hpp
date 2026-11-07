@@ -12,8 +12,6 @@ enum class StackContext : std::uint8_t {
     Mqtt,
     Main,
     HeapSupervisor,
-    Display,
-    Led,
     OtaCheck,
     OtaWriter,
     OtaGate,
@@ -36,10 +34,10 @@ enum class StackContext : std::uint8_t {
     Count,
 };
 inline constexpr unsigned kStackContextCount = static_cast<unsigned>(StackContext::Count);
-static_assert(kStackContextCount == 27 && kStackContextCount <= stack_sample::kCapacity);
+static_assert(kStackContextCount == 25 && kStackContextCount <= stack_sample::kCapacity);
 // Contiguous enum values index one flash-resident table; no automatic pointer array or switch bodies.
 inline constexpr const char* kStackContextNames[] = {
-    "httpd", "vehicle", "auto_pair", "mqtt", "main", "heap_supervisor", "display", "led",
+    "httpd", "vehicle", "auto_pair", "mqtt", "main", "heap_supervisor",
     "ota_check", "ota_writer", "ota_gate", "net_watchdog", "syslog", "captive_dns", "captive_http",
     "wifi_event", "eth_event", "mqtt_event", "mqtt_probe_event", "nimble_host", "ble_scan_timer",
     "diag_log_callback", "sntp_sync", "ping_net", "ping_syslog", "ota_network", "ota_parser",

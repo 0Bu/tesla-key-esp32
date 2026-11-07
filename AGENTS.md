@@ -66,7 +66,7 @@ Follow the [lock/task contract](docs/ARCHITECTURE.md#concurrency-normative-contr
 state under lock, use after unlock; no logging, network or storage work under leaf cache/result locks.
 The allocation-free, RTOS-lock-free `esp_timer_get_time()` read may also run under the mailbox mux
 to linearize RX arrival and empty-queue expiry.
-Background status/display/telemetry consume caches and preserve sleep debounce, retry/backoff and
+Background status and telemetry consume caches and preserve sleep debounce, retry/backoff and
 foreground-command arbitration. Reboot loops are safety failures.
 
 Pure decisions belong in `main/logic/`, with host tests and registered ownership. New untracked logic

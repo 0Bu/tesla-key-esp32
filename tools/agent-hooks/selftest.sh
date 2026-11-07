@@ -265,7 +265,8 @@ try:
 finally: sys.stdin=old_stdin
 ag_out=json.loads(output.getvalue())
 assert rc==0 and ag_out["decision"]=="continue" and ag_out["hookSpecificOutput"]["permissionDecision"]=="block"
-assert any("tools/display_sim.py" in str(arg) for call in calls for arg in call)
+assert any("main/" in str(arg) for call in calls for arg in call)
+assert any("test/" in str(arg) for call in calls for arg in call)
 PY
 then pass_case 'Stop hook requires strict tools/script and blocks failure/timeout'; else fail_case 'Stop strict fail-closed contract'; fi
 
@@ -392,10 +393,10 @@ for dependency_input in cmake/admit-dependency-sources.cmake scripts/dependency_
   fi
 done
 if printf '%s\n' 'docs/README.md' | gate_vehicle_command_relevant \
-   || printf '%s\n' 'main/display.cpp' | gate_vehicle_command_relevant \
+   || printf '%s\n' 'main/board.cpp' | gate_vehicle_command_relevant \
    || printf '%s\n' 'sdkconfig' | gate_vehicle_command_relevant \
    || printf '%s\n' 'sdkconfig.defaultsX' | gate_vehicle_command_relevant \
-   || printf '%s\n' 'main/logic/soc_gradient.hpp' | gate_vehicle_command_relevant; then
+   || printf '%s\n' 'main/logic/net_link.hpp' | gate_vehicle_command_relevant; then
   fail_case 'unrelated files match vehicle-command relevance'
 else
   pass_case 'unrelated files do not match vehicle-command relevance'
@@ -489,7 +490,7 @@ expect_rc 2 'vehicle-relevant check requires vehicle-command-audit' env AGENT_PO
 printf '%s\n' main/logic/telemetry_poll.hpp >"$tmp/telemetry-header.files"
 expect_rc 2 'header-only telemetry change blocks without protocol review' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/no-vehicle.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/telemetry-header.files" "$gate" --check --project-dir "$root"
 expect_rc 0 'header-only telemetry change accepts current protocol review' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/all.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/telemetry-header.files" "$gate" --check --project-dir "$root"
-printf '%s\n' main/logic/soc_gradient.hpp >"$tmp/unrelated-header.files"
+printf '%s\n' main/logic/net_link.hpp >"$tmp/unrelated-header.files"
 expect_rc 0 'unrelated logic header does not require protocol review' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/no-vehicle.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/unrelated-header.files" "$gate" --check --project-dir "$root"
 expect_rc 0 'feature-only check skips vehicle-command-audit' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/no-vehicle.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/feature.files" "$gate" --check --project-dir "$root"
 

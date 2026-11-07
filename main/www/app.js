@@ -193,8 +193,7 @@ function settleWakeToast(){
 
 /* ---------- signal glyph ---------- */
 /* WEB_PRESENTERS_BEGIN */
-// Mirror the native display/LED SoC ramp and display RSSI thresholds; the host parity gate
-// checks all integer SoC values and the signed-byte RSSI range against the actual C++ helpers.
+// The host parity gate checks the SoC ramp and signed-byte RSSI thresholds against C++ reference vectors.
 function signalBars(rssi){ return rssi>=-55?4:rssi>=-65?3:rssi>=-75?2:rssi>=-85?1:0; }
 function socColor(soc){
   var f=Math.fround, p=soc<=0?0:soc>=100?1:f(soc/100);

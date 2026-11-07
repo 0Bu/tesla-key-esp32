@@ -11,8 +11,8 @@
 #include "logic/units.hpp"
 
 // Vehicle-state result structs — the cached shapes VehicleController hands to every
-// consumer (/status + web UI, /api evcc routes, MQTT/HA bridge, MCP get_vehicle_state,
-// display/LED via UiSnapshot). IDF-free ON PURPOSE: logic/status_model.hpp shapes the
+// consumer (/status + web UI, /api evcc routes, MQTT/HA bridge, MCP get_vehicle_state).
+// IDF-free ON PURPOSE: logic/status_model.hpp shapes the
 // /status contract from these on the host (test/test_logic.cpp golden CHECKs), and the
 // device serializes the same structs — so a field-contract regression fails the mock
 // build instead of surfacing on hardware. Moved verbatim from vehicle_ctrl.hpp; the

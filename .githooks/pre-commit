@@ -59,7 +59,7 @@ if echo "$staged_files" | grep -q '^main/www/.*\.js$'; then
 fi
 
 # 6. Run host logic tests if firmware logic changed
-if ! git diff --cached --quiet -- main/ test/ tools/display_sim.py; then
+if ! git diff --cached --quiet -- main/ test/; then
     echo "[pre-commit] Firmware logic changed; verifying host tests..."
     # Git prepends its private helper directory when launching a hook. Remove only that
     # builtin prefix from the test environment; custom exec paths and all other PATH entries

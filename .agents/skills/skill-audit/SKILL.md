@@ -103,8 +103,6 @@ workflow scripts and [deep document owners](../../../docs/README.md), not histor
 - **`$device-diag`**: collected evidence first; separate live-target permission; cache-only GETs with
   no verbosity/clear changes; state-changing checks use separately authorized POST aliases. Current status keys/units/presence, internal spot/log/trend heap sources,
   classified BLE failures, reset/crash/pairing causes and read-only handoff.
-- **`$display-preview`**: current simulator CLI/output, PNG inspection and presenter parity;
-  source-writing `cheader` is outside preview; no hardware claim.
 - **`$ota-release-verify`**: immutable stable tag dereference, complete 16-part local snapshot,
   length/hash/merged ranges and target/version identity, signature/artifact limits, end-snapshot race
   recheck and separately approved live reads; no publication/ref mutation.

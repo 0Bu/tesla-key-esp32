@@ -256,9 +256,7 @@ EXPECTED_TASKS = {
     "dns_task",
     "loop_task_fn_",
     "auto_pair_task_fn_",
-    "display_task",
     "net_watchdog_task",
-    "led_task",
     "nimble_host_task",
 }
 
@@ -309,8 +307,6 @@ CONTAINED = {
     "syslog_task",
     "loop_task_fn_",
     "auto_pair_task_fn_",
-    "display_task",
-    "led_task",
     "ota_health_gate_task",
     "net_watchdog_task",
     "on_sync_cb",
@@ -774,8 +770,8 @@ F135_TASK_CONTEXTS = {
     "heap_supervisor_task": "HeapSupervisor", "ota_check_task": "OtaCheck",
     "ota_task": "OtaWriter", "syslog_task": "Syslog", "dns_task": "CaptiveDns",
     "loop_task_fn_": "Vehicle", "auto_pair_task_fn_": "AutoPair",
-    "display_task": "Display", "net_watchdog_task": "NetWatchdog",
-    "led_task": "Led", "nimble_host_task": "NimbleHost",
+    "net_watchdog_task": "NetWatchdog",
+    "nimble_host_task": "NimbleHost",
     "ota_network_task": "OtaNetwork",
 }
 F135_CALLBACK_CONTEXTS = {
@@ -4766,8 +4762,6 @@ def require_safe_mode_source_contract(source: str) -> None:
 
 ITERATION_FAULT_TASKS = (
     ("vehicle_telemetry.cpp", "loop_task_fn_", "while (true)", 50),
-    ("display.cpp", "display_task", "for (;;)", 200),
-    ("led_status.cpp", "led_task", "for (uint32_t frame = 0;; frame = (frame + 1) % kSampleEveryFrames)", 200),
 )
 
 
@@ -4876,7 +4870,6 @@ CACHE_READERS = {
     'seconds_since_contact',
     'session_availability',
     'session_available',
-    'ui_snapshot',
     'vcsec_sleep_raw',
     'vin',
 }
@@ -4926,10 +4919,8 @@ def require_background_wake_policies(telemetry: str, pairing: str, commands: str
 
 
 def require_cache_only_consumers(sources: dict[str, str]) -> None:
-    """F-109: status, MQTT, display, LEDs and MCP get_vehicle_state read caches only."""
+    """F-109: status, MQTT and MCP get_vehicle_state read caches only."""
     scopes = (
-        ("display.cpp", scrub_cpp(sources["display.cpp"])),
-        ("led_status.cpp", scrub_cpp(sources["led_status.cpp"])),
         ("mqtt_ha.cpp", scrub_cpp(sources["mqtt_ha.cpp"])),
         ("/status", scrub_cpp(function_body_in(sources["http_status.cpp"], "build_status_object"))),
         ("MCP get_vehicle_state", scrub_cpp(function_body_in(sources["mcp_server.cpp"], "vehicle_state_result_"))),
@@ -5072,9 +5063,6 @@ def self_test_ble_safety_contract() -> None:
     for label, name, old, new in (
         ("MQTT wakes the car", "mqtt_ha.cpp", "ChargeStateResult cs = s_vehicle->get_cached_charge();",
          "s_vehicle->wake_up(); ChargeStateResult cs = s_vehicle->get_cached_charge();"),
-        ("display wakes the car", "display.cpp", "tk::UiSnapshot s = safe_mode ? tk::UiSnapshot{} : v.ui_snapshot();",
-         "v.wake_up(); tk::UiSnapshot s = safe_mode ? tk::UiSnapshot{} : v.ui_snapshot();"),
-        ("LEDs wake the car", "led_status.cpp", "snap = v.ui_snapshot();", "v.wake_up(); snap = v.ui_snapshot();"),
         ("/status polls the car", "http_status.cpp", "in.vin             = g_vehicle->vin();",
          "g_vehicle->charge_state_poll();\n    in.vin             = g_vehicle->vin();"),
         ("MCP get_vehicle_state polls the car", "mcp_server.cpp",
@@ -5088,8 +5076,6 @@ def self_test_ble_safety_contract() -> None:
         ("MCP get_vehicle_state runs a command", "mcp_server.cpp",
          "const bool charge_available = g_vehicle->get_charge_state(cs);",
          "execute_vehicle_command(*g_vehicle, tk::CmdKind::WakeUp); const bool charge_available = g_vehicle->get_charge_state(cs);"),
-        ("display aliases the controller", "display.cpp", "tk::UiSnapshot s = safe_mode ? tk::UiSnapshot{} : v.ui_snapshot();",
-         "auto& car = v; car.wake_up(); tk::UiSnapshot s = safe_mode ? tk::UiSnapshot{} : v.ui_snapshot();"),
     ):
         consumers = dict(SOURCES)
         consumers[name] = mutate(label, SOURCES[name], old, new)

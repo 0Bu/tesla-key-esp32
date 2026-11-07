@@ -26,8 +26,7 @@ There are **two kinds of unit**, and they reach that differently:
   of the native header. Firmware may also include and use that same header. A
   **parity harness** compiles the C++, dumps its decisions, compares the same covered inputs with
   the shipped consumer source, and fails on a mismatch. Follow step 2b instead.
-  Existing examples: `logic/display_model.hpp` ↔ `tools/display_sim.py`, and
-  `logic/ble_row.hpp` ↔ the `BLE_ROW` region of `main/www/app.js`.
+  Existing example: `logic/ble_row.hpp` ↔ the `BLE_ROW` region of `main/www/app.js`.
 
 ## When NOT to use this
 

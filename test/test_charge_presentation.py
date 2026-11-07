@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compile the actual cache snapshot and indicator input against passive RTOS facades."""
+"""Compile the actual cache snapshot against passive RTOS facades."""
 
 from pathlib import Path
 import os
@@ -29,7 +29,6 @@ def require_http_snapshot(source: str) -> None:
 def main() -> None:
     source = (ROOT / "main/vehicle_ctrl.cpp").read_text()
     getter = function_body_in(source, "get_cached_charge_with_age")
-    indicator = function_body_in(source, "ui_snapshot")
     layout = scrub_cpp_preserving_layout(getter)
     start, end = scope_around(layout, "tk::SemGuard g(cache_mutex_);")
     for statement in ("charge = last_known_charge_;", "sample = last_charge_ticks_.load();",
@@ -60,9 +59,7 @@ def main() -> None:
 #include <cmath>
 #include <cstdint>
 #include <functional>
-#include "logic/charge_control.hpp"
 #include "logic/vehicle_data.hpp"
-#include "logic/ui_state.hpp"
 static uint32_t ticks = 0;
 static constexpr uint32_t configTICK_RATE_HZ = 100;
 static uint32_t xTaskGetTickCount() { return ticks; }
@@ -89,17 +86,10 @@ struct VehicleController {
     Mutex* cache_mutex_ = &mutex;
     ChargeStateResult last_known_charge_;
     std::atomic<uint32_t> last_charge_ticks_{0}, charge_state_generation_{0};
-    tk::LinkState link = tk::LinkState::Awake;
     ChargeStateResult get_cached_charge_with_age(bool& have_age, uint32_t& age_s);
-    tk::UiSnapshot ui_snapshot();
-    tk::LinkState link_state() const { return link; }
-    bool ble_connected() const { return true; }
-    bool ble_rssi(int8_t& rssi) const { rssi = -60; return true; }
 };
 ChargeStateResult VehicleController::get_cached_charge_with_age(bool& have_age, uint32_t& age_s)
 ''' + getter + r'''
-tk::UiSnapshot VehicleController::ui_snapshot()
-''' + indicator + r'''
 int main() {
     VehicleController vc;
     vc.last_known_charge_.valid = true;
@@ -109,24 +99,17 @@ int main() {
     vc.charge_state_generation_ = 1;
     for (uint32_t age : {0u, 29u, 30u, 31u, 86400u}) {
         ticks = age * configTICK_RATE_HZ;
-        for (auto link : {tk::LinkState::Awake, tk::LinkState::Asleep, tk::LinkState::Idle,
-                          tk::LinkState::Unknown, tk::LinkState::Unreachable}) {
-            vc.link = link;
-            bool have = false; uint32_t reported = 999;
-            auto cs = vc.get_cached_charge_with_age(have, reported);
-            assert(cs.valid && have && reported == age && !vc.mutex.held);
-            auto ui = vc.ui_snapshot();
-            assert(ui.have_soc && ui.soc == 0);
-            assert(ui.charging == (link == tk::LinkState::Awake && age <= 30));
-        }
+        bool have = false; uint32_t reported = 999;
+        auto cs = vc.get_cached_charge_with_age(have, reported);
+        assert(cs.valid && have && reported == age && !vc.mutex.held);
     }
-    vc.link = tk::LinkState::Awake;
     ticks = 0; vc.charge_state_generation_ = 0;
-    assert(!vc.ui_snapshot().charging);
+    bool have_zero = true; uint32_t zero_age = 999;
+    vc.get_cached_charge_with_age(have_zero, zero_age);
+    assert(!have_zero && zero_age == 0);
     vc.charge_state_generation_ = 1;
-    assert(vc.ui_snapshot().charging); // legitimate tick-zero sample
-    vc.last_known_charge_.valid = false;
-    assert(!vc.ui_snapshot().charging);
+    vc.get_cached_charge_with_age(have_zero, zero_age);
+    assert(have_zero && zero_age == 0);
     vc.last_known_charge_.valid = true;
     vc.last_charge_ticks_ = UINT32_MAX - 1999; ticks = 1000;
     bool have = false; uint32_t age = 999;
@@ -144,7 +127,7 @@ int main() {
     vc.mutex.available = false;
     have = true; age = 999;
     assert(!vc.get_cached_charge_with_age(have, age).valid && !have && age == 0);
-    assert(!vc.ui_snapshot().charging && !vc.mutex.held);
+    assert(!vc.mutex.held);
 }
 '''
     compiler = shutil.which(os.environ.get("CXX", "c++"))
@@ -156,7 +139,7 @@ int main() {
         subprocess.run([compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-I", str(ROOT/"main"),
                         str(cpp), "-o", str(binary)], check=True, timeout=40)
         subprocess.run([str(binary)], check=True, timeout=10)
-    print("charge presentation: PASS (actual coherent snapshot/indicator, tick zero/wrap, lock failure and post-unlock publication)")
+    print("charge presentation: PASS (actual coherent snapshot, tick zero/wrap, lock failure and post-unlock publication)")
 
 
 if __name__ == "__main__":

@@ -512,7 +512,6 @@ jobs:
           target: esp32
           command: >-
             ./scripts/ci-build-all.sh
-            --skip-led-variant
             --target "${{ matrix.target }}"
             "${{ needs.prepare.outputs.release-version }}"
             "${{ github.sha }}"

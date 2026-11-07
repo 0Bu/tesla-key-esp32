@@ -226,9 +226,7 @@ elif name == "compiler" and "-o" in args:
             if fail != "heap":
                 expected += [["__mqtt_json__"]]
             if fail not in ("heap", "mqtt"):
-                expected += [["test/test_led_driver_contract.py", "--sanitize"],
-                             ["test/test_display_parity_contract.py", "--render-only", "--sanitize"],
-                             ["test/test_f137_host.py", "--source", ".", "--sanitize", "--execute-controlled-host-only"]]
+                expected += [["test/test_f137_host.py", "--source", ".", "--sanitize", "--execute-controlled-host-only"]]
                 if fail != "f137":
                     expected += [["test/test_identity_recovery_contract.py", "--sanitize"]]
                     if fail != "identity":
@@ -243,7 +241,7 @@ elif name == "compiler" and "-o" in args:
 def probe_heap_suite_invocations(run_mock: str, fast: str, watched_target: str = "heap_supervisor_tests") -> None:
     """Execute actual fallback/fast shell paths with inert compiler and executable effects."""
     branch = 'if command -v cmake >/dev/null 2>&1; then'
-    boundary = '# Display sim'
+    boundary = '# Python runtime and repository checks.'
     require(run_mock.count(branch) == 1 and run_mock.count(boundary) == 1,
             "Heap fallback flow seam is missing")
     # Select only the documented no-CMake branch. All guards, generators, compile argv and
@@ -434,7 +432,7 @@ def probe_stack_hook_invocations(source: str) -> None:
     """Run the actual run_gate/Python branch with inert tools, never compile or sample RTOS."""
     label = "stack hook invocation flow"
     gate = re.findall(r"(?ms)^run_gate\(\) \{\n.*?^\}", source)
-    begin, end = "# Display sim", '    run_gate "runtime C-boundary inventory"'
+    begin, end = "# Python runtime and repository checks.", '    run_gate "runtime C-boundary inventory"'
     require(len(gate) == 1 and source.count(begin) == source.count(end) == 1,
             label + ": actual shell seams are missing/ambiguous")
     mode = re.findall(r"(?m)^set -euo pipefail$", source)
@@ -458,10 +456,6 @@ def probe_stack_hook_program(program: str, watched: str = "test/test_stack_conte
     with tempfile.TemporaryDirectory(prefix="stack-hook-host-flow-") as directory:
         work = Path(directory); tools = work / "bin"; scripts = work / "scripts"
         tools.mkdir(); scripts.mkdir(); trace = work / "trace.jsonl"
-        # Earlier gates in this exact branch are inert. Their own canonical probes remain
-        # independently required by validate(); do not compile or launch their real effects here.
-        parity = scripts / "check-display-sim-parity.sh"
-        parity.write_text("#!/bin/sh\nexit 0\n"); parity.chmod(0o700)
         stub = '''#!PYTHON
 import json, os, sys
 args = sys.argv[1:]
@@ -619,19 +613,6 @@ def validate(root: Path) -> None:
     for validator in ("check-pages-manifest.py", "check-release-pages-bytes.py"):
         require(f'python3 "$repo_root/scripts/{validator}" --self-test' in publication_gate,
                 f"publication validator self-test is not executed: {validator}")
-    display_gate = (root / "scripts/check-display-sim-parity.sh").read_text()
-    require('"$OUT/display_golden_dump" --font' in display_gate and
-            'python3 tools/display_sim.py font-parity "$OUT/display_font_golden.tsv"' in display_gate and
-            'cmp main/display_font.h "$OUT/display_font.generated.h"' in display_gate and
-            'python3 test/test_display_parity_contract.py' in display_gate and
-            'test/test_display_parity_contract.py' in run_mock,
-            "display native font/provenance/golden controls are missing from the strict host gate")
-    require('run_gate "optional LED driver decisions and GPIO" 120 python3 test/test_led_driver_contract.py' in run_mock and
-            'test/test_led_driver_contract.py' in run_mock and
-            'python3 test/test_led_driver_contract.py --sanitize' in sanitizers,
-            "actual optional LED driver gate is missing")
-    require('python3 test/test_display_parity_contract.py --render-only --sanitize' in sanitizers,
-            "actual display renderer sanitizer gate is missing")
     require('run_gate "cached identity recovery and actual restart owner" 120 python3 test/test_identity_recovery_contract.py' in run_mock and
             'python3 test/test_identity_recovery_contract.py --sanitize' in sanitizers,
             "actual identity recovery host/sanitizer gate is missing")
@@ -639,7 +620,8 @@ def validate(root: Path) -> None:
     require('"$OUT/ble_row_golden_dump" --web-presenters > "$OUT/web_presenter_golden.tsv"' in presenter_gate and
             'node tools/ble_row_parity.js "$OUT/ble_row_golden.tsv" "$OUT/web_presenter_golden.tsv"' in presenter_gate and
             'run_gate "BLE browser-row parity" 120 scripts/check-ble-row-parity.sh' in run_mock and
-            "test/ble_row_golden_dump.cpp" in run_mock and "tools/ble_row_parity.js" in run_mock,
+            "test/ble_row_golden_dump.cpp" in run_mock and
+            "test/web_presentation_reference.hpp" in run_mock and "tools/ble_row_parity.js" in run_mock,
             "actual web presenter native/glyph parity is missing from the strict host gate")
     require("--exclude-regex '^(runtime_boundary_contract|eth_startup_cleanup_controls|f137_task_host_contract)$'" in run_mock,
             "strict host CTest must exclude exactly the three directly executed contracts")
@@ -1102,14 +1084,6 @@ def self_test(root: Path) -> None:
          'true # removed contextual outcomes gate', "contextual charging command outcomes"),
         ("scripts/run-mock-tests.sh", 'run_gate "coherent charge presentation snapshot" 120 python3 test/test_charge_presentation.py',
          'true # removed charge snapshot gate', "coherent charge presentation snapshot"),
-        ("scripts/run-mock-tests.sh", 'run_gate "optional LED driver decisions and GPIO" 120 python3 test/test_led_driver_contract.py',
-         '# removed LED gate', "actual optional LED driver gate is missing"),
-        ("scripts/run-sanitizer-tests.sh", 'python3 test/test_led_driver_contract.py --sanitize',
-         'true # removed LED sanitizers', "actual optional LED driver gate is missing"),
-        ("scripts/check-display-sim-parity.sh", 'cmp main/display_font.h "$OUT/display_font.generated.h"',
-         '# removed font provenance', "display native font/provenance/golden controls"),
-        ("scripts/check-display-sim-parity.sh", 'python3 test/test_display_parity_contract.py',
-         '# removed empty golden controls', "display native font/provenance/golden controls"),
         ("scripts/test-build-contracts.sh", 'python3 "$repo_root/scripts/check-pages-manifest.py" --self-test',
          '# removed Pages self-test', "publication validator self-test is not executed"),
         ("scripts/test-build-contracts.sh", 'python3 "$repo_root/test/test_deploy_candidate.py"',
@@ -1392,17 +1366,6 @@ def self_test(root: Path) -> None:
         ("scripts/ci-build-verify.sh", "MQTT_JSON_SANITIZE=1 bash ./test/run-mqtt-json-publish-tests.sh",
          "true", "real-cJSON host gates"),
     ]
-    mutations.append(("scripts/run-sanitizer-tests.sh",
-                      "python3 test/test_display_parity_contract.py --render-only --sanitize",
-                      "true # removed native display renderer execution",
-                      "actual display renderer sanitizer gate"))
-    display_call = 'ASAN_OPTIONS="$asan_options" UBSAN_OPTIONS="$ubsan_options" \\\n    LSAN_OPTIONS="$lsan_options" CXX="$CXX" python3 test/test_display_parity_contract.py --render-only --sanitize'
-    mutations.extend([
-        ("scripts/run-sanitizer-tests.sh", display_call, 'if false; then\n' + display_call + '\nfi',
-         "sanitizer invocation flow"),
-        ("scripts/run-sanitizer-tests.sh", display_call, 'exit 0\n' + display_call,
-         "sanitizer invocation flow"),
-    ])
     css_call = 'run_gate "CSS bytes and actual inline generation" 120 python3 test/test_inline_assets.py'
     mutations.extend([
         ("scripts/run-mock-tests.sh", css_call, "true # omitted CSS generator controls",
@@ -1547,7 +1510,6 @@ def self_test(root: Path) -> None:
                 "scripts/run-sanitizer-tests.sh",
                 "scripts/run-fast-tests.sh",
                 "scripts/check-ble-row-parity.sh",
-                "scripts/check-display-sim-parity.sh",
                 "tools/agent-hooks/agent_hook.py",
                 "test/CMakeLists.txt",
                 "test/test_f137_host.py",

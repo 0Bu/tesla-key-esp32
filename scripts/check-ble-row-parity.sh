@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Compare shipped browser BLE decisions, SoC colours and RSSI glyph counts with native helpers.
+# Compare shipped browser BLE decisions, SoC colours and RSSI glyph counts with C++ reference values.
 # The host dumper produces both input/vector sets; Node evaluates the marked shipped JS and
 # the actual signal SVG builder. This proves the covered presenter decisions, not pixels or
 # physical signal accuracy. The strict mock runner invokes this gate.
