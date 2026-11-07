@@ -4,7 +4,7 @@ var $=function(id){return document.getElementById(id)};
 function setHTML(el,html){ if(el && el.__h!==html){ el.__h=html; el.innerHTML=html; } }
 var state=null, otaTimer=null, otaAvail=null, otaOffer=null, waking=false, wakeTimeout=null, chgBusy=false, feedOk=false;
 var otaBusy=false, otaPhase=null, otaPollState=null, otaDeadline=0, otaExpectedVersion=null, otaChannel='release', otaChannelInitialSet=false;
-var otaChannelInFlight=false, otaChannelTarget=null, otaPrompting=false;
+var otaChannelInFlight=false, otaChannelTarget=null, otaPrompting=false, otaCheckRequest=null;
 var otaFlowToken=null;
 var fwFocusId=null;   // control that started the running check/channel change; refocused once the UI is idle again
 
@@ -1553,6 +1553,7 @@ function otaCheck(){
   toast('Checking for updates…', 'load', 'ota');
   otaBarProgress('indet');
   var prSel=otaPrSelection();
+  otaCheckRequest={channel:otaChannel||'release',pr:prSel?Number(prSel):0};
   return otaAfterStatusPoll(function(){
     var checkUrl='/ota/check?'+(prSel?'pr='+prSel+'&':'')+'ms='+Date.now();
     return requestOtaStart(checkUrl,{});
@@ -1574,7 +1575,13 @@ function otaCheckPoll(){
     if(o.state==='error'){ otaFail('check failed'+(o.message?' — '+o.message:'')); return; }
     if(o.state!=='idle'){ otaFail('invalid check state'); return; }
     // Another client withdrew this completed offer before it was read: never report "up to date".
-    if(o.offer_changed===true){ otaFail('Update offer changed — check again and confirm the new offer',true); return; }
+    if(o.offer_changed===true){ otaFail('Update offer changed — check again and confirm the new offer'); return; }
+    // A completed result for another channel/PR (another client's setting or check) is not this check's answer.
+    var asked=otaCheckRequest;
+    if(typeof o.channel==='string'&&((typeof o.configured_channel==='string'&&o.configured_channel!==o.channel)||
+       (asked&&(o.channel!==asked.channel||(o.pr||0)!==asked.pr)))){
+      otaFail('Update channel changed — check again'); return;
+    }
     if(o.update_available){
       var offer=otaOfferSnapshot(o);
       if(!offer){ otaFail('Update offer identity is missing — check again'); return; }

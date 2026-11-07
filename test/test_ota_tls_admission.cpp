@@ -493,6 +493,7 @@ void upload_checks(){
  CHECK(ota_get_state()==OtaState::Error&&ota_get_status().channel==tk::OtaChannel::Dev);
  reset();ota_set_channel(tk::OtaChannel::Dev);async_copy_ok=false;
  CHECK(ota_upload_start(&req,handed)==R::NoMemory&&!handed&&!ota_is_busy()&&async_copies==0);
+ CHECK(ota_get_state()==OtaState::Error&&ota_get_status().channel==tk::OtaChannel::Dev);
  reset();ota_set_channel(tk::OtaChannel::Dev);create_ok=false;
  CHECK(ota_upload_start(&req,handed)==R::InternalError&&handed&&!ota_is_busy());
  CHECK(async_copies==1&&async_completions==1&&begins==0);
@@ -587,6 +588,24 @@ void dev_source_error_checks(){
  CHECK(ota_check_start(0)==tk::OtaStartResult::NoMemory);dev_error(kOtaNoMemory);
  reset();ota_set_channel(tk::OtaChannel::Dev);create_ok=false;
  CHECK(ota_check_start(0)==tk::OtaStartResult::InternalError);dev_error("could not start OTA coordinator task");
+ // Client B's later Release setting cannot rename A's captured Dev source at deferred admission.
+ auto moved_error=[](std::string_view message){
+  const auto status=ota_get_status();
+  CHECK(status.state==OtaState::Error&&status.channel==tk::OtaChannel::Dev);
+  CHECK(status.configured_channel==tk::OtaChannel::Release&&!status.update_available&&!status.offer_changed);
+  CHECK(std::string_view(status.message.data())==message&&!ota_is_busy()&&begins==0&&selectors==0);
+ };
+ reset();ota_set_channel(tk::OtaChannel::Dev);http_request_live=true;entry_largest=57344;
+ CHECK(ota_check_start_after_http(0,&http_server_marker)==tk::OtaStartResult::Started);
+ http_request_live=false;ota_set_channel(tk::OtaChannel::Release);run_queued_http();moved_error(kOtaNoMemory);
+ reset();ota_set_channel(tk::OtaChannel::Dev);now=50;
+ CHECK(ota_check_start_after_http(0,&http_server_marker)==tk::OtaStartResult::Started);
+ ota_set_channel(tk::OtaChannel::Release);now=operation_budget(50,false).deadline();run_queued_http();
+ moved_error("update deadline reached during setup");
+ reset();ota_set_channel(tk::OtaChannel::Dev);http_request_live=true;entry_largest=57344;
+ CHECK(ota_check_start_after_http(0,&http_server_marker)==tk::OtaStartResult::Started);
+ http_request_live=false;entry_largest=61440;create_ok=false;ota_set_channel(tk::OtaChannel::Release);
+ run_queued_http();moved_error("could not start OTA coordinator task");
  reset();
 }
 void deferred_http_checks(){

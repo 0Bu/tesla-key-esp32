@@ -520,10 +520,13 @@ cases; startup is no longer represented by a fake integer task parameter.
 
 The same fixture compiles actual update/status/notes/channel handlers against that OTA application.
 Two-client cases cover channel ABA, same-channel no-op, superseding checks, bound notes,
-missing/stale/duplicate IDs and mismatched PRs with zero image effects. Immediate and deferred
-checks changed before completion assert the returned status, source/configured channels and notes.
-Dev upload, install, deferred-admission and exhaustion errors keep their captured source, and a
-completed offer withdrawn by a channel change reports `offer_changed`. Same-version manifest
+missing/stale/duplicate IDs and mismatched PRs with zero image effects. Current Release, Dev and PR
+offers assert the exact returned status and bound notes; an old ID cannot read a same-channel
+successor's notes. Immediate and deferred checks changed before completion assert the returned
+status, source/configured channels and notes. Deferred memory/queue/deadline/task refusals, also
+after a later setting change, check entry memory/task failures, upload refusals and failures,
+replaced or no-longer-newer Dev installs and exhaustion keep their captured source. A completed
+offer withdrawn by a channel change, including ABA, reports `offer_changed`. Same-version manifest
 and selected-note changes refuse before image transfer. Dev and PR candidates reach mandatory
 SDK verification, and both generation/channel exhaustion remain fail-closed while signed direct
 upload stays available. Altered payloads and short/long images never reach SDK end/selection.

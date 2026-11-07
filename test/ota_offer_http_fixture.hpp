@@ -88,6 +88,25 @@ void no_current_offer(const char* state,const char* source,const char* configure
  upload_status.clear();const auto notes=request_offer(handle_ota_changelog);
  CHECK(!notes&&upload_status=="204 No Content"&&upload_reply.empty());
 }
+// Externally returned current offer and its bound notes, exactly as a client receives them.
+void current_offer(const std::string& id,const char* source,const char* version,unsigned pr,const char* notes){
+ const auto json=request_offer(handle_ota_status);CHECK(response_status==200&&json);
+ CHECK(json_text(json,"state")=="idle"&&json_text(json,"channel")==source&&json_text(json,"offer_id")==id);
+ CHECK(json_text(json,"configured_channel")==source&&json_text(json,"available")==version);
+ CHECK(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(json.get(),"update_available")));
+ CHECK(!cJSON_GetObjectItemCaseSensitive(json.get(),"offer_changed"));
+ const cJSON* pr_item=cJSON_GetObjectItemCaseSensitive(json.get(),"pr");
+ CHECK(pr?cJSON_IsNumber(pr_item)&&pr_item->valuedouble==pr:pr_item==nullptr);
+ const auto image=image_body();tk::ota::Digest digest{};
+ CHECK(tk::ota::sha256(image.data(),image.size(),digest)==PSA_SUCCESS);
+ constexpr char hex[]="0123456789abcdef";std::string hash;
+ for(auto b:digest){hash+=hex[b>>4];hash+=hex[b&15];}
+ CHECK(json_text(json,"image_sha256")==hash);
+ const cJSON* bytes=cJSON_GetObjectItemCaseSensitive(json.get(),"image_bytes");
+ CHECK(cJSON_IsNumber(bytes)&&bytes->valuedouble==static_cast<double>(image.size()));
+ upload_status.clear();const auto text=request_offer(handle_ota_changelog,"offer="+id);
+ CHECK(!text&&upload_status.empty()&&response_status==0&&upload_reply==notes);
+}
 void refused_offer(std::string query,int expected=409){
  const int old_connects=connects.load();
  const auto json=request_offer(handle_ota_update,std::move(query));
@@ -101,6 +120,7 @@ void offer_binding_checks(){
  auto json=request_offer(handle_ota_status);CHECK(response_status==200);
  CHECK(std::string_view(cJSON_GetObjectItemCaseSensitive(json.get(),"channel")->valuestring)=="release");
  CHECK(std::string_view(cJSON_GetObjectItemCaseSensitive(json.get(),"offer_id")->valuestring)==first);
+ current_offer(first,"release","1.6.3",0,"A change");
  // Same-channel save persists at most once and is an explicit identity-preserving no-op.
  change_channel(tk::OtaChannel::Release);change_channel(tk::OtaChannel::Release);
  CHECK(config_saves==1&&std::string_view(ota_get_status().offer_id.data())==first);
@@ -118,11 +138,18 @@ void offer_binding_checks(){
  const char* changed=tk::ota_start_reason(tk::OtaStartResult::OfferChanged,false);
  no_current_offer("idle","release","dev",changed,true);
  auto notes=request_offer(handle_ota_changelog,"offer="+first);CHECK(response_status==409&&notes);
- change_channel(tk::OtaChannel::Release);refused_offer("offer="+first);
- // A new check by B replaces A's ID even when the candidate bytes are identical.
- reset_for_image();const std::string second=confirmed_offer;
+ change_channel(tk::OtaChannel::Release);no_current_offer("idle","release","release",changed,true);
+ refused_offer("offer="+first);
+ // A new same-channel check by B replaces A's ID even when the candidate bytes are identical;
+ // A's notes ID cannot read B's successor notes.
+ reset();changelog="{\"version\":\"1.6.3\",\"changelog\":\"Successor notes\"}";
+ CHECK(ota_check(0).update_available);join_worker();
+ const std::string second=ota_get_status().offer_id.data();reset();
  CHECK(second!=first);refused_offer("offer="+first);
  CHECK(std::string_view(ota_get_status().offer_id.data())==second);
+ notes=request_offer(handle_ota_changelog,"offer="+first);CHECK(response_status==409&&notes);
+ CHECK(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(notes.get(),"offer_changed")));
+ current_offer(second,"release","1.6.3",0,"Successor notes");
  // Accepted metadata work loses its offer if either channel changes before completion,
  // including deferred HTTP work whose Release capture precedes client B's change.
  for(bool deferred:{false,true})for(bool aba:{false,true}){
@@ -168,6 +195,7 @@ void dev_preview_binding_checks(){
   changelog="{\"version\":\""+version+"\",\"changelog\":\"Bound notes\"}";
   CHECK(ota_check(pr).update_available);join_worker();
   const auto checked=ota_get_status();CHECK(checked.channel==channel&&checked.target_pr==pr&&checked.offer_id[0]);
+  current_offer(checked.offer_id.data(),tk::ota_channel_name(channel),version.c_str(),pr,"Bound notes");
   raw_end_error=ESP_ERR_OTA_VALIDATE_FAILED; // Reach mandatory SDK verification without a terminal boot.
   const auto result=request_offer(handle_ota_update,"offer="+std::string(checked.offer_id.data())+(pr?"&pr=42":""));
   CHECK(response_status==200&&result);run_selected();join_worker();
@@ -185,6 +213,15 @@ void dev_preview_binding_checks(){
  const char* changed=tk::ota_start_reason(tk::OtaStartResult::OfferChanged,false);
  no_current_offer("error","dev","dev",changed);
  CHECK(begins==0&&writes==0&&selectors==0);refused_offer("offer="+dev_offer);
+ // A confirmed Dev candidate that is no longer newer is refused in one Error record.
+ reset();ota_set_channel(tk::OtaChannel::Dev);image_version="1.6.3-dev.1";
+ manifest=selected_manifest(image_version);changelog="{}";
+ CHECK(ota_check(0).update_available);join_worker();
+ const std::string older_offer=ota_get_status().offer_id.data();manifest=selected_manifest("1.6.2");
+ const auto older=request_offer(handle_ota_update,"offer="+older_offer);
+ CHECK(response_status==200&&older);run_selected();join_worker();
+ no_current_offer("error","dev","dev","no newer version available");
+ CHECK(begins==0&&writes==0&&selectors==0);refused_offer("offer="+older_offer);
  // Reverse direction while the real deferred check still owns its captured Dev source.
  reset();ota_set_channel(tk::OtaChannel::Dev);image_version="1.6.3-dev.1";
  manifest=selected_manifest(image_version);changelog="{}";

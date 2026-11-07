@@ -891,8 +891,9 @@ static void set_check_done(const OtaCheckResult& r, const OtaOperation& operatio
 static void ota_task_impl(OtaOperation& operation) {
     const OtaCheckResult pre = perform_check(operation, operation.target_pr);
     if (!pre.ok || !pre.update_available) {
-        set_check_done(pre, operation); // Fresh failures/OOM withdraw any earlier offer.
-        if (pre.ok) set_state(OtaState::Error, 0, "no newer version available");
+        // One publication: install polling must never read an intermediate Idle record as success.
+        if (pre.ok) set_check_error("no newer version available", operation.channel_state);
+        else set_check_done(pre, operation); // Fresh failures/OOM withdraw any earlier offer.
         return;
     }
     if (operation.channel_state != s_ota_channel.load(std::memory_order_acquire) ||

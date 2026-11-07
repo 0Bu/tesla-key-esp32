@@ -3990,6 +3990,10 @@ def require_ota_status_lock_contract(ota_source: str, runtime_tests: str) -> Non
     check = scrub_cpp(function_body_in(ota_source, "perform_check"))
     if re.search(r"\b(?:set_state|set_check_error|set_check_done)\s*\(", check):
         raise AssertionError("OTA manifest check publishes a partial shared-status generation")
+    install = scrub_cpp(function_body_in(ota_source, "ota_task_impl"))
+    refusal = install[: install.find("tk::ota::ImagePolicy policy{};")]
+    if "tk::ota::ImagePolicy policy{};" not in install or re.search(r"\bset_state\s*\(", refusal):
+        raise AssertionError("OTA install refusal publishes an intermediate status generation")
     done = scrub_cpp(function_body_in(ota_source, "set_check_done"))
     for token in (
         "OtaStatusPod candidate{};",
