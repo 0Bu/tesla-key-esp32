@@ -72,11 +72,6 @@ function showDegradedReply(j,key){
   poll();
   return true;
 }
-function commandResponse(j){
-  var o=j&&j.response;
-  if(!o||typeof o.result!=='boolean'||typeof o.reason!=='string') throw new Error('invalid command response');
-  return o;
-}
 
 /* ---------- toasts ---------- */
 function toast(msg, type, key){
@@ -598,6 +593,7 @@ function render(s){
   setSub("vehSub", paired?pairedTxt:(hasVin?'Not paired yet':'Add the VIN to begin'), '');
   var vinTx=hasVin?'Change VIN':'Add VIN';
   var vb=$("vinBtn"); if(vb){ vb.setAttribute('aria-label',vinTx); vb.setAttribute('title',vinTx); }
+  var eb=$("evccBtn"); if(eb) eb.classList.toggle('hide',!evccYaml(s));
 
   // Render the parity-tested BLE presenter; raw scan state carries no deadline.
   var ble=s.ble||{};
@@ -848,7 +844,7 @@ function askOpen(o,cancelValue){
   var ic=$("askIcon"); if(ic&&ic.classList) ic.classList.toggle('hide',!o.destructive||text);
   var p=$("askText"); if(p){ p.textContent=o.text||''; if(p.classList) p.classList.toggle('hide',!o.text); }
   var f=$("askField"); if(f&&f.classList) f.classList.toggle('hide',!text);
-  var dt=$("askDetail"); if(dt){ dt.textContent=o.detail||''; if(dt.classList) dt.classList.toggle('hide',!o.detail); }
+  var dt=$("askDetail"); if(dt){ dt.textContent=o.detail||''; if(dt.classList){ dt.classList.toggle('hide',!o.detail); dt.classList.toggle('code',!!o.code); } }
   var n=$("askNote"); if(n){ n.textContent=o.note||''; n.className='note'+(o.destructive?' danger':''); n.hidden=!o.note; }
   var ok=$("askOk"); if(ok) ok.textContent=o.okLabel||'Save';
   var cc=$("askCancel"); if(cc) cc.textContent=o.cancelLabel||'Cancel';
@@ -1168,6 +1164,120 @@ function genKey(){
       })
       .catch(function(){ toast('Key generation failed', 'err', 'key'); });
   });
+}
+
+/* ---------- evcc vehicle configuration ---------- */
+// docs/examples/evcc-custom-vehicle.yaml without its leading comments; the web UI test requires
+// equality. Prefer the active IPv4 lease, which evcc reaches without mDNS, else this page's host.
+// Request paths must carry the stored uppercase VIN exactly.
+var EVCC_YAML=[
+  'title: Tesla Key ESP32',
+  'icon: car',
+  'capacity: 60 # Optional battery capacity in kWh; set for your vehicle.',
+  '',
+  'chargeEnable:',
+  '  source: http',
+  '  uri: \'http://DEVICE_HOST/api/1/vehicles/REPLACE_WITH_VIN/command/{{ if .chargeenable }}charge_start{{ else }}charge_stop{{ end }}\'',
+  '  method: POST',
+  '  headers:',
+  '    Content-Type: application/json',
+  '  timeout: 30s',
+  'maxcurrent:',
+  '  source: http',
+  '  uri: http://DEVICE_HOST/api/1/vehicles/REPLACE_WITH_VIN/command/set_charging_amps',
+  '  method: POST',
+  '  headers:',
+  '    Content-Type: application/json',
+  '  body: \'{"charging_amps": ${maxcurrent}}\'',
+  '  timeout: 30s',
+  'wakeup:',
+  '  source: http',
+  '  uri: http://DEVICE_HOST/api/1/vehicles/REPLACE_WITH_VIN/command/wake_up',
+  '  method: POST',
+  '  headers:',
+  '    Content-Type: application/json',
+  '  timeout: 30s',
+  'soc:',
+  '  source: http',
+  '  uri: http://DEVICE_HOST/api/1/vehicles/REPLACE_WITH_VIN/vehicle_data?endpoints=charge_state',
+  '  jq: .response.response.charge_state.battery_level',
+  '  timeout: 30s',
+  '  cache: 1s',
+  'getmaxcurrent:',
+  '  source: http',
+  '  uri: http://DEVICE_HOST/api/1/vehicles/REPLACE_WITH_VIN/vehicle_data?endpoints=charge_state',
+  '  jq: .response.response.charge_state.charge_amps',
+  '  timeout: 30s',
+  '  cache: 1s',
+  'limitsoc:',
+  '  source: http',
+  '  uri: http://DEVICE_HOST/api/1/vehicles/REPLACE_WITH_VIN/vehicle_data?endpoints=charge_state',
+  '  jq: .response.response.charge_state.charge_limit_soc',
+  '  timeout: 30s',
+  '  cache: 1s',
+  'range:',
+  '  source: http',
+  '  uri: http://DEVICE_HOST/api/1/vehicles/REPLACE_WITH_VIN/vehicle_data?endpoints=charge_state',
+  '  jq: .response.response.charge_state.battery_range',
+  '  scale: 1.60934',
+  '  timeout: 30s',
+  '  cache: 1s',
+  'chargedenergy:',
+  '  source: http',
+  '  uri: http://DEVICE_HOST/api/1/vehicles/REPLACE_WITH_VIN/vehicle_data?endpoints=charge_state',
+  '  jq: .response.response.charge_state.charge_energy_added',
+  '  timeout: 30s',
+  '  cache: 1s',
+  'climater:',
+  '  source: http',
+  '  uri: http://DEVICE_HOST/api/1/vehicles/REPLACE_WITH_VIN/vehicle_data?endpoints=climate_state',
+  '  jq: .response.response.climate_state.is_preconditioning',
+  '  timeout: 30s',
+  '  cache: 1s',
+  'odometer:',
+  '  source: http',
+  '  uri: http://DEVICE_HOST/api/1/vehicles/REPLACE_WITH_VIN/vehicle_data?endpoints=drive_state',
+  '  jq: .response.response.drive_state.odometer | if . > 0 then . else error("odometer not available") end',
+  '  scale: 1.60934',
+  '  timeout: 30s',
+  '  cache: 1s',
+  'status:',
+  '  source: http',
+  '  uri: http://DEVICE_HOST/api/1/vehicles/REPLACE_WITH_VIN/vehicle_data?endpoints=charge_state',
+  '  jq: (if (.response.response.charge_state.charging_state == "Charging") then "C"',
+  '    elif (.response.response.charge_state.charging_state == "Starting") then "B"',
+  '    elif (.response.response.charge_state.charging_state == "Stopped") then "B"',
+  '    elif (.response.response.charge_state.charging_state == "NoPower") then "B"',
+  '    elif (.response.response.charge_state.charging_state == "Complete") then "B"',
+  '    else "A" end)',
+  '  timeout: 30s',
+  '  cache: 1s'
+].join('\n')+'\n';
+function evccYaml(s){
+  var ip=s&&s.ip!=='0.0.0.0'&&s.ip||location.hostname||'';
+  return s&&/^[A-HJ-NPR-Z0-9]{17}$/.test(s.vin)&&/^[\w.-]+$/.test(ip)?
+    EVCC_YAML.split('DEVICE_HOST').join(ip).split('REPLACE_WITH_VIN').join(s.vin):null;
+}
+function openEvcc(){
+  var y=evccYaml(state);
+  if(!y) return;
+  return askConfirm({title:'evcc configuration', detail:y, code:true, okLabel:'Copy', cancelLabel:'Close',
+    text:'Paste into evcc under Settings → Vehicles → Add → Custom device. Reserve this IP in your router.'}).then(function(go){
+    var ok=go&&copyText(y);
+    if(go) toast(ok?'Copied to clipboard':'Copy failed — select the text and copy it manually',ok?'ok':'err','evcc');
+    if(go&&!ok) return openEvcc();
+  });
+}
+// Plain-HTTP pages lack the asynchronous Clipboard API: copy from a temporary read-only field.
+// Its 16 px text avoids the iOS focus zoom; focus then returns to the control that had it.
+function copyText(text){
+  var f=document.createElement('textarea'), back=document.activeElement, ok=false;
+  f.value=text; f.readOnly=true; f.style.cssText='position:fixed;left:-9999px;font-size:16px';
+  document.body.appendChild(f);
+  try{ f.select(); f.setSelectionRange(0,text.length); ok=document.execCommand('copy')===true; }catch(e){}
+  document.body.removeChild(f);
+  if(back&&back.focus) back.focus();
+  return ok;
 }
 
 /* ---------- OTA ---------- */
@@ -1733,22 +1843,6 @@ function fwRefocus(){
   var lost = !ae || ae === document.body || ae === document.documentElement || ae.disabled || ae.id === id;
   var el = $(id);
   if(lost && el && typeof el.focus === 'function') el.focus({ preventScroll: true });
-}
-if(typeof window!=='undefined'){
-  window.isOtaRunning = isOtaRunning;
-  window.isOtaBusy = isOtaBusy;
-  window.syncOtaUi = syncOtaUi;
-  window.openFwUpdate = openFwUpdate;
-  window.openChannelSelect = openChannelSelect;
-  window.closeChannelModal = closeChannelModal;
-  window.selectChannel = selectChannel;
-  window.setChannel = setChannel;
-  window.startOtaUpdate = startOtaUpdate;
-  window.askValidate = askValidate;
-  window.askOtaInstall = askOtaInstall;
-  window.closeOtaModal = closeOtaModal;
-  window.otaCheck = otaCheck;
-  window.getActiveChannel = getActiveChannel;
 }
 
 /* ---------- boot ---------- */

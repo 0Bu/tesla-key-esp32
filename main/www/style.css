@@ -47,8 +47,6 @@ svg{display:block}
 .logo{display:grid; place-items:center; flex:none; width:46px; height:46px; border-radius:14px; background:var(--accent);
   box-shadow:0 3px 12px rgba(232,33,39,.35)}
 .logo svg{width:60%; height:60%; fill:#fff}
-.logo.big{width:48px; height:48px; border-radius:14px}
-.rail-logo{display:none}
 
 /* Loading icon in action popups. */
 .otaspin{animation:spin 1s linear infinite}
@@ -59,15 +57,8 @@ svg{display:block}
 .pane{display:flex; width:100%}
 .pane.hide{display:none!important}
 .pane-setup{display:flex; flex-direction:column; width:100%}
-.stack{flex-direction:column; gap:14px}
 .card{background:var(--card); border:1px solid var(--border); border-radius:var(--r-card); box-shadow:var(--shadow);
   padding:16px; display:flex; flex-direction:column; gap:10px; width:100%; min-width:0}
-.lbl{font-size:11px; font-weight:650; letter-spacing:.6px; text-transform:uppercase; color:var(--muted)}
-.val{font-size:19px; overflow-wrap:anywhere}
-.val.vin{letter-spacing:.8px}
-.sub{font-size:14px; color:var(--muted)}
-.sub.strong{font-weight:600}
-.sub.ok{color:var(--ok-text)} .sub.warn{color:var(--warn-text)}
 .ph{color:var(--muted)}
 
 .ri svg,.ib svg,.pill svg,.bi svg,.warnic svg{width:100%; height:100%; fill:none; stroke:currentColor;
@@ -86,17 +77,16 @@ svg{display:block}
 .pill{align-self:flex-start; min-height:44px; padding:0 16px; border-radius:999px; border:1px solid var(--border);
   background:none; font-size:15px; font-weight:650; display:inline-flex; align-items:center; justify-content:center; gap:8px}
 .pill svg{width:16px; height:16px; flex:none}
-.pill.soft{background:var(--soft)}
-.pill.soft:hover{background:color-mix(in srgb,var(--fg) 8%,var(--soft))}
 .pill.danger{color:var(--accent-text); border-color:color-mix(in srgb,var(--accent) 45%,var(--border))}
 .pill.sm{font-size:14px; padding:0 14px; background:var(--card)}
-.pill.wide-btn{align-self:stretch; min-height:46px}
 .pill:active,.btn:active{transform:scale(.985)}
 .ib{width:44px; height:44px; flex:none; border:0; border-radius:12px; background:none; color:var(--muted); display:grid; place-items:center}
 .ib:hover{background:var(--soft)}
 .ib.danger{color:var(--accent-text)}
 .ib.danger:hover{background:color-mix(in srgb,var(--accent) 12%,var(--soft))}
 .ib svg{width:18px; height:18px}
+/* Text pill beside the VIN pencil, within the same 44 px target. */
+#evccBtn{width:auto; padding:0; margin-right:-12px}
 .btn{min-height:50px; border-radius:999px; font-weight:650; border:1px solid var(--border); background:none}
 .btn.primary{border:0; background:var(--accent); color:#fff}
 .btn.primary:hover{background:#c3151b}
@@ -244,6 +234,9 @@ svg{display:block}
   min-height:0; overflow-y:auto; overscroll-behavior:contain}
 .ota-changes[hidden]{display:none}
 .ota-changes > li{flex-shrink:0; overflow-wrap:anywhere}
+/* Unwrapped code keeps its visible indentation; one tap selects all of it for a manual copy. */
+.sheet:has(.code){max-width:760px}
+.detail.code{max-height:50vh; overflow:auto; white-space:pre; overflow-wrap:normal; font-size:12.5px; -webkit-user-select:all; user-select:all}
 
 /* toasts */
 .toasts{position:fixed; left:0; right:0; z-index:30; bottom:calc(16px + env(safe-area-inset-bottom));
