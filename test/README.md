@@ -520,7 +520,9 @@ cases; startup is no longer represented by a fake integer task parameter.
 
 The same fixture compiles actual update/status/notes/channel handlers against that OTA application.
 Two-client cases cover channel ABA, same-channel no-op, superseding checks, bound notes,
-missing/stale/duplicate IDs and mismatched PRs with zero image effects. Same-version manifest
+missing/stale/duplicate IDs and mismatched PRs with zero image effects. Immediate and deferred
+checks changed before completion assert the returned status, source/configured channels and notes,
+and Dev upload/install errors keep their captured source. Same-version manifest
 and selected-note changes refuse before image transfer. Dev and PR candidates reach mandatory
 SDK verification, and both generation/channel exhaustion remain fail-closed while signed direct
 upload stays available. Altered payloads and short/long images never reach SDK end/selection.

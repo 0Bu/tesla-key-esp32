@@ -70,6 +70,21 @@ void change_channel(tk::OtaChannel channel){
  CHECK(response_status==200&&cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(json.get(),"result")));
  CHECK(ota_get_channel()==channel);
 }
+std::string_view json_text(const tk::JsonOwner& json,const char* name){
+ const cJSON* item=cJSON_GetObjectItemCaseSensitive(json.get(),name);
+ CHECK(cJSON_IsString(item));return item->valuestring;
+}
+// Externally returned status and notes for a source whose offer must not be current.
+void no_current_offer(const char* state,const char* source,const char* configured,const char* message){
+ const auto json=request_offer(handle_ota_status);CHECK(response_status==200&&json);
+ CHECK(json_text(json,"state")==state&&json_text(json,"channel")==source);
+ CHECK(json_text(json,"configured_channel")==configured&&json_text(json,"message")==message);
+ CHECK(json_text(json,"available").empty()&&json_text(json,"offer_id").empty());
+ CHECK(cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(json.get(),"update_available")));
+ CHECK(!cJSON_GetObjectItemCaseSensitive(json.get(),"image_sha256"));
+ upload_status.clear();const auto notes=request_offer(handle_ota_changelog);
+ CHECK(!notes&&upload_status=="204 No Content"&&upload_reply.empty());
+}
 void refused_offer(std::string query,int expected=409){
  const int old_connects=connects.load();
  const auto json=request_offer(handle_ota_update,std::move(query));
@@ -96,18 +111,28 @@ void offer_binding_checks(){
  CHECK(!ota_get_status().update_available&&ota_get_status().available[0]==0);
  CHECK(std::string_view(cJSON_GetObjectItemCaseSensitive(json.get(),"channel")->valuestring)=="release");
  CHECK(std::string_view(cJSON_GetObjectItemCaseSensitive(json.get(),"configured_channel")->valuestring)=="dev");
+ // The withdrawn completed offer no longer reads as an available update.
+ const char* changed=tk::ota_start_reason(tk::OtaStartResult::OfferChanged,false);
+ no_current_offer("idle","release","dev",changed);
  auto notes=request_offer(handle_ota_changelog,"offer="+first);CHECK(response_status==409&&notes);
  change_channel(tk::OtaChannel::Release);refused_offer("offer="+first);
  // A new check by B replaces A's ID even when the candidate bytes are identical.
  reset_for_image();const std::string second=confirmed_offer;
  CHECK(second!=first);refused_offer("offer="+first);
  CHECK(std::string_view(ota_get_status().offer_id.data())==second);
- // Accepted metadata work loses its offer if either channel changes before completion.
- for(bool aba:{false,true}){
-  reset();CHECK(ota_check_start(0)==tk::OtaStartResult::Started);
+ // Accepted metadata work loses its offer if either channel changes before completion,
+ // including deferred HTTP work whose Release capture precedes client B's change.
+ for(bool deferred:{false,true})for(bool aba:{false,true}){
+  reset();
+  if(deferred)CHECK(ota_check_start_after_http(0,&http_server_marker)==tk::OtaStartResult::Started);
+  else CHECK(ota_check_start(0)==tk::OtaStartResult::Started);
   change_channel(tk::OtaChannel::Dev);if(aba)change_channel(tk::OtaChannel::Release);
+  no_current_offer("checking","release",aba?"release":"dev","checking for updates");
+  if(deferred){run_queued_http();CHECK(s_operation.load()->channel==tk::OtaChannel::Release);}
   run_selected();join_worker();CHECK(!ota_get_status().update_available&&ota_get_status().offer_id[0]==0);
   size_t n=99;char text[64];CHECK(!ota_get_changelog(text,sizeof(text),n)&&n==0);
+  no_current_offer("error","release",aba?"release":"dev","update channel changed; check again");
+  CHECK(connects==2&&begins==0&&writes==0&&selectors==0);
  }
  // Version-identical candidate mutation (manifest or notes) cannot begin an image transfer.
  for(bool notes_changed:{false,true}){
@@ -144,7 +169,19 @@ void dev_preview_binding_checks(){
   const auto result=request_offer(handle_ota_update,"offer="+std::string(checked.offer_id.data())+(pr?"&pr=42":""));
   CHECK(response_status==200&&result);run_selected();join_worker();
   CHECK(begins==1&&writes>0&&ends==1&&selectors==0&&!ota_is_busy());
+  const auto failed=ota_get_status(); // The install error keeps its confirmed source and PR.
+  CHECK(failed.state==OtaState::Error&&failed.channel==channel&&failed.target_pr==pr);
  }
+ // A replaced Dev candidate is refused under its own source, never the default Release.
+ reset();ota_set_channel(tk::OtaChannel::Dev);image_version="1.6.3-dev.1";
+ manifest=selected_manifest(image_version);changelog="{}";
+ CHECK(ota_check(0).update_available);join_worker();
+ const std::string dev_offer=ota_get_status().offer_id.data();manifest+=" ";
+ const auto replaced=request_offer(handle_ota_update,"offer="+dev_offer);
+ CHECK(response_status==200&&replaced);run_selected();join_worker();
+ const char* changed=tk::ota_start_reason(tk::OtaStartResult::OfferChanged,false);
+ no_current_offer("error","dev","dev",changed);
+ CHECK(begins==0&&writes==0&&selectors==0);refused_offer("offer="+dev_offer);
  // Reverse direction while the real deferred check still owns its captured Dev source.
  reset();ota_set_channel(tk::OtaChannel::Dev);image_version="1.6.3-dev.1";
  manifest=selected_manifest(image_version);changelog="{}";

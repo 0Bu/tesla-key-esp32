@@ -490,6 +490,7 @@ void upload_checks(){
  }
  reset();ota_set_channel(tk::OtaChannel::Dev);entry_largest=1;
  CHECK(ota_upload_start(&req,handed)==R::NoMemory&&!handed&&!ota_is_busy());
+ CHECK(ota_get_state()==OtaState::Error&&ota_get_status().channel==tk::OtaChannel::Dev);
  reset();ota_set_channel(tk::OtaChannel::Dev);async_copy_ok=false;
  CHECK(ota_upload_start(&req,handed)==R::NoMemory&&!handed&&!ota_is_busy()&&async_copies==0);
  reset();ota_set_channel(tk::OtaChannel::Dev);create_ok=false;
@@ -550,6 +551,9 @@ void upload_checks(){
   CHECK(!ota_is_busy()&&!raw_handle_live&&async_completions==1);
   CHECK(selectors==0&&restart_calls==0&&init_calls==0&&connects==0);
   CHECK(upload_status=="400 Bad Request"&&ota_get_state()==OtaState::Error);
+  // An error names the captured upload source even after a later Release setting.
+  CHECK(ota_get_status().channel==tk::OtaChannel::Dev&&ota_get_status().upload);
+  CHECK(ota_get_status().configured_channel==(scenario==6?tk::OtaChannel::Release:tk::OtaChannel::Dev));
   if(scenario==0||scenario==4||scenario==5||scenario==6||scenario==7)CHECK(begins==0);
   if(scenario==1)CHECK(ends==1&&aborts==0);
   if(scenario==2||scenario==3)CHECK(aborts==1);
@@ -582,6 +586,13 @@ void deferred_http_checks(){
  auto coordinator=selected_task;stale_work(stale_argument);
  CHECK(selected_task==coordinator&&entry_heap_reads==1); // Duplicate callback is not a new job.
  run_selected();join_worker();CHECK(!ota_is_busy()&&connects==2&&begins==0&&writes==0&&selectors==0);
+ // The completed captured Release result keeps its own source and is no offer under Dev.
+ const auto published=ota_get_status();
+ CHECK(published.state==OtaState::Error&&!published.update_available&&published.available[0]==0);
+ CHECK(published.channel==tk::OtaChannel::Release&&published.configured_channel==tk::OtaChannel::Dev);
+ CHECK(published.target_pr==400&&published.offer_id[0]==0&&published.image_bytes==0);
+ CHECK(std::string_view(published.message.data())=="update channel changed; check again");
+ {char notes[64];size_t len=99;CHECK(!ota_get_changelog(notes,sizeof(notes),len)&&len==0);}
 
  // A reused static capture does not authorize a callback from the previous ticket.
  reset();http_request_live=true;entry_largest=57344;

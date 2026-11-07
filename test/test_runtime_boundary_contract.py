@@ -2456,7 +2456,7 @@ def require_recovery_reference_contract(ota_source: str) -> None:
     start = entry.index("if (!tk::ota_recovery_memory_affordable(entry_largest,")
     stop = entry.index("publish_operation_start(image, channel_state, generation, expected)")
     refused = entry[start:stop]
-    for token in ("set_check_error(kOtaNoMemory);", "release_unstarted_operation();", "return Result::NoMemory;"):
+    for token in ("set_check_error(kOtaNoMemory, channel_state);", "release_unstarted_operation();", "return Result::NoMemory;"):
         if token not in refused: raise AssertionError("typed entry-memory refusal missing " + token)
     require_before("memory publication before owner release", refused, "set_check_error", "release_unstarted_operation")
     require_before("memory release before typed result", refused, "release_unstarted_operation", "return Result::NoMemory")
@@ -4029,8 +4029,8 @@ def require_ota_status_lock_contract(ota_source: str, runtime_tests: str) -> Non
     # complete generation, otherwise a second allocation failure would terminate the task and a
     # partial set_state() fallback could expose mixed check fields to concurrent readers.
     if not re.search(
-        r"static\s+void\s+set_check_error\s*\(\s*const\s+char\s*\*\s*message\s*\)\s*"
-        r"noexcept\s*\{",
+        r"static\s+void\s+set_check_error\s*\(\s*const\s+char\s*\*\s*message\s*,"
+        r"\s*uint32_t\s+channel_state\s*\)\s*noexcept\s*\{",
         ota_source,
     ):
         raise AssertionError("OTA check-error fallback must remain noexcept")
@@ -4038,6 +4038,8 @@ def require_ota_status_lock_contract(ota_source: str, runtime_tests: str) -> Non
     for token in (
         "OtaStatusPod candidate{};",
         "candidate.state = OtaState::Error;",
+        "candidate.channel_state = channel_state;",
+        "candidate.channel = tk::ota_channel_in_state(channel_state);",
         "copy_status_text(candidate.message, message);",
         "const std::string_view current = running_version();",
         "copy_status_text(candidate.current, current.data());",
@@ -4048,6 +4050,8 @@ def require_ota_status_lock_contract(ota_source: str, runtime_tests: str) -> Non
     expected_error = (
         "{ OtaStatusPod candidate{}; candidate.state = OtaState::Error; "
         "candidate.target_pr = s_target_pr.load(std::memory_order_relaxed); "
+        "candidate.channel_state = channel_state; "
+        "candidate.channel = tk::ota_channel_in_state(channel_state); "
         "copy_status_text(candidate.message, message); "
         "const std::string_view current = running_version(); "
         "copy_status_text(candidate.current, current.data()); "
@@ -4058,7 +4062,8 @@ def require_ota_status_lock_contract(ota_source: str, runtime_tests: str) -> Non
     require_exact(
         "OTA check-error fallback call allowlist",
         called_functions(error),
-        {"copy_status_text", "data", "publish_check_status", "running_version", "load"},
+        {"copy_status_text", "data", "publish_check_status", "running_version", "load",
+         "ota_channel_in_state"},
     )
 
     for token in (
@@ -7720,9 +7725,9 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
     )
 
     allocating_check_error = ota_source.replace(
-        "static void set_check_error(const char* message) noexcept {\n"
+        "static void set_check_error(const char* message, uint32_t channel_state) noexcept {\n"
         "    OtaStatusPod candidate{};",
-        "static void set_check_error(const char* message) noexcept {\n"
+        "static void set_check_error(const char* message, uint32_t channel_state) noexcept {\n"
         "    std::string fallback_allocation;\n"
         "    OtaStatusPod candidate{};",
         1,
@@ -7734,9 +7739,9 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
         lambda: require_ota_status_lock_contract(allocating_check_error, runtime_tests),
     )
     hidden_allocating_check_error = ota_source.replace(
-        "static void set_check_error(const char* message) noexcept {\n"
+        "static void set_check_error(const char* message, uint32_t channel_state) noexcept {\n"
         "    OtaStatusPod candidate{};",
-        "static void set_check_error(const char* message) noexcept {\n"
+        "static void set_check_error(const char* message, uint32_t channel_state) noexcept {\n"
         "    auto fallback_allocation = std::to_string(42);\n"
         "    OtaStatusPod candidate{};",
         1,
