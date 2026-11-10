@@ -98,14 +98,16 @@ standalone tag-fetch CMake path remains unchanged.
 then the build uses `gzip -9 -n`. Raw marker checks precede any transformation. The bounded,
 standard-library `prune_css_comments.py` helper blanks documentation text in whole-line CSS
 comments outside strings and parentheses, and ordinary whole-line JavaScript `//` comments.
-It preserves byte offsets, whitespace, inline comments, recognized legal/tooling directive families and HTML-sensitive
-sequences. JavaScript block comments remain opaque. The supported JavaScript subset refuses code
+CSS byte offsets and whitespace are preserved. The JavaScript pass removes leading spaces and
+tabs from code lines and keeps the original line endings, including on blanked comment lines.
+Inline comments, legal/tooling directives and HTML-sensitive sequences are preserved. JavaScript
+block comments remain opaque. The supported JavaScript subset refuses code
 lines containing template backticks, inline block openers or a final backslash, code after a block
 closer, unfinished blocks and Unicode line separators. These restrictions exclude untracked
 multiline strings/templates without guessing regex syntax. Inputs are bounded UTF-8 without NUL.
 Markup and code tokens remain unchanged; source comments remain readable. This is conservative
 repository-specific pruning, not general minification or universal observable equivalence:
-source introspection such as `Function.prototype.toString()` can expose changed comment text.
+source introspection such as `Function.prototype.toString()` can expose changed whitespace and comments.
 The application does not use source introspection.
 The helper is an explicit generator dependency. It rejects output/input aliases before cleanup,
 removes the validated old output before generation and publishes complete bytes atomically.

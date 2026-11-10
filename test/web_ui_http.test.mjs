@@ -3184,3 +3184,136 @@ test("F142 recovery banner distinguishes fatal and cached identity states", () =
     assert.match(element("hsub").textContent, /key is sent automatically/);
   }
 });
+
+// evcc configuration: the pill offers the shipped, regression-tested example with this device's
+// IPv4 lease and VIN; copying works on plain HTTP without the asynchronous Clipboard API.
+const EVCC_VIN = "5YJ3E1EA1JF000001";
+const evccExample = fs.readFileSync(new URL("../docs/examples/evcc-custom-vehicle.yaml", import.meta.url), "utf8");
+function evccExpected(host, vin = EVCC_VIN) {
+  const mapping = evccExample.replace(/^(#[^\n]*\n)+/, "");
+  assert.ok(mapping.startsWith("title:") && mapping.includes("DEVICE_HOST") && mapping.includes("REPLACE_WITH_VIN"));
+  return mapping.split("DEVICE_HOST").join(host).split("REPLACE_WITH_VIN").join(vin);
+}
+function stubClipboardDocument(context, result) {
+  const copied = [];
+  const body = { children: [], appendChild(child) { this.children.push(child); }, removeChild(child) { this.children.splice(this.children.indexOf(child), 1); } };
+  context.document.body = body;
+  const createElement = context.document.createElement;
+  context.document.createElement = (tag) => tag !== "textarea" ? createElement(tag) : ({ style: {},
+    select() { this.selected = true; context.document.activeElement = this; },
+    setSelectionRange(start, end) { this.range = [start, end]; } });
+  context.document.execCommand = (command) => {
+    const field = body.children.at(-1);
+    copied.push({ command, value: field.value, readOnly: field.readOnly, selected: field.selected, range: field.range });
+    if (result instanceof Error) throw result;
+    return result;
+  };
+  return { copied, body };
+}
+
+test("evcc text equals the documented example with the device IPv4 lease and exact VIN", () => {
+  const { context } = loadUi();
+  context.location.hostname = "tesla-key.local";
+  assert.equal(context.evccYaml({ ip: "192.0.2.10", vin: EVCC_VIN }), evccExpected("192.0.2.10"));
+  for (const ip of ["", "0.0.0.0", undefined]) {
+    assert.equal(context.evccYaml({ ip, vin: EVCC_VIN }), evccExpected("tesla-key.local"),
+      "without a usable lease the page's own host is used");
+  }
+  for (const s of [null, {}, { ip: "192.0.2.10", vin: "UNKNOWN" }, { ip: "192.0.2.10", vin: EVCC_VIN.toLowerCase() },
+    { ip: "192.0.2.10", vin: "5YJ3E1EA1JF00000I" }, { ip: "192.0.2.10", vin: EVCC_VIN + "1" },
+    { ip: "192.0.2.10/x", vin: EVCC_VIN }, { ip: "192.0.2.10\nicon: x", vin: EVCC_VIN }]) {
+    assert.equal(context.evccYaml(s), null, JSON.stringify(s));
+  }
+  context.location.hostname = "";
+  assert.equal(context.evccYaml({ vin: EVCC_VIN }), null, "no usable host offers no configuration");
+});
+
+test("the evcc pill appears only while a usable configuration exists", () => {
+  const { context, element } = loadUi();
+  context.location.hostname = "";
+  const pill = element("evccBtn");
+  pill.classList.add("hide");
+  context.render({ vin: EVCC_VIN, ip: "192.0.2.10", key_present: true });
+  assert.equal(pill.classList.contains("hide"), false);
+  context.render({ vin: "UNKNOWN", ip: "192.0.2.10" });
+  assert.equal(pill.classList.contains("hide"), true);
+  context.render({ vin: EVCC_VIN, ip: "" });
+  assert.equal(pill.classList.contains("hide"), true);
+});
+
+test("the evcc sheet shows unwrapped YAML, copies it from a read-only field and restores focus", async () => {
+  const { context, element } = loadUi();
+  context.state = { vin: EVCC_VIN, ip: "192.0.2.10" };
+  const { copied, body } = stubClipboardDocument(context, true);
+  const pill = element("evccBtn");
+  pill.focus();
+  const done = context.openEvcc();
+  assert.equal(element("askModal").classList.contains("hide"), false);
+  assert.equal(element("askTitle").textContent, "evcc configuration");
+  assert.match(element("askText").textContent, /Settings → Vehicles → Add → Custom device/);
+  assert.equal(element("askDetail").textContent, evccExpected("192.0.2.10"));
+  assert.equal(element("askDetail").classList.contains("code"), true);
+  assert.equal(element("askOk").textContent, "Copy");
+  assert.equal(element("askCancel").textContent, "Close");
+  assert.equal(context.document.activeElement, element("askOk"));
+  assert.equal(element("wrap").inert, true);
+  context.askSubmit();
+  await done;
+  assert.deepEqual(copied, [{ command: "copy", value: evccExpected("192.0.2.10"), readOnly: true, selected: true,
+    range: [0, evccExpected("192.0.2.10").length] }]);
+  assert.equal(body.children.length, 0, "the temporary field is removed");
+  assert.equal(element("askModal").classList.contains("hide"), true);
+  assert.equal(context.document.activeElement, pill);
+  assert.match(element("toasts").children[0].className, /\bok\b/);
+  assert.match(element("toasts").children[0].innerHTML, /Copied to clipboard/);
+
+  // The next ordinary confirmation keeps its wrapped detail layout.
+  context.askConfirm({ title: "Regenerate the security key?", detail: "AA:BB" });
+  assert.equal(element("askDetail").classList.contains("code"), false);
+  context.askClose(false);
+});
+
+test("closing the evcc sheet copies nothing; a failed copy reports it and reopens the text", async () => {
+  for (const failure of [false, new Error("blocked")]) {
+    const { context, element } = loadUi();
+    context.state = { vin: EVCC_VIN, ip: "192.0.2.10" };
+    const { copied, body } = stubClipboardDocument(context, failure);
+    let selected;
+    context.window.getSelection = () => ({ selectAllChildren(detail) { selected = detail.textContent; } });
+    const pill = element("evccBtn");
+    pill.focus();
+    const closed = context.openEvcc();
+    context.askClose(context.askCancelValue);
+    await closed;
+    assert.equal(copied.length, 0);
+    assert.equal(element("askModal").classList.contains("hide"), true);
+    assert.equal(context.document.activeElement, pill);
+
+    const failed = context.openEvcc();
+    context.state = { vin: EVCC_VIN, ip: "192.0.2.11" };
+    context.askSubmit();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(copied.length, 1);
+    assert.equal(body.children.length, 0, "the temporary field is removed after a refused copy");
+    assert.match(element("toasts").children[0].className, /\berr\b/);
+    assert.match(element("toasts").children[0].innerHTML, /Copy failed/);
+    assert.equal(element("askModal").classList.contains("hide"), false, "the text stays available for a manual copy");
+    assert.equal(element("askDetail").textContent, evccExpected("192.0.2.10"));
+    assert.equal(context.document.activeElement, element("askDetail"), "manual copy keeps keyboard focus in the text");
+    assert.equal(selected, evccExpected("192.0.2.10"), "the selection still contains the YAML the user saw");
+    context.askClose(context.askCancelValue);
+    await failed;
+    assert.equal(context.document.activeElement, pill, "focus returns to the pill, not the removed field");
+  }
+});
+
+test("the evcc sheet is refused while firmware work is busy or without a configuration", async () => {
+  const { context, element } = loadUi();
+  context.state = { vin: "UNKNOWN", ip: "192.0.2.10" };
+  assert.equal(await context.openEvcc(), undefined);
+  assert.equal(element("askModal").classList.contains("hide"), true);
+  context.state = { vin: EVCC_VIN, ip: "192.0.2.10" };
+  context.otaBusy = true;
+  await context.openEvcc();
+  assert.equal(element("askModal").classList.contains("hide"), true);
+});

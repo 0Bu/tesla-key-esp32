@@ -59,17 +59,22 @@ class ScannerTests(unittest.TestCase):
 
 
 class JavaScriptTests(unittest.TestCase):
-    def test_whole_line_only_with_exact_whitespace_and_unicode_byte_offsets(self):
+    def test_whole_line_only_preserves_line_endings_and_literals(self):
         raw = '// Erklärung\r\n\t// another\rvar x="// literal"; // inline\n'.encode()
-        expected = b' ' * len('// Erklärung'.encode()) + b'\r\n\t          \rvar x="// literal"; // inline\n'
+        expected = b'\r\n\rvar x="// literal"; // inline\n'
         result = CSS.prune_js(raw)
         self.assertEqual(result, expected)
-        self.assertEqual(len(result), len(raw))
         self.assertEqual(CSS.prune_js(result), result)
 
     def test_block_comments_are_opaque(self):
         raw = b'/* note\n// inside block\n`template` \\\n*/\n/* one line */\n'
         self.assertEqual(CSS.prune_js(raw), raw)
+
+    def test_distinct_cr_and_lf_boundaries_are_not_joined(self):
+        expected = b'var x=1;\r \nvar y=2;'
+        for body in (b'// documentation', b' \t '):
+            self.assertEqual(CSS.prune_js(b'var x=1;\r' + body + b'\nvar y=2;'), expected)
+        self.assertEqual(CSS.prune_js(expected), expected)
 
     def test_binary_line_boundaries_do_not_split_valid_string_data(self):
         for separator in (b'\xc2\x85', b'\x1c', b'\x1d', b'\x1e'):
@@ -77,7 +82,7 @@ class JavaScriptTests(unittest.TestCase):
             with self.subTest(separator=separator):
                 self.assertEqual(CSS.prune_js(raw), raw)
                 self.assertEqual(CSS.prune_js(raw + b'// ordinary comment\n'),
-                                 raw + b' ' * len(b'// ordinary comment') + b'\n')
+                                 raw + b'\n')
 
     def test_legal_annotations_and_html_context_are_preserved(self):
         for comment in (b'//! notice', b'//# sourceMappingURL=x', b'//@ sourceURL=x',
@@ -88,11 +93,12 @@ class JavaScriptTests(unittest.TestCase):
                 self.assertEqual(CSS.prune_js(raw), raw)
 
     def test_regex_quotes_and_automatic_semicolon_insertion_in_actual_node(self):
-        raw = (b'function value(){ return\n// ASI must remain\n{ok:1}; }\n'
-               b'var pattern=/[&<>"\']/g;\nvar url="https://example.invalid/path";\n'
+        raw = (b'function value(){ return\n  // ASI must remain\n  {ok:1}; }\n'
+               b'  var pattern=/[&<>"\']/g;\n\tvar url="https://example.invalid/path";\n'
                b'console.log(JSON.stringify([value(),pattern.test("&"),url]));\n')
         pruned = CSS.prune_js(raw)
-        self.assertNotEqual(pruned, raw)
+        self.assertIn(b'\n{ok:1}; }\nvar pattern=', pruned)
+        self.assertIn(b'\nvar url="https://example.invalid/path";\n', pruned)
         outputs = []
         for script in (raw, pruned):
             result = subprocess.run(['node', '-'], input=script, capture_output=True, timeout=5)
@@ -110,16 +116,19 @@ class JavaScriptTests(unittest.TestCase):
             with self.subTest(raw=raw[:50]), self.assertRaises(ValueError):
                 CSS.prune_js(raw)
 
-    def test_actual_app_code_lines_are_exact_and_comments_remain_in_source(self):
+    def test_actual_app_tokens_are_exact_and_comments_remain_in_source(self):
         raw = (WWW / 'app.js').read_bytes()
         result = CSS.prune_js(raw)
-        self.assertEqual(len(result), len(raw))
+        self.assertLess(len(result), len(raw))
+        self.assertEqual(result.count(b'\n'), raw.count(b'\n'))
         changed = 0
         for before, after in zip(raw.splitlines(keepends=True), result.splitlines(keepends=True)):
             if before != after:
                 changed += 1
-                self.assertTrue(before.lstrip(b' \t').startswith(b'//'))
-                self.assertEqual(after, bytes(value if value in CSS.SPACE else 32 for value in before))
+                if before.lstrip(b' \t').startswith(b'//'):
+                    self.assertEqual(after, before[len(before.rstrip(b'\r\n')):])
+                else:
+                    self.assertEqual(after, before.lstrip(b' \t'))
         self.assertGreater(changed, 0)
         self.assertEqual(CSS.prune_js(result), result)
         self.assertEqual((WWW / 'app.js').read_bytes(), raw)

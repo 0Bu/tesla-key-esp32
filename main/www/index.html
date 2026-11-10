@@ -62,6 +62,7 @@
         <div class="row" id="rowVeh">
           <span class="ri"><svg viewBox="0 0 24 24"><use href="#ic-car"/></svg><span class="dot" id="vehDot"></span></span>
           <span class="rb"><span class="rl">Vehicle</span><span class="rv mono" id="vehVal">&mdash;</span><span class="rs" id="vehSub"></span></span>
+          <button type="button" class="ib hide" id="evccBtn" onclick="openEvcc()"><span class="chip-badge">evcc</span></button>
           <button type="button" class="ib" id="vinBtn" onclick="editVin()" aria-label="Change VIN" title="Change VIN"><svg viewBox="0 0 24 24"><use href="#ic-pencil"/></svg></button>
         </div>
         <div class="row" id="rowKey">
@@ -118,7 +119,7 @@
       <input id="askInput" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="askErr">
       <span class="field-err hide" id="askErr" role="alert"></span>
     </div>
-    <div class="detail mono hide" id="askDetail"></div>
+    <div class="detail mono hide" id="askDetail" tabindex="-1"></div>
     <p class="note" id="askNote"></p>
     <div class="actions">
       <button type="button" class="btn secondary" id="askCancel">Cancel</button>
