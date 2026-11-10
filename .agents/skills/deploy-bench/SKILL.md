@@ -3,9 +3,8 @@ name: deploy-bench
 description: Identify the intended physical ESP32 bench among multiple USB boards, including benches currently running Tesla or Daikin firmware, delegate signed app-only USB flashing to flash-esp32 (or usb-recovery's steps for a published image), then test the implementation on that same board. Does not publish or merge repository changes.
 ---
 
-Invoke `$deploy-bench`. Read [AGENTS.md](../../../AGENTS.md) first. The user's explicit invocation
-authorizes the workflow below; automatic selection by an agent does not. Canonical skills live
-under `.agents/skills/`.
+Invoke `$deploy-bench` directly or delegate from an explicit user invocation of `$deploy`. Read
+[AGENTS.md](../../../AGENTS.md) first. Automatic skill selection grants no authority.
 
 # deploy-bench — identify, USB-flash and test the bench
 
@@ -15,18 +14,21 @@ Test the implementation on the intended physical bench, even when its current fi
 [$usb-recovery](../usb-recovery/SKILL.md) steps 1 and 3 for an already-published image. [$deploy](../deploy/SKILL.md) owns commit, push, PR and merge; this skill does
 not perform those steps or deploy to a production device.
 
-The user's own `$deploy-bench` invocation is explicit user authorization to identify the intended bench,
-reset/query that board over USB, read its bootloader and partition table without NVS, verify and
-flash the eligible signed app at `0x20000`, activate it by erasing `otadata@0xf000/0x2000`, and run
-same-board passive acceptance. Acceptance includes bounded serial logs and cache-only
-`GET /status`, `GET /diag?redact=1` and `GET /api/proxy/1/version`. It also covers a clean reset
-and timed boot check when serial release delays startup after a successful write/activation.
+The user's `$deploy-bench` invocation, or `$deploy` invocation covering the bench, provides
+explicit user authorization to identify the intended bench, reset/query it over USB, and read its bootloader
+and partition table outside NVS. That authorization covers flashing the verified signed app at
+`0x20000`, activating it by erasing `otadata@0xf000/0x2000`, and running same-board passive
+acceptance. Acceptance includes bounded serial logs and the passive HTTP checks in step 5b. It also
+covers a clean reset and timed boot check when serial release delays startup after activation.
 Carry this scope into `$flash-esp32` or the delegated `$usb-recovery` steps; do not ask for USB or
 HTTP approval again after resolving the board, port, target and artifact. Ask for missing identity
 information only when selection remains ambiguous. Vehicle commands, pairing, charge toggles,
 cluster access, OTA, NVS/identity changes and broader recovery need separate scope.
 Run multi-line shell blocks, here and in the delegated skills, through a scratch script as
 [Development](../../../docs/DEVELOPMENT.md#running-workflow-shell-blocks) describes.
+If the host sandbox brokers serial access, group authorized USB steps in a single scoped request
+where practical. Keep each verification and stop condition before the write it guards. The host
+sandbox's permission check is separate from the user's workflow authorization.
 
 ## 1. Bind the implementation and test plan
 
@@ -80,8 +82,10 @@ reset or contact other candidates to discover which one responds. If selection i
 ambiguous, obtain the bench's USB identity or a physical unplug/replug identification, then repeat
 the passive inventory. Never choose the first port.
 
-Only after identifying the physical bench, bind its current explicit `PORT` and perform the scoped
-chip/MAC check on that port. These serial operations may reset it. Match the detected chip and
+Before any USB operation that can reset the board, establish from existing evidence or the operator's
+bench setup that the board has no configured vehicle VIN or is isolated from the vehicle's BLE
+range. A configured board can attempt vehicle communication on boot. Bind the identified board's
+current explicit `PORT` and perform the scoped chip/MAC check on that port. Match the detected chip and
 hardware identity to the selected board and signed image; a mismatch stops the flow. Re-enumeration
 must resolve to that same physical board, not to whichever device inherits its old port name.
 
@@ -110,6 +114,13 @@ the explicit port through every operation; do not use fallback port detection. R
 exact-source, version, chip, size and signature/key checks. CI/preview images must match the
 production public-key pin.
 
+For a published image, clear inherited support-image inputs in the same scratch script before
+the delegated preflight and write. This selects the retained bootloader and app-only branches.
+
+```bash
+unset BOOTLOADER PARTITION_TABLE BOOT_OFFSET
+```
+
 The only ordinary writes are the verified signed app at `0x20000`, then activation by erasing
 `otadata@0xf000/0x2000` last. Preserve NVS, the existing bootloader and partition table. Recheck
 attachment and app hash immediately before writing. A failed write or activation stops the flow;
@@ -128,17 +139,13 @@ key reuse, sleep/wake, charge commands or production behavior; record these as *
 
 ### 5b. Health verification
 
-Under the user's `$deploy-bench` authorization for these passive endpoints, set `DEVICE_IP` to the
+Under the existing bench authorization for these passive endpoints, set `DEVICE_IP` to the
 address verified for this physical bench. Keep it for all requests; no default production address. Observe stable version,
 uptime, safe mode/crash state, INTERNAL largest contiguous block and task stack margins. Review
 warnings in context, distinguishing expected unpaired bench state from a regression.
 
 ```bash
 : "${DEVICE_IP:?set the verified address of the selected physical bench}"
-curl --connect-timeout 3 --max-time 5 -fsS "http://$DEVICE_IP/status" | jq '{version, paired,
-  heap: .sys.free_heap, min_heap: .sys.min_free_heap, largest_block: .sys.largest_block,
-  uptime: .sys.uptime_s, safe_mode: .sys.safe_mode, reset_reason: .sys.reset_reason,
-  last_reboot, last_crash, stack_min_free_bytes: .sys.stack_min_free_bytes}'
 curl --connect-timeout 3 --max-time 5 -fsS "http://$DEVICE_IP/api/proxy/1/version" | jq .
 BENCH_DIAG=$(curl --connect-timeout 3 --max-time 5 -fsS "http://$DEVICE_IP/diag?redact=1") || exit 1
 printf '%s\n' "$BENCH_DIAG" | grep -iE 'error|warn|fail|panic' || true
@@ -156,6 +163,21 @@ Only when separately authorized for this bench, the cluster and vehicle-read sco
 : "${DEVICE_IP:?retain the verified address of the selected physical bench}"
 RUN_COMMANDS=0 ALLOW_CHARGE_TOGGLE=0 RUN_ALL_COMMANDS=0 \
   ESP32_URL="http://$DEVICE_IP" bash scripts/e2e_evcc.sh
+```
+
+### 5d. Optional status snapshot on an unconfigured bench
+
+Use this separate block only with evidence that the selected bench lacks both a configured VIN and
+a stored vehicle session. Otherwise use the serial logs, version and diagnostic endpoints in step 5b.
+`GET /status` can persist a missing pairing timestamp for a stored session. A status read with that
+side effect requires separate scope, as described in [$device-diag](../device-diag/SKILL.md).
+
+```bash
+: "${DEVICE_IP:?retain the verified address of the selected physical bench}"
+curl --connect-timeout 3 --max-time 5 -fsS "http://$DEVICE_IP/status" | jq '{version, paired,
+  heap: .sys.free_heap, min_heap: .sys.min_free_heap, largest_block: .sys.largest_block,
+  uptime: .sys.uptime_s, safe_mode: .sys.safe_mode, reset_reason: .sys.reset_reason,
+  last_reboot, last_crash, stack_min_free_bytes: .sys.stack_min_free_bytes}'
 ```
 
 Report source/artifact identity, selected board evidence, USB result, targeted positive/negative
