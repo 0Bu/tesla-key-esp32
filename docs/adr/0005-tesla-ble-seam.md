@@ -7,7 +7,7 @@
 
 ## Context
 
-The firmware integrates `yoziru/tesla-ble` v6.3.0 as an ESP-IDF component. Upstream `tesla-ble` divides into two distinct layers:
+The firmware integrates `yoziru/tesla-ble` v6.4.0 as an ESP-IDF component. Upstream `tesla-ble` divides into two distinct layers:
 1. **The protocol crypto core** (`client.h`, `peer.h`, `crypto_context.h`, generated Nanopb protobufs): handles P-256 ECDH, HMAC key derivation, AES-GCM encryption/decryption, and protobuf serialization.
 2. **The vehicle orchestration layer** (`vehicle.cpp`, `tb_logging.cpp`): manages BLE stream reassembly, request-response dispatch, command queuing, authentication flows, and retry/timeout heuristics.
 
@@ -100,7 +100,7 @@ The entries above were checked against [vehicle-command `83baa078`](https://gith
 - **Length 0 rejected**: `tk::RxFramer` rejects incoming frames with decoded length 0 fail-closed (`CorruptLength`), preventing zero-byte framing lockups.
 - **Session-info latency (`maxLatency`) and persisted age**: `vehicle-command` limits live SessionInfo response latency to 4 s on BLE; this is separate from persisted-session age. The firmware's `load_nvs_sessions_()` (`main/vehicle_telemetry.cpp`) inherits a comparison of Unix time against vehicle epoch seconds (`SessionInfo.clock_time`). A successfully restored Unix clock rejects these persisted sessions; it does not implement a real-time 1-hour reuse window. Restore runs before controller initialization, but absent/unreadable `last_time` or an unsuccessful clock set can leave the inherited negative-age acceptance path. Session expiry is therefore not guaranteed by clock restore alone.
 - **Request-scoped VCSEC routing**: As in `vehicle-command` (`dispatcher.go:400-409`), each newly serialized routable VCSEC attempt gets a fresh nonzero 16-byte reply address. `logic/vcsec_response.hpp` captures its actual frame metadata without allocating another message buffer and binds generation, command, attempt, kind and deadlines. Only a successful BLE write activates the context. Timeouts, failed builds/writes, retries, flushes and link loss retire it. Auth and the Infotainment wake prerequisite admit their correlated proactive SessionInfo/fault replies without allowing them to acknowledge the payload. Infotainment retains a stable ordinary address, restored after every temporary VCSEC builder scope. Raw WhitelistAdd remains a non-routable transmit-only request. This routing match is attribution, not authentication of plaintext replies.
-- **Charge-port command domain**: The reference uses Infotainment CarServer open/close actions; this firmware uses VCSEC `ClosureMoveRequest.chargePort`. Both builders exist at v6.3.0. This preserves the existing local policy; static conformance evidence does not establish role acceptance or hardware behavior.
+- **Charge-port command domain**: The reference uses Infotainment CarServer open/close actions; this firmware uses VCSEC `ClosureMoveRequest.chargePort`. Both builders exist at v6.4.0. This preserves the existing local policy; static conformance evidence does not establish role acceptance or hardware behavior.
 - **One-plaintext-response rule**: Unlike `vehicle-command` (which applies no replay check to plaintext, `dispatcher.go:301-308`), this firmware's `BleDispatcher` enforces a strict one-unauthenticated-response rule where foreign-UUID responses are dropped before reaching telemetry callbacks.
 - **Wake completion on transmission**: The runner's explicit `Wake` request completes when its RKE
   frame is transmitted, whereas `vehicle-command` waits for a reply (`pkg/vehicle/vcsec.go`,
@@ -128,7 +128,7 @@ The entries above were checked against [vehicle-command `83baa078`](https://gith
 #### Cryptographic bindings and output cleanup
 
 - **Key fingerprint (`key_fingerprint()`)**: Retained natively in `main/vehicle_pairing.cpp`: Mbed TLS PK parses the stored PEM, the key moves into a volatile PSA key, and PSA SHA-1 over the exported public point gives `SHA1(pubkey_bytes)[:4]`, keeping it decoupled from `tesla-ble` internals. The function itself is IDF code; the host harness checks a mirror of it against tesla-ble's key id.
-- **Crypto bindings on PSA (patch 0006)**: Upstream tesla-ble v6.3.0 still binds the legacy Mbed TLS 3 crypto API, which ESP-IDF 6's Mbed TLS 4 removed. `0006-port-crypto-bindings-to-psa.patch` re-binds the same operations to PSA Crypto (ADR-0002, "Execution"). ECDH X-coordinate byte order and `SHA1(X)[:16]`, the "session info" HMAC-SHA256, AES-128-GCM with a 12-byte nonce, AAD = `SHA256(metadata)` and a 16-byte tag, the VIN BLE name and the SEC1 PEM key format are unchanged, and the host harness's V1 part proves them against the protocol.md vectors. A failed RNG read for a nonce now fails `Peer::encrypt`; upstream only logged it and encrypted under an unfilled nonce.
+- **Crypto bindings on PSA (patch 0006)**: Upstream tesla-ble v6.4.0 still binds the legacy Mbed TLS 3 crypto API, which ESP-IDF 6's Mbed TLS 4 removed. `0006-port-crypto-bindings-to-psa.patch` re-binds the same operations to PSA Crypto (ADR-0002, "Execution"). ECDH X-coordinate byte order and `SHA1(X)[:16]`, the "session info" HMAC-SHA256, AES-128-GCM with a 12-byte nonce, AAD = `SHA256(metadata)` and a 16-byte tag, the VIN BLE name and the SEC1 PEM key format are unchanged, and the host harness's V1 part proves them against the protocol.md vectors. A failed RNG read for a nonce now fails `Peer::encrypt`; upstream only logged it and encrypted under an unfilled nonce.
 - **Response authentication and explicit response AAD (patch 0006)**: v5.3.0 now verifies the AES-GCM response tag and uses the response-carried counter upstream, matching `vehicle-command`'s `Signer.Decrypt`. The PSA rebase preserves this behavior with `psa_aead_verify` and plaintext wiping on authentication failure. It retains the separate `construct_response_ad_buffer` helper and makes the request-only `construct_ad_buffer` reject response signatures; upstream instead overloads one metadata helper with an optional counter. All response callers pass `AES_GCM_Response_data.counter`. V1 proves a response whose counter differs from the request counter, rejects request-counter AAD and rejects tampered tags. The unverified-tag/request-counter defects described in the September execution of ADR-0002 were present in v5.2.0 and are fixed upstream in v5.3.0.
 - **Failed-decrypt cleanup and library logging**: Patch 0006 wipes the full caller-provided output capacity after an AEAD-operation failure, including bytes a failing driver may write without reporting. Successful crypto and key formats are unchanged. The component and native harness compile at INFO (`TESLA_BLE_LOG_LEVEL=2`), excluding DEBUG/VERBOSE argument evaluation and formatting. Known public-key/packet log formats also have a redacted-export guard. `test/test_dependency_guards.py` compiles the actual patched method with synthetic write-before-error drivers and the upstream logging macros/formatter, including removed-fix controls; the separate V1 vectors own real crypto answers. These checks do not establish an ESP-driver leak, physical key reuse or hardware acceptance.
 
@@ -340,7 +340,7 @@ The native BLE orchestration layer is implemented across:
 - `main/logic/command_result.hpp`: Local exact `already_set` and command-context charging outcome policies.
 - `main/vehicle_ctrl.{hpp,cpp}`, `main/vehicle_commands.cpp`, `main/vehicle_telemetry.cpp`, `main/vehicle_pairing.cpp`: Direct integration with `TeslaBLE::Client`.
 - Native transactional key generation: `tk::regenerate_private_key()` in `main/logic/key_rotation.hpp` (2048 B PEM export, fail-closed rollback), called by `regenerate_key_native_()` in `main/vehicle_pairing.cpp`.
-- `test/test_tesla_ble_harness.cpp` (`scripts/test-tesla-ble-harness.sh`, run in the CI `logic-harness` job) exercises the TX framing helpers, `tk::regenerate_private_key()` and the protocol-vector known answers (V1) against the real patched tesla-ble v6.3.0, Nanopb and the exact Mbed TLS 4.1 / TF-PSA-Crypto commit that ESP-IDF v6.1 pins.
+- `test/test_tesla_ble_harness.cpp` (`scripts/test-tesla-ble-harness.sh`, run in the CI `logic-harness` job) exercises the TX framing helpers, `tk::regenerate_private_key()` and the protocol-vector known answers (V1) against the real patched tesla-ble v6.4.0, Nanopb and the exact Mbed TLS 4.1 / TF-PSA-Crypto commit that ESP-IDF v6.1 pins.
 
 With this architecture in place, patches 0001, 0002, 0003, and the `vehicle.cpp` portion of 0005 were retired. The active patch series in `patches/tesla-ble/` consists strictly of:
 1. `0004-drop-unused-parental-controls-actions.patch` (trim unused Nanopb message descriptors for target size budget)
@@ -404,6 +404,17 @@ The comparison uses `teslamotors/vehicle-command` at
 vehicle data. The optional upstream estimator does not change that wire contract. Host vectors
 and pinned builds remain separate from signed hardware and live vehicle acceptance.
 
+## v6.4.0 migration (2026-11-10)
+
+The tag resolves to `67ec5c7ff8cf14664d76810d9f8e3fb4b499387a`. All five patch files
+apply unchanged. Only `src/vehicle.cpp` has different preimage and postimage hashes in the patch
+inventory. [Upstream diff](https://github.com/yoziru/tesla-ble/compare/v6.3.0...v6.4.0)
+
+Upstream `Vehicle` adds an explicit charge-schedule poll and `InfotainmentPollPolicy` gains a
+bounded probe window. Both are outside the firmware's direct `Client` path. The two tags have
+identical `Client`, `Peer`, builders, generated messages and crypto sources. The existing native
+dispatch, pairing and key/session storage paths retain their behavior.
+
 ## v6.3.0 migration (2026-10-27)
 
 The pin resolves to `f7e288e026a19e6bfac0b207922086e57460d860`. All five repository patches
@@ -450,6 +461,6 @@ checks; they do not prove HMAC correctness or radio/vehicle behavior. No real co
 
 - **Framing Robustness**: Eliminates buffer-recovery heuristics and log storms. BLE stream reassembly matches Tesla reference behavior.
 - **Security & Anti-Replay**: Eliminates the plaintext CarServer replay window. Response attribution is strictly bound by request UUID.
-- **NVS & Key Preservation**: Zero modification to durable NVS schemas, key formats, or session storage. Existing paired vehicles survive update without re-pairing.
+- **NVS & Key Preservation**: Existing NVS schemas and key/session formats support reuse under the current loading policy.
 - **Memory evidence**: Pure decisions in `main/logic/` have host tests. Compiler frames and runtime stack minima are separate checks under the [concurrency contract](../ARCHITECTURE.md#concurrency-normative-contract); neither establishes a universal bound on composed call depth or heap demand.
-- **Dependency Contract**: Upstream `yoziru/tesla-ble` dependency pin (v6.3.0) and four firmware targets remain explicit; upstream also declares esp32c5.
+- **Dependency Contract**: Upstream `yoziru/tesla-ble` dependency pin (v6.4.0) and four firmware targets remain explicit; upstream also declares esp32c5.

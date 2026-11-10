@@ -23,10 +23,10 @@ TOOLCHAIN = (
 )
 IDF_VERSION = "6.1.0"
 TESLA_GIT = "https://github.com/yoziru/tesla-ble.git"
-TESLA_VERSION = "v6.3.0"
-TESLA_RESOLVED_COMMIT = "f7e288e026a19e6bfac0b207922086e57460d860"
-TESLA_COMPONENT_HASH = "243eea1e2060af370dd901ea82e22b2b5357e3c771bf2fa9915065ab01d28631"
-LOCK_MANIFEST_HASH = "63e60c85aa6db770a114cc85cb6d34d51aecc1a223158ffb556606021b502cb1"
+TESLA_VERSION = "v6.4.0"
+TESLA_RESOLVED_COMMIT = "67ec5c7ff8cf14664d76810d9f8e3fb4b499387a"
+TESLA_COMPONENT_HASH = "31703ec6157614d0af85b799f5be7b40cc9cbeaa4e0194735add90f48da2c6a8"
+LOCK_MANIFEST_HASH = "0e8d78f655968d12e68fb85d537db7097895c05267c1fa93148a1c7e7b2eb9e5"
 # The host harness proves the PSA crypto port (patch 0006) against the Mbed TLS commit the firmware
 # links (the host builds its builtin software drivers; the firmware sends AES-GCM through the ESP PSA
 # driver). Its literal must equal this pin, and inside the pinned image (--idf-path) so must ESP-IDF's
@@ -40,13 +40,13 @@ IDF_MBEDTLS_SUBMODULE = "components/mbedtls/mbedtls"
 # silently rewrite an otherwise semantically plausible lock.
 FILE_DIGESTS = {
     "scripts/nanopb-source.json": "9796c1535651f23ad95022b28781903ab38316b436b8a16188085db48a836123",
-    "scripts/tesla-ble-patch-state.json": "8882b3c18bffd665cb26231b049ba2151568cb1c904b6a224afe7aa40ffaac75",
+    "scripts/tesla-ble-patch-state.json": "a3122f023a5d43136248341617a8721b3009c76948cdf607ebf2194b863d89ae",
     "esp-idf-toolchain.txt": "6ef2f1d9c15bb269430cbb4530d689022d914b12ac8610b539d4ac00d148d84f",
-    "main/idf_component.yml": "a29f83baaaae5bf3259309b6a664718ba5dfcb53d015a876f6a19d86311942cc",
-    "dependencies.lock.esp32": "f6c0f8bba42fe826852b0fa4fb9420a2851fd25744bd49e8194cb9cb29fae47f",
-    "dependencies.lock.esp32s3": "70adb2a4413e3f717dfa414ac3d9ebdde41449526ca69cc2751b9dcb43a6be19",
-    "dependencies.lock.esp32c3": "342c78c4b83c69d820bbf5f59543a147cb92994e686d979293b54802c8d07c29",
-    "dependencies.lock.esp32c6": "c1d53862908d30f92d91031a5a468138140799ca13f3a65f9095bcde7114bdd8",
+    "main/idf_component.yml": "fbc1dea4cc05e43e7092587d764d37029d51ab1e615c1c010d17b699794648e8",
+    "dependencies.lock.esp32": "17b234355d87f6c1a159ad1f324f91c4c65ba2bec01e01bfa5677338af7e43f0",
+    "dependencies.lock.esp32s3": "4845e25d99ae8bcfa9d09251c20eebb7b96321a77709dfdb7578dab6159ed5b1",
+    "dependencies.lock.esp32c3": "4e62cbf3c5ae844699bd7021bc0946a495a0c2c91be1ff2c20bcc03c3e032021",
+    "dependencies.lock.esp32c6": "bea15972b0b43531f76a4cc9590c3c94cef2169237263b89bded7d10be78405e",
 }
 PATCH_INVENTORY = (
     (
@@ -254,7 +254,7 @@ def validate(root: Path) -> None:
     manifest_data = read_regular(root / "main/idf_component.yml")
     manifest_text = decode(manifest_data, "main/idf_component.yml")
     require(logical_yaml_lines(manifest_text) == MANIFEST_LOGICAL_LINES,
-            "main/idf_component.yml exact IDF/Espressif-component/tesla-ble v6.3.0 Git contract drifted")
+            f"main/idf_component.yml exact IDF/Espressif-component/tesla-ble {TESLA_VERSION} Git contract drifted")
 
     actual_locks = tuple(sorted(path.name for path in root.glob("dependencies.lock.*")))
     expected_locks = tuple(f"dependencies.lock.{target}" for target in TARGETS)
@@ -347,11 +347,11 @@ def probe_harness_invocations(source: str) -> None:
         component = work / "cache/tesla-patched"
         (component / "src").mkdir(parents=True)
         (component / "generated/src").mkdir(parents=True)
-        (component / "idf_component.yml").write_text('version: "6.3.0"\n')
+        (component / "idf_component.yml").write_text(f'version: "{TESLA_VERSION[1:]}"\n')
         (component / "src/fake.cpp").write_text("int fake;\n")
         (work / "main").mkdir()
         (work / "main/idf_component.yml").write_text(
-            'dependencies:\n  yoziru/tesla-ble:\n    version: "v6.3.0"\n')
+            f'dependencies:\n  yoziru/tesla-ble:\n    version: "{TESLA_VERSION}"\n')
         nanopb = work / "cache/nanopb-pristine"
         nanopb.mkdir(parents=True)
         for name in ("pb_common.c", "pb_decode.c", "pb_encode.c"):
@@ -512,10 +512,10 @@ def self_test(root: Path) -> None:
          "exact ESP-IDF v6.1"),
         ("toolchain-image", text("esp-idf-toolchain.txt", "81893", "91893"),
          "exact ESP-IDF v6.1"),
-        ("manifest-version", text("main/idf_component.yml", 'version: "v6.3.0"',
-                                  'version: "v6.2.0"'), "v6.3.0 Git contract"),
+        ("manifest-version", text("main/idf_component.yml", f'version: "{TESLA_VERSION}"',
+                                  'version: "v6.3.0"'), f"{TESLA_VERSION} Git contract"),
         ("manifest-git", text("main/idf_component.yml", TESLA_GIT,
-                              "https://example.invalid/tesla-ble.git"), "v6.3.0 Git contract"),
+                              "https://example.invalid/tesla-ble.git"), f"{TESLA_VERSION} Git contract"),
         ("manifest-component-ref", text("main/idf_component.yml", '"mdns-v1.13.1"',
                                         '"mdns-v1.13.0"'), "Espressif-component"),
         ("manifest-w5500-rule", text("main/idf_component.yml", "target == esp32s3",

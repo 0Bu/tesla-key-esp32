@@ -23,7 +23,7 @@ The complete runner needs CMake, Python 3.11+, C11 and C++17 compilers, Ruby, jq
 The portable direct native loop is `run-fast-tests.sh`; it does not certify the full contract suite.
 The evcc example check uses Ruby's standard YAML parser and `jq` to execute the shipped status
 expression, verify explicit setter deadlines and reject the historical `Starting` mapping.
-The separate real v6.3.0 tesla-ble/PSA harness requires C++20; pure firmware logic remains C++17.
+The separate real v6.4.0 tesla-ble/PSA harness requires C++20; pure firmware logic remains C++17.
 Strict mode requires Git, Python, Node, Ruby, jq, CMake, compiler and every gate file, with bounded subprocesses.
 Missing tooling is failure, not reduced coverage reported green. A failed check fails its binary:
 the pure-logic suite and the tesla-ble harness report every failed check before exiting 1, while the
@@ -282,7 +282,7 @@ behavior claims. Mirrored C++/Python/JS presenters need parity checks, not merel
 | Public protocol vectors | `tesla_protocol_vectors.test.mjs`: VIN, ECDH/HMAC/AES-GCM and patch contracts, public test keys only |
 | External JSON contract | Golden status output, command registry/bounds, MQTT registry/fields/presence and exact MCP IDs |
 
-The v6.3.0 real-library harness also checks fresh/forced/established/cleared-secret peer admission,
+The v6.4.0 real-library harness also checks fresh/forced/established/cleared-secret peer admission,
 monotonic session counters, domain request-hash isolation and invalid-domain lookup.
 The crypto harness checks official client/session derivation, HMAC/tag, the library-built request
 metadata against the official TLV vector, and a real Client request against independently rebuilt
