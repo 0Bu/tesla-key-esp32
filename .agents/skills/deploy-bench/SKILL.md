@@ -140,9 +140,11 @@ key reuse, sleep/wake, charge commands or production behavior; record these as *
 ### 5b. Health verification
 
 Under the existing bench authorization for these passive endpoints, set `DEVICE_IP` to the
-address verified for this physical bench. Keep it for all requests; no default production address. Observe stable version,
-uptime, safe mode/crash state, INTERNAL largest contiguous block and task stack margins. Review
-warnings in context, distinguishing expected unpaired bench state from a regression.
+address verified for this physical bench and use it for every request. Confirm the version and
+record the boot, reset and heap evidence available in the serial and diagnostic logs. Review
+warnings in context. Report unavailable uptime, crash-state, largest-block or stack measurements
+as unverified. If acceptance requires those measurements, obtain the status snapshot in step 5d
+or separate authorization for the status read when that step does not apply.
 
 ```bash
 : "${DEVICE_IP:?set the verified address of the selected physical bench}"
