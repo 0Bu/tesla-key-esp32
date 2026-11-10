@@ -490,8 +490,17 @@ void upload_checks(){
  }
  reset();ota_set_channel(tk::OtaChannel::Dev);entry_largest=1;
  CHECK(ota_upload_start(&req,handed)==R::NoMemory&&!handed&&!ota_is_busy());
+ CHECK(ota_get_status().state==OtaState::Error&&ota_get_status().channel==tk::OtaChannel::Dev&&ota_get_status().upload);
+ // A feed check refused before publishing its start still owns its error record.
+ ota_set_channel(tk::OtaChannel::Release);
+ CHECK(ota_check_start(42)==R::NoMemory&&!ota_is_busy());
+ const auto check_error=ota_get_status();
+ CHECK(check_error.state==OtaState::Error&&check_error.channel==tk::OtaChannel::Release);
+ CHECK(!check_error.upload&&check_error.target_pr==42&&!check_error.update_available);
+ CHECK(begins==0&&writes==0&&selectors==0);
  reset();ota_set_channel(tk::OtaChannel::Dev);async_copy_ok=false;
  CHECK(ota_upload_start(&req,handed)==R::NoMemory&&!handed&&!ota_is_busy()&&async_copies==0);
+ CHECK(ota_get_status().state==OtaState::Error&&ota_get_status().channel==tk::OtaChannel::Dev);
  reset();ota_set_channel(tk::OtaChannel::Dev);create_ok=false;
  CHECK(ota_upload_start(&req,handed)==R::InternalError&&handed&&!ota_is_busy());
  CHECK(async_copies==1&&async_completions==1&&begins==0);
@@ -550,6 +559,9 @@ void upload_checks(){
   CHECK(!ota_is_busy()&&!raw_handle_live&&async_completions==1);
   CHECK(selectors==0&&restart_calls==0&&init_calls==0&&connects==0);
   CHECK(upload_status=="400 Bad Request"&&ota_get_status().state==OtaState::Error);
+  // An error names the captured upload source even after a later Release setting.
+  CHECK(ota_get_status().channel==tk::OtaChannel::Dev&&ota_get_status().upload);
+  CHECK(ota_get_status().configured_channel==(scenario==6?tk::OtaChannel::Release:tk::OtaChannel::Dev));
   if(scenario==0||scenario==4||scenario==5||scenario==6||scenario==7)CHECK(begins==0);
   if(scenario==1)CHECK(ends==1&&aborts==0);
   if(scenario==2||scenario==3)CHECK(aborts==1);
@@ -561,6 +573,47 @@ void upload_checks(){
 void run_queued_http(){
  CHECK(queued_http_work);auto work=queued_http_work;void* argument=queued_http_argument;
  queued_http_work=nullptr;queued_http_argument=nullptr;work(argument);
+}
+// Pre-coordinator errors keep the captured Dev source; Release is the zero default.
+void dev_source_error_checks(){
+ auto dev_error=[](std::string_view message){
+  const auto status=ota_get_status();
+  CHECK(status.state==OtaState::Error&&status.channel==tk::OtaChannel::Dev);
+  CHECK(status.configured_channel==tk::OtaChannel::Dev&&!status.update_available&&!status.offer_changed);
+  CHECK(std::string_view(status.message.data())==message&&!ota_is_busy()&&begins==0&&selectors==0);
+ };
+ reset();ota_set_channel(tk::OtaChannel::Dev);http_request_live=true;entry_largest=57344;
+ CHECK(ota_check_start_after_http(0,&http_server_marker)==tk::OtaStartResult::Started);
+ http_request_live=false;run_queued_http();dev_error(kOtaNoMemory);
+ reset();ota_set_channel(tk::OtaChannel::Dev);queue_ok=false;
+ CHECK(ota_check_start_after_http(0,&http_server_marker)==tk::OtaStartResult::Unavailable);
+ dev_error(tk::ota_start_reason(tk::OtaStartResult::Unavailable,true));
+ reset();ota_set_channel(tk::OtaChannel::Dev);now=50;
+ CHECK(ota_check_start_after_http(0,&http_server_marker)==tk::OtaStartResult::Started);
+ now=operation_budget(50,false).deadline();run_queued_http();dev_error("update deadline reached during setup");
+ reset();ota_set_channel(tk::OtaChannel::Dev);entry_largest=1;
+ CHECK(ota_check_start(0)==tk::OtaStartResult::NoMemory);dev_error(kOtaNoMemory);
+ reset();ota_set_channel(tk::OtaChannel::Dev);create_ok=false;
+ CHECK(ota_check_start(0)==tk::OtaStartResult::InternalError);dev_error("could not start OTA coordinator task");
+ // Client B's later Release setting cannot rename A's captured Dev source at deferred admission.
+ auto moved_error=[](std::string_view message){
+  const auto status=ota_get_status();
+  CHECK(status.state==OtaState::Error&&status.channel==tk::OtaChannel::Dev);
+  CHECK(status.configured_channel==tk::OtaChannel::Release&&!status.update_available&&!status.offer_changed);
+  CHECK(std::string_view(status.message.data())==message&&!ota_is_busy()&&begins==0&&selectors==0);
+ };
+ reset();ota_set_channel(tk::OtaChannel::Dev);http_request_live=true;entry_largest=57344;
+ CHECK(ota_check_start_after_http(0,&http_server_marker)==tk::OtaStartResult::Started);
+ http_request_live=false;ota_set_channel(tk::OtaChannel::Release);run_queued_http();moved_error(kOtaNoMemory);
+ reset();ota_set_channel(tk::OtaChannel::Dev);now=50;
+ CHECK(ota_check_start_after_http(0,&http_server_marker)==tk::OtaStartResult::Started);
+ ota_set_channel(tk::OtaChannel::Release);now=operation_budget(50,false).deadline();run_queued_http();
+ moved_error("update deadline reached during setup");
+ reset();ota_set_channel(tk::OtaChannel::Dev);http_request_live=true;entry_largest=57344;
+ CHECK(ota_check_start_after_http(0,&http_server_marker)==tk::OtaStartResult::Started);
+ http_request_live=false;entry_largest=61440;create_ok=false;ota_set_channel(tk::OtaChannel::Release);
+ run_queued_http();moved_error("could not start OTA coordinator task");
+ reset();
 }
 void deferred_http_checks(){
  reset();now=100;http_request_live=true;entry_largest=57344;
@@ -582,6 +635,13 @@ void deferred_http_checks(){
  auto coordinator=selected_task;stale_work(stale_argument);
  CHECK(selected_task==coordinator&&entry_heap_reads==1); // Duplicate callback is not a new job.
  run_selected();join_worker();CHECK(!ota_is_busy()&&connects==2&&begins==0&&writes==0&&selectors==0);
+ // The completed captured Release result keeps its own source and is no offer under Dev.
+ const auto published=ota_get_status();
+ CHECK(published.state==OtaState::Error&&!published.update_available&&published.available[0]==0);
+ CHECK(published.channel==tk::OtaChannel::Release&&published.configured_channel==tk::OtaChannel::Dev);
+ CHECK(published.target_pr==400&&published.offer_id[0]==0&&published.image_bytes==0&&!published.offer_changed);
+ CHECK(std::string_view(published.message.data())=="update channel changed; check again");
+ {char notes[64];size_t len=99;CHECK(!ota_get_changelog(notes,sizeof(notes),len)&&len==0);}
 
  // A reused static capture does not authorize a callback from the previous ticket.
  reset();http_request_live=true;entry_largest=57344;
@@ -998,7 +1058,7 @@ int main(int argc,char** argv){
  else if(terminal_case=="cleanup-cas")cleanup_cas_checks();
  else {
   CHECK(terminal_case=="normal");
-  deferred_http_checks();memory_checks();manifest_lifetime_checks();recovery_policy_checks();entry_recovery_checks();parser_checks();admission_checks();quarantine_checks();image_checks();raw_memory_checks();
+  deferred_http_checks();dev_source_error_checks();memory_checks();manifest_lifetime_checks();recovery_policy_checks();entry_recovery_checks();parser_checks();admission_checks();quarantine_checks();image_checks();raw_memory_checks();
   upload_checks();
   offer_binding_checks();dev_preview_binding_checks();hash_binding_checks();image_binding_checks();
   checkpoint_semantics_checks();
