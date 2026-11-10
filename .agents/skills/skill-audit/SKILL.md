@@ -64,12 +64,14 @@ workflow scripts and [deep document owners](../../../docs/README.md), not histor
   separate USB/OTA scopes. OTA requires candidate equality and ≥100 s monotonic+wall-clock delta
   from first post-OTA baseline, no hidden reboot and boot-local mark-valid success. USB has only
   bounded boot retries. Manual stable release is separate from main Dev publication.
-- **`$deploy`**: the user's explicit invocation authorizes its commit/push/PR/merge and protected Dev
-  publication phases without repeated approval; independent fix/review loop, current-head
-  gates, canonical squash and exact-main CI/publication observation; no device delivery.
+- **`$deploy`**: the user's explicit invocation authorizes its commit/push/PR/merge, protected Dev
+  publication and the intended USB bench through `$deploy-bench`. Check the current-head gates,
+  canonical squash, exact-main run/artifact, and bench handoff with the existing approval. Honor a
+  narrower user scope. Production delivery, OTA, live evcc, vehicle and cluster work stay separate.
 - **`$deploy-bench`**: physical USB identity across Tesla/Daikin firmware, no probing unrelated boards,
-  user invocation authorizes its standard preflight/reset/read/flash and passive acceptance scope
-  through delegated skills without repeated approval,
+  direct user invocation or authorized `$deploy` handoff carries its standard USB preflight and
+  passive acceptance scope through delegated skills. Verify boot isolation, retained-layout checks,
+  app-only recovery inputs and the pairing-timestamp guard on the status read,
   explicit port/chip and compatible retained layout, delegated signed `$flash-esp32` or published-image
   `$usb-recovery` steps, exact-source targeted positive/negative tests and same-board health
   evidence; separate vehicle/cluster scope.
