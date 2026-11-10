@@ -1,4 +1,5 @@
-# Replace DEVICE_HOST and REPLACE_WITH_VIN in every URI before use.
+# Replace DEVICE_HOST and REPLACE_WITH_VIN in every URI before use, or copy this mapping
+# with both values filled in from the web UI's evcc button on the Vehicle row.
 # Settings: paste this mapping into the Custom device YAML editor.
 # evcc.yaml: add name: tesla and type: custom under one vehicles list item,
 # then indent this entire mapping beneath that item.

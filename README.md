@@ -42,9 +42,13 @@ three simultaneous BLE connections are shared with phone keys and fobs.
 
 ## 3. Connect evcc
 
-In evcc, open **Settings → Vehicles → Add → Custom device** and paste the
-[custom vehicle example](docs/examples/evcc-custom-vehicle.yaml). Replace `DEVICE_HOST` and
-`REPLACE_WITH_VIN` in every URI; the device uses HTTP port 80. Adjust the battery capacity.
+In the web UI, tap **evcc** beside the VIN on the **Vehicle** row and choose **Copy**. It copies the
+[custom vehicle example](docs/examples/evcc-custom-vehicle.yaml) with the VIN and the device's
+IPv4 lease, or the page's hostname when no lease is available. Reserve the device's address in
+your router if you use the IPv4 lease.
+In evcc, open **Settings → Vehicles → Add → Custom device**, paste it and adjust the battery
+capacity. To use the example file directly, replace `DEVICE_HOST` and `REPLACE_WITH_VIN` in every
+URI; the device uses HTTP port 80.
 The Settings editor takes the example as-is, without `name`, `type` or a `vehicles` wrapper.
 
 For a hand-edited `evcc.yaml`, create one item under `vehicles:` with `name: tesla` and

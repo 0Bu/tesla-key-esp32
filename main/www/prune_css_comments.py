@@ -1,4 +1,4 @@
-"""Blank bounded CSS/JavaScript documentation without rewriting code or whitespace.
+"""Blank bounded CSS/JavaScript documentation and trim JavaScript code indentation.
 
 The CSS pass supports the repository's bounded UTF-8, NUL-free subset. Strings, escapes,
 parenthesized regions, inline comments, legal/tooling notices and HTML style-end
@@ -76,7 +76,7 @@ def prune(source: bytes) -> bytes:
 
 
 def prune_js(source: bytes) -> bytes:
-    """Blank whole-line // comments in the repository's single-line-code subset.
+    """Blank whole-line // comments and trim code indentation without joining lines.
 
     Strings and regex literals cannot cross a physical line without templates or
     string continuations. Refuse those constructs, inline block openers and code
@@ -107,10 +107,14 @@ def prune_js(source: bytes) -> bytes:
                 marker in lowered for marker in
                 (b'@license', b'copyright', b'@preserve', b'spdx', b'sourcemappingurl',
                  b'sourceurl', b'<script', b'</script', b'<!--', b'-->'))
-            output.extend(line if keep else bytes(value if value in SPACE else 32 for value in line))
-            continue
-        if b'`' in body or b'/*' in body or body.endswith(b'\\'):
-            raise ValueError('JavaScript code exceeds the single-line lexical subset')
+            line = line if keep else line[len(body):]
+        else:
+            if b'`' in body or b'/*' in body or body.endswith(b'\\'):
+                raise ValueError('JavaScript code exceeds the single-line lexical subset')
+            line = line.lstrip(b' \t')
+        # Keep distinct CR and LF boundaries when a line loses all of its content.
+        if line.startswith(b'\n') and output.endswith(b'\r'):
+            output.append(32)
         output.extend(line)
     if block:
         raise ValueError('unfinished JavaScript block comment')
