@@ -4,8 +4,8 @@
 #
 # Runs the *exact* HTTP calls evcc's `tesla-ble` template makes, from INSIDE the
 # evcc pod, so it exercises the real network path (pod → k3s node → LAN → ESP32 →
-# BLE → car). The headline goal is the one that matters for evcc: every read must
-# return well-formed data with NO timeouts.
+# BLE → car). Check for timeouts and distinguish a successful sample from a
+# documented evcc error while the cache is being filled.
 #
 # Usage (each line also needs ESP32_URL=http://<board-ip>, see Required below):
 #   scripts/e2e_evcc.sh                 # read-only: status, /api/proxy/1/version, vehicle_data
@@ -219,6 +219,40 @@ print(f"FAIL|{name} failed/timed out (HTTP {code}): {raw}")
     NOTE) echo "  NOTE  $msg" ;;
     *) bad "$name: internal error evaluating response ($decision)" ;;
   esac
+}
+
+# This function is also used inside the pod's POSIX shell. Keep the exact body,
+# including any trailing newline, because evcc compares the entire error token.
+evcc_data_error() {
+  case "$1:$2:$3" in
+    503:charge_state:ErrAsleep|503:climate_state:ErrAsleep|503:drive_state:ErrAsleep|503:charge_state:ErrMustRetry)
+      return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+evcc_charge_baseline() {
+  python3 -c '
+import json, sys
+
+def unique_object(pairs):
+    obj = dict(pairs)
+    if len(obj) != len(pairs):
+        raise ValueError("duplicate response key")
+    return obj
+
+try:
+    snapshot = json.load(sys.stdin, object_pairs_hook=unique_object)
+    charge, age = snapshot["vehicle"], snapshot["charge_age_s"]
+    amps, limit = charge["amps"], charge["charge_limit"]
+    if (snapshot["link"] != "awake" or type(age) is not int or not 0 <= age <= 30
+            or type(amps) is not int or not 0 <= amps <= 48
+            or type(limit) is not int or not 50 <= limit <= 100):
+        sys.exit(1)
+except (ValueError, TypeError, KeyError):
+    sys.exit(1)
+print(amps, limit)
+'
 }
 
 # evcc's own setter requests (evcc-io/evcc 79b4a8b, templates/definition/vehicle/tesla-ble.yaml).
@@ -528,6 +562,30 @@ PY
   expect_request "charge_stop" 'false' evcc_charge_stop
   expect_request "set_charging_amps" '{"charging_amps": 16}' evcc_max_current 16
 
+  evcc_data_error 503 charge_state ErrAsleep || exit 1
+  evcc_data_error 503 charge_state ErrMustRetry || exit 1
+  evcc_data_error 503 climate_state ErrAsleep || exit 1
+  evcc_data_error 503 drive_state ErrAsleep || exit 1
+  if evcc_data_error 503 charge_state $'ErrAsleep\n' ||
+     evcc_data_error 200 charge_state ErrAsleep ||
+     evcc_data_error 503 climate_state ErrMustRetry ||
+     evcc_data_error 503 charge_state '{"reason":"ErrAsleep"}'; then
+    echo "self_test FAILED: malformed or unhandled evcc data error accepted" >&2
+    exit 1
+  fi
+  local good_baseline='{"link":"awake","charge_age_s":30,"vehicle":{"amps":0,"charge_limit":80}}'
+  [ "$(evcc_charge_baseline <<< "$good_baseline")" = "0 80" ] || exit 1
+  for mock_body in 'ErrAsleep' 'ErrMustRetry' "${good_baseline/awake/idle}" "${good_baseline/30/31}" \
+    '{"link":"awake","vehicle":{"amps":0,"charge_limit":80}}' \
+    '{"link":"awake","charge_age_s":0,"vehicle":{"amps":null,"charge_limit":80}}' \
+    '{"link":"awake","charge_age_s":0,"vehicle":{"amps":49,"charge_limit":80}}' \
+    '{"link":"awake","charge_age_s":0,"vehicle":{"amps":0,"charge_limit":false}}'; do
+    if evcc_charge_baseline <<< "$mock_body"; then
+      echo "self_test FAILED: unsafe current/limit baseline accepted" >&2
+      exit 1
+    fi
+  done
+
   # A live run must name its board and refuse before it contacts the cluster or a device. The child
   # gets an inert kubectl and no command scopes, so a regressed guard cannot reach a real cluster.
   printf '#!/bin/sh\n: > "$E2E_KUBECTL_CALLED"\nexit 1\n' > "$st_dir/bin/kubectl"
@@ -605,70 +663,71 @@ fi
 
 # ── 2. vehicle_data burst — the critical no-timeout check ───────────────────
 hdr "2. GET vehicle_data?endpoints=charge_state  (${ITER}× — evcc's poll)"
-RES="$(kex '
+RES="$(kex "$(declare -f evcc_data_error)"'
 VIN='"$ESC_VIN"'; BASE='"$ESC_BASE"'; N='"$ITER"'; TO='"$TIMEOUT"'
 host=$(echo "$BASE" | sed -e "s,^http://,," -e "s,/.*$,," -e "s,:.*$,,"); port=$(echo "$BASE" | sed -n "s,^http://[^:]*:\([0-9]*\).*,\1,p"); [ -z "$port" ] && port=80
-f=0; stale=0; mx=0; sum=0
+f=0; stale=0; pending=0; mx=0; sum=0; sample=""
+sep=$(printf "\r\n\r\n."); sep=${sep%.}
 for i in $(seq 1 $N); do
   s=$(date +%s%3N)
-  raw=$(printf "GET /api/1/vehicles/%s/vehicle_data?endpoints=charge_state HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n" "$VIN" "$host" | nc -w $TO "$host" "$port" 2>/dev/null)
-  code=$(echo "$raw" | head -n1 | cut -d" " -f2)
-  b=$(echo "$raw" | sed -e "1,/^\r\{0,1\}$/d")
+  raw=$(printf "GET /api/1/vehicles/%s/vehicle_data?endpoints=charge_state HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n" "$VIN" "$host" | nc -w $TO "$host" "$port" 2>/dev/null; printf .)
+  code=$(printf "%s" "$raw" | head -n1 | cut -d" " -f2)
+  case "$raw" in *"$sep"*) b=${raw#*"$sep"}; b=${b%.} ;; *) b="" ;; esac
   e=$(date +%s%3N); d=$((e-s)); sum=$((sum+d)); [ $d -gt $mx ] && mx=$d
-  # A real failure is a transport error/timeout OR an unexpected HTTP status code
-  # (neither 200 nor 503) OR a body missing the charge_state evcc parses.
-  # A well-formed body with HTTP 503 or "result":false is the honest stale-cache
-  # response (served in ~0ms). evcc treats a non-2xx as an error and logs it (docs/API.md
-  # says when that stops its loadpoint cycle), so count it separately as "stale" rather
-  # than conflating it with a timeout.
-  if [ -z "$b" ] || [ -z "$code" ] || { [ "$code" != "200" ] && [ "$code" != "503" ]; } || ! echo "$b" | grep -q "\"charge_state\""; then
+  if evcc_data_error "$code" charge_state "$b"; then
+    pending=$((pending+1))
+  elif { [ "$code" != "200" ] && [ "$code" != "503" ]; } || ! echo "$b" | grep -q "\"charge_state\""; then
     f=$((f+1))
   elif [ "$code" = "503" ] || ! echo "$b" | grep -q "\"result\":true"; then
     stale=$((stale+1))
+  else
+    sample=$b
   fi
 done
-echo "FAILS=$f STALE=$stale MAX=$mx AVG=$((sum/N))"
-echo "SAMPLE=$b"
+echo "FAILS=$f STALE=$stale PENDING=$pending MAX=$mx AVG=$((sum/N))"
+echo "SAMPLE=$sample"
 ')"
 FAILS=$(echo "$RES" | sed -n 's/.*FAILS=\([0-9]*\).*/\1/p')
 STALE=$(echo "$RES" | sed -n 's/.*STALE=\([0-9]*\).*/\1/p')
+PENDING=$(echo "$RES" | sed -n 's/.*PENDING=\([0-9]*\).*/\1/p')
 MAXMS=$(echo "$RES" | sed -n 's/.*MAX=\([0-9]*\).*/\1/p')
 AVGMS=$(echo "$RES" | sed -n 's/.*AVG=\([0-9]*\).*/\1/p')
 SAMPLE=$(echo "$RES" | sed -n 's/^SAMPLE=//p')
-echo "  latency: avg=${AVGMS}ms max=${MAXMS}ms   transport failures: ${FAILS}/${ITER}   stale: ${STALE:-0}/${ITER}"
+echo "  latency: avg=${AVGMS}ms max=${MAXMS}ms   transport failures: ${FAILS}/${ITER}   stale: ${STALE:-0}/${ITER}   evcc pending/asleep: ${PENDING:-0}/${ITER}"
 [ "${FAILS:-1}" = 0 ] && ok "0 timeouts/transport failures over ${ITER} polls" || bad "${FAILS} timeout(s)/transport failure(s)"
-[ "${STALE:-0}" != 0 ] && echo "  NOTE  ${STALE}/${ITER} returned result:false (stale cache); well-formed & ~0ms. evcc logs an error for a 503, see docs/API.md"
-# evcc parses these fields; all must be present and numeric (battery_range as float)
-for fld in charging_state battery_level charge_limit_soc charger_power charge_rate charge_amps battery_range charge_energy_added minutes_to_full_charge; do
-  echo "$SAMPLE" | grep -q "\"$fld\"" && ok "field present: $fld" || bad "field MISSING: $fld"
-done
+if [ -n "$SAMPLE" ]; then
+  for fld in charging_state battery_level charge_limit_soc charger_power charge_rate charge_amps battery_range charge_energy_added minutes_to_full_charge; do
+    echo "$SAMPLE" | grep -q "\"$fld\"" && ok "field present: $fld" || bad "field MISSING: $fld"
+  done
+else
+  echo "  NOTE  charge_state: no successful sample; data fields unverified"
+fi
 
 # ── 2b. climate_state + drive_state — cache-only domain selectors ───────────
-# evcc reads climate_state.is_preconditioning and drive_state.odometer. Both are served from the
-# firmware cache (no BLE round-trip, no wake). Outside the active window a valid last-known climate
-# cache is served with 200, and a valid drive cache with an odometer is always 200. HTTP 503 (or
-# "result":false) means the cache was never filled since boot/pairing, an in-window climate is
-# older than 300 s, or no odometer was reported; evcc logs an error and treats climate as inactive
-# (odometer as unavailable).
 hdr "2b. GET vehicle_data?endpoints=climate_state / drive_state  (cache-only, no wake)"
 for dom in climate_state drive_state; do
   case "$dom" in
     climate_state) pat='"is_preconditioning":\(true\|false\)'; fld="is_preconditioning" ;;
     *)             pat='"odometer":[0-9]'; fld="odometer" ;;
   esac
-  DRES="$(kex '
+  DRES="$(kex "$(declare -f evcc_data_error)"'
 VIN='"$ESC_VIN"'; BASE='"$ESC_BASE"'; TO='"$TIMEOUT"'; DOM='"$dom"'
 host=$(echo "$BASE" | sed -e "s,^http://,," -e "s,/.*$,," -e "s,:.*$,,"); port=$(echo "$BASE" | sed -n "s,^http://[^:]*:\([0-9]*\).*,\1,p"); [ -z "$port" ] && port=80
-raw=$(printf "GET /api/1/vehicles/%s/vehicle_data?endpoints=%s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n" "$VIN" "$DOM" "$host" | nc -w $TO "$host" "$port" 2>/dev/null)
-code=$(echo "$raw" | head -n1 | cut -d" " -f2)
-b=$(echo "$raw" | sed -e "1,/^\r\{0,1\}$/d")
+sep=$(printf "\r\n\r\n."); sep=${sep%.}
+raw=$(printf "GET /api/1/vehicles/%s/vehicle_data?endpoints=%s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n" "$VIN" "$DOM" "$host" | nc -w $TO "$host" "$port" 2>/dev/null; printf .)
+code=$(printf "%s" "$raw" | head -n1 | cut -d" " -f2)
+case "$raw" in *"$sep"*) b=${raw#*"$sep"}; b=${b%.} ;; *) b="" ;; esac
+if evcc_data_error "$code" "$DOM" "$b"; then echo "ASLEEP=1"; fi
 echo "CODE=$code"
 echo "BODY=$b"
 ')"
   DCODE=$(echo "$DRES" | sed -n 's/^CODE=//p' | head -n1)
   DBODY=$(echo "$DRES" | sed -n 's/^BODY=//p' | head -n1)
   echo "  $dom: HTTP ${DCODE:-none}  ->  $DBODY"
-  if [ -z "$DCODE" ] || [ -z "$DBODY" ]; then
+  if [ "$(printf '%s\n' "$DRES" | head -n1)" = "ASLEEP=1" ]; then
+    ok "$dom: evcc sleep response"
+    echo "  NOTE  $dom: no sample; data fields unverified"
+  elif [ -z "$DCODE" ] || [ -z "$DBODY" ]; then
     bad "$dom: transport failure or empty body"
   elif [ "$DCODE" = "400" ]; then
     bad "$dom: HTTP 400 — firmware lacks the $dom selector"
@@ -716,22 +775,25 @@ echo "$BC" | grep -q '"result":true' && ok "body_controller_state ok" || echo " 
 if [ "$RUN_COMMANDS" = 1 ]; then
   hdr "4. Commands (write path → signed BLE → car)"
 
-  # capture current amps + limit so we can restore
-  CUR_AMPS=$(echo "$SAMPLE"  | sed -n 's/.*"charge_amps":\([0-9]*\).*/\1/p')
-  CUR_LIM=$(echo "$SAMPLE"   | sed -n 's/.*"charge_limit_soc":\([0-9]*\).*/\1/p')
-  echo "  baseline: charge_amps=${CUR_AMPS:-?}  charge_limit_soc=${CUR_LIM:-?}"
-
+  # Already-awake wake requests can succeed without opening the active window.
+  # Use /status for the current/limit and age of one coherent ChargeState snapshot.
+  before_wake_fail=$fail
   evcc_wake_up
+  if [ "$fail" -eq "$before_wake_fail" ] &&
+     BASELINE_JSON="$(kex "wget -qO- --timeout=$TIMEOUT '$ESC_BASE/status?redact=1' 2>/dev/null")" &&
+     BASELINE="$(evcc_charge_baseline <<< "$BASELINE_JSON")"; then
+    read -r CUR_AMPS CUR_LIM <<< "$BASELINE"
+    echo "  baseline: charge_amps=$CUR_AMPS  charge_limit_soc=$CUR_LIM"
+    evcc_max_current "$CUR_AMPS"
 
-  # set_charging_amps: set to current value (no real change), proves the BLE write path
-  evcc_max_current "${CUR_AMPS:-6}"
-
-  # set_charge_limit: a real change (CUR-10) then restore to CUR. Re-asserting the
-  # *same* value is a no-op the car rejects when Complete, so we change-and-restore.
-  if [ -n "${CUR_LIM:-}" ] && [ "$CUR_LIM" -ge 60 ]; then
-    NEWLIM=$((CUR_LIM-10))
-    cmd "set_charge_limit(${NEWLIM})" "set_charge_limit" "{\"percent\":${NEWLIM}}"
-    cmd "set_charge_limit(${CUR_LIM}) [restore]" "set_charge_limit" "{\"percent\":${CUR_LIM}}"
+    # Change and restore the charge limit; a no-op can be rejected when Complete.
+    if [ "$CUR_LIM" -ge 60 ]; then
+      NEWLIM=$((CUR_LIM-10))
+      cmd "set_charge_limit(${NEWLIM})" "set_charge_limit" "{\"percent\":${NEWLIM}}"
+      cmd "set_charge_limit(${CUR_LIM}) [restore]" "set_charge_limit" "{\"percent\":${CUR_LIM}}"
+    fi
+  else
+    bad "no verified post-wake current/limit baseline; skipping current and limit writes"
   fi
 
   # Role-boundary negative test: the key is enrolled Charging-Manager-only, so the car
@@ -783,5 +845,5 @@ fi
 # ── summary ─────────────────────────────────────────────────────────────────
 hdr "RESULT"
 echo "  PASS=$pass  FAIL=$fail"
-[ "$fail" -eq 0 ] && { echo "  ✅ e2e OK — evcc can drive the ESP32 with no timeouts."; exit 0; } \
+[ "$fail" -eq 0 ] && { echo "  ✅ e2e checks passed for the selected scope. See NOTE lines for unavailable samples."; exit 0; } \
                   || { echo "  ❌ e2e found problems (see FAIL lines above)."; exit 1; }
