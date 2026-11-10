@@ -4,7 +4,7 @@ var $=function(id){return document.getElementById(id)};
 function setHTML(el,html){ if(el && el.__h!==html){ el.__h=html; el.innerHTML=html; } }
 var state=null, otaTimer=null, otaAvail=null, otaOffer=null, waking=false, wakeTimeout=null, chgBusy=false, feedOk=false;
 var otaBusy=false, otaPhase=null, otaPollState=null, otaDeadline=0, otaExpectedVersion=null, otaChannel='release', otaChannelInitialSet=false;
-var otaChannelInFlight=false, otaChannelTarget=null, otaPrompting=false, otaCheckRequest=null;
+var otaChannelInFlight=false, otaPrompting=false;
 var otaFlowToken=null;
 var fwFocusId=null;   // control that started the running check/channel change; refocused once the UI is idle again
 
@@ -661,13 +661,8 @@ function render(s){
   renderFwVer();
 
   if(s.ota && typeof s.ota.channel === 'string'){
-    var sChan = s.ota.channel === 'dev' ? 'dev' : 'release';
-    if(otaChannelInFlight || otaChannelTarget){
-      if(sChan === otaChannelTarget){
-        otaChannelTarget = null;
-      }
-    } else {
-      otaChannel = sChan;
+    if(!isOtaFlowBusy()){
+      otaChannel = s.ota.channel === 'dev' ? 'dev' : 'release';
       otaChannelInitialSet = true;
     }
     renderChanMenu();
@@ -1277,7 +1272,6 @@ function setChannel(chan){
   if(!changed) return Promise.resolve();
 
   otaChannel = chan;
-  otaChannelTarget = chan;
   otaChannelInFlight = true;
   otaChannelInitialSet = true;
   renderChanMenu();
@@ -1288,7 +1282,7 @@ function setChannel(chan){
     body: JSON.stringify({ channel: chan })
   }, OTA_HTTP_TIMEOUT_MS).then(function(res){
     if(degradedReply(res.json)){
-      otaChannelInFlight=false; otaChannelTarget=null; otaChannel=prevChan;
+      otaChannelInFlight=false; otaChannel=prevChan;
       renderChanMenu(); showDegradedReply(res.json,'channel'); fwRefocus(); return;
     }
     if(!res.ok){
@@ -1305,7 +1299,6 @@ function setChannel(chan){
     return otaCheck();
   }).catch(function(err){
     otaChannelInFlight = false;
-    otaChannelTarget = null;
     otaChannel = prevChan;
     renderChanMenu();
     if(err && err.http){
@@ -1551,10 +1544,10 @@ function otaCheck(){
   if(typeof syncOtaUi === 'function') syncOtaUi();
   toast('Checking for updates…', 'load', 'ota');
   otaBarProgress('indet');
-  var prSel=otaPrSelection();
-  otaCheckRequest={channel:otaChannel||'release',pr:prSel?Number(prSel):0};
+  token.channel=otaChannel;
+  token.pr=Number(otaPrSelection());
   return otaAfterStatusPoll(function(){
-    var checkUrl='/ota/check?'+(prSel?'pr='+prSel+'&':'')+'ms='+Date.now();
+    var checkUrl='/ota/check?'+(token.pr?'pr='+token.pr+'&':'')+'ms='+Date.now();
     return requestOtaStart(checkUrl,{});
   }).then(function(j){
     if(otaFlowToken!==token) return;
@@ -1567,19 +1560,21 @@ function otaCheckPoll(){
   clearTimeout(otaTimer);
   return otaStatus().then(function(o){
     if(otaFlowToken!==token) return;
+    // Reconcile the selected channel even if this check's original intent is now stale.
+    var configured=o.configured_channel;
+    if(configured==='release'||configured==='dev'){
+      otaChannel=configured;
+      otaChannelInitialSet=true;
+      renderChanMenu();
+    }
     if(o.state==='checking'){ otaSchedule(otaCheckPoll,1200); return; }
     if(o.state==='downloading'||o.state==='done'){
       otaExpectedVersion=o.available||null; otaBegin('update',OTA_UPDATE_TIMEOUT_MS); otaProgress(o); return;
     }
     if(o.state==='error'){ otaFail('check failed'+(o.message?' — '+o.message:'')); return; }
     if(o.state!=='idle'){ otaFail('invalid check state'); return; }
-    // Another client withdrew this completed offer before it was read: never report "up to date".
-    if(o.offer_changed===true){ otaFail('Update offer changed — check again and confirm the new offer'); return; }
-    // A completed result for another channel/PR (another client's setting or check) is not this check's answer.
-    var asked=otaCheckRequest;
-    if(typeof o.channel==='string'&&((typeof o.configured_channel==='string'&&o.configured_channel!==o.channel)||
-       (asked&&(o.channel!==asked.channel||(o.pr||0)!==asked.pr)))){
-      otaFail('Update channel changed — check again'); return;
+    if(o.offer_changed||o.channel!==token.channel||configured!==token.channel||(o.pr==null?0:o.pr)!==token.pr){
+      otaFail('Update offer changed — check again and confirm the new offer'); return;
     }
     if(o.update_available){
       var offer=otaOfferSnapshot(o);
