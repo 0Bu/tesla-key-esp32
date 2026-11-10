@@ -3074,6 +3074,7 @@ static void test_vehicle_data() {
     ChargeStateResult cs1{};
     cs1.valid = true;
     cs1.charging_state = "Charging";
+    cs1.has_battery_level = cs1.has_charge_limit_soc = cs1.has_charging_amps = true;
     cs1.battery_level = 72;
     cs1.charge_limit_soc = 80;
     cs1.charger_power = 11;
@@ -3096,6 +3097,19 @@ static void test_vehicle_data() {
         "charge_energy_added=12.5\n"
         "battery_range=280.5\n"
         "minutes_to_full_charge=45\n"));
+
+    {
+        auto partial = cs1;
+        partial.has_battery_level = false;
+        partial.charge_limit_soc = 0;
+        partial.charging_amps = 0;
+        CollectEmitter e;
+        tk::emit_vehicle_charge_state(partial, tk::LinkState::Awake, e);
+        CHECK(e.out.find("\nbattery_level=null\n") != std::string::npos);
+        CHECK(e.out.find("charge_limit_soc=null\n") != std::string::npos);
+        CHECK(e.out.find("charge_amps=0\n") != std::string::npos);
+        CHECK(e.out.find("charging_state=\"Charging\"\n") != std::string::npos);
+    }
 
     // Scenario 2 — zero-initialized / unknown: every field must still be emitted (evcc requirement),
     // with minutes_to_full_charge emitting 0 so evcc's '> 0' guard yields ""
@@ -3325,6 +3339,14 @@ static void test_vehicle_data() {
         CHECK(!tk::vehicle_drive_available(stale));
         CHECK(!tk::vehicle_drive_available(tk::VehicleDriveData{false, true, 1609.344f}));
         CHECK(tk::vehicle_drive_available(tk::VehicleDriveData{true, true, 1609.344f}));
+        for (float invalid : {0.0f, -1.0f, std::numeric_limits<float>::infinity(),
+                              std::numeric_limits<float>::quiet_NaN()}) {
+            const tk::VehicleDriveData invalid_drive{true, true, invalid};
+            CHECK(!tk::vehicle_drive_available(invalid_drive));
+            CollectEmitter invalid_wire;
+            tk::emit_vehicle_drive_state(invalid_drive, invalid_wire);
+            CHECK(golden_eq(invalid_wire.out, "odometer=0\n"));
+        }
     }
 
     // Endpoint selection factories.
@@ -3359,6 +3381,30 @@ static void test_vehicle_data() {
     CHECK(tk::parse_vehicle_data_endpoints("cached=" + std::string(120, 'x')).has_unsupported == false);
     CHECK(tk::parse_vehicle_data_endpoints("cached=" + std::string(121, 'x')).has_unsupported);
     CHECK(tk::parse_vehicle_data_endpoint_list({}).has_unsupported);
+
+    // Typed evcc errors only for singleton requests awaiting their first sample.
+    {
+        using tk::LinkState;
+        using tk::VehicleDataEndpoints;
+        const auto charge = VehicleDataEndpoints::of(tk::kVehicleDataCharge);
+        const auto climate = VehicleDataEndpoints::of(tk::kVehicleDataClimate);
+        const auto drive = VehicleDataEndpoints::of(tk::kVehicleDataDrive);
+        const auto mixed = VehicleDataEndpoints::of(tk::kVehicleDataCharge | tk::kVehicleDataClimate);
+        using tk::evcc_vehicle_data_error;
+        CHECK_STR(evcc_vehicle_data_error(charge, LinkState::Asleep, true, false, false), "ErrAsleep");
+        CHECK_STR(evcc_vehicle_data_error(climate, LinkState::Asleep, false, true, false), "ErrAsleep");
+        CHECK_STR(evcc_vehicle_data_error(drive, LinkState::Asleep, false, false, true), "ErrAsleep");
+        CHECK_STR(evcc_vehicle_data_error(charge, LinkState::Idle, true, false, false), "ErrMustRetry");
+        CHECK_STR(evcc_vehicle_data_error(charge, LinkState::Awake, true, false, false), "ErrMustRetry");
+        CHECK(!evcc_vehicle_data_error(charge, LinkState::Asleep, false, true, true));
+        CHECK(!evcc_vehicle_data_error(charge, LinkState::Awake, false, false, false));
+        CHECK(!evcc_vehicle_data_error(charge, LinkState::Unknown, true, false, false));
+        CHECK(!evcc_vehicle_data_error(charge, LinkState::Unreachable, true, false, false));
+        CHECK(!evcc_vehicle_data_error(climate, LinkState::Awake, false, true, false));
+        CHECK(!evcc_vehicle_data_error(mixed, LinkState::Asleep, true, true, false));
+        CHECK(!evcc_vehicle_data_error(VehicleDataEndpoints::unsupported(), LinkState::Asleep,
+                                       true, true, true));
+    }
 
     // Scenario 5 — endpoints query parsing
     {
