@@ -79,7 +79,11 @@ int write_effect_id(Transport& transport, const mcp_json::RpcId& id) {
 // receipt, physical command execution or prevent an external client's own retries.
 template <typename Transport>
 int degraded_effect_reply(Transport& transport, HttpEffectReply& reply) {
-    int result = begin_effect_reply(transport, reply, 200);
+    const bool rest_command = reply.state.shape == ReplyShape::WrappedRest &&
+        (reply.state.possible_effects & static_cast<uint8_t>(RequestEffect::Command)) != 0;
+    // evcc's command setters accept any 2xx as success. Preserve a transport failure for
+    // an unconfirmed REST command even when only the allocation-free fallback can be sent.
+    int result = begin_effect_reply(transport, reply, rest_command && !reply.state.success() ? 502 : 200);
     if (result != 0) return result;
     const auto write = [&](const char* value) {
         if (result == 0) result = transport.chunk(value, std::strlen(value));

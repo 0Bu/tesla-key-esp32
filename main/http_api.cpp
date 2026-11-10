@@ -149,15 +149,14 @@ bool is_command_route(const char* uri) {
 [[gnu::noinline]] static esp_err_t send_command_result(GuardedReq rq, bool ok,
                                                        const char* cmd, const char* vin,
                                                        const std::string& err, tk::CommandNoOp no_op) {
-    const bool effective_ok = ok || tk::is_nominal_already_set(err);
-    // A false command outcome is not an HTTP success: evcc otherwise accepts the request
-    // as delivered and the old current can remain active. Keep the Tesla-compatible JSON
-    // body, but make the transport status retryable/observable.
-    return send_effect_json(rq, effective_ok ? 200 : 502,
-                     make_response(effective_ok, cmd, vin,
-                         ok && no_op != tk::CommandNoOp::None ? tk::command_noop_text(no_op) :
-                         tk::command_result_text(effective_ok, err),
-                         ok ? tk::command_noop_code(no_op) : nullptr));
+    // The runner already normalizes accepted no-ops for the current command. The shared
+    // diagnostic text cannot promote a failed command to an HTTP success.
+    const char* reason = !ok && tk::is_nominal_already_set(err)
+        ? tk::uncertain_command_reason() : tk::command_result_text(ok, err);
+    if (ok && no_op != tk::CommandNoOp::None) reason = tk::command_noop_text(no_op);
+    return send_effect_json(rq, ok ? 200 : 502,
+                            make_response(ok, cmd, vin, reason,
+                                          ok ? tk::command_noop_code(no_op) : nullptr));
 }
 
 esp_err_t handle_command(GuardedReq rq) {
@@ -271,30 +270,59 @@ esp_err_t handle_command(GuardedReq rq) {
     tk::CommandNoOp no_op = tk::CommandNoOp::None;
     bool ok = execute_vehicle_command(*g_vehicle, info->kind, ival, bval, &no_op);
     if (ok) rq.reply()->state.succeeded(); // before fallible/global error-text sampling
-    // On failure, distinguish "the car rejected it" (we got an error reply, e.g.
-    // "complete") from "the car was unreachable" (no reply / timed out). The former
-    // carries the real Tesla reason; only the latter is an in-range problem. The text
-    // selection is shared with the MCP tools/call result (logic/mcp.hpp) so the two
-    // paths can never report the same outcome differently.
+    // Preserve the available diagnostic text for a rejection or reachability failure.
+    // Like MCP tools/call, REST uses the command result text for the diagnostic.
+    // The shared last error is sampled after the command completes and is used
+    // only to explain the outcome. The request-local result above is the source
+    // of truth for the HTTP success status.
     std::string err = g_vehicle->last_command_error();
     return send_command_result(rq, ok, cmd, vin, err, no_op);
 }
 
 // ─── GET /api/1/vehicles/{VIN}/vehicle_data ───────────────────────────────────
 
-// Emit a fixed cache snapshot without copying unrelated climate strings.
-static bool emit_cached_vehicle_climate(tk::StatusJsonEmitter& e) {
-    tk::VehicleClimateData climate{};
-    const bool ok = g_vehicle->get_vehicle_climate(climate);
-    tk::emit_vehicle_climate_state(climate, e);
-    return ok;
+static esp_err_t send_evcc_vehicle_data_error(httpd_req_t* req, const char* error) {
+    esp_err_t result = httpd_resp_set_status(req, "503 Service Unavailable");
+    if (result != ESP_OK) return result;
+    result = httpd_resp_set_type(req, "text/plain");
+    if (result != ESP_OK) return result;
+    result = httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    if (result != ESP_OK) return result;
+    return httpd_resp_sendstr(req, error);
 }
 
-// Same for the drive snapshot: only the odometer is emitted, never shift_state or other strings.
-static bool emit_cached_vehicle_drive(tk::StatusJsonEmitter& e) {
-    const tk::VehicleDriveData drive = g_vehicle->get_cached_vehicle_drive();
-    tk::emit_vehicle_drive_state(drive, e);
-    return tk::vehicle_drive_available(drive);
+// Keep the emitter's stack frame separate from the live cache snapshots.
+[[gnu::noinline]] static esp_err_t send_vehicle_data_json(
+    httpd_req_t* req, const char* vin, const tk::VehicleDataEndpoints& endpoints,
+    const ChargeStateResult& cs, const tk::VehicleClimateData& climate,
+    const tk::VehicleDriveData& drive, tk::LinkState link, bool ok) {
+    // Fleet API / TeslaBleHttpProxy envelope for successful reads and unclassified failures.
+    tk::JsonBuilder json;
+    tk::StatusJsonEmitter e(json);
+    e.obj_begin("response");
+    e.str("vin", vin);
+    e.obj_begin("response");
+    if (endpoints.charge_state) {
+        e.obj_begin("charge_state");
+        tk::emit_vehicle_charge_state(cs, link, e);
+        e.obj_end();
+    }
+    if (endpoints.climate_state) {
+        e.obj_begin("climate_state");
+        tk::emit_vehicle_climate_state(climate, e);
+        e.obj_end();
+    }
+    if (endpoints.drive_state) {
+        e.obj_begin("drive_state");
+        tk::emit_vehicle_drive_state(drive, e);
+        e.obj_end();
+    }
+    e.obj_end();
+    e.boolean("result", ok);
+    e.str("reason", ok ? "success" : "stale or unavailable");
+    e.obj_end();
+
+    return send_json(req, ok ? 200 : 503, e.release());
 }
 
 esp_err_t handle_vehicle_data(GuardedReq rq) {
@@ -312,38 +340,20 @@ esp_err_t handle_vehicle_data(GuardedReq rq) {
 
     ChargeStateResult cs{};
     const bool cs_ok = endpoints.charge_state && g_vehicle->get_charge_state(cs);
-    bool cl_ok = false;
-    bool dr_ok = false;
-
-    // Fleet API / TeslaBleHttpProxy envelope and the shared, host-tested emitters.
-    // Cache failures still produce typed fields, but never a successful HTTP response.
-    tk::JsonBuilder json;
-    tk::StatusJsonEmitter e(json);
-    e.obj_begin("response");
-    e.str("vin", vin);
-    e.obj_begin("response");
-    if (endpoints.charge_state) {
-        e.obj_begin("charge_state");
-        tk::emit_vehicle_charge_state(cs, g_vehicle->link_state(), e);
-        e.obj_end();
-    }
-    if (endpoints.climate_state) {
-        e.obj_begin("climate_state");
-        cl_ok = emit_cached_vehicle_climate(e);
-        e.obj_end();
-    }
-    if (endpoints.drive_state) {
-        e.obj_begin("drive_state");
-        dr_ok = emit_cached_vehicle_drive(e);
-        e.obj_end();
-    }
-    e.obj_end();
+    tk::VehicleClimateData climate{};
+    const bool cl_ok = endpoints.climate_state && g_vehicle->get_vehicle_climate(climate);
+    const auto drive = endpoints.drive_state ? g_vehicle->get_cached_vehicle_drive() : tk::VehicleDriveData{};
+    const bool dr_ok = tk::vehicle_drive_available(drive);
+    const auto link = g_vehicle->link_state();
     const bool ok = tk::vehicle_data_available(endpoints, cs_ok, cl_ok, dr_ok);
-    e.boolean("result", ok);
-    e.str("reason", ok ? "success" : "stale or unavailable");
-    e.obj_end();
+    if (!ok) {
+        const char* error = tk::evcc_vehicle_data_error(
+            endpoints, link, endpoints.charge_state && !cs.valid && !g_vehicle->has_cached_charge_sample(),
+            !climate.valid, !drive.valid);
+        if (error) return send_evcc_vehicle_data_error(req, error);
+    }
 
-    return send_json(req, ok ? 200 : 503, e.release());
+    return send_vehicle_data_json(req, vin, endpoints, cs, climate, drive, link, ok);
 }
 
 // ─── GET /api/1/vehicles/{VIN}/body_controller_state ─────────────────────────

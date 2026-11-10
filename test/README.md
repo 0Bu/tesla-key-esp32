@@ -525,7 +525,8 @@ successor's notes. Immediate and deferred checks changed before completion asser
 status, source/configured channels and notes. These keep their captured source: deferred memory,
 queue, deadline and task-creation refusals (memory, deadline and task creation also after a later
 setting change); ordinary-check entry memory and task-creation failures; upload refusals and
-failures; replaced or no-longer-newer Dev installs; and identity exhaustion. A completed offer
+failures; replaced or no-longer-newer Dev installs; and identity exhaustion. An early PR check
+refusal after a refused upload must report feed status with the new PR. A completed offer
 withdrawn by a channel change, including ABA, reports `offer_changed`. Same-version manifest
 and selected-note changes refuse before image transfer. Dev and PR candidates reach mandatory
 SDK verification, and both generation/channel exhaustion remain fail-closed while signed direct

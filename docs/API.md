@@ -52,10 +52,10 @@ dispatch; the same rule applies to vehicle-data routes.
   asleep or unreachable car, timeout, or a device-side refusal such as a full command queue) keeps
   the Tesla-compatible JSON (`result:false` plus the reason) but uses HTTP `502`, not a misleading
   `200`. Intake and out-of-memory failures before dispatch keep their own codes. If the reply
-  cannot be built after the attempt, the degraded HTTP `200` reply carries `outcome:"succeeded"`
-  only for a successful command, including `already_set` and these no-ops, otherwise
-  `result:false` and `outcome:"unknown"` (see
-  [Response classes](#response-classes)).
+  cannot be built after the attempt, the degraded reply keeps HTTP `200` for a confirmed success
+  and uses HTTP `502` with `result:false` and `outcome:"unknown"` for an unconfirmed command.
+  evcc's setters use the status code to decide whether the command succeeded. See
+  [Response classes](#response-classes).
   vehicle-command's proxy maps these differently (200 for car refusals, otherwise 408/412/500/503
   with an error-only body, or a Fleet server error's own status); see
   [ADR-0005](adr/0005-tesla-ble-seam.md#2-platform-forced-departures-and-reference-deviations).
@@ -121,24 +121,27 @@ GET /api/1/vehicles/{VIN}/vehicle_data
 
 The doubled `response` and `charge_amps` match the Fleet API/TeslaBleHttpProxy shape.
 `battery_level` is nominal SOC; `usable_battery_level` matches the Tesla app. Charge fields form a
-complete fixed numeric schema, including session `charge_energy_added` in kWh. `/status` and MQTT
-may omit unreported fields. Range/rate remain miles/mph here; MQTT uses km/km/h.
-Non-finite charge, climate or odometer numbers use the fixed schema's `0` placeholder,
-including after unit conversion; this means an unavailable reading, not a measured zero.
+fixed set of keys, including session `charge_energy_added` in kWh. When a charge sample exists,
+unreported or invalid `battery_level`, `charge_limit_soc` and `charge_amps` are JSON `null`.
+evcc's numeric getters reject those values and can still read the other fields. Reported zero SOC
+and zero amps remain numbers. Other numeric fields keep their typed zero fallback, including for
+non-finite values. `/status` and MQTT may omit unreported fields. Range/rate remain miles/mph here,
+and MQTT uses km/km/h.
 
 Optional `?endpoints=` selects `charge_state`, `climate_state` and/or `drive_state`. Omission selects
 charge and climate. Combine selectors with `;`, `,`, `%3B` or `%2C`. The exact query key is required;
 empty, unsupported, duplicate or malformed selectors and queries ≥128 bytes return `400`.
 TeslaBleHttpProxy instead uses its default for empty selectors, accepts duplicates and returns
 `503` for unsupported selectors; this firmware treats them as client errors. Every selected cache
-must be available for `200`/`result:true`; otherwise the response is `503`/`result:false` with
-`"stale or unavailable"`. Reads never poll or wake the car.
+must have a usable cache for `200`/`result:true`. Unavailable caches return `503`, normally with
+JSON `result:false` and reason `stale or unavailable`. The single-domain exceptions for evcc are
+listed below. Reads use existing caches and never poll or wake the car.
 
 | Selected domain | Availability and units |
 |---|---|
 | Charge | Valid idle cache may be old. In the active window, data older than 30 s is unavailable. |
 | Climate | Valid cache required; inside the active window it must be ≤300 s old. Unreported `is_preconditioning` is `false`; other optional fields use typed zero/false fallbacks. |
-| Drive | Valid cache with reported odometer required; last-known odometer is served in miles. Missing odometer returns `503` with `odometer:0`, where the proxy returns `200` with zero; evcc rejects either. |
+| Drive | Valid cache with a positive finite odometer required. The last-known reading is served in miles. A generic unavailable response has `503` with `odometer:0`. |
 
 The active window is a command in the last five minutes, or cached Charging/Starting with live
 Infotainment contact <60 s old. Once that contact expires without a recent command, valid
@@ -150,23 +153,34 @@ Drive refreshes through the rotation and a best-effort `NO_WAKE_SKIP` wake/boots
 
 ### evcc integration
 
-While `link` is `unreachable`, a valid cache and no command attempted in the last five minutes (failed
-attempts count) give `200` with `charging_state: Unknown` and last-known numbers. evcc maps `Unknown`
-to status A, so it does not see a car that left as plugged in. Inside that window, or with no
-ChargeState since boot, the response stays `503`, with zeroed fields that evcc does not parse. `Unknown`
-also reports an unmapped or absent car state. MCP and `/status` keep the last-known string beside
-`link`, and MQTT beside `sleep_status`. When the link returns, the last-known state is served until the
-next ChargeState: one round trip for an awake car, 30-300 s of backoff after a failed poll, and until
-it wakes for a sleeping car.
+evcc 0.318.2 requests each domain separately. The HTTP plugin recognizes the exact error body
+tokens documented under [Known error values](https://docs.evcc.io/en/reference/plugins/#known-error-values).
 
-TeslaBleHttpProxy answers `503` once its cache window has passed. Here that would stop evcc's loadpoint
-cycle in two configurations:
+| Condition for a single selected domain | HTTP result |
+|---|---|
+| Valid cache within its freshness policy | `200` with the wrapped JSON for that domain |
+| First sample missing with debounced, reachable sleep | `503 text/plain` with exactly `ErrAsleep` |
+| First ChargeState missing while the link is reachable and idle or awake | `503 text/plain` with exactly `ErrMustRetry` while background polling can obtain it |
+| Stale active feedback, an unusable odometer, or a missing cache without sleep or charge bootstrap evidence | `503` with the wrapped JSON error |
 
-- A `twc3` charger with an active vehicle and an enabled loadpoint. evcc logs `charger get max current`.
-- A charger that takes its status from the vehicle (`vehicle-api` or a custom status plugin). evcc logs
-  `charger status`.
+The plain responses carry `Cache-Control: no-store`. Mixed or default requests retain the wrapped
+JSON error. A startup with no reachability evidence retains the generic response until the link
+is classified. A successful read with retained idle data still uses JSON, including while asleep.
 
-Status A has its own cost on the second kind: a BLE gap of 150 s on a plugged-in car ends the session
+evcc's TWC3 current synchronization accepts both typed errors without accepting a new current.
+Its SoC polling also retries `ErrMustRetry` at the next eligible cycle. The stock `vehicle-api`
+charger maps `ErrAsleep` to status B and can subsequently issue a separate wake command under
+evcc's charging policy. That charger's status check and custom charger status plugins may still
+stop a cycle for `ErrMustRetry` or a generic failure.
+
+While the link is `unreachable`, a valid cache and no command attempted in the last five minutes
+give `200` with `charging_state: Unknown` and last-known numbers. Failed command attempts count.
+The stock template maps `Unknown` to status A. Unmapped or absent vehicle states also emit
+`Unknown`. MCP and `/status` keep the last-known string beside `link`, and MQTT does so beside
+`sleep_status`. On return, the next ChargeState can refresh the cache after one round trip for an
+awake car, or after the 30–300 s bootstrap backoff on failed polls.
+
+For chargers that read status from the vehicle, a BLE gap of 150 s on a plugged-in car ends the session
 and applies the loadpoint's default mode, if one is set. Without a default vehicle, evcc also does not
 identify a car plugged in during a BLE outage of over 10 minutes and treats it as a guest; a `twc3`
 charger then fails to relay to the vehicle until the car is replugged or selected manually.
@@ -366,13 +380,13 @@ errors with the route's flat or wrapped envelope. Successful `/diag` exports rem
 | Route class | Status and envelope |
 |---|---|
 | Vehicle command | Wrapped `response`; `200` for success or an accepted no-op, `502` for a failed command, `404` for an unknown command. Intake errors use `400`/`413`/`503`. |
-| `vehicle_data` | Wrapped `response`; `200` when all selected caches are usable; unusable required caches return `503`/`result:false`. Invalid URI/query/selectors retain `400`, VIN mismatch `404`. |
+| `vehicle_data` | `200` with wrapped JSON for usable caches. `503` with a wrapped error or a [plain evcc error](#evcc-integration). Invalid URI/query/selectors retain `400`, VIN mismatch `404`. |
 | `body_controller_state` | Wrapped `response`; a completed retrieval attempt returns `200`; inspect `response.result` for its outcome. |
 | Configuration | Wrapped `response` for time/VIN/MQTT/Syslog/WiFi. Key generation is flat `{result,reason}`. Channel success is flat `{ok,result,channel}`; channel errors are wrapped. Invalid intake is `400`/`413`, pending VIN identity recovery `409`, unavailable resources `503`, failed persistence `500`. |
 | OTA check | Flat `{started,reason?}`; `200` accepts the queued check, `409` for busy, `503` for unavailable service/queue, `500` for setup failure. Later memory/worker failures appear through `/ota/status`. |
 | OTA update | Flat `{result,reason,offer_changed?}`; `200` on start; `400` for malformed/duplicate binding, `409` for busy/probation or missing/stale/mismatched offer (`offer_changed:true`), `503` for unavailable service, insufficient ordinary-entry recovery memory or unknown image state, `500` for worker startup failure. |
 | Pre-effect REST OOM fallback | Flat `{result:false,reason:"out of memory"}`, `503`, even for routes whose normal envelope is wrapped. |
-| Degraded mutation reply | HTTP `200` with explicit application outcome, as described below; this status alone does not establish success. |
+| Degraded mutation reply | Explicit application outcome. An unconfirmed REST vehicle command returns `502`; other degraded replies use `200`. |
 
 Vehicle commands, `vehicle_data`, `body_controller_state`, `/gen_keys`, `/set_vin`, `/scan` and
 `POST /mcp` return `503` before dispatch when vehicle runtime is unavailable, with
@@ -382,7 +396,7 @@ not a JSON-RPC envelope. Before an effect attempt, contained C++ exceptions retu
 
 REST/MCP commands, configuration saves, browser-clock application, key/VIN transactions and OTA
 starts retain a bounded request-local outcome before response work. If response construction fails
-after an attempt, a fixed HTTP `200` JSON reply carries `reply_degraded:true` and one of:
+after an attempt, a fixed JSON reply carries `reply_degraded:true` and one of:
 
 | `outcome` | `result` | Meaning |
 |---|---|---|

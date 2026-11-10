@@ -82,7 +82,7 @@
           "/COMPONENT_MAIN_DIR/ota_update.cpp :: tk::OtaStartResult ota_start(unsigned int, std::string_view)": 288,
           "/COMPONENT_MAIN_DIR/ota_update.cpp :: void run_coordinator_task(void*, bool)": 512,
           "/COMPONENT_MAIN_DIR/ota_update.cpp :: void set_check_done(const OtaCheckResult&, const OtaOperation&)": 384,
-          "/COMPONENT_MAIN_DIR/ota_update.cpp :: void set_check_error(const char*, uint32_t)": 368
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: void set_check_error(const char*, uint32_t, bool)": 368
         },
         "CMakeFiles/__idf_main.dir/ota_writer.cpp.su": {},
         "CMakeFiles/__idf_main.dir/provisioning.cpp.su": {
@@ -200,7 +200,7 @@
           "/COMPONENT_MAIN_DIR/ota_update.cpp :: tk::OtaStartResult ota_start(unsigned int, std::string_view)": 288,
           "/COMPONENT_MAIN_DIR/ota_update.cpp :: void run_coordinator_task(void*, bool)": 512,
           "/COMPONENT_MAIN_DIR/ota_update.cpp :: void set_check_done(const OtaCheckResult&, const OtaOperation&)": 384,
-          "/COMPONENT_MAIN_DIR/ota_update.cpp :: void set_check_error(const char*, uint32_t)": 368
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: void set_check_error(const char*, uint32_t, bool)": 368
         },
         "CMakeFiles/__idf_main.dir/ota_writer.cpp.su": {},
         "CMakeFiles/__idf_main.dir/provisioning.cpp.su": {
@@ -315,7 +315,7 @@
           "/COMPONENT_MAIN_DIR/ota_update.cpp :: tk::OtaStartResult ota_start(unsigned int, std::string_view)": 256,
           "/COMPONENT_MAIN_DIR/ota_update.cpp :: void run_coordinator_task(void*, bool)": 528,
           "/COMPONENT_MAIN_DIR/ota_update.cpp :: void set_check_done(const OtaCheckResult&, const OtaOperation&)": 384,
-          "/COMPONENT_MAIN_DIR/ota_update.cpp :: void set_check_error(const char*, uint32_t)": 336
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: void set_check_error(const char*, uint32_t, bool)": 336
         },
         "CMakeFiles/__idf_main.dir/ota_writer.cpp.su": {},
         "CMakeFiles/__idf_main.dir/provisioning.cpp.su": {
@@ -428,7 +428,7 @@
           "/COMPONENT_MAIN_DIR/ota_update.cpp :: tk::OtaStartResult ota_start(unsigned int, std::string_view)": 272,
           "/COMPONENT_MAIN_DIR/ota_update.cpp :: void run_coordinator_task(void*, bool)": 528,
           "/COMPONENT_MAIN_DIR/ota_update.cpp :: void set_check_done(const OtaCheckResult&, const OtaOperation&)": 384,
-          "/COMPONENT_MAIN_DIR/ota_update.cpp :: void set_check_error(const char*, uint32_t)": 352
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: void set_check_error(const char*, uint32_t, bool)": 352
         },
         "CMakeFiles/__idf_main.dir/ota_writer.cpp.su": {},
         "CMakeFiles/__idf_main.dir/provisioning.cpp.su": {

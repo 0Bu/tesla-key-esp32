@@ -490,7 +490,14 @@ void upload_checks(){
  }
  reset();ota_set_channel(tk::OtaChannel::Dev);entry_largest=1;
  CHECK(ota_upload_start(&req,handed)==R::NoMemory&&!handed&&!ota_is_busy());
- CHECK(ota_get_status().state==OtaState::Error&&ota_get_status().channel==tk::OtaChannel::Dev);
+ CHECK(ota_get_status().state==OtaState::Error&&ota_get_status().channel==tk::OtaChannel::Dev&&ota_get_status().upload);
+ // A feed check refused before publishing its start still owns its error record.
+ ota_set_channel(tk::OtaChannel::Release);
+ CHECK(ota_check_start(42)==R::NoMemory&&!ota_is_busy());
+ const auto check_error=ota_get_status();
+ CHECK(check_error.state==OtaState::Error&&check_error.channel==tk::OtaChannel::Release);
+ CHECK(!check_error.upload&&check_error.target_pr==42&&!check_error.update_available);
+ CHECK(begins==0&&writes==0&&selectors==0);
  reset();ota_set_channel(tk::OtaChannel::Dev);async_copy_ok=false;
  CHECK(ota_upload_start(&req,handed)==R::NoMemory&&!handed&&!ota_is_busy()&&async_copies==0);
  CHECK(ota_get_status().state==OtaState::Error&&ota_get_status().channel==tk::OtaChannel::Dev);
