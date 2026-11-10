@@ -225,7 +225,7 @@ request to a known device address can still trigger this foreground read. See [s
 | `GET` or `POST /ota/check[?ms=<epoch>][&pr=<N>]` | Start a background update check (then poll `/ota/status`); `pr=<N>` targets that PR's preview build. |
 | `POST /ota/update?offer=<ID>[&pr=<N>]` | Consume the exact checked offer and start its background download/install. |
 | `POST /ota/upload` | Dev-channel-only raw signed app upload; see [direct upload](#direct-signed-firmware-upload). |
-| `GET /ota/status` | Progress/offer plus `channel` (checked source), `configured_channel`, `offer_id`, `upload`, `busy`, `verification`, `recovery_required_bytes`, `project`, `target`, full `elf_sha256` and per-boot `boot_id`; `pr` only while a PR build is targeted. An available offer includes `image_sha256` and `image_bytes`. |
+| `GET /ota/status` | Progress/offer plus `channel` (source of the current check, install or upload record, including its error), `configured_channel`, `offer_id`, `offer_changed` (only `true`), `upload`, `busy`, `verification`, `recovery_required_bytes`, `project`, `target`, full `elf_sha256` and per-boot `boot_id`; `pr` only while a PR build is targeted. An available offer includes `image_sha256` and `image_bytes`. |
 | `GET /ota/changelog[?offer=<ID>]` | Release notes for the current offer: `text/plain`, ≤ 1024 bytes, `no-store`; `204` when none, `409` when the supplied ID is stale. |
 | `GET /api/proxy/1/version` | `{version, platform}` (`"ESP32"`/`"ESP32-S3"`/`"ESP32-C3"`/`"ESP32-C6"`). |
 | `POST /mcp` | MCP server for AI agents (Streamable HTTP, stateless JSON-RPC 2.0; `GET` → `405`, no SSE): [MCP.md](MCP.md). |
@@ -274,8 +274,21 @@ notes and image identity. Save its opaque 24-character lowercase hexadecimal `of
 `/ota/status`, request notes with that ID and submit the same ID and PR when confirming.
 Changing channel, starting another check or accepting an install/upload invalidates an earlier
 offer; switching back does not restore it. Saving the same channel preserves the offer. Reboot
-discards all offers. Missing/stale IDs or a mismatched PR return `409` with
-`{result:false,offer_changed:true,reason}`; malformed or duplicate offer parameters return `400`.
+discards all offers. Before the first record `channel` reads `release`; if the status lock is
+unavailable, an `error` with message `unavailable` carries the setting in both channel fields.
+
+A withdrawn completed offer, normally by a channel change, reads as `state:"idle"`,
+`update_available:false` and `offer_changed:true`. `available` and `offer_id` are empty, notes
+return `204` (`409` for the old ID), `message` is the offer-changed reason, and `channel` and `pr`
+keep the original source. Clients must not report it as up to date. A result checked under a
+channel changed during the check enters `error` instead.
+
+`/ota/check` returns no check identity. A client must accept only a completed result whose
+`channel` equals both `configured_channel` and the setting it saw when starting the check, and
+whose `pr` equals the requested PR (absent for none).
+
+Missing/stale IDs or a mismatched PR return `409` with `{result:false,offer_changed:true,reason}`;
+malformed or duplicate offer parameters return `400`.
 These refusals perform no image download or flash operation and leave another client's valid
 offer intact. Run another check and confirm its result; never retry the old install automatically.
 After admission, the worker re-fetches and compares the complete manifest, selected notes,
