@@ -13,9 +13,9 @@ It builds **nothing** — it USB-writes an *already-published, signed* CI image 
 and erases `otadata`, deliberately leaving `nvs@0x9000` untouched so the pairing, private key,
 VIN and WiFi survive (no NFC re-enrol).
 
-When `$deploy-bench` delegates steps 1 and 3, the user's explicit bench invocation supplies the
-selected board's bounded preflight/read/reset and app/otadata write approval. It also separately
-names its passive HTTP acceptance scope. Reuse those approvals without asking again; the separate
+When `$deploy-bench` delegates steps 1 and 3, its existing authorization, granted directly or
+through `$deploy`, covers the selected board's bounded preflight/read/reset and app/otadata write.
+`$deploy-bench` also names its passive HTTP acceptance scope. Reuse those approvals; the separate
 approval prompts below apply outside that delegated bench scope. All artifact, layout, NVS and
 failure-stop checks remain mandatory.
 

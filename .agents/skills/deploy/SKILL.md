@@ -1,6 +1,6 @@
 ---
 name: deploy
-description: Publish a tesla-key-esp32 change through local checks, commit, push, PR creation, independent reviews, CI and canonical squash merge. Observe the resulting main build; USB bench testing belongs to deploy-bench and device delivery is a separate workflow.
+description: Publish a tesla-key-esp32 change through local checks, commit, push, PR creation, independent reviews, CI and canonical squash merge. Follow the Dev build and delegate firmware acceptance on the intended USB bench to deploy-bench.
 ---
 
 Invoke `$deploy`. Read [AGENTS.md](../../../AGENTS.md) first. The user's explicit invocation
@@ -9,26 +9,26 @@ under `.agents/skills/`.
 
 # deploy — commit, push, PR and merge
 
-Take the scoped repository change through verification, commit, push, PR creation and canonical
-squash merge. Follow the resulting main build so its source and publication outcome are known.
-Use [$deploy-bench](../deploy-bench/SKILL.md) for USB flashing and testing the implementation.
-Use [$ship](../ship/SKILL.md) when separately requested to deliver a signed main image to a device.
-This workflow ends without board, vehicle, cluster, USB or OTA operations.
+Take the scoped change through verification, commit, push, PR creation and canonical squash merge.
+Follow the resulting main build. Use [$deploy-bench](../deploy-bench/SKILL.md) for USB flash and
+acceptance on the intended test board. Production delivery belongs to [$ship](../ship/SKILL.md).
 
 ## Authorization and baseline
 
 The user's own `$deploy` invocation is explicit user authorization for the current task's local
-checks, commit, push, PR creation/updates and earned gate records, independent reviews, canonical squash
-merge of the verified head, and protected Dev signing/publication from the resulting main push.
-Continue through those phases without asking for approval again. Resolve the concrete PR/head
-from the task and verify it before merging; discovering its number or a new verified fix commit
-does not expire the workflow authorization. Ask only for missing information or additional scope.
-A stable Release and device delivery are outside this workflow.
+checks, commit, push, PR creation/updates and earned gate records, independent reviews, canonical
+squash merge of the verified head, protected Dev signing/publication and the standard
+`$deploy-bench` scope on the intended USB bench. Carry that approval into the delegated USB preflight,
+signed app-only flash, final `otadata` activation and same-board passive acceptance. Honor any
+narrower scope, such as repository-only deployment. Ask only for missing target information or
+additional scope. Stable Releases, production delivery, OTA, NVS/identity changes, cluster and
+vehicle actions require separate user authorization.
 
 Inspect status, branch, `origin/main`, merge-base and intervening changes. Preserve user changes and
 other tasks' worktrees. Stage only this change; do not reset, stash or rewrite history. If the user
-requires a bench test before merge, hand the exact candidate to `$deploy-bench` while the PR is
-open and resume only after its required acceptance. A new push invalidates that candidate's evidence.
+requires a bench test before merge, hand the exact candidate and the existing authorization to
+`$deploy-bench` while the PR is open. Resume only after its required acceptance. A new push
+invalidates that candidate's evidence.
 
 ## Prepare and verify the candidate
 
@@ -85,13 +85,17 @@ gh --repo github.com/0Bu/tesla-key-esp32 pr merge <numeric-pr> --match-head-comm
 No admin, auto, queue, alternate API, merge-commit or rebase variant. A changed head requires fresh
 verification before integration.
 
-## Observe main and report
+## Observe main and complete bench acceptance
 
 Capture the resulting merge commit. Follow exactly its main `build` PUSH run with `gh run watch
 <run-id> --exit-status`, using the run selection in [$ship](../ship/SKILL.md).
-A red run stops completion and needs diagnosis. Report whether Dev signing/publication ran or was
-skipped; no stable Release is implied. Do not continue into `$ship`'s device-delivery sections.
+A red run stops completion and needs diagnosis. For a firmware deployment, pass the exact signed
+artifact from that main run to `$deploy-bench`, unless the user requested repository-only scope
+or the accepted pre-merge bench run already satisfies the requested test. If the bench is unresolved,
+finish the authorized repository phases and ask only for the missing board or isolation details. A
+missing eligible artifact or failed board, layout, or bootloader check stops the USB path. Report
+which artifact was accepted and whether it came from the PR head or the resulting main build.
 
-Report the PR, reviewed head, merge SHA, CI result and any pending bench or delivery acceptance.
+Report the PR, reviewed head, merge SHA, CI result, Dev publication and bench acceptance separately.
 Keep diagnostic evidence and other tasks' workspaces. Branch deletion or broader cleanup requires
 its own applicable authorization.
