@@ -8,7 +8,7 @@ const appSource = fs.readFileSync(new URL("../main/www/app.js", import.meta.url)
 const OFFER_ID = "123456789abcdef000000001";
 function offered(fields = {}) {
   return { state: "idle", update_available: true, progress: 0, message: "update available",
-    current: "1.5.0", available: "1.6.0", channel: "release", offer_id: OFFER_ID, ...fields };
+    current: "1.5.0", available: "1.6.0", channel: "release", configured_channel: "release", offer_id: OFFER_ID, ...fields };
 }
 function seedOffer(context, fields = {}) {
   const offer = offered(fields);
@@ -44,6 +44,99 @@ test("Release remains Release when another client selects Dev", async () => {
   const opened = context.openFwUpdate();await new Promise(resolve => setImmediate(resolve));
   assert.equal(element("otaChannel").textContent, "Release");
   context.closeOtaModal(false);await opened;
+});
+
+test("an offer withdrawn by another client's channel change is never reported up to date", async () => {
+  const { context, element } = loadUi();
+  const calls = [];
+  context.fetch = async url => {
+    calls.push(url);
+    if (url.startsWith("/ota/check")) return { ok: true, status: 200, async json() { return { started: true }; } };
+    if (url.startsWith("/ota/status")) return { ok: true, status: 200, async json() {
+      return { state: "idle", update_available: false, offer_changed: true, progress: 0,
+        message: "update offer changed; check again and confirm the new offer", available: "",
+        current: "1.5.0", channel: "release", configured_channel: "dev", offer_id: "" };
+    } };
+    return { ok: true, status: 200, async json() { return {}; } };
+  };
+  await context.otaCheck();
+  assert.equal(context.otaBusy, false);
+  assert.match(element("toasts").children[0].innerHTML, /Update offer changed/);
+  assert.doesNotMatch(element("toasts").children[0].innerHTML, /up to date/);
+  assert.equal(calls.some(url => url.startsWith("/ota/changelog") || url.startsWith("/ota/update")), false);
+  // The withdrawal flag is fail-closed: it cannot accompany a current offer or carry false.
+  for (const status of [offered({ offer_changed: true }),
+    { state: "idle", update_available: false, progress: 0, message: "", available: "", current: "1.5.0", offer_changed: false }]) {
+    context.fetch = async () => ({ ok: true, status: 200, async json() { return status; } });
+    await assert.rejects(context.otaStatus(), /invalid OTA status response/);
+  }
+});
+
+test("a check result for another channel or PR is never taken as this client's answer", async () => {
+  const cases = [
+    { channel: "release", configured_channel: "dev", update_available: false },                   // B changed the setting
+    { ...offered({ channel: "dev", offer_id: "aaaaaaaaaaaaaaaa00000002" }), configured_channel: "dev" }, // B's Dev check
+    { ...offered({ pr: 42, available: "1.6.0-PR-42" }), configured_channel: "release" },             // B's PR preview
+    { configured_channel: "release", update_available: false },                                   // missing checked source
+    offered({ configured_channel: undefined }),                                                   // missing configured source
+  ];
+  for (const fields of cases) {
+    const { context, element } = loadUi();
+    context.otaChannel = "release";
+    const calls = [];
+    context.fetch = async url => {
+      calls.push(url);
+      if (url.startsWith("/ota/check")) return { ok: true, status: 200, async json() { return { started: true }; } };
+      if (url.startsWith("/ota/status")) return { ok: true, status: 200, async json() {
+        return { state: "idle", progress: 0, message: "up to date", available: "", current: "1.5.0", ...fields };
+      } };
+      return { ok: true, status: 200, async json() { return {}; } };
+    };
+    await context.otaCheck();
+    assert.equal(context.otaBusy, false); assert.equal(context.otaOffer, null);
+    assert.match(element("toasts").children[0].innerHTML, /Update offer changed/);
+    assert.doesNotMatch(element("toasts").children[0].innerHTML, /up to date|Update available/);
+    assert.equal(calls.some(url => url.startsWith("/ota/changelog") || url.startsWith("/ota/update")), false);
+  }
+  // The matching channel and PR still reach the ordinary results.
+  const { context, element } = loadUi();
+  context.otaChannel = "release";
+  context.fetch = async url => url.startsWith("/ota/check")
+    ? { ok: true, status: 200, async json() { return { started: true }; } }
+    : { ok: true, status: 200, async json() { return { state: "idle", progress: 0, message: "up to date",
+        available: "1.5.0", current: "1.5.0", update_available: false, channel: "release", configured_channel: "release" }; } };
+  await context.otaCheck();
+  assert.match(element("toasts").children[0].innerHTML, /Firmware is up to date/);
+});
+
+test("a channel overwritten by a second client can be checked again", async () => {
+  const { context, element } = loadUi();
+  const calls = [];
+  let checks = 0;
+  context.render({ version: "1.5.0", ota: { channel: "release" } });
+  context.fetch = async url => {
+    calls.push(url);
+    if (url === "/set_ota") return { ok: true, status: 200, async json() {
+      return { ok: true, result: true, channel: "dev" };
+    } };
+    if (url.startsWith("/ota/check")) {
+      checks++;
+      return { ok: true, status: 200, async json() { return { started: true }; } };
+    }
+    if (url.startsWith("/ota/status")) return { ok: true, status: 200, async json() {
+      return offered({ configured_channel: "release", update_available: checks === 1 });
+    } };
+    throw new Error("unexpected OTA request: " + url);
+  };
+
+  await context.setChannel("dev");
+  assert.match(element("toasts").children.find(item => item.dataset.key === "ota").innerHTML, /Update offer changed/);
+  assert.equal(context.otaChannel, "release");
+  assert.equal(element("fwSub").textContent, "Release channel");
+  await context.otaCheck();
+  assert.match(element("toasts").children.find(item => item.dataset.key === "ota").innerHTML, /Firmware is up to date/);
+  assert.equal(checks, 2);
+  assert.equal(calls.some(url => url.startsWith("/ota/changelog") || url.startsWith("/ota/update")), false);
 });
 
 test("stale bound notes require another check and cannot reach confirmation or install", async () => {
@@ -1310,7 +1403,9 @@ test("otaCheck triggers load toast and resolves to up to date toast when idle", 
           progress: 0,
           message: "idle",
           available: "1.6.0",
-          current: "1.6.0"
+          current: "1.6.0",
+          channel: "release",
+          configured_channel: "release"
         };
       }
     };
@@ -1645,10 +1740,9 @@ test("channel switching is responsive and immune to intermediate polling race co
   assert.equal(context.otaChannel, "release");
   assert.equal(context.otaChannelInFlight, false);
 
-  // Subsequent status poll now reporting release clears target
+  // A subsequent status poll confirms the selected channel.
   context.render({ version: "1.6.0-dev-1", ota: { channel: "release" } });
   assert.equal(context.otaChannel, "release");
-  assert.equal(context.otaChannelTarget, null);
   assert.equal(element("fwSub").textContent, "Release channel");
 });
 
@@ -1833,7 +1927,9 @@ test("openFwUpdate checks for updates, closes modal and toasts if up to date", a
             progress: 0,
             message: "up to date",
             available: "1.4.0",
-            current: "1.4.0"
+            current: "1.4.0",
+            channel: "release",
+            configured_channel: "release"
           };
         }
       };
@@ -2030,7 +2126,9 @@ test("tapping the update check button shows a toast and no modal when up to date
     progress: 0,
     message: "up to date",
     available: "1.4.0",
-    current: "1.4.0"
+    current: "1.4.0",
+    channel: "release",
+    configured_channel: "release"
   };
 
   context.fetch = async (url) => {
@@ -2057,7 +2155,7 @@ test("tapping the update check button shows a toast and no modal when up to date
   toasts.length = 0;
   statusResponse = {
     state: "idle",
-    update_available: true, offer_id: OFFER_ID, channel: "release",
+    update_available: true, offer_id: OFFER_ID, channel: "release", configured_channel: "release",
     progress: 0,
     message: "update available",
     available: "1.5.0",
@@ -2148,7 +2246,7 @@ test("Update confirmation dialog survives periodic background polls and does not
         async json() {
           return {
             state: "idle",
-            update_available: true, offer_id: OFFER_ID, channel: "release",
+            update_available: true, offer_id: OFFER_ID, channel: "release", configured_channel: "release",
             progress: 0,
             message: "update available",
             available: "1.5.0",
