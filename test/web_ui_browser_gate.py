@@ -375,6 +375,11 @@ console.error = function() {
       check(!document.querySelector("body > textarea"), "temporary copy field is removed");
       check(notice && notice.classList.contains(accepted ? "ok" : "err"), "copy outcome is reported");
       check(askModal.classList.contains("hide") === accepted, accepted ? "copy closes the sheet" : "failed copy keeps the text open");
+      if (!accepted) {
+        check(document.activeElement === askDetail, "failed copy focuses the YAML");
+        const selection = window.getSelection().toString();
+        check(selection === evccText || selection + "\n" === evccText, "failed copy selects the shown YAML");
+      }
     }
     check(document.activeElement === evccPill, "focus returns to the evcc pill");
     evccPill.click();

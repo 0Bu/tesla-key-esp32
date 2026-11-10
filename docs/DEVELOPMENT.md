@@ -98,14 +98,16 @@ standalone tag-fetch CMake path remains unchanged.
 then the build uses `gzip -9 -n`. Raw marker checks precede any transformation. The bounded,
 standard-library `prune_css_comments.py` helper blanks documentation text in whole-line CSS
 comments outside strings and parentheses, and ordinary whole-line JavaScript `//` comments.
-It preserves byte offsets, whitespace, inline comments, recognized legal/tooling directive families and HTML-sensitive
-sequences. JavaScript block comments remain opaque. The supported JavaScript subset refuses code
+CSS byte offsets and whitespace are preserved. The JavaScript pass removes leading spaces and
+tabs from code lines and keeps the original line endings, including on blanked comment lines.
+Inline comments, legal/tooling directives and HTML-sensitive sequences are preserved. JavaScript
+block comments remain opaque. The supported JavaScript subset refuses code
 lines containing template backticks, inline block openers or a final backslash, code after a block
 closer, unfinished blocks and Unicode line separators. These restrictions exclude untracked
 multiline strings/templates without guessing regex syntax. Inputs are bounded UTF-8 without NUL.
 Markup and code tokens remain unchanged; source comments remain readable. This is conservative
 repository-specific pruning, not general minification or universal observable equivalence:
-source introspection such as `Function.prototype.toString()` can expose changed comment text.
+source introspection such as `Function.prototype.toString()` can expose changed whitespace and comments.
 The application does not use source introspection.
 The helper is an explicit generator dependency. It rejects output/input aliases before cleanup,
 removes the validated old output before generation and publishes complete bytes atomically.
@@ -297,9 +299,10 @@ an application build or treat its presence as a flashable or physically tested r
 
 Unsigned local images **cannot boot**. Use provenance-bound signed artifacts and the canonical
 `$flash-esp32`, `$deploy-bench`, `$ship` or `$usb-recovery` procedure, as appropriate. Every physical write
-requires explicit authorization for the board, target and scope. The user's explicit `$deploy-bench`
-instruction supplies its standard USB preflight/reset/read/flash and passive acceptance approval;
-identify and verify the concrete board/artifact without asking for that approval again.
+requires explicit authorization for the board, target and scope. The user's `$deploy` invocation
+for firmware deployment and a direct `$deploy-bench` invocation both supply the standard USB
+preflight, flash and passive acceptance scope for the intended bench. Resolve its physical identity
+and verify the exact artifact before acting. Honor any narrower scope the user specified.
 Verify every image's signature;
 production and preview artifacts must match the production public-key pin. An authorized local
 development image must match the supplied development key. Size/chip/version checks alone do not
@@ -311,13 +314,14 @@ last. NVS stays intact. Merged-image writes and full erases destroy configuratio
 a separate trust lineage and needs an explicit key and scope.
 
 `$deploy` handles commit, push, PR creation, current-head reviews/CI and canonical squash merge,
-then observes the main build. The user's explicit invocation authorizes those steps, including
-protected Dev signing/publication; no additional phase confirmation is needed. It does not contact devices.
-[`$deploy-bench`](../.agents/skills/deploy-bench/SKILL.md) identifies the physical USB bench across
-Tesla/Daikin firmware, flashes a signed PR preview or development-key image through `$flash-esp32`
-or an already-published image through `$usb-recovery`'s provenance and app-only steps, and tests
-the implementation on that same board. Device delivery after merge remains a separately requested
-`$ship` operation.
+then follows the protected Dev build. For firmware deployment it passes the resulting signed image
+and the existing approval to [`$deploy-bench`](../.agents/skills/deploy-bench/SKILL.md). A required
+pre-merge bench check uses the exact candidate while the PR is open. `$deploy-bench` binds the
+physical board across Tesla/Daikin firmware, verifies the artifact through `$flash-esp32` or the
+app-only steps of `$usb-recovery`, and accepts the implementation on that same board. Establish
+that the board lacks a configured vehicle VIN or is isolated from the vehicle before a USB reset.
+Ask only for missing bench details. Production delivery through `$ship`, OTA and live evcc or vehicle
+tests require their own authorization.
 
 ### Installed-layout proof
 

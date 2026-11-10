@@ -310,6 +310,7 @@ tk::JsonOwner build_vehicle_data_fixture(std::string_view endpoints,
     const auto selected = select_endpoints(endpoints);
     ChargeStateResult charge{};
     charge.valid = true;
+    charge.has_battery_level = charge.has_charge_limit_soc = charge.has_charging_amps = true;
     charge.charging_state = "Charging";
     charge.battery_level = 63;
     charge.charge_limit_soc = 80;
@@ -399,9 +400,7 @@ void test_vehicle_data_numeric_domain() {
     };
     struct ChargeField { float ChargeStateResult::* member; const char* key; };
     const ChargeField charge_fields[] = {
-        {&ChargeStateResult::battery_level, "battery_level"},
         {&ChargeStateResult::usable_battery_level, "usable_battery_level"},
-        {&ChargeStateResult::charge_limit_soc, "charge_limit_soc"},
         {&ChargeStateResult::charger_power, "charger_power"},
         {&ChargeStateResult::charge_rate, "charge_rate"},
         {&ChargeStateResult::charge_energy_added, "charge_energy_added"},
@@ -418,6 +417,37 @@ void test_vehicle_data_numeric_domain() {
                 tk::StatusJsonEmitter emitter(json);
                 tk::emit_vehicle_charge_state(charge, tk::LinkState::Awake, emitter);
                 check_wire_number(emitter.finish(), field.key, sample.expected);
+            }
+            CHECK(live_allocations == 0);
+        }
+    }
+    for (bool present : {false, true}) {
+        for (bool plausible : {false, true}) {
+            reset_allocator(0);
+            {
+                ChargeStateResult charge{};
+                charge.valid = true;
+                charge.has_battery_level = charge.has_charge_limit_soc = charge.has_charging_amps = present;
+                charge.battery_level = plausible ? 0.0f : std::numeric_limits<float>::quiet_NaN();
+                charge.charge_limit_soc = plausible ? 80.0f : 0.0f;
+                charge.charging_amps = plausible ? 0 : -1;
+                tk::JsonBuilder json;
+                tk::StatusJsonEmitter emitter(json);
+                tk::emit_vehicle_charge_state(charge, tk::LinkState::Awake, emitter);
+                const auto root = emitter.finish();
+                const tk::JsonPrintOwner wire(cJSON_PrintUnformatted(root.get()));
+                CHECK(wire != nullptr);
+                const auto parsed = tk::json_owner(cJSON_Parse(wire.get()));
+                CHECK(parsed != nullptr);
+                for (const char* key : {"battery_level", "charge_limit_soc", "charge_amps"}) {
+                    const auto* item = cJSON_GetObjectItemCaseSensitive(parsed.get(), key);
+                    if (present && plausible) {
+                        CHECK(cJSON_IsNumber(item));
+                        CHECK(item->valuedouble == (std::strcmp(key, "charge_limit_soc") == 0 ? 80 : 0));
+                    } else {
+                        CHECK(cJSON_IsNull(item));
+                    }
+                }
             }
             CHECK(live_allocations == 0);
         }
@@ -460,7 +490,7 @@ void test_vehicle_data_numeric_domain() {
                 tk::StatusJsonEmitter emitter(json);
                 tk::emit_vehicle_drive_state(drive, emitter);
                 auto root = emitter.finish();
-                const double expected = present && std::isfinite(sample.input)
+                const double expected = present && std::isfinite(sample.input) && sample.input > 0
                     ? static_cast<float>(tk::km_to_mi(sample.input)) : 0.0;
                 check_wire_number(std::move(root), "odometer", expected);
             }
@@ -1436,7 +1466,8 @@ tk::JsonOwner build_effect_fixture() {
 
 void check_effect_wire(const EffectTransportSpy& transport, const tk::HttpEffectReply& reply,
                        bool degraded) {
-    CHECK(transport.status == 200);
+    CHECK(transport.status == (degraded && reply.state.shape == tk::ReplyShape::WrappedRest &&
+                               !reply.state.success() ? 502 : 200));
     CHECK(transport.status_calls == 1);
     CHECK(transport.type_calls == 1);
     auto json = tk::json_owner(cJSON_Parse(transport.body));
@@ -1575,6 +1606,23 @@ void test_effect_reply_renderer() {
                 }
             }
         }
+    }
+    {
+        reset_allocator(1);
+        HttpEffectReply reply;
+        reply.state.attempting(RequestEffect::Command);
+        EffectTransportSpy transport;
+        CHECK(effect_json_reply(transport, reply, 502, build_effect_fixture()) == 0);
+        fail_at = 0;
+        check_effect_wire(transport, reply, true);
+    }
+    {
+        reset_allocator(0);
+        HttpEffectReply reply;
+        reply.state.attempting(RequestEffect::Configuration);
+        EffectTransportSpy transport;
+        CHECK(degraded_effect_reply(transport, reply) == 0);
+        CHECK(transport.status == 200); // only status-based REST command clients need this split
     }
     // Normal complete response keeps its original status and still has one terminal send attempt.
     for (int fail : {0, 1, 2, 3}) {

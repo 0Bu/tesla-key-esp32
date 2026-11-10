@@ -138,13 +138,13 @@ The canonical runner owns the complete invocation list; these groups identify th
 | `scripts/test-build-contracts.sh` | No arguments retain the complete standalone contract, including relevance. The explicit `--build-and-manifest` profile runs the remaining block only after the strict host suite's mandatory relevance gate; it has its own 120-second limit. The two serial gates permit 240 seconds combined. Targets, pins, partitions, generated artifacts, size/stack/effective-build and publication contracts; validator self-tests isolate offsets, digest syntax, unsigned-prefix/size reuse, production pins, signed padding/image binding and complete Release/Pages bytes with deterministic disposable fixtures. Pages controls cover build-state/CLI consumption, bounded backoff beyond 50 seconds, delayed size/hash/404 failures for each of 16 parts, independent complete retries, bounded persistent failures, separate manifest/Release-byte delegation and immutable-input rejection before polling; no real signing key |
 | `scripts/test-pr-gates.sh` | Exact-head review records, relevance, canonical Git command boundaries and shared-library loss using fixtures; `ci-heal.sh` refusals with stubbed `git`/`gh` |
 | `test_pages_changelog.py` and Pages checker/relevance self-tests | Actual assembler delegation and metadata admission; exact root/Dev served bytes, complete fresh retries, immutable same-commit baseline files, and shipped Markdown add/edit/rename/delete through all three relevance decisions. Synthetic firmware and owned offline Git fixtures prove no delivery or live CDN behavior. |
-| `test_inline_assets.py` | Bounded CSS/JavaScript byte fixtures, legal/annotation/HTML-context preservation, rejected unsupported multiline JS, actual Node ASI/regex controls, exact CMake output and unchanged code lines, raw-marker rejection, stale-output cleanup and real incremental helper dependency. The Linux browser fixture reuses the helper API but independently compares the ordered raw CSSOM with its actual DOM stylesheet; host CMake tests and target build semantics cover the production generator. |
+| `test_inline_assets.py` | Bounded CSS/JavaScript byte fixtures, legal and HTML-sensitive text, unsupported multiline JS rejection, Node ASI/regex controls, preserved code tokens and line boundaries, exact CMake output, raw-marker rejection, stale-output cleanup and the real incremental helper dependency. The Linux browser fixture compares the ordered raw CSSOM with the DOM stylesheet. |
 | `web_ui_browser_gate.py` / `browser_cdp.py` and their policy/transport tests | Linux-only assembled page in Chrome/Chromium: console/request failures, degraded poller, escaping, computed contrast, OTA notes and uncertainty, the evcc pill and copy sheet; populated 390/light, 768/light and 1200/dark layouts; real trusted CDP Tab navigation, focus-visible ring and exactly one action each for Enter and Space. Controlled Python peers test pipe framing/limits/FD ownership and cleanup separately from DOM behavior; the host contract executes the actual strict shell with passive tools on Linux/Darwin branches and rejects commented, disabled or early-exit test invocations |
 | `web_installer.test.mjs` | Actual installer with passive serial/flasher adapters: installed-firmware check and when Flash is offered, phase ordering with the OTA selector last, abort/release including esptool's reset lines and buffered reads, one serial open per connection, explicit Clean flash confirmation, the boot-version check, and `eraseAll:false` on every write. No physical flash or NVS-preservation proof. |
 | `serial_port_release.test.mjs` | Port leases, quarantine and permission removal of the installer. |
 | `test_provision.py` / `test_capture_wake.py` | Passive HTTP provisioning and wake-capture client contracts; no live device requests. |
 | `test_evcc_vehicle.rb` / `test_log_origin_contract.py` | Shipped evcc jq mapping/setter contracts and actual logging-origin source controls. |
-| `web_ui_http.test.mjs` | Actual `app.js` in a Node VM with stubbed DOM and fetch: request helpers, configuration, OTA and sheet flows. The evcc sheet text must equal `docs/examples/evcc-custom-vehicle.yaml` with the host and VIN filled in; copy success, refusal and focus return are checked. |
+| `web_ui_http.test.mjs` | Actual `app.js` in a Node VM with stubbed DOM and fetch. Covers request helpers, configuration, OTA and sheet flows. The evcc sheet must match the YAML example with the host and VIN filled in. Tests cover copying, manual selection after refusal, and focus return. |
 | `run-config-repair-backend.sh` | Actual default-off maintenance backend and raw transport bodies against passive SDK/NVS facades. |
 
 <a id="whats-covered"></a>
@@ -520,7 +520,15 @@ cases; startup is no longer represented by a fake integer task parameter.
 
 The same fixture compiles actual update/status/notes/channel handlers against that OTA application.
 Two-client cases cover channel ABA, same-channel no-op, superseding checks, bound notes,
-missing/stale/duplicate IDs and mismatched PRs with zero image effects. Same-version manifest
+missing/stale/duplicate IDs and mismatched PRs with zero image effects. Current Release, Dev and PR
+offers assert the exact returned status and bound notes; an old ID cannot read a same-channel
+successor's notes. Immediate and deferred checks changed before completion assert the returned
+status, source/configured channels and notes. These keep their captured source: deferred memory,
+queue, deadline and task-creation refusals (memory, deadline and task creation also after a later
+setting change); ordinary-check entry memory and task-creation failures; upload refusals and
+failures; replaced or no-longer-newer Dev installs; and identity exhaustion. An early PR check
+refusal after a refused upload must report feed status with the new PR. A completed offer
+withdrawn by a channel change, including ABA, reports `offer_changed`. Same-version manifest
 and selected-note changes refuse before image transfer. Dev and PR candidates reach mandatory
 SDK verification, and both generation/channel exhaustion remain fail-closed while signed direct
 upload stays available. Altered payloads and short/long images never reach SDK end/selection.

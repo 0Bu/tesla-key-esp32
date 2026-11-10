@@ -27,8 +27,8 @@ app binary. A successful local compile is not a flashable artifact:
 > merge, release, or prior flash authorizes no new flash. Before `write-flash`/`write_flash` or
 > `erase-region`/`erase_region`, identify the exact port, detected chip, image provenance, target,
 > app offset `0x20000`, and activation erase `otadata@0xf000/0x2000`, then verify the explicit approval.
-> The user's `$deploy-bench` invocation supplies that approval for its selected bench, including
-> the bounded preflight reads and USB resets; do not request another approval when delegated here.
+> `$deploy-bench` carries this approval from the user's direct invocation or from `$deploy` for
+> the selected bench, including the bounded preflight reads and USB resets. Reuse that approval.
 > Never touch `nvs@0x9000/0x6000`, never use a merged full-flash image, and never read or search for
 > the real OTA signing key.
 

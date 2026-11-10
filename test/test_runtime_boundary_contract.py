@@ -1576,50 +1576,56 @@ def require_status_production_seams(producer: str, handler: str, emitter_header:
 
 
 VEHICLE_DATA_SEAMS = (
-    "tk::StatusJsonEmitter", "tk::emit_vehicle_charge_state(cs, g_vehicle->link_state(), e)", "e.release()",
     "strchr(req->uri, '?')", 'tk::parse_vehicle_data_endpoints(query ? query + 1 : "")',
     "endpoints.empty() || endpoints.has_unsupported", "static_assert(kQueryBufBytes == 128",
     "endpoints.charge_state && g_vehicle->get_charge_state(cs)",
-    "if (endpoints.charge_state)", "if (endpoints.climate_state)", "if (endpoints.drive_state)",
-    "bool dr_ok = false;",
-    "cl_ok = emit_cached_vehicle_climate(e)", "dr_ok = emit_cached_vehicle_drive(e)",
+    "endpoints.climate_state && g_vehicle->get_vehicle_climate(climate)",
+    "endpoints.drive_state ? g_vehicle->get_cached_vehicle_drive()",
+    "tk::vehicle_drive_available(drive)",
+    "const auto link = g_vehicle->link_state()",
     "const bool ok = tk::vehicle_data_available(endpoints, cs_ok, cl_ok, dr_ok)",
+    "tk::evcc_vehicle_data_error(",
+    "endpoints.charge_state && !cs.valid && !g_vehicle->has_cached_charge_sample()",
+    "!climate.valid, !drive.valid", "if (error) return send_evcc_vehicle_data_error(req, error)",
+    "return send_vehicle_data_json(req, vin, endpoints, cs, climate, drive, link, ok)",
+)
+
+VEHICLE_DATA_JSON_SEAMS = (
+    "tk::StatusJsonEmitter", "tk::emit_vehicle_charge_state(cs, link, e)", "e.release()",
+    "if (endpoints.charge_state)", "if (endpoints.climate_state)", "if (endpoints.drive_state)",
+    "tk::emit_vehicle_climate_state(climate, e)", "tk::emit_vehicle_drive_state(drive, e)",
     'e.boolean("result", ok)', "return send_json(req, ok ? 200 : 503, e.release())",
 )
-CLIMATE_CACHE_SEAMS = (
-    "g_vehicle->get_vehicle_climate(climate)", "tk::emit_vehicle_climate_state(climate, e)",
-    "return ok;",
-)
-DRIVE_CACHE_SEAMS = (
-    "g_vehicle->get_cached_vehicle_drive()", "tk::emit_vehicle_drive_state(drive, e)",
-    "return tk::vehicle_drive_available(drive)",
+
+EVCC_ERROR_REPLY_SEAMS = (
+    'httpd_resp_set_status(req, "503 Service Unavailable")',
+    'httpd_resp_set_type(req, "text/plain")',
+    'httpd_resp_set_hdr(req, "Cache-Control", "no-store")',
+    "return httpd_resp_sendstr(req, error);",
 )
 
 
-def require_vehicle_data_production_seams(handler: str) -> None:
+def require_vehicle_data_production_seams(handler: str, renderer: str) -> None:
     # Real cache selection, availability and status must delegate to the host-tested seams.
     code = scrub_cpp_preserving_layout(handler)
     for token in VEHICLE_DATA_SEAMS:
         if scrub_cpp_preserving_layout(token) not in code:
             raise AssertionError(f"/vehicle_data handler bypasses tested production seam {token!r}")
+    for token in VEHICLE_DATA_JSON_SEAMS:
+        if scrub_cpp_preserving_layout(token) not in scrub_cpp_preserving_layout(renderer):
+            raise AssertionError(f"/vehicle_data renderer bypasses tested production seam {token!r}")
+    for token in ("charge_state_poll", "WakePolicy", "ensure_connected_", "get_vehicle_status", "wake_up"):
+        if token in code:
+            raise AssertionError(f"/vehicle_data handler added a vehicle-active read: {token}")
+    if code.count("get_charge_state(") != 1:
+        raise AssertionError("/vehicle_data must take exactly one charge cache snapshot")
 
 
-def require_vehicle_climate_cache_seam(helper: str) -> None:
+def require_evcc_error_reply_seam(helper: str) -> None:
     code = scrub_cpp_preserving_layout(helper)
-    for token in CLIMATE_CACHE_SEAMS:
-        if token not in code:
-            raise AssertionError(f"climate cache helper bypasses tested production seam {token!r}")
-    if "get_charge_state" in code or "charge_state_poll" in code or "WakePolicy" in code:
-        raise AssertionError("climate cache helper added a vehicle-active read")
-
-
-def require_vehicle_drive_cache_seam(helper: str) -> None:
-    code = scrub_cpp_preserving_layout(helper)
-    for token in DRIVE_CACHE_SEAMS:
-        if token not in code:
-            raise AssertionError(f"drive cache helper bypasses tested production seam {token!r}")
-    if "get_charge_state" in code or "charge_state_poll" in code or "WakePolicy" in code:
-        raise AssertionError("drive cache helper added a vehicle-active read")
+    for token in EVCC_ERROR_REPLY_SEAMS:
+        if scrub_cpp_preserving_layout(token) not in code:
+            raise AssertionError(f"/vehicle_data evcc error wire reply drift: {token}")
 
 
 DRIVE_GETTER_SEAMS = (
@@ -1827,7 +1833,7 @@ ACTIVE_WINDOW_SEAMS = (
 # not count. These are the initializers; a later assignment must not bypass a pinned input.
 ACTIVE_WINDOW_WRITES = {"lc": 1, "now_ticks": 1, "recent_cmd": 1, "contact_age": 1, "have_contact": 1}
 CACHE_SEAM_WIRING = (
-    "require_vehicle_climate_cache_seam", "require_vehicle_drive_cache_seam",
+    "require_vehicle_data_production_seams", "require_evcc_error_reply_seam",
     "require_vehicle_drive_getter_seam", "require_vehicle_climate_getter_seam",
     "require_charge_state_getter_seam", "require_active_window_seam",
     "require_climate_publication_stamp",
@@ -2452,7 +2458,7 @@ def require_recovery_reference_contract(ota_source: str) -> None:
     start = entry.index("if (!tk::ota_recovery_memory_affordable(entry_largest,")
     stop = entry.index("publish_operation_start(image, channel_state, generation, expected)")
     refused = entry[start:stop]
-    for token in ("set_check_error(kOtaNoMemory);", "release_unstarted_operation();", "return Result::NoMemory;"):
+    for token in ("set_check_error(kOtaNoMemory, channel_state, upload);", "release_unstarted_operation();", "return Result::NoMemory;"):
         if token not in refused: raise AssertionError("typed entry-memory refusal missing " + token)
     require_before("memory publication before owner release", refused, "set_check_error", "release_unstarted_operation")
     require_before("memory release before typed result", refused, "release_unstarted_operation", "return Result::NoMemory")
@@ -3952,17 +3958,16 @@ def require_ota_status_lock_contract(ota_source: str, runtime_tests: str) -> Non
         if token not in ota_source:
             raise AssertionError(f"OTA status fixed snapshot contract missing {token!r}")
 
-    for writer_name in ("set_state", "publish_check_status", "publish_upload_start"):
+    for writer_name in ("set_state", "publish_check_status"):
         writer = function_body_in(ota_source, writer_name)
         first_status = writer.find("s_status")
         if first_status < 0:
             raise AssertionError(f"OTA status writer {writer_name} no longer publishes status")
-        refused = "return false;" if writer_name == "publish_upload_start" else "return;"
         for token in (
             "SemaphoreHandle_t lock = ensure_lock();",
-            "if (!lock) " + refused,
+            "if (!lock) return;",
             "tk::SemGuard g(lock)",
-            "if (!g) " + refused,
+            "if (!g) return;",
         ):
             if token not in writer[:first_status]:
                 raise AssertionError(
@@ -3986,6 +3991,10 @@ def require_ota_status_lock_contract(ota_source: str, runtime_tests: str) -> Non
     check = scrub_cpp(function_body_in(ota_source, "perform_check"))
     if re.search(r"\b(?:set_state|set_check_error|set_check_done)\s*\(", check):
         raise AssertionError("OTA manifest check publishes a partial shared-status generation")
+    install = scrub_cpp(function_body_in(ota_source, "ota_task_impl"))
+    refusal = install[: install.find("tk::ota::ImagePolicy policy{};")]
+    if "tk::ota::ImagePolicy policy{};" not in install or re.search(r"\bset_state\s*\(", refusal):
+        raise AssertionError("OTA install refusal publishes an intermediate status generation")
     done = scrub_cpp(function_body_in(ota_source, "set_check_done"))
     for token in (
         "OtaStatusPod candidate{};",
@@ -4007,26 +4016,25 @@ def require_ota_status_lock_contract(ota_source: str, runtime_tests: str) -> Non
     require_before("OTA completed check guard before shared read", done, "if (!lock) return;", "s_status.generation")
     require_before("OTA completed check take before shared read", done, "tk::SemGuard g(lock);", "s_status.generation")
     publisher = scrub_cpp(function_body_in(ota_source, "publish_check_status"))
-    # Preserve only the active upload source for an error, inside the same guarded generation.
+    # Publish the new operation's source and result as one guarded snapshot.
     expected_publisher = (
         "{ SemaphoreHandle_t lock = ensure_lock(); if (!lock) return; "
         "tk::SemGuard g(lock); if (!g) return; "
-        "const bool upload = keep_upload && s_status.upload; "
-        "s_status = candidate; s_status.upload = upload; "
+        "s_status = candidate; "
         "if (!candidate.update_available) set_changelog_locked(nullptr); }"
     )
     if " ".join(publisher.split()) != expected_publisher:
         raise AssertionError("OTA publisher is not the exact guarded snapshot/source program")
-    if "static void publish_check_status(const OtaStatusPod& candidate, bool keep_upload = false) noexcept" not in ota_source:
-        raise AssertionError("OTA completed-check publication must reset upload source by default")
+    if "static void publish_check_status(const OtaStatusPod& candidate) noexcept" not in ota_source:
+        raise AssertionError("OTA publication must take its source from the candidate")
 
     # set_check_error() is the last-resort path used from exception/OOM catches and task-create
     # failure. It is noexcept by design: keep the entire path fixed-buffer-only and publish one
     # complete generation, otherwise a second allocation failure would terminate the task and a
     # partial set_state() fallback could expose mixed check fields to concurrent readers.
     if not re.search(
-        r"static\s+void\s+set_check_error\s*\(\s*const\s+char\s*\*\s*message\s*\)\s*"
-        r"noexcept\s*\{",
+        r"static\s+void\s+set_check_error\s*\(\s*const\s+char\s*\*\s*message\s*,"
+        r"\s*uint32_t\s+channel_state\s*,\s*bool\s+upload\s*=\s*false\s*\)\s*noexcept\s*\{",
         ota_source,
     ):
         raise AssertionError("OTA check-error fallback must remain noexcept")
@@ -4034,27 +4042,34 @@ def require_ota_status_lock_contract(ota_source: str, runtime_tests: str) -> Non
     for token in (
         "OtaStatusPod candidate{};",
         "candidate.state = OtaState::Error;",
+        "candidate.channel_state = channel_state;",
+        "candidate.channel = tk::ota_channel_in_state(channel_state);",
+        "candidate.upload = upload;",
         "copy_status_text(candidate.message, message);",
         "const std::string_view current = running_version();",
         "copy_status_text(candidate.current, current.data());",
-        "publish_check_status(candidate, true);",
+        "publish_check_status(candidate);",
     ):
         if token not in error:
             raise AssertionError(f"OTA check-error fixed snapshot missing {token!r}")
     expected_error = (
         "{ OtaStatusPod candidate{}; candidate.state = OtaState::Error; "
         "candidate.target_pr = s_target_pr.load(std::memory_order_relaxed); "
+        "candidate.channel_state = channel_state; "
+        "candidate.channel = tk::ota_channel_in_state(channel_state); "
+        "candidate.upload = upload; "
         "copy_status_text(candidate.message, message); "
         "const std::string_view current = running_version(); "
         "copy_status_text(candidate.current, current.data()); "
-        "publish_check_status(candidate, true); }"
+        "publish_check_status(candidate); }"
     )
     if " ".join(error.split()) != expected_error:
         raise AssertionError("OTA check-error fallback is not the exact fixed snapshot program")
     require_exact(
         "OTA check-error fallback call allowlist",
         called_functions(error),
-        {"copy_status_text", "data", "publish_check_status", "running_version", "load"},
+        {"copy_status_text", "data", "publish_check_status", "running_version", "load",
+         "ota_channel_in_state"},
     )
 
     for token in (
@@ -5244,9 +5259,9 @@ def require_runtime_source_contracts() -> None:
         MAIN_CODE["status_json_emitter.hpp"],
     )
     require_wifi_rollback_status_cache(SOURCES["main.cpp"], function_body("build_status_object"))
-    require_vehicle_data_production_seams(function_body("handle_vehicle_data"))
-    require_vehicle_climate_cache_seam(function_body("emit_cached_vehicle_climate"))
-    require_vehicle_drive_cache_seam(function_body("emit_cached_vehicle_drive"))
+    require_vehicle_data_production_seams(function_body("handle_vehicle_data"),
+                                          function_body("send_vehicle_data_json"))
+    require_evcc_error_reply_seam(function_body("send_evcc_vehicle_data_error"))
     require_vehicle_drive_getter_seam((MAIN / "vehicle_ctrl.hpp").read_text())
     require_vehicle_climate_getter_seam(SOURCES["vehicle_telemetry.cpp"])
     require_charge_state_getter_seam(SOURCES["vehicle_telemetry.cpp"])
@@ -6056,35 +6071,32 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
     require_status_production_seams(status_producer, status_handler, status_emitter)
 
     vehicle_data_handler = function_body("handle_vehicle_data")
+    vehicle_data_renderer = function_body("send_vehicle_data_json")
     for token in VEHICLE_DATA_SEAMS:
         mutated_vd = vehicle_data_handler.replace(token, "fixture_vehicle_data_bypass")
         try:
-            require_vehicle_data_production_seams(mutated_vd)
+            require_vehicle_data_production_seams(mutated_vd, vehicle_data_renderer)
         except AssertionError:
             pass
         else:
             raise AssertionError(f"/vehicle_data seam-removal mutation passed unexpectedly: {token}")
-    climate_helper = function_body("emit_cached_vehicle_climate")
-    for token in CLIMATE_CACHE_SEAMS:
-        try:
-            require_vehicle_climate_cache_seam(climate_helper.replace(token, "fixture_climate_bypass"))
-        except AssertionError:
-            pass
-        else:
-            raise AssertionError(f"climate cache seam-removal mutation passed unexpectedly: {token}")
-    drive_helper = function_body("emit_cached_vehicle_drive")
-    for token in DRIVE_CACHE_SEAMS:
-        try:
-            require_vehicle_drive_cache_seam(drive_helper.replace(token, "fixture_drive_bypass"))
-        except AssertionError:
-            pass
-        else:
-            raise AssertionError(f"drive cache seam-removal mutation passed unexpectedly: {token}")
+    for token in VEHICLE_DATA_JSON_SEAMS:
+        require_mutation_rejected(
+            f"/vehicle_data renderer bypass {token!r}",
+            lambda token=token: require_vehicle_data_production_seams(
+                vehicle_data_handler, vehicle_data_renderer.replace(token, "fixture_bypass")),
+        )
+    error_helper = function_body("send_evcc_vehicle_data_error")
+    for token in EVCC_ERROR_REPLY_SEAMS:
+        require_mutation_rejected(
+            f"/vehicle_data evcc error reply drift {token!r}",
+            lambda token=token: require_evcc_error_reply_seam(error_helper.replace(token, "fixture_bypass")),
+        )
     for injected in ("get_charge_state(cs);", "charge_state_poll();", "WakePolicy p;"):
         require_mutation_rejected(
-            f"drive cache helper vehicle-active read {injected!r}",
-            lambda injected=injected: require_vehicle_drive_cache_seam(
-                drive_helper.replace("{", "{ " + injected, 1)),
+            f"/vehicle_data added vehicle-active read {injected!r}",
+            lambda injected=injected: require_vehicle_data_production_seams(
+                vehicle_data_handler.replace("{", "{ " + injected, 1), vehicle_data_renderer),
         )
     getter_source = (MAIN / "vehicle_ctrl.hpp").read_text()
     drive_getter = function_body_in(getter_source, "get_cached_vehicle_drive")
@@ -7634,17 +7646,16 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
         ),
         (
             "OTA error publisher loses upload source",
-            ota_source.replace("s_status.upload = upload;", "s_status.upload = false;", 1),
+            ota_source.replace("candidate.upload = upload;", "candidate.upload = false;", 1),
         ),
         (
             "OTA feed publisher inherits upload source",
-            ota_source.replace("const bool upload = keep_upload && s_status.upload;",
-                               "const bool upload = s_status.upload;", 1),
+            ota_source.replace("s_status = candidate;",
+                               "const bool upload = s_status.upload; s_status = candidate; s_status.upload = upload;", 1),
         ),
         (
             "OTA error fallback omits source preservation",
-            ota_source.replace("publish_check_status(candidate, true);",
-                               "publish_check_status(candidate);", 1),
+            ota_source.replace("candidate.upload = upload;", "", 1),
         ),
         (
             "OTA status reader allocation-failure unlocked read",
@@ -7706,9 +7717,9 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
     )
 
     allocating_check_error = ota_source.replace(
-        "static void set_check_error(const char* message) noexcept {\n"
+        "static void set_check_error(const char* message, uint32_t channel_state, bool upload = false) noexcept {\n"
         "    OtaStatusPod candidate{};",
-        "static void set_check_error(const char* message) noexcept {\n"
+        "static void set_check_error(const char* message, uint32_t channel_state, bool upload = false) noexcept {\n"
         "    std::string fallback_allocation;\n"
         "    OtaStatusPod candidate{};",
         1,
@@ -7720,9 +7731,9 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
         lambda: require_ota_status_lock_contract(allocating_check_error, runtime_tests),
     )
     hidden_allocating_check_error = ota_source.replace(
-        "static void set_check_error(const char* message) noexcept {\n"
+        "static void set_check_error(const char* message, uint32_t channel_state, bool upload = false) noexcept {\n"
         "    OtaStatusPod candidate{};",
-        "static void set_check_error(const char* message) noexcept {\n"
+        "static void set_check_error(const char* message, uint32_t channel_state, bool upload = false) noexcept {\n"
         "    auto fallback_allocation = std::to_string(42);\n"
         "    OtaStatusPod candidate{};",
         1,
@@ -7735,7 +7746,7 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
     )
 
     partial_check_error = ota_source.replace(
-        "    publish_check_status(candidate, true);\n}\n\n// ─── Small HTTPS GET",
+        "    publish_check_status(candidate);\n}\n\n// ─── Small HTTPS GET",
         "    set_state(OtaState::Error, 0, message);\n}\n\n// ─── Small HTTPS GET",
         1,
     )
@@ -8844,9 +8855,8 @@ def require_api_reply_contract(parts: dict[str, str]) -> None:
         if compact(branch) not in compact(command):
             raise AssertionError(f"REST body status must use actual tested policy: {state}")
     sender = compact(function_body_in(parts["api"], "send_command_result"))
-    expected = ('return send_effect_json(rq,effective_ok?200:502,make_response(effective_ok,cmd,vin,'
-                'ok&&no_op!=tk::CommandNoOp::None?tk::command_noop_text(no_op):'
-                'tk::command_result_text(effective_ok,err),ok?tk::command_noop_code(no_op):nullptr));')
+    expected = ('return send_effect_json(rq,ok?200:502,make_response(ok,cmd,vin,reason,'
+                'ok?tk::command_noop_code(no_op):nullptr));')
     if compact(expected) not in sender:
         raise AssertionError("REST command failure status/envelope drift")
     call = compact(function_body_in(parts["mcp"], "handle_tools_call_"))
@@ -8892,7 +8902,7 @@ def require_api_reply_contract(parts: dict[str, str]) -> None:
 def self_test_api_reply_contract(parts: dict[str, str]) -> None:
     variants = (
         ("REST413mapping", "api", 'tk::body_read_http_status(body.status)', '400'),
-        ("RESTfailedcommand503", "api", 'effective_ok ? 200 : 502', 'effective_ok ? 200 : 503'),
+        ("RESTfailedcommand503", "api", 'ok ? 200 : 502', 'ok ? 200 : 503'),
         ("MCPunknowntoolcode", "mcp", 'tk::kJsonRpcInvalidParams, "unknown tool"', 'tk::kJsonRpcMethodNotFound, "unknown tool"'),
         ("MQTTOTAguardremoved", "config", 'tk::http_route_blocks_during_ota_update_409(tk::HttpRoute::SetMqtt)', 'false'),
         ("WiFiOTAguardfallthrough", "config", 'return send_json(req, static_cast<int>(tk::HttpRouteOtaConflict::Reject409),\n                         make_response(false, "set_wifi", "", tk::kOtaUpdateInProgressReason.data()));', '(void)send_json(req, static_cast<int>(tk::HttpRouteOtaConflict::Reject409),\n                         make_response(false, "set_wifi", "", tk::kOtaUpdateInProgressReason.data()));'),

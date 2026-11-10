@@ -197,6 +197,7 @@ esp_err_t handle_ota_status(GuardedReq rq) {
     json.string(json.root(), "message", s.message.data());
     json.string(json.root(), "available", s.available.data());
     json.boolean(json.root(), "update_available", s.update_available);
+    if (s.offer_changed) json.boolean(json.root(), "offer_changed", true);
     json.boolean(json.root(), "upload", s.upload);
     json.string(json.root(), "current", s.current.data());
     json.string(json.root(), "channel", tk::ota_channel_name(s.channel));

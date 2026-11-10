@@ -4,7 +4,7 @@ var $=function(id){return document.getElementById(id)};
 function setHTML(el,html){ if(el && el.__h!==html){ el.__h=html; el.innerHTML=html; } }
 var state=null, otaTimer=null, otaAvail=null, otaOffer=null, waking=false, wakeTimeout=null, chgBusy=false, feedOk=false;
 var otaBusy=false, otaPhase=null, otaPollState=null, otaDeadline=0, otaExpectedVersion=null, otaChannel='release', otaChannelInitialSet=false;
-var otaChannelInFlight=false, otaChannelTarget=null, otaPrompting=false;
+var otaChannelInFlight=false, otaPrompting=false;
 var otaFlowToken=null;
 var fwFocusId=null;   // control that started the running check/channel change; refocused once the UI is idle again
 
@@ -657,13 +657,8 @@ function render(s){
   renderFwVer();
 
   if(s.ota && typeof s.ota.channel === 'string'){
-    var sChan = s.ota.channel === 'dev' ? 'dev' : 'release';
-    if(otaChannelInFlight || otaChannelTarget){
-      if(sChan === otaChannelTarget){
-        otaChannelTarget = null;
-      }
-    } else {
-      otaChannel = sChan;
+    if(!isOtaFlowBusy()){
+      otaChannel = s.ota.channel === 'dev' ? 'dev' : 'release';
       otaChannelInitialSet = true;
     }
     renderChanMenu();
@@ -1259,14 +1254,24 @@ function evccYaml(s){
     EVCC_YAML.split('DEVICE_HOST').join(ip).split('REPLACE_WITH_VIN').join(s.vin):null;
 }
 function openEvcc(){
-  var y=evccYaml(state);
-  if(!y) return;
-  return askConfirm({title:'evcc configuration', detail:y, code:true, okLabel:'Copy', cancelLabel:'Close',
-    text:'Paste into evcc under Settings → Vehicles → Add → Custom device. Reserve this IP in your router.'}).then(function(go){
-    var ok=go&&copyText(y);
-    if(go) toast(ok?'Copied to clipboard':'Copy failed — select the text and copy it manually',ok?'ok':'err','evcc');
-    if(go&&!ok) return openEvcc();
-  });
+  var yaml=evccYaml(state);
+  if(!yaml) return;
+  function show(manual){
+    var prompt=askConfirm({title:'evcc configuration', detail:yaml, code:true, okLabel:'Copy', cancelLabel:'Close',
+      text:'Paste into evcc under Settings → Vehicles → Add → Custom device.'});
+    if(manual&&isOpen('askModal')){
+      var detail=$('askDetail');
+      detail.focus();
+      var selection=window.getSelection();
+      if(selection) selection.selectAllChildren(detail);
+    }
+    return prompt.then(function(go){
+      var ok=go&&copyText(yaml);
+      if(go) toast(ok?'Copied to clipboard':'Copy failed — copy the selected text manually',ok?'ok':'err','evcc');
+      if(go&&!ok) return show(true);
+    });
+  }
+  return show(false);
 }
 // Plain-HTTP pages lack the asynchronous Clipboard API: copy from a temporary read-only field.
 // Its 16 px text avoids the iOS focus zoom; focus then returns to the control that had it.
@@ -1324,6 +1329,7 @@ function otaStatus(){
       typeof o.update_available==='boolean'&&typeof o.progress==='number'&&isFinite(o.progress)&&o.progress>=0&&o.progress<=100&&
       typeof o.message==='string'&&typeof o.available==='string'&&typeof o.current==='string';
     if(valid&&o.upload!==undefined) valid=typeof o.upload==='boolean';
+    if(valid&&o.offer_changed!==undefined) valid=o.offer_changed===true&&!o.update_available;
     if(valid&&o.upload===true) valid=!o.update_available&&o.available===''&&(o.pr==null||o.pr===0);
     else if(valid&&(o.update_available||o.state==='downloading'||o.state==='done')) valid=otaVersion(o.available);
     if(valid&&o.update_available) valid=!!otaOfferSnapshot(o);
@@ -1386,7 +1392,6 @@ function setChannel(chan){
   if(!changed) return Promise.resolve();
 
   otaChannel = chan;
-  otaChannelTarget = chan;
   otaChannelInFlight = true;
   otaChannelInitialSet = true;
   renderChanMenu();
@@ -1397,7 +1402,7 @@ function setChannel(chan){
     body: JSON.stringify({ channel: chan })
   }, OTA_HTTP_TIMEOUT_MS).then(function(res){
     if(degradedReply(res.json)){
-      otaChannelInFlight=false; otaChannelTarget=null; otaChannel=prevChan;
+      otaChannelInFlight=false; otaChannel=prevChan;
       renderChanMenu(); showDegradedReply(res.json,'channel'); fwRefocus(); return;
     }
     if(!res.ok){
@@ -1414,7 +1419,6 @@ function setChannel(chan){
     return otaCheck();
   }).catch(function(err){
     otaChannelInFlight = false;
-    otaChannelTarget = null;
     otaChannel = prevChan;
     renderChanMenu();
     if(err && err.http){
@@ -1660,9 +1664,10 @@ function otaCheck(){
   if(typeof syncOtaUi === 'function') syncOtaUi();
   toast('Checking for updates…', 'load', 'ota');
   otaBarProgress('indet');
-  var prSel=otaPrSelection();
+  token.channel=otaChannel;
+  token.pr=Number(otaPrSelection());
   return otaAfterStatusPoll(function(){
-    var checkUrl='/ota/check?'+(prSel?'pr='+prSel+'&':'')+'ms='+Date.now();
+    var checkUrl='/ota/check?'+(token.pr?'pr='+token.pr+'&':'')+'ms='+Date.now();
     return requestOtaStart(checkUrl,{});
   }).then(function(j){
     if(otaFlowToken!==token) return;
@@ -1675,12 +1680,22 @@ function otaCheckPoll(){
   clearTimeout(otaTimer);
   return otaStatus().then(function(o){
     if(otaFlowToken!==token) return;
+    // Reconcile the selected channel even if this check's original intent is now stale.
+    var configured=o.configured_channel;
+    if(configured==='release'||configured==='dev'){
+      otaChannel=configured;
+      otaChannelInitialSet=true;
+      renderChanMenu();
+    }
     if(o.state==='checking'){ otaSchedule(otaCheckPoll,1200); return; }
     if(o.state==='downloading'||o.state==='done'){
       otaExpectedVersion=o.available||null; otaBegin('update',OTA_UPDATE_TIMEOUT_MS); otaProgress(o); return;
     }
     if(o.state==='error'){ otaFail('check failed'+(o.message?' — '+o.message:'')); return; }
     if(o.state!=='idle'){ otaFail('invalid check state'); return; }
+    if(o.offer_changed||o.channel!==token.channel||configured!==token.channel||(o.pr==null?0:o.pr)!==token.pr){
+      otaFail('Update offer changed — check again and confirm the new offer'); return;
+    }
     if(o.update_available){
       var offer=otaOfferSnapshot(o);
       if(!offer){ otaFail('Update offer identity is missing — check again'); return; }
