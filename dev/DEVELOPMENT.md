@@ -297,9 +297,10 @@ an application build or treat its presence as a flashable or physically tested r
 
 Unsigned local images **cannot boot**. Use provenance-bound signed artifacts and the canonical
 `$flash-esp32`, `$deploy-bench`, `$ship` or `$usb-recovery` procedure, as appropriate. Every physical write
-requires explicit authorization for the board, target and scope. The user's explicit `$deploy-bench`
-instruction supplies its standard USB preflight/reset/read/flash and passive acceptance approval;
-identify and verify the concrete board/artifact without asking for that approval again.
+requires explicit authorization for the board, target and scope. The user's `$deploy` invocation
+for firmware deployment and a direct `$deploy-bench` invocation both supply the standard USB
+preflight, flash and passive acceptance scope for the intended bench. Resolve its physical identity
+and verify the exact artifact before acting. Honor any narrower scope the user specified.
 Verify every image's signature;
 production and preview artifacts must match the production public-key pin. An authorized local
 development image must match the supplied development key. Size/chip/version checks alone do not
@@ -311,13 +312,14 @@ last. NVS stays intact. Merged-image writes and full erases destroy configuratio
 a separate trust lineage and needs an explicit key and scope.
 
 `$deploy` handles commit, push, PR creation, current-head reviews/CI and canonical squash merge,
-then observes the main build. The user's explicit invocation authorizes those steps, including
-protected Dev signing/publication; no additional phase confirmation is needed. It does not contact devices.
-[`$deploy-bench`](../.agents/skills/deploy-bench/SKILL.md) identifies the physical USB bench across
-Tesla/Daikin firmware, flashes a signed PR preview or development-key image through `$flash-esp32`
-or an already-published image through `$usb-recovery`'s provenance and app-only steps, and tests
-the implementation on that same board. Device delivery after merge remains a separately requested
-`$ship` operation.
+then follows the protected Dev build. For firmware deployment it passes the resulting signed image
+and the existing approval to [`$deploy-bench`](../.agents/skills/deploy-bench/SKILL.md). A required
+pre-merge bench check uses the exact candidate while the PR is open. `$deploy-bench` binds the
+physical board across Tesla/Daikin firmware, verifies the artifact through `$flash-esp32` or the
+app-only steps of `$usb-recovery`, and accepts the implementation on that same board. Establish
+that the board lacks a configured vehicle VIN or is isolated from the vehicle before a USB reset.
+Ask only for missing bench details. Production delivery through `$ship`, OTA and live evcc or vehicle
+tests require their own authorization.
 
 ### Installed-layout proof
 
