@@ -384,7 +384,7 @@ as well (`CONFIG_BT_CTRL_BLE_SECURITY_ENABLE=n`, `CONFIG_BT_CTRL_BLE_ADV=n`,
 `CONFIG_BT_CTRL_DTM_ENABLE=n`), so their boot line reads `BLE_INIT: Feature Config, ADV:0, ..., DTM:0,
 ..., SMP:0`. [ATT/SMP departures](adr/0005-tesla-ble-seam.md#2-platform-forced-departures-and-reference-deviations).
 
-All targets use the manifest-pinned v6.3.0 graph and lexical, hash-checked patch series. The firmware
+All targets use the manifest-pinned v6.4.0 graph and ordered, hash-checked patch series. The firmware
 uses `TeslaBLE::Client` directly; `main/logic/` owns framing, UUID/session tracking and an eight-slot
 command runner: VCSEC auth → wake → Infotainment auth → payload, with backoff. Strict 2-byte BE
 length framing has bounded buffering and inter-chunk timeout; TX preserves the builder's frame.
@@ -397,10 +397,9 @@ missing context, failed tags or repeated carried counters (including zero) drop 
 sleep updates or callbacks, never falling through to plaintext. Passive plaintext VehicleStatus
 keeps its separate path. Native retries rebuild/sign new UUID/counter bytes; upstream Vehicle's
 identical-byte retry does not change this policy. Upstream C5 support does not add a firmware target.
-The v6.3.0 charging-power estimator belongs to upstream `Vehicle`; native charge telemetry still
-reports the vehicle's raw power and phase fields without inferred AC watts or phases.
-The v6.3.0 optional poll-result callback also belongs to upstream `Vehicle`; the native
-controller does not consume it or treat command completion as fresh telemetry.
+The upstream `Vehicle` estimator, poll-result callback and charge-schedule poll are outside the
+native controller's `Client` path. Native charge telemetry reports the vehicle's power and phase
+fields directly. Command completion and telemetry freshness are separate.
 [ADR-0005](adr/0005-tesla-ble-seam.md) records all departures;
 [ADR-0002](adr/0002-idf6-mbedtls4-crypto-seam.md) records wire/key compatibility.
 
