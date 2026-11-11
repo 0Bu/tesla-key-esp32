@@ -15,7 +15,7 @@ reboot_marker=$2
 DEVICE_IP=fixture.invalid
 DELIVERY=ota
 VERSION=1.6.6
-FAMILY=esp32
+FAMILY=ESP32
 SECONDS=0
 
 sleep() {
@@ -27,7 +27,12 @@ sleep() {
 }
 
 curl() {
-  local uptime boot=0123456789abcdef
+  local uptime arg revalidate=0 boot=0123456789abcdef
+  for arg in "$@"; do
+    if [ "$arg" = 'Cache-Control: no-cache, no-store' ]; then
+      revalidate=1
+    fi
+  done
   case "${!#}" in
     http://fixture.invalid/ota/status)
       if [ "$scenario" = missing-boot-id ]; then
@@ -41,11 +46,14 @@ curl() {
       if [ -f "$reboot_marker" ] || { [ "$scenario" = hidden-reboot ] && (( SECONDS >= 5 )); }; then
         boot=fedcba9876543210
       fi
+      if [ "$scenario" = cached-reboot ] && (( SECONDS >= 5 && revalidate )); then
+        boot=fedcba9876543210
+      fi
       printf '{"state":"idle","message":"","boot_id":"%s"}\n' "$boot"
       ;;
     http://fixture.invalid/status)
       uptime=$((SECONDS + 1))
-      if [ "$scenario" = hidden-reboot ] && (( SECONDS >= 5 )); then
+      if [[ "$scenario" == hidden-reboot || "$scenario" == cached-reboot ]] && (( SECONDS >= 5 )); then
         uptime=$((SECONDS - 3))
       fi
       printf '{"version":"1.6.6","sys":{"uptime_s":%s}}\n' "$uptime"
@@ -61,7 +69,7 @@ curl() {
       if [ "$scenario" = sample-reboot ] && (( SECONDS >= 5 )); then
         : > "$reboot_marker"
       fi
-      printf '%s\n' '{"version":"1.6.6-esp32","platform":"esp32"}'
+      printf '%s\n' '{"version":"1.6.6-esp32","platform":"ESP32"}'
       ;;
     'http://fixture.invalid/diag?redact=1')
       if [ "$scenario" = diagnostic-reboot ]; then
@@ -97,7 +105,9 @@ class ShipOtaProbationTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_reboots_are_rejected(self):
-        for scenario in ("baseline-reboot", "hidden-reboot", "sample-reboot", "diagnostic-reboot"):
+        for scenario in (
+            "baseline-reboot", "hidden-reboot", "cached-reboot", "sample-reboot", "diagnostic-reboot",
+        ):
             with self.subTest(scenario=scenario):
                 result = self.run_scenario(scenario)
                 self.assertEqual(result.returncode, 1, result.stderr)

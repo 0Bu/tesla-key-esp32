@@ -377,6 +377,7 @@ else
   read_ota_boot_id() {
     local status
     status=$(curl --connect-timeout 3 --max-time 5 -fsS \
+      -H 'Cache-Control: no-cache, no-store' \
       "http://$DEVICE_IP/ota/status") || return 1
     OTA_BOOT_ID=$(printf '%s' "$status" \
       | jq -ser 'select(length == 1) | .[0].boot_id | strings | select(length == 16 and test("^[0-9a-f]{16}$"))') || {
