@@ -374,12 +374,42 @@ if [ "$DELIVERY" = usb ]; then
     exit 1
   }
 else
+  read_ota_boot_id() {
+    local status
+    status=$(curl --connect-timeout 3 --max-time 5 -fsS \
+      "http://$DEVICE_IP/ota/status") || return 1
+    OTA_BOOT_ID=$(printf '%s' "$status" \
+      | jq -ser 'select(length == 1) | .[0].boot_id | strings | select(length == 16 and test("^[0-9a-f]{16}$"))') || {
+      echo "DEPLOYMENT INCOMPLETE: invalid OTA boot identity" >&2; exit 1;
+    }
+  }
+
+  require_same_ota_boot() {
+    [ "$OTA_BOOT_ID" = "$1" ] || {
+      echo "DEPLOYMENT INCOMPLETE: OTA boot identity changed" >&2; exit 1;
+    }
+  }
+
+  live_ota_sample() {
+    LIVE_REACHABLE=0
+    read_ota_boot_id || return 1
+    local sample_boot_id=$OTA_BOOT_ID
+    require_same_ota_boot "${PROBATION_BOOT_ID:-$sample_boot_id}"
+    live_matches_artifact || return 1
+    if ! read_ota_boot_id; then
+      LIVE_REACHABLE=0
+      return 1
+    fi
+    require_same_ota_boot "$sample_boot_id"
+  }
+
   # OTA is asynchronous and deliberately reboots. Bound the whole download/reboot/probe window;
   # transient connection failures are expected, but a reported OTA error is terminal.
   VERIFIED=0
+  PROBATION_BOOT_ID=""
   UPDATE_DEADLINE=$((SECONDS + 600))
   while (( SECONDS < UPDATE_DEADLINE )); do
-    if live_matches_artifact; then VERIFIED=1; break; fi
+    if live_matches_artifact && live_ota_sample; then VERIFIED=1; break; fi
     if OTA_JSON=$(curl --connect-timeout 3 --max-time 5 -fsS \
         "http://$DEVICE_IP/ota/status"); then
       printf '%s' "$OTA_JSON" | jq -e '
@@ -400,7 +430,8 @@ else
 
   # A first successful boot is still PENDING_VERIFY. The rollback health gate starts only after
   # the firmware services have proved a link, so absolute device uptime is not evidence that its
-  # 90-s probation has elapsed. Bind a baseline to the first exact post-OTA observation instead.
+  # 90-s probation has elapsed. Bind the baseline to the boot that supplied the status and version.
+  PROBATION_BOOT_ID=$OTA_BOOT_ID
   PROBATION_BASELINE_UPTIME=$(printf '%s' "$LIVE_STATUS_JSON" \
     | jq -er '.sys.uptime_s | select(type == "number" and . >= 0) | floor') || {
     echo "DEPLOYMENT INCOMPLETE: live status lacks numeric sys.uptime_s" >&2; exit 1;
@@ -410,7 +441,7 @@ else
   PROBATION_VERIFIED=0
   PROBATION_DEADLINE=$((PROBATION_BASELINE_WALL + 180))
   while (( SECONDS < PROBATION_DEADLINE )); do
-    if live_matches_artifact; then
+    if live_ota_sample; then
       LIVE_UPTIME=$(printf '%s' "$LIVE_STATUS_JSON" \
         | jq -er '.sys.uptime_s | select(type == "number" and . >= 0) | floor') || {
         echo "DEPLOYMENT INCOMPLETE: live status lacks numeric sys.uptime_s" >&2; exit 1;
@@ -450,6 +481,11 @@ else
     echo "DEPLOYMENT INCOMPLETE: cannot verify OTA mark-valid result" >&2
     exit 1
   }
+  # The last accepted sample precedes the diagnostic read. Confirm the same boot after it.
+  read_ota_boot_id || {
+    echo "DEPLOYMENT INCOMPLETE: cannot verify OTA boot after diagnostic read" >&2; exit 1;
+  }
+  require_same_ota_boot "$PROBATION_BOOT_ID"
   printf '%s' "$OTA_DIAG" | grep -F 'OTA image healthy after ' \
     | grep -F 'marked valid (rollback cancelled' >/dev/null || {
     echo "DEPLOYMENT INCOMPLETE: firmware did not confirm OTA rollback cancellation" >&2
@@ -458,12 +494,11 @@ else
 fi
 ```
 
-Report: merged PR, channel and version, target(s) flashed, device-confirmed version and — for OTA —
-the exact version/platform observed for at least 100 seconds from the first post-OTA live
-baseline, with monotonic uptime advancing by the same minimum and tracking wall-clock time
-within five seconds, plus the boot-local `/diag?redact=1` confirmation that ESP-IDF accepted
-rollback cancellation. If the
-device still reports the old version after an OTA, check `/ota/status` `message` before retrying.
+Report the merged PR, channel, version, flashed targets and device-confirmed version. For OTA,
+report the exact version and platform observed under one `boot_id` for at least 100 seconds
+from the first verified sample. Uptime must advance by at least 100 seconds and track wall time
+within five seconds. Include the `/diag?redact=1` confirmation of rollback cancellation from the
+same boot. If the device still reports the old version, check `/ota/status` `message` before retrying.
 Validation or signature failures do not uniquely establish a trust-anchor mismatch. Compare
 candidate identity, integrity and signing-authority evidence before proposing separately
 authorized USB recovery; see [Security](../../../docs/SECURITY.md).
