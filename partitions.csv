@@ -7,11 +7,10 @@
 # signature appended, still keeping healthy headroom (the ci-build-all.sh app-size gate sits
 # 32 KB below the slot). Main compiles with -Og; the bootloader uses size optimization
 # and Mbed TLS/TF-PSA-Crypto uses its reviewed -Os exception. A larger flash leaves the top unused, so
-# ONE table serves every board. esp_https_ota writes the INACTIVE slot, so OTA updates
-# never touch nvs (0x9000) → WiFi / VIN / key survive upgrades. otadata tracks the active
-# slot; a blank otadata (after a full erase) boots ota_0. ota_0 stays at 0x20000 so a
-# device already on the old 8 MB table keeps OTA-updating without a reflash (the INSTALLED
-# table governs OTA writes; new full-flashes get this 4 MB table).
+# ONE table serves every board. The OTA writer uses raw esp_ota_* calls and requires
+# the canonical inactive slot. OTA preserves NVS, including WiFi settings, VIN and key.
+# Blank otadata selects ota_0. For legacy layouts with different slot offsets or sizes,
+# see the USB layout recovery in docs/SECURITY.md.
 #
 # The `coredump` partition costs NOTHING that was in use: 0x12000..0x20000 was a 56 KB hole
 # between phy_init and the app, left by the app's 0x20000 start. So it takes NO OTA headroom —
