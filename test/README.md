@@ -701,9 +701,8 @@ declarations. Final normal-workload stack floors are httpd/vehicle ≥1024 B, MQ
 auto-pair ≥1024 B. Recovery starts/ends with zero boot-failure count, includes ≥4 fault resets to latch
 safe mode, then a distinct non-fault reboot (≥5 planned), with final normal stack evidence. These are
 policy margins, not hardware-derived alarm thresholds.
-The setup portal explicitly reserves 6144 bytes for CaptiveHttp. Compiler frame checks do not
-establish its physical high-water floor; portal-save stack minima and display-enabled T-Dongle-S3
-INTERNAL largest-block margin need separate board evidence.
+The setup portal explicitly reserves 6144 bytes for CaptiveHttp. Measuring the minimum free stack
+while saving portal settings requires a board test.
 
 
 ## Adding to it
