@@ -34,7 +34,7 @@ dependencies:
       type: idf
     version: 6.1.0
   yoziru/tesla-ble:
-    component_hash: 243eea1e2060af370dd901ea82e22b2b5357e3c771bf2fa9915065ab01d28631
+    component_hash: 31703ec6157614d0af85b799f5be7b40cc9cbeaa4e0194735add90f48da2c6a8
     dependencies:
     - name: idf
       version: '>=5.0.1'
@@ -48,13 +48,13 @@ dependencies:
     - esp32c3
     - esp32c6
     - esp32c5
-    version: f7e288e026a19e6bfac0b207922086e57460d860
+    version: 67ec5c7ff8cf14664d76810d9f8e3fb4b499387a
 direct_dependencies:
 - espressif/cjson
 - espressif/mdns
 - espressif/mqtt
 - idf
 - yoziru/tesla-ble
-manifest_hash: 63e60c85aa6db770a114cc85cb6d34d51aecc1a223158ffb556606021b502cb1
+manifest_hash: 0e8d78f655968d12e68fb85d537db7097895c05267c1fa93148a1c7e7b2eb9e5
 target: esp32
 version: 3.0.0
