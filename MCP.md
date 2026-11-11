@@ -21,9 +21,13 @@ see [`ARCHITECTURE.md`](ARCHITECTURE.md#mcp-endpoint-mcp); for the security post
 ## Endpoint & transport
 
 ```
-POST http://<ESP32-IP>/mcp        (or http://tesla-key-esp32.local/mcp)
+POST http://<ESP32-IP>/mcp
 Content-Type: application/json
 ```
+
+Every board requests the same mDNS name, so use the target board's IP address:
+`tesla-key-esp32.local` can reach another board. With a single board on the network that name also
+works in place of `<ESP32-IP>`.
 
 The server implements the **Streamable HTTP transport in its stateless profile**:
 
@@ -55,14 +59,24 @@ spec lets the server pick either representation and this one always answers plai
 | `tools/call` | Tool result (`content` + `isError`) |
 | anything else (`resources/list`, …) | JSON-RPC error `-32601` |
 
+The `initialize` result's `instructions` also advertises the dev-only
+[`POST /ota/upload` workflow](API.md#direct-signed-firmware-upload): raw signed app binary,
+`Content-Type: application/octet-stream`, `Content-Length`, an already selected `dev`
+channel and progress/boot/ELF identity through `GET /ota/status`. A published feed or merge is not
+required. Same-version and PR/local builds retain the trusted signature, chip/slot checks,
+version-core floor and rollback; `release` refuses uploads. There is no new MCP firmware-write
+tool: an agent uses HTTP after explicit authorization for the target board and OTA/reboot.
+Discovery alone grants no write authority, and PR/publication gates continue to apply.
+
 ---
 
 ## Tools
 
-The tool set mirrors **exactly the commands the enrolled Charging-Manager key can
-execute** — plus one read-only state tool. Commands the car refuses for this key role
-(doors, climate, horn, sentry) are deliberately not exposed: a tool that always fails
-only misleads the calling model.
+The tool set selects charging and wake commands for the enrolled Charging-Manager role, plus
+one cached state tool. Doors, climate, horn and sentry are deliberately omitted because they are
+outside that role's expected scope. Exposure does not establish acceptance by every vehicle or
+software version; the [charge-port domain choice](adr/0005-tesla-ble-seam.md#native-execution-framing-and-session-reuse)
+in particular still requires physical role acceptance.
 
 | Tool | Arguments | Behavior |
 |------|-----------|----------|
@@ -93,10 +107,15 @@ Notes that matter to a calling agent:
   bounds — both are generated from one spec table, so they cannot drift).
 - **Failures are tool results, not protocol errors:** a refused or undeliverable command
   comes back as a normal `tools/call` result with `isError: true` and the reason as text —
-  the car's refusal reason when it answered, or `vehicle not reachable` when it didn't. JSON-RPC errors are
+  the car's refusal reason when it answered, `vehicle not reachable` when it didn't, or
+  `command outcome unknown; command may have executed` after possible submission. After that last
+  one, check `get_vehicle_state` before repeating the command. JSON-RPC errors are
   reserved for malformed requests (unknown tool/method, missing required args, parse
   errors). Already-satisfied charging requests follow the [shared command policy](API.md)
   and return successful tool results.
+  Charge-start/stop no-ops include `structuredContent.noop` (`complete`, `is_charging`,
+  `not_charging` or `already_set`) and explanatory text, with `isError:false`. This request-owned
+  result does not update charging telemetry or claim that a charge physically started.
 - **`get_vehicle_state` is cache-fed.** Fields appear only when known: after a reboot
   with the car asleep, expect `vin`, `paired`, `session_available`, `charge_available:false` and `link`.
   `paired` means a stored VCSEC session; `session_available` means a usable VCSEC session in RAM
@@ -120,7 +139,7 @@ The endpoint is plain HTTP + JSON, so everything is testable with curl.
 ### 1. `initialize`
 
 ```bash
-curl -s http://tesla-key-esp32.local/mcp \
+curl -s http://<ESP32-IP>/mcp \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{
         "protocolVersion":"2025-06-18",
@@ -133,7 +152,7 @@ curl -s http://tesla-key-esp32.local/mcp \
   "protocolVersion":"2025-06-18",
   "capabilities":{"tools":{}},
   "serverInfo":{"name":"tesla-key-esp32","version":"1.5.0"},
-  "instructions":"BLE-to-HTTP bridge for one Tesla, paired as Charging Manager: charging commands and cached read-only state only. get_vehicle_state never wakes the car; commands block for the BLE round-trip — typically 3-5s after idle, up to 20s when the car is unreachable."}}
+  "instructions":"Cached get_vehicle_state never wakes; BLE commands may take 20s. HTTP OTA (board/OTA approval): POST /ota/upload, saved dev only, Content-Length, application/octet-stream, signed app .bin. GET /ota/status: progress/boot/ELF. No feed/merge; reboots. Signature/rollback/PR gates remain."}}
 ```
 
 (`serverInfo.version` is illustrative — the device reports its running firmware version.)
@@ -141,7 +160,7 @@ curl -s http://tesla-key-esp32.local/mcp \
 The client then sends the initialized notification — answered with `202` and no body:
 
 ```bash
-curl -si http://tesla-key-esp32.local/mcp \
+curl -si http://<ESP32-IP>/mcp \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","method":"notifications/initialized"}'
 # HTTP/1.1 202 Accepted
@@ -153,7 +172,7 @@ for smoke tests — but real clients always run the lifecycle.)
 ### 2. `tools/list`
 
 ```bash
-curl -s http://tesla-key-esp32.local/mcp \
+curl -s http://<ESP32-IP>/mcp \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
 ```
@@ -176,7 +195,7 @@ curl -s http://tesla-key-esp32.local/mcp \
 ### 3. `tools/call` — read state (never wakes the car)
 
 ```bash
-curl -s http://tesla-key-esp32.local/mcp \
+curl -s http://<ESP32-IP>/mcp \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":3,"method":"tools/call",
        "params":{"name":"get_vehicle_state","arguments":{}}}'
@@ -185,14 +204,14 @@ curl -s http://tesla-key-esp32.local/mcp \
 ```json
 {"jsonrpc":"2.0","id":3,"result":{
   "content":[{"type":"text","text":
-    "{\"vin\":\"<VIN>\",\"paired\":true,\"session_available\":false,\"link\":\"asleep\",\"last_seen_s\":4210,\"soc\":72,\"usable_soc\":70,\"charging_state\":\"Disconnected\",\"charge_limit\":80,\"charge_amps\":16,\"charger_power_kw\":0}"}],
+    "{\"vin\":\"<VIN>\",\"paired\":true,\"session_available\":false,\"charge_available\":true,\"link\":\"asleep\",\"last_seen_s\":4210,\"soc\":72,\"usable_soc\":70,\"charging_state\":\"Disconnected\",\"charge_limit\":80,\"charge_amps\":16,\"charger_power_kw\":0}"}],
   "isError":false}}
 ```
 
 ### 4. `tools/call` — command with arguments
 
 ```bash
-curl -s http://tesla-key-esp32.local/mcp \
+curl -s http://<ESP32-IP>/mcp \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":4,"method":"tools/call",
        "params":{"name":"set_charging_amps","arguments":{"amps":16}}}'
@@ -214,25 +233,25 @@ Success and failure use the same shape — check `isError`:
 
 ```bash
 # Unknown tool → JSON-RPC error -32602
-curl -s http://tesla-key-esp32.local/mcp -H 'Content-Type: application/json' \
+curl -s http://<ESP32-IP>/mcp -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"door_unlock"}}'
 # {"jsonrpc":"2.0","id":5,"error":{"code":-32602,"message":"unknown tool"}}
 
 # Unimplemented capability → -32601
-curl -s http://tesla-key-esp32.local/mcp -H 'Content-Type: application/json' \
+curl -s http://<ESP32-IP>/mcp -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":6,"method":"resources/list"}'
 # {"jsonrpc":"2.0","id":6,"error":{"code":-32601,"message":"method not found"}}
 
 # Malformed body, including invalid raw UTF-8 in a JSON string → -32700
-curl -s http://tesla-key-esp32.local/mcp -H 'Content-Type: application/json' -d 'not json'
+curl -s http://<ESP32-IP>/mcp -H 'Content-Type: application/json' -d 'not json'
 # {"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"parse error"}}
 
 # Batch → -32600 (single messages only)
-curl -s http://tesla-key-esp32.local/mcp -H 'Content-Type: application/json' -d '[]'
+curl -s http://<ESP32-IP>/mcp -H 'Content-Type: application/json' -d '[]'
 # {"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"batching not supported"}}
 
 # GET → 405 (no SSE stream offered)
-curl -si http://tesla-key-esp32.local/mcp | head -1
+curl -si http://<ESP32-IP>/mcp | head -1
 # HTTP/1.1 405 Method Not Allowed
 ```
 
@@ -243,7 +262,7 @@ curl -si http://tesla-key-esp32.local/mcp | head -1
 | `-32700` | Body is not valid JSON (including malformed raw UTF-8 or invalid string escapes), empty, or could not be received. |
 | `-32600` | Invalid request: body over the 2 KB cap (HTTP `413`, message `request body too large`); nesting beyond 16 arrays/objects (`JSON nesting too deep`); more than 64 values (`too many JSON values`, `id:null`); escaped U+0000 anywhere (`JSON NUL escape not supported`); a batch array or non-object body; `jsonrpc` missing or not the exact string `"2.0"` (a separate valid `id` is still correlated); duplicate object keys at any depth (a duplicate `id` is ambiguous, so `id:null`); no `method`; an invalid `id`; or a `notifications/*` message that carries an `id`. |
 | `-32601` | Method not implemented (`resources/*`, `prompts/*`, …). |
-| `-32602` | `tools/call` with an unknown tool, an absent required argument (`missing required argument: <key>`) or a present-but-unparseable one (`integer required: <key>`, `boolean required: <key>` or `invalid argument: <key>`, according to the registry type and input). |
+| `-32602` | Unknown tool, absent required argument (`missing required argument: <key>`), invalid integer/boolean syntax (`integer required: <key>`, `boolean required: <key>` or `invalid argument: <key>`), or an integral value outside its command bounds (`argument out of range: <key>`). |
 | `-32603` | HTTP `503`: receive-buffer, cJSON materialization or pre-effect response-build/print allocation failure. |
 
 These codes describe handler replies. Before dispatch, runtime admission can return the flat
@@ -261,8 +280,8 @@ acknowledgement does not establish that a command failed; verify state before an
 
 ## Client integration
 
-Configure a local MCP client for **Streamable HTTP** at `http://tesla-key-esp32.local/mcp` or the
-board IP. Initialize, list tools, then call `get_vehicle_state` to confirm cached read access.
+Configure a local MCP client for **Streamable HTTP** at the target board's
+`http://<ESP32-IP>/mcp`. Initialize, list tools, then call `get_vehicle_state` to confirm cached read access.
 Commands such as `set_charge_limit` require deliberate action and the car may refuse them.
 
 A client must accept JSON-only responses and plain HTTP on your trusted LAN. There is no SSE stream
@@ -284,7 +303,7 @@ configuration belongs to that client's documentation; do not expose the board pu
   `wake_up`/commands cost a BLE connect and, repeated needlessly, keep the car from
   sleeping. A well-behaved agent checks `link` first and only wakes when it must.
 - **The car is the authority.** The device validates arguments and forwards; the vehicle may
-  still refuse (already at limit, cable locked, …) — that reason comes back verbatim in
+  still refuse (cable locked, …) — that reason comes back verbatim in
   the `isError` result text.
 - **No push.** The server never initiates messages (no SSE): to observe a change, poll
   `get_vehicle_state` — or use the read-only [MQTT/Home-Assistant bridge](ARCHITECTURE.md#home-assistant-mqtt-bridge)
@@ -298,6 +317,8 @@ configuration belongs to that client's documentation; do not expose the board pu
 | Client complains about SSE / `405` on GET | Expected — this server is stateless JSON-only. Configure the client for plain Streamable HTTP (`--transport http-only` for `mcp-remote`). |
 | `tools/call` returns `isError: true`, `"vehicle not reachable"` | Car out of BLE range or link cold — check range and pairing; an intentional wake may be needed before retrying. |
 | `tools/call` returns `isError: true` with the car's refusal text | The vehicle rejected the request; inspect its reason before retrying. |
-| `get_vehicle_state` has only `vin`/`paired`/`session_available`/`link` | Fresh boot with the car asleep: telemetry caches are empty until the first contact. |
+| `tools/call` returns `isError: true`, `"command outcome unknown; command may have executed"` | The command may have taken effect. Check `get_vehicle_state` before repeating it. |
+| `get_vehicle_state` reports an unexpected `vin` | The shared mDNS name reached another board. Use the target board's IP address. |
+| `get_vehicle_state` has only `vin`/`paired`/`session_available`/`charge_available:false`/`link` | Fresh boot with the car asleep: telemetry caches are empty until the first contact. |
 | Commands fail although the car is nearby | Check BLE availability and the hero's pairing status. `paired` reports a stored VCSEC session, not fresh vehicle acceptance. Reconnection and same-key enrollment run automatically; approve any enrollment prompt with the NFC card on the reader. Do not regenerate the key from an error hint. |
 | HTTPS / auth errors from a strict client | The endpoint is plain HTTP without credentials by design — see [`SECURITY.md`](SECURITY.md#http-api-exposure). Use a client/bridge that permits HTTP on a trusted LAN. |

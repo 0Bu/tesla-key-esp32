@@ -12,7 +12,7 @@ charging, but cannot unlock or drive. NVS also holds WiFi credentials, VIN and M
 |---|---|
 | Physical USB/JTAG | Factory flash is readable and firmware replaceable; protection requires separately planned hardware hardening. |
 | LAN/API | Unauthenticated plaintext control; trusted LAN, firewall/VLAN or authenticated reverse proxy. |
-| BLE | Tesla application crypto, authenticated responses, request binding and replay windows; NimBLE SMP/bonding is compiled out on all targets. |
+| BLE | Encrypted replies are authenticated and replay-checked. Legacy plaintext replies remain accepted under request UUID/address and one-response checks; those checks do not authenticate the sender. NimBLE SMP/bonding is compiled out on all targets. |
 | Build/publication | Pinned inputs, independent rebuild, protected signing and byte-bound artifacts. |
 
 First-boot key generation enables hardware entropy before WiFi/BLE. IDF6 PSA draws from the hardware
@@ -41,10 +41,13 @@ log, commit, upload, publicly attach or casually inspect them.
 
 ### NVS retention
 
-`main/logic/nvs_contract.hpp` owns the exact namespace/key/API/retention inventory and records
+`main/logic/nvs_contract.hpp` owns the exact application/pinned-library namespace/key/API/retention inventory and records
 which entries contain secrets. The secret flag is classification metadata; it does not encrypt or
 redact stored values. The storage adapter rejects unknown records, wrong APIs, collisions and names
 over 15 bytes.
+
+SDK-owned WiFi settings and PHY calibration also share this partition. Its secrecy and
+preservation requirements cover those records as well; they are outside the application registry.
 
 | Namespace / logical key (stored key where different) | Owner | Retention |
 |---|---|---|
@@ -55,13 +58,13 @@ over 15 bytes.
 | `tesla_cfg/ble_mac` | BLE discovery | replaceable cache |
 | `tesla_cfg/reboot_why` | independent heap supervisor | recovery journal |
 | `tesla_cfg/boot_fails` | boot guard | recovery journal |
-| `tesla_cfg/disp_rot` | display | durable across OTA |
-| `tesla_cfg/disp_flip` | display | read-only legacy migration |
 | `tesla_ble/private_key` | pinned tesla-ble library | durable across OTA |
 | `tesla_ble/session_vcsec` (`sess_vcsec`), `session_infotainment` (`sess_info`) | pinned tesla-ble library | replaceable session cache |
 | `tesla_ble/paired_at` | pairing | replaceable metadata |
 | `tesla_ble/key_created` | pairing | durable across OTA |
 | `tesla_ble/key_rotate` | key rotation | recovery journal |
+
+Legacy `tesla_cfg/disp_rot` and `tesla_cfg/disp_flip` values are ignored and left in NVS.
 
 OTA, verified signed app-only USB delivery and installer **Flash** preserve NVS. The installer
 offers **Flash** only when the device's own partition table places `nvs` at `0x9000`/`0x6000` and
@@ -71,21 +74,37 @@ firmware at boot, because it never erases an NVS partition it cannot initialize.
 require the flasher stub: the ROM loader erases 16 KiB blocks, so the partition-table write would
 reach into `nvs`.
 
+Runtime OTA accepts only the canonical OTA-slot offsets `0x20000`/`0x210000`, each `0x1f0000`
+bytes. Historical larger-flash partition layouts are not grandfathered into OTA; they need a
+separately authorized USB/layout recovery that preserves secret NVS. App-only USB delivery does
+not rewrite a partition table. The OTA writer uses raw `esp_ota_*`, not `esp_https_ota`.
+
 Installer **Clean flash**, merged-image writes and full flash erases destroy NVS. Each **Clean
 flash** requires a separate confirmation with a secret-NVS backup reminder before any flash work
 starts. Firmware rollback does not restore keys/configuration. Destructive or identity work needs
 explicit authorization and a backup/rollback plan.
+
+## MQTT transport
+
+Schemeless broker entries select TLS when a username or URI userinfo exists; credential-free
+entries select plaintext. Explicit `mqtt://` and `mqtts://` schemes are honored, so an explicit
+plaintext URI can send credentials without encryption. TLS verifies bundled CA roots and has no
+plaintext fallback. Status exposes the selected transport and connection error without broker
+credentials. Configuration belongs to the [user guide](USER_GUIDE.md#home-assistant-mqtt);
+the [runtime owner](ARCHITECTURE.md#home-assistant-mqtt-bridge) defines admission and retries.
 
 ## HTTP API exposure
 
 Port 80 has no authentication or TLS. Any LAN peer can call commands, change configuration/identity,
 trigger updates or remove crash evidence; the key role bounds car privileges, not device control.
 Never port-forward the device. Setup AP is open and provisioning uses plaintext HTTP; keep its
-window short. With stored credentials the open setup AP closes when the network comes up, after 10
+window short. With a running WiFi station or a successfully started Ethernet driver waiting for a lease, the open
+setup AP closes when the network comes up, after 10
 minutes without a client, and 30 minutes after opening even with one; a failed close is retried
 with backoff, the boot does not continue while the AP is up, and a power cycle reopens it.
-First-time setup, stored credentials that fail validation, and a credential rollback that could not
-be saved keep it open until the form is saved. mDNS advertises version, not VIN.
+Without either recovery transport, first-time setup or unusable credentials keep it open until
+the form is saved, including after Ethernet driver construction fails. An unsaved rollback also keeps the
+terminal portal open. mDNS advertises version, not VIN.
 
 Browser mutations require a device-owned Host, matching Origin when present, and no cross-site
 fetch. Owned names are the shared DHCP boot name and the current mDNS name (bare or `.local`),
@@ -99,8 +118,11 @@ fetch-site provenance, or the specific `X-Requested-With` header; otherwise they
 POST aliases exist for ota/check, diag and coredump.
 
 Diagnostic GETs `/status`, `/diag`, `/heap`, `/coredump`, `/ota/status` and `/ota/changelog` require
-a device-owned Host before gathering or sending state, including redacted exports. The evcc version,
-vehicle-data and body-controller routes retain their existing compatibility behavior. `GET /mcp`
+a device-owned Host before gathering or sending state, including redacted exports.
+The foreground `body_controller_state` GET also requires an owned Host, while evcc clients without
+Origin/Referer remain supported. A cross-site request addressed directly to a known device IP can
+still pass this Host check and cause a foreground BLE read; Host validation does not establish
+caller identity. The evcc version and cache-only vehicle-data routes retain their compatibility behavior. `GET /mcp`
 returns a fixed 405 with no diagnostic data. The static UI at `/` and `/index.html` sends
 `X-Frame-Options: DENY` and `Content-Security-Policy: frame-ancestors 'none'`; embedding it in an iframe
 is unsupported. These headers do not restrict the page's scripts/styles. The open provisioning AP
@@ -119,7 +141,10 @@ Syslog sends unredacted console logs over cleartext, unauthenticated UDP. VIN, S
 appear; keep raw logs private and use trusted collectors. Known MQTT URI parse-error records
 are replaced before Serial, RAM and Syslog, including when the optional RAM-ring mutex fails.
 This narrow guard does not sanitize arbitrary library or fragmented driver output. `/status?redact=1` and `/diag?redact=1` redact known identifiers,
-but retain the physical board MAC. Inspect before sharing. Overlong/truncated logical log lines
+but retain the physical board MAC. The ring flattens embedded line breaks in recognized
+identifier-bearing records so a value cannot escape per-line redaction. This also changes raw
+RAM-log exports; other Serial/Syslog records keep their original bytes. Inspect before sharing.
+Overlong/truncated logical log lines
 fail closed; do not join partial generations.
 
 Core dumps are unauthenticated downloads. General DRAM capture is off, but task stacks can contain
@@ -136,13 +161,42 @@ authenticate bytes, not freshness; app-descriptor/channel checks enforce version
 No eFuse anti-rollback is burned. Pending images retain rollback until runtime health is proven;
 [Architecture](ARCHITECTURE.md#ota-self-update) owns confirmation rules and allowed channel transitions.
 
+Feed installs also require a current checked offer ID bound to channel revision, PR, version,
+selected notes and manifest/image SHA-256 and size. Channel changes and replacement checks
+invalidate old confirmations; candidate changes require another check. The received image must
+match the confirmed bytes before SDK signature verification. The opaque ID prevents accidental
+cross-client substitution; it is not authentication, a secret or a CSRF credential. Hashes bind
+an unsigned manifest's claims and do not replace the pinned RSA authority.
+
+In `dev`, a LAN peer can also supply a raw signed app through `POST /ota/upload` without
+publishing it to a feed. This uses the same trusted RSA signature, target/slot validation,
+operation exclusion, probation and health/rollback checks. It accepts an equal/newer canonical
+version core, including same-version and PR/local builds; ordinary feed rules are unchanged.
+Release-channel uploads are refused. The channel is an operator opt-in, not authentication:
+the existing unauthenticated `/set_ota` API can select `dev`. Possession of LAN access alone
+still does not authorize unsigned or foreign-key firmware. HTTP does not bind uploaded bytes
+to a Git source SHA or attest PR gates; the operator must select an eligible signed artifact.
+The direct route does not provision a signing key, modify CI/publication policy or relax NVS,
+key/session preservation. See the [upload contract](API.md#direct-signed-firmware-upload).
+
+The maintainer's global `$ota` workflow uses `scripts/dev-ota-upload.py` for local, uncommitted
+source tests. Its private source inventory includes new non-ignored files. Executed test/build
+logs, a separate reviewer process with enforced read-only sandbox, signed-image SHA-256 and
+production RSA authority are bound through a private local journal. This detects accidental
+receipt edits and stale candidates; it is not external attestation against a malicious
+same-user operator. The journal, approved production inventory and signing configuration stay
+outside Git. No private key enters the helper. The helper requires an already saved `dev`
+channel and fixed IP/MAC/project/chip, consumes one attempt before POST even on timeout, and
+checks a distinct boot and full ELF identity plus passive runtime/retention evidence. It cannot
+prove vehicle behavior or all NVS contents, and does not authorize commands, retries or publication.
+
 The USB installer validates the schema-v2 source SHA's format and the four-target roles/offsets.
 It verifies byte lengths and SHA-256 hashes for the detected chip's four parts **before erasing/writing**;
 otadata activation is last. Downloads stream within each part's declared size, reject redirects and
 stop after 60 seconds. The manifest is unsigned: the browser does not authenticate its claimed
 source commit or inspect the other three chips' application bytes. These checks detect
 mixed/corrupt downloads, but USB still trusts the chosen Pages origin. Vendored hash-pinned
-`esptool-js@0.7.0` runs under `script-src 'self'`, with no CDN execution. Which installer action
+`esptool-js@0.7.1` runs under `script-src 'self'`, with no CDN execution. Which installer action
 keeps NVS is owned by [NVS retention](#nvs-retention).
 
 ## Signed OTA images
@@ -198,10 +252,28 @@ files, 28 diagnostics, 40 stable Release assets and 16 manifest parts. Do not us
 The main DAG starts `prepare`, `logic-test` and `logic-harness` together. The producer matrix
 `build-target` and the matrix `independent-rebuild-target` each need only `prepare`, so producer
 and independent target compiles run concurrently before protected publication. The `build` join
-needs `prepare`, both host jobs and `build-target`; `independent-rebuild` needs `build` and every
-`independent-rebuild-target` leg; `publish` and then `deploy` follow. `build` is a required status
+needs `prepare`, both host jobs and `build-target`; `independent-rebuild` needs `prepare` and every
+`independent-rebuild-target` leg, using the same prepared release version. The key-free independent
+join can finish before `build`; `publish` requires both successful joins, compares their complete
+inventories and bytes before key use, and then `deploy` follows. `build` is a required status
 check, and GitHub treats a check skipped because a need failed as passed, so `build` runs with
 `if: ${{ always() }}` and fails first unless every need succeeded. The independent join has no key.
+
+`prepare` performs cumulative relevance classification once for scheduling. It does not grant
+publication authority; current-source and Pages/Release checks remain at every mutation boundary.
+Dev publication overlaps the same pinned image download with key-free input checks on the signing
+runner. A successful pull, exact-image availability and fresh source/version admission are required
+before provisioning the key. This warmup grants no signing authority and changes no signing inputs,
+container limits or post-signing acceptance. Stable creation and immutable reuse are unchanged.
+Signed previews similarly resolve a trusted version, rebuild four targets on separate read-only
+runners, then join their complete inventory before the protected compare/sign stage.
+Selected PR feedback cannot authorize signing: eligible previews require additional complete
+host/protocol acceptance before the protected job. Main and manual publication always run full
+checks. Local cached successes are never consumed as publication or independent review evidence.
+Only the protected publisher and key-free deploy checkouts use `filter: blob:none`: they retain
+complete history/tags and hydrate the entire exact-source tree, omitting unrelated historical blobs.
+Compiler and host checkouts remain self-contained for historical reads in read-only containers.
+No Git history access or lazy fetch occurs while the signing key is provisioned.
 
 | Phase | Required proof and authority |
 |---|---|
@@ -237,21 +309,28 @@ exact staged snapshot without Release metadata and rechecks Pages source before 
 publisher. Each root or Dev push attempt and unchanged-byte build request rechecks staged
 SOURCE_SHA against fresh remote main. Root uses the same per-attempt staged-source/current-main
 admission; immutable Release authority is checked before the publisher.
+An explicit `root-recovery` mode is separate: current clean main helpers authenticate the original
+Actions ZIP by its GitHub artifact ID/digest, then verify its complete site and all 40 immutable
+latest Release assets, four production signatures, exact tag/source and main ancestry. Each push
+attempt and unchanged-byte build request repeats that authority check, including Pages source.
+No build, signing key, re-signing or Release mutation is available in this mode. An expired original
+artifact or changed authority stops recovery; [the runbook](DEVELOPMENT.md#recover-a-published-stable-site)
+owns its separately authorized invocation. First publication and Dev retain current-main equality.
+The shared publisher owns one empty, regular root `.nojekyll` marker so GitHub serves the assembled
+static site without rebuilding it through Jekyll. Every channel mutation validates it before and
+after staging; existing nonempty, linked or nonregular entries stop publication. Legacy recovery
+permits exactly this empty control file in addition to the complete original authenticated site.
+No original payload byte is excluded from comparison or regenerated. Build requests, readiness
+polling and complete public-byte acceptance remain required.
 Cumulative relevance reads the manifest and changelog from one exact branch commit. Stable
 acceptance binds firmware to an immutable Release/tag; Dev checks its declared sizes/hashes without
 requiring a Release. Both require exact served changelog bytes. Absent Dev authority falls back to
 the stable baseline; known metadata or served-byte mismatches keep reconciliation open.
 
-Stable and Dev acceptance first observe the latest Pages build with up to eight status reads and
-exponential delays capped at 60 seconds (310 seconds of default waiting). Queued/building, failed
-builds and unavailable status have distinct diagnostics before byte acceptance starts. This latest
-build observation is a readiness hint, not provenance for a particular firmware snapshot.
-Post-publication byte acceptance then retries the complete manifest, all 16 Pages parts and changelog with
-exponential delays capped at 60 seconds (190 seconds of default waiting). Each attempt uses a fresh
-cache key and must independently pass all
-identity, size, hash and byte-binding checks. Results from incomplete attempts are never combined.
-Invalid staged Dev bytes, expected changelog or immutable Release metadata/assets fail before Pages polling. This
-handles delayed CDN propagation; it does not establish an atomic CDN snapshot.
+Publication acceptance requires a complete fresh manifest/part/changelog snapshot; incomplete
+attempts cannot be combined. [Development](DEVELOPMENT.md#served-pages-acceptance) owns the bounded
+readiness polling, byte checks and retry procedure.
+
 A stale run must not replace unrepresented firmware. Top-level `docs/*.md` files are shipped Pages
 content, so their changes follow the normal four-target build, independent rebuild and protected
 Dev publication. Older firmware is never relabelled with a newer documentation source SHA. Unshipped

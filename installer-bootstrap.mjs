@@ -1,4 +1,4 @@
-import { ESPLoader, Transport } from "./vendor/esptool-js-0.7.0.bundle.js";
+import { ESPLoader, Transport } from "./vendor/esptool-js-0.7.1.bundle.js";
 import { attachWebInstaller } from "./web-installer.mjs";
 
 export function bootstrapInstaller({

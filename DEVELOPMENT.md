@@ -8,7 +8,8 @@ inspect status, `origin/main`, the merge-base and intervening changes; preserve 
 
 Use `scripts/idf-docker.sh` with the ESP-IDF tag and immutable digest in
 [`esp-idf-toolchain.txt`](../esp-idf-toolchain.txt). The wrapper limits each container to 1.5 CPU
-and 1800 MiB. A remote runner without Docker can run host checks but cannot establish IDF evidence.
+and 1800 MiB and uses Docker's init reaper so killed subprocess descendants do not remain zombies.
+A remote runner without Docker can run host checks but cannot establish IDF evidence.
 
 ```bash
 scripts/idf-docker.sh idf.py -B build set-target esp32s3 build
@@ -27,9 +28,8 @@ rerun admission when they change. This uses normal CMake timestamp and inventory
 independent fresh rebuilds establish delivery provenance.
 
 Host gates use `scripts/with-host-python.sh` to resolve Python ≥3.11 for tomllib. It re-execs once,
-not a hidden source change. Native Codex adapters are checked/generated with
-`node tools/agent-config/sync-codex.mjs --check` / `--write`; keep reviewed primary-checkout hook
-registration/trust in sync in linked worktrees. Adapter parity does not prove runtime enforcement.
+not a hidden source change. [AGENTS.md](../AGENTS.md#documentation) owns native adapter
+generation, linked-worktree hook setup and trust; adapter parity does not prove runtime enforcement.
 
 Optional build acceleration: `IDF_FAST_BUILD=1` uses a container-native volume;
 `scripts/idf-docker.sh daemon start` keeps a warm container, and `daemon stop` releases it.
@@ -98,14 +98,16 @@ standalone tag-fetch CMake path remains unchanged.
 then the build uses `gzip -9 -n`. Raw marker checks precede any transformation. The bounded,
 standard-library `prune_css_comments.py` helper blanks documentation text in whole-line CSS
 comments outside strings and parentheses, and ordinary whole-line JavaScript `//` comments.
-It preserves byte offsets, whitespace, inline comments, recognized legal/tooling directive families and HTML-sensitive
-sequences. JavaScript block comments remain opaque. The supported JavaScript subset refuses code
+CSS byte offsets and whitespace are preserved. The JavaScript pass removes leading spaces and
+tabs from code lines and keeps the original line endings, including on blanked comment lines.
+Inline comments, legal/tooling directives and HTML-sensitive sequences are preserved. JavaScript
+block comments remain opaque. The supported JavaScript subset refuses code
 lines containing template backticks, inline block openers or a final backslash, code after a block
 closer, unfinished blocks and Unicode line separators. These restrictions exclude untracked
 multiline strings/templates without guessing regex syntax. Inputs are bounded UTF-8 without NUL.
 Markup and code tokens remain unchanged; source comments remain readable. This is conservative
 repository-specific pruning, not general minification or universal observable equivalence:
-source introspection such as `Function.prototype.toString()` can expose changed comment text.
+source introspection such as `Function.prototype.toString()` can expose changed whitespace and comments.
 The application does not use source introspection.
 The helper is an explicit generator dependency. It rejects output/input aliases before cleanup,
 removes the validated old output before generation and publishes complete bytes atomically.
@@ -120,6 +122,53 @@ layout and trusted-keyboard checks; this is modern-browser evidence, not every-b
 
 Start with checks relevant to the diff. Host suite scope and prerequisites are in the
 [test guide](../test/README.md); no host result establishes hardware or vehicle behavior.
+
+Run the complete local handoff once with `scripts/check-local.sh`; add `--firmware` for the
+four-target build, disposable-key signing and reproducibility contract. The entry point runs host,
+protocol, repository/agent gates and Linux sanitizers, using the pinned Docker image for sanitizers
+on macOS. It performs no publication, real-key signing, device or vehicle operation. Standalone
+commands below remain available for focused iteration.
+
+The host runner reports elapsed time for each gate. Contract parsers reuse bounded immutable
+results for identical complete source strings within one process; changed fixture text is parsed
+again, and returned inventories are independent copies. Every mutation and failure-propagation
+case still runs. Passive dependency-flow tools use shell stubs for inert compiler/archive/system
+effects. Deploy-policy fixtures copy their workflow/checker inputs without local build or cache trees.
+Shared dependency, otadata and Release-acceptance self-tests have one owner in
+`test-build-contracts.sh`; the full host wrapper does not repeat them. CI also leaves its shared
+version, size, Pages, changelog and build-gate self-tests with that mandatory full host gate.
+On main, full repository/agent preflight runs in `logic-harness` alongside the longer mock suite;
+both remain required by `build`. The independent artifact join uses `prepare`'s release version
+without waiting for `build`; protected publication still needs both successful joins and compares
+their full exact-source inventories and bytes before key use. Main and trusted preview
+acceptance still execute the complete remote contract before signing, without local receipts.
+
+For repeated local host checks, use:
+
+```bash
+scripts/with-host-python.sh python3 scripts/run-local-checks.py --require-all
+```
+
+The Stop and strict pre-commit hooks share this coordinator. Successful runs can be reused for
+identical HEAD, tracked and non-ignored new file contents/modes, resolved tools, environment and
+host configuration. Deleted files invalidate the result. Concurrent callers share a worktree-local
+lock, inherited by bounded sub-gates. Failed and interrupted runs leave no success receipt.
+The 20-minute strict suite budget is enclosed by longer core, adapter and hook-registration
+deadlines, leaving time for cleanup before an outer timeout can interrupt it.
+`--force` always executes; CI never consumes or writes local receipts. These receipts provide local
+feedback, not review, remote CI, signed-artifact or hardware evidence.
+Pre-commit removes only the leading builtin helper path added by Git before starting tests.
+Custom Git exec paths and unrelated PATH entries remain unchanged and invalidate reuse normally.
+
+Startup files, module search paths and nonliteral compiler overrides disable reuse. On macOS,
+changes to the browser runner's local image also invalidate it; unrelated Docker images do not.
+Initial browser/CMake setup can change runtime
+inputs during a successful run; that result is reported but not cached. Pre-commit uses `--staged`:
+when working-tree inputs differ from the index, it executes fresh checks without reuse. Those
+checks still exercise the working tree; partial staging needs separate staged-snapshot verification
+before claiming commit-byte coverage. Host runners remove signing-key environment variables.
+Per-call runner metadata (`CODEX_TOOL_CALL_ID`) is removed from Git and test subprocesses and
+omitted from the cache identity. Other unknown environment variables still invalidate reuse.
 
 ```bash
 scripts/run-mock-tests.sh
@@ -151,9 +200,25 @@ checks all four size and stack baselines incrementally; `--target` narrows inves
 `--clean` removes its cache. Narrow checks do not replace the four-target handoff.
 
 The IDF wrapper applies the same CPU/memory ceiling to ordinary builds, daemon creation and
-Fast-Build volume setup. Volume setup uses the pinned IDF image and stops on failure. Its offline
-self-test executes the shipped wrapper with a passive Docker CLI, including setup failures; it
+Fast-Build volume setup. Volume setup uses the pinned IDF image and stops on failure.
+Daemon reuse additionally requires the init reaper. The offline self-test executes the shipped
+wrapper with a passive Docker CLI, including setup failures; it
 neither accesses a Docker daemon nor establishes actual container resource enforcement.
+
+CI computes cumulative firmware relevance once in `prepare`, conservatively building when the
+published baseline cannot be verified. Target jobs consume that scheduling decision; signing and
+publication revalidate current source and authority at their own boundaries. The primary matrix verifies all four supported targets. Independent main builds use the same target defaults.
+
+PR feedback is selected by `scripts/check-change-scope.py`: ordinary Markdown-only changes use repository
+lint without firmware compilation; browser changes use strict browser checks; firmware source uses
+runtime, protocol and sanitizer checks. The PR template, feature catalog and third-party notices
+are executable checker inputs and select full coverage. Protocol vectors and shared native/browser
+parity run in both profiles. The strict runtime gate includes the retained MQTT JSON/registry owner;
+Linux sanitizers execute that same owner with instrumentation. Unknown,
+combined runtime/browser code, test, policy, build and dependency changes use full coverage. `repo-lint.sh --quick` keeps
+actual validators while omitting their unrelated mutation self-tests. Local handoff and main/manual
+publication remain full. Main still reconciles shipped documentation through the existing signed
+site pipeline; PR selection does not change that publication/source contract.
 
 ## Build and evidence contracts
 
@@ -171,11 +236,22 @@ The effective-build validator closes every C/C++ compilation unit to reviewed so
 pinned compilers/includes. It verifies generated producers, Ninja commands/dependencies, archive
 objects, linker response files and the exact ELF-to-image chain. One literal main-component `SRCS`
 registration is permitted; hidden attachment, escaped sources or forced includes fail.
-The gate checks that every main-component unit compiles with `-Og` and emits `-fstack-usage`;
-the other components are covered by the checked `CONFIG_COMPILER_OPTIMIZATION_DEBUG=y` Kconfig
-value, Mbed TLS/TF-PSA-Crypto `-Os` is checked as the effective Kconfig value, and the bootloader,
-which builds with size optimization, is compared only between independent builds. Main privately
-enforces C++17 and return-value/format warnings.
+The gate checks effective optimization tokens for every application C/C++ unit. Ordinary project
+and component units require exactly `-Og`; main also requires one `-fstack-usage`. The six OTA
+units `http_ota.cpp`, `ota_update.cpp`, `ota_transport.cpp`, `ota_http.cpp`,
+`ota_coordinator.cpp` and `ota_writer.cpp` append exactly one `-Os` after `-Og`.
+Their literal CMake property block and exact main-component source/object owners are closed by
+`check-build-semantics.py`; missing, additional or overriding options fail. This keeps the
+signed C6 app within the unchanged OTA slot and retains stack reports and independent four-target
+byte rebuilds. Closed source/owner rules
+preserve the pinned SDK's private Mbed TLS/TF-PSA-Crypto `-Og -Os`, its two PQCP units at `-Og`,
+and the six C3/C6 libc primitives at `-Og -O2` only when the SDK's optimized-misaligned-access
+selector is enabled. The generated project anchor retains its exact SDK recipe without an
+optimization flag. The validator owns the admitted paths and object owners; missing, duplicate,
+reordered or overriding optimization tokens fail. The SDK exceptions preserve their pinned
+compiler behavior; the OTA profile is the explicit project exception. The separate
+size-optimized bootloader is compared between independent builds. Main
+privately enforces C++17 and return-value/format warnings.
 The Tesla BLE component privately selects `TESLA_BLE_LOG_LEVEL=2`; effective commands must
 contain that single definition. Its host harness uses the same level and keys object reuse to
 the patch-state digest. DEBUG/VERBOSE arguments and formatting are excluded; INFO remains.
@@ -203,8 +279,9 @@ and frames over 4096 B; they do not prove call depth or runtime stack margin.
 
 An approved toolchain migration must update the image tag and digest in `esp-idf-toolchain.txt`,
 the dependency verifier's IDF/Mbed TLS pins, all four lockfiles, the harness `MBEDTLS_REF`,
-the workflow's independent-rebuild image literal, both resource baselines' toolchain identities,
-the SDK-default and build-semantic version literals, and the compiled X509 bundle hash.
+the workflow's `logic-harness` version assertion, both resource baselines' toolchain identities,
+the SDK-default and build-semantic version literals, the compiled X509 bundle hash, and the
+version, links and rows of the [ESP-IDF matrix](ESP_IDF_MATRIX.md).
 Review the PSA patch and canonical postimages, then rerun the protocol vectors and complete
 four-target contract. CI action inputs must still use the toolchain output, and both target
 matrices must still contain exactly the four supported targets. This list is a migration checklist,
@@ -214,7 +291,7 @@ not authorization to change any pin.
 
 The default-off [configuration recovery](CONFIG_RECOVERY.md#default-off-build-and-artifact-boundary)
 owner describes its separate project identity, unsigned four-target source/reproduction driver,
-resource gates and unqualified physical procedure. Its non-OTA apps never enter the normal16parts;
+resource gates and unqualified physical procedure. Its non-OTA apps never enter the normal 16 parts;
 ordinary source/compiler/partition/signature authority is not relaxed. Do not enable its config in
 an application build or treat its presence as a flashable or physically tested recovery product.
 
@@ -222,9 +299,10 @@ an application build or treat its presence as a flashable or physically tested r
 
 Unsigned local images **cannot boot**. Use provenance-bound signed artifacts and the canonical
 `$flash-esp32`, `$deploy-bench`, `$ship` or `$usb-recovery` procedure, as appropriate. Every physical write
-requires explicit authorization for the board, target and scope. The user's explicit `$deploy-bench`
-instruction supplies its standard USB preflight/reset/read/flash and passive acceptance approval;
-identify and verify the concrete board/artifact without asking for that approval again.
+requires explicit authorization for the board, target and scope. The user's `$deploy` invocation
+for firmware deployment and a direct `$deploy-bench` invocation both supply the standard USB
+preflight, flash and passive acceptance scope for the intended bench. Resolve its physical identity
+and verify the exact artifact before acting. Honor any narrower scope the user specified.
 Verify every image's signature;
 production and preview artifacts must match the production public-key pin. An authorized local
 development image must match the supplied development key. Size/chip/version checks alone do not
@@ -236,14 +314,103 @@ last. NVS stays intact. Merged-image writes and full erases destroy configuratio
 a separate trust lineage and needs an explicit key and scope.
 
 `$deploy` handles commit, push, PR creation, current-head reviews/CI and canonical squash merge,
-then observes the main build. The user's explicit invocation authorizes those steps, including
-protected Dev signing/publication; no additional phase confirmation is needed. It does not contact devices.
-[`$deploy-bench`](../.agents/skills/deploy-bench/SKILL.md) identifies the physical USB bench across
-Tesla/Daikin firmware, flashes a signed PR preview or development-key image through `$flash-esp32`
-or an already-published image through `$usb-recovery`'s provenance and app-only steps, and tests
-the implementation on that same board. Device delivery after merge remains a separately requested
-`$ship` operation.
+then follows the protected Dev build. For firmware deployment it passes the resulting signed image
+and the existing approval to [`$deploy-bench`](../.agents/skills/deploy-bench/SKILL.md). A required
+pre-merge bench check uses the exact candidate while the PR is open. `$deploy-bench` binds the
+physical board across Tesla/Daikin firmware, verifies the artifact through `$flash-esp32` or the
+app-only steps of `$usb-recovery`, and accepts the implementation on that same board. Establish
+that the board lacks a configured vehicle VIN or is isolated from the vehicle before a USB reset.
+Ask only for missing bench details. Production delivery through `$ship`, OTA and live evcc or vehicle
+tests require their own authorization.
 
+### Installed-layout proof
+
+Every app-only USB path, including standalone `$usb-recovery`, requires evidence of the selected
+board's installed partition table before writing. A matching chip or signed app does not establish
+its layout. Reuse collected evidence only while its physical-board binding and installed layout
+remain established. Otherwise obtain the missing bounded read scope and collect only the table
+metadata at the established table location (`0x8000`, at most `0x1000` bytes for this project),
+excluding NVS. `$deploy-bench` already authorizes its scoped preflight reads; do not request that
+approval again. Keep per-board evidence outside Git.
+
+Decode the table with the pinned SDK tooling and verify:
+
+- Valid entries and termination, and the format's checksum. A checksum-less historical table needs
+  independently established byte identity with a known compatible table; unknown integrity stops.
+- All regions fit the established physical flash capacity without overlap. The protected NVS range
+  remains `0x9000/0x6000`, and OTA data remains `0xf000/0x2000`.
+- The intended `ota_0` app starts at `0x20000`, has the correct app subtype and can hold the complete
+  verified signed image. Erasing OTA data must select that app, without a factory app taking priority.
+
+Compatible historical tables may omit newer diagnostic partitions or have different remaining
+regions; they need not equal today's table byte-for-byte. Record the actual table checks, selected
+image length/hash and same-board binding rather than a manually asserted pass flag. If evidence is
+missing, unreadable or incompatible, stop the app-only procedure. A broader conversion or
+bootloader/table recovery needs its separately authorized plan; it is not an automatic fallback.
+The retained-bootloader and signature checks remain separate prerequisites.
+
+### Local OTA test before merge
+
+The global maintainer skill `$ota` tests the intended local source on an explicitly selected
+production board before merge or feed publication. It routes Tesla and Daikin separately;
+Tesla uses [`scripts/dev-ota-upload.py`](../scripts/dev-ota-upload.py). Read its `--help` and
+the current project instructions. Creating or editing the skill grants no live/signing/upload
+authority. Remote CI, a commit and PR-body gate stamps are not local-test prerequisites; the
+ordinary PR gates remain required at their existing publication/merge boundaries.
+
+`prepare --evidence <absolute-private-directory> --inventory <absolute-private-json>
+--board <approved-id> --version <intended-version>` snapshots the complete intended tree,
+including non-ignored new files. The inventory is mode `0600`, outside Git, with one selected
+production entry's project, supported target, literal IP and hardware MAC. No discovery,
+default board or automatic channel change exists. Keep real inventory/signing details global,
+not in this repository. The chip comes from that explicit hardware binding, never an S3 default.
+
+Run `tests` and `build` with the same `--evidence` directory. They execute the existing local
+host/contract/format checks and the pinned Docker build in a fresh case-specific directory.
+The selected version must fit the running version-core floor. Through a separately authorized
+standalone signer, sign those exact bytes with the existing approved authority; the helper
+never reads a private key. `bind-image --image <absolute-signed-app.bin> --sha256 <signed-file-sha256>`
+checks the signature pin, app project/chip/version/size and correspondence to that unsigned build.
+
+`review` launches an independent Codex process with enforced read-only sandbox and no approvals,
+using the existing reviewer instructions for OTA/heap/security, persistence/NVS/pairing,
+BLE/evcc meaning, documentation and UI. Its actual thread identity, structured findings and
+report/log hashes join the source/image-bound local journal. A manually supplied pass cannot
+replace this process. Missing checks, a failed run, blocking findings or source/artifact edits
+stop readiness; regenerate the affected evidence rather than reusing old proof.
+
+`check` is offline. `preflight` performs live passive reads and requires the selected target/read
+scope. Only an explicitly authorized board test permits `execute --execute --case-id <case-id>`.
+The board must already be on saved `dev`, with stable verification and adequate memory.
+Before its sole POST the helper rechecks all evidence and consumes its exclusive attempt marker.
+No timeout/refusal/lost response grants a retry, channel change or different delivery path.
+
+Acceptance needs a distinct boot nonce, full expected ELF/version/project/chip, unchanged
+hardware identity and observable retention, plus healthy stable runtime. It records changed
+behavior as **not run** until the separately authorized concrete functional test is performed.
+No vehicle command or live evcc/cluster call is inferred. Report these boundaries separately;
+HTTP success, local host fixtures and a compiled image cannot prove the real hardware/function.
+See [API](API.md#direct-signed-firmware-upload) and [security](SECURITY.md#ota-self-update).
+
+### Served Pages acceptance
+
+The assembler emits an empty `.nojekyll`, and every shared branch-publisher mode maintains it at
+the branch root. Pages therefore serves the already-built static files without a Jekyll rebuild.
+The explicit build request is retained because a `GITHUB_TOKEN` branch push does not trigger Pages.
+This removes redundant site processing; GitHub's deployment queue and CDN propagation remain
+external waits and still require the same acceptance checks.
+
+Stable and Dev acceptance first observe the latest Pages build with up to 32 status reads at fixed
+10-second intervals (the same 310-second waiting span). This avoids up to 60 seconds of readiness
+detection lag from exponential polling. Queued/building, failed
+builds and unavailable status have distinct diagnostics before byte acceptance starts. This latest
+build observation is a readiness hint, not provenance for a particular firmware snapshot.
+Post-publication byte acceptance then retries the complete manifest, all 16 Pages parts and changelog with
+exponential delays capped at 60 seconds (190 seconds of default waiting). Each attempt uses a fresh
+cache key and must independently pass all
+identity, size, hash and byte-binding checks. Results from incomplete attempts are never combined.
+Invalid staged Dev bytes, expected changelog or immutable Release metadata/assets fail before Pages polling. This
+handles delayed CDN propagation; it does not establish an atomic CDN snapshot.
 Pages acceptance requires a bounded, validated expected `changelog.json` and exact served bytes
 within the same complete attempt as the manifest and 16 firmware parts. The root checker takes
 `--expected-changelog-file`; staged Dev checks derive it from the candidate directory, while live
@@ -254,7 +421,56 @@ Before either Pages branch write, the downloaded candidate passes four key-free 
 against the production public pin. The offline deploy-consumer test executes this YAML step with
 disposable signed fixtures and confirms that each target failure stops before publication.
 
+Dev publication prefetches the unchanged digest-pinned IDF image on the signing runner while
+key-free artifact and provenance checks run. The pull must finish successfully and the exact image
+must exist before key provisioning; source/version authority is refreshed after the wait.
+`scripts/prefetch-idf-image.sh` exclusively creates private per-job state and rejects failed pulls,
+changed pins, stale state and timeouts. The signer still uses `scripts/idf-docker.sh` with its
+existing resource limits and all independent-byte, signature, size and layout checks. Stable
+creation and immutable reuse retain their existing paths. Prefetching is not signing authority.
+
+### Recover a published stable site
+
+A Release that became immutable before a failed deploy can be recovered after main advances.
+Use a clean checkout of current main, Python 3.11+, `gh`, `rsync`, authenticated GitHub reads and
+an explicitly authorized stable Pages recovery. Publication additionally requires `GITHUB_TOKEN`
+with the repository/Pages write permissions. Do not rerun historical workflow code or use `--exact`
+to recreate the existing tag.
+
+First verify the original stable build's numeric run ID without writing Pages:
+
+```bash
+python3 scripts/recover-release-pages.py --run-id <original-run-id>
+```
+
+After the recovery is authorized, add `--publish` to the same invocation. The helper downloads
+the exact unexpired signed artifact and checks its API-authenticated ZIP digest before extraction.
+It preserves the original HTML/JavaScript, firmware and changelog; it does not rebuild current
+documentation under an old source SHA. The candidate must equal the entire original site plus
+exactly one empty root `.nojekyll` control file, including when the original predates that marker.
+An unsafe original marker or any changed, missing or extra payload is rejected.
+It requires the latest immutable Release, exact tag/source,
+source ancestry and successful original host/rebuild/signature gates. A later publish-job failure
+is recoverable only when all critical pre-publication steps succeeded; cancelled runs are refused.
+Explicitly attested key-free immutable reuse is also accepted. Every branch retry repeats these
+checks, then readiness and full public-byte acceptance follow. Expired artifacts, foreign authority,
+changed latest/main/tag or any byte mismatch stop the operation. Stable creation and Dev never use
+this exception.
+
+Unprivileged `prepare` accepts an empty latest-stable base only for no eligible immutable latest
+Release; existing version fallbacks then apply. API reads retry at most three times; malformed or
+denied responses remain errors. Signed preview version selection still requires an eligible base.
+
 ### Served PR preview acceptance
+
+The preview version is selected once from trusted default-branch code. Four separate, cache-free,
+read-only target jobs rebuild the exact PR head concurrently, without producer artifact access.
+A secret-free join requires every target and assembles the complete source/version-bound inventory.
+The protected signer compares producer and independent payloads, revalidates the live PR and stable
+version, and never checks out PR code.
+Eligible previews additionally require both complete host/protocol acceptance suites, parallel with
+the target legs. Selected PR feedback never suffices for signing. A source run without the unsigned
+firmware artifact is ineligible, so a documentation-only PR does not start preview rebuilds.
 
 After signed preview publication, `scripts/check-pr-preview-served.py` runs trusted default-branch
 code without keys or repository tokens. It validates the local signed four-target site against the
@@ -349,6 +565,10 @@ grant no device-read, publication or vehicle authority.
 
 Required independent checks and exact-head records are in [AGENTS.md](../AGENTS.md#pr-and-review).
 Skills specify how to perform them; a green build does not substitute for review.
+Bounded changes use focused reviews of changed contracts and affected consumers against an accepted
+baseline. Explicit whole-project reviews, cross-cutting migrations, target/dependency or trust-boundary
+changes, and unknown baselines use full audits. Reports state scope and exclusions; the existing
+head-bound records and independent privacy/English check remain required.
 Before PR creation or a new push, publication reviews can bind a clean local candidate with
 verified branch, base and ancestry. Recheck the exact GitHub head after push; these records do
 not establish remote CI or merge acceptance.

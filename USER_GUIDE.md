@@ -17,16 +17,6 @@ startup. This is intended to mitigate the reported Super Mini startup failures i
 no serial reset log, so a brownout is not confirmed. If startup still fails, retain a serial boot
 log and check the USB cable, power supply and board antenna before erasing configuration.
 
-An esp32c3 or classic esp32 board that refuses every update check with `not enough memory for
-update` usually runs a build without its target's RAM settings: v1.6.3 (and for the classic esp32
-also v1.6.4) or a Dev build around them. Such a board cannot fetch the settings over the air.
-Reinstall it once with USB **Flash** (see [Updates and recovery](#updates-and-recovery)) from a
-release that includes them — v1.6.4 or newer for esp32c3, a release newer than v1.6.4 for esp32 —
-which keeps WiFi, VIN, pairing and sessions; update checks are then admitted again. The classic
-esp32 keeps little margin, so a live vehicle link or MQTTS can still make a check refuse; retry
-after a reboot. Boards on v1.6.2 or older are not refused, but update them only to such a
-release: a build without the settings cannot confirm itself and rolls back on the next reboot.
-
 The pinned library also declares C5, but this firmware does not support it: restoring C5 requires
 separate firmware, signing-size and hardware acceptance. Undeclared chips such as esp32c61 need
 upstream support first. [Target decision](adr/0004-drop-esp32c5-target.md).
@@ -43,7 +33,11 @@ prepend a validated four-pin mapping through Kconfig.
 If wired boot obtains a DHCP lease before fallback, WiFi **never starts**, removing WiFi/BLE radio
 coexistence and freeing ~57 KB of contiguous heap. No WiFi credentials are needed; set the VIN in
 the web UI. Without a usable wired link it falls back to WiFi or the setup portal. A cable plugged
-in later takes over routing but can leave WiFi running.
+in later takes over routing but can leave WiFi running. Without WiFi credentials, a successfully
+started Ethernet driver keeps waiting for a late lease. That lease closes the setup portal,
+releases its WiFi driver and continues boot without a restart. While waiting, the open AP closes
+after 10 minutes without a client or 30 minutes with one; power-cycle the board to reopen it.
+If driver construction fails and no WiFi station can recover, setup stays open for the form.
 The **same** esp32s3 image serves a LilyGo T-Dongle-S3, a bare ESP32-S3 and both PoE boards, each
 detected at boot; the driver is not compiled into the other targets. Design:
 [ARCHITECTURE](ARCHITECTURE.md#wifi--lan-connectivity).
@@ -60,11 +54,12 @@ python3 provision.py --url http://192.168.4.1 --ssid MyNet --vin '<VIN>'
 ```
 
 For an already reachable device use `--url http://tesla-key-esp32.local`, which calls
-`POST /set_wifi` with its one-shot rollback. A vehicle identity change is deliberately separate
-because it clears the old pairing:
+`POST /set_wifi` with its one-shot rollback. Every board requests that same mDNS name, so with more
+than one board on the network use the target board's IP address: the name can reach another board.
+A vehicle identity change is deliberately separate because it clears the old pairing:
 
 ```bash
-python3 provision.py --url http://tesla-key-esp32.local --mode lan \
+python3 provision.py --url http://<ESP32-IP> --mode lan \
   --vin-only --vin '<VIN>' --confirm-vin-change
 ```
 
@@ -91,12 +86,21 @@ Changing VIN or forcing key generation removes the old pairing. Re-saving the sa
 Use these operations only for an intentional identity change, then pair again. Connection timeouts
 alone do not require a new key. [Pairing lifecycle](ARCHITECTURE.md#pairing-lifecycle--invalidation).
 
+The setup portal refuses a first VIN while an identity-recovery journal is pending (HTTP 409) or
+unreadable (503). Leave VIN blank to save network settings, then finish identity recovery before
+setting the VIN. This preserves the pending recovery record.
+
 ## Updates and recovery
 
 In the web UI, click the download icon on **Firmware**, confirm the offered update and wait for
 the device to reboot. Click the version to select **Release** (official releases, default) or
-**Dev** (main builds). OTA preserves configuration and keys.
+**Development** (main builds). OTA preserves configuration and keys.
 The update dialog shows up to five change entries at once. Scroll inside the list to read more.
+The dialog keeps the channel and version from its check. If another client changes the channel
+or checks again, or the published candidate changes, the old confirmation is refused. Check
+again and confirm the new offer. A check that finishes with another client's channel or PR asks
+you to check again. The Firmware row shows the device's current channel for the next check.
+Saving the same channel leaves a checked offer valid.
 
 For USB recovery, **Connect** checks the chip and reads the installed partition table and firmware
 without writing. This restarts the board through its bootloader; the log then follows its boot.
@@ -125,6 +129,33 @@ Never flash an unsigned local build: it cannot boot. [Verified delivery procedur
 A reviewed same-repository PR with the `signed-preview` label may offer a signed installer at
 `https://0bu.github.io/tesla-key-esp32/PR/<N>/`. Its version is `<stable>-PR-<N>` and it remains on
 the selected update channel. The preview disappears when closed, force-pushed or unlabelled.
+Preview OTA and Dev uploads still enforce numeric-core downgrade protection. A preview based on
+an older stable core cannot replace a newer Development core; use its signed USB installer for
+that case. Equal or newer preview cores can pass the version gate, subject to the normal OTA checks.
+
+### Update memory recovery
+
+An esp32c3 or classic esp32 board that refuses every update check with `not enough memory for
+update` usually runs a build without its target's RAM settings: v1.6.3 (and for the classic esp32
+also v1.6.4) or a Dev build around them. Such a board cannot fetch the settings over the air.
+Reinstall it once with USB **Flash** (see [Updates and recovery](#updates-and-recovery)) from a
+release that includes them — v1.6.4 or newer for esp32c3, a release newer than v1.6.4 for esp32 —
+which keeps WiFi, VIN, pairing and sessions; update checks are then admitted again. The classic
+esp32 keeps little margin, so a live vehicle link or MQTTS can still make a check refuse; retry
+after a reboot. Boards on v1.6.2 or older are not refused, but update them only to such a
+release: a build without the settings cannot confirm itself and rolls back on the next reboot.
+
+An esp32s3 board without the S3 RAM settings (v1.6.5 and older, or a Dev build without them) can
+settle below the memory OTA needs; this was observed on a paired board on Ethernet. An image
+installed over the air then stays pending verification, update checks are refused with `not enough
+memory for update`, and the next restart returns the board to its previous firmware. The firmware
+has no restart control, so power-cycle the board once (unplug its PoE or USB power). Do not
+reinstall v1.6.5. Use a newer release that includes the S3 RAM settings; if none is published,
+use a provenance-verified, production-signed Dev build known to include them. If checks are
+still refused, use its compatible signed installer for USB **Flash** once, preserving WiFi, VIN,
+pairing and sessions. Follow [Updates and recovery](#updates-and-recovery) and the signed-image,
+chip/bootloader compatibility and NVS-preservation checks. A signed app alone instead needs the
+[app-only USB procedure](DEVELOPMENT.md#delivery); a locally unsigned build is not a recovery source.
 
 ## Home Assistant (MQTT)
 
@@ -138,6 +169,11 @@ evcc, BLE and pairing. Runtime design:
 **Enable:** set the broker in the web UI (**MQTT** row, pencil icon, `IP:PORT`); it is stored in NVS
 (`mqtt_uri`) and applied after the reboot it triggers. Compile-time defaults/credentials live in
 `scripts/idf-docker.sh idf.py menuconfig` → *Tesla Key Configuration*:
+
+A broker without a scheme uses TLS (`mqtts://`) when a username or URI userinfo is present,
+otherwise plaintext (`mqtt://`). An explicit scheme is honored. TLS verifies the bundled CA
+roots and never falls back to plaintext after a failure. Check the secured MQTT row and
+`/status.mqtt.tls`/`error`; see the [transport trust boundary](SECURITY.md#mqtt-transport).
 
 | Option | Default | Purpose |
 |--------|---------|---------|
@@ -162,6 +198,31 @@ NVS. Delivery only needs the hostname/IP to resolve (UDP, no ack); `/status.sysl
 advisory ARP/ICMP hint, so a collector behind firewalled ICMP still receives lines with
 `reachable:false` shown.
 
+## Troubleshooting
+
+Inspect the web UI first, then `/status`, `/diag` and `/heap` as needed. Device requests require
+access to your trusted LAN. Commands, pairing, update checks, verbose logging and artifact deletion
+change state; distinguish them from reading an existing log or cached status.
+
+| Symptom | Check | Next step |
+|---|---|---|
+| Update check always reports insufficient memory, or an update rolls back | Target RAM settings and running version | Follow [update memory recovery](#update-memory-recovery); preserve NVS and use a compatible signed image. |
+| Installer has no serial port | Data cable, browser Web Serial support, port already in use | Close other serial programs or tabs; hold BOOT while connecting or use BOOT + RESET. |
+| Installer: version not seen within 20 s | Adapter without reset lines, a native USB port that reconnected late, or an image that does not boot | The firmware is already on flash: press **Reset** or the board's RESET button, or reconnect the cable, and read the log. If it still does not start, reinstall with **Flash** rather than **Clean flash**. |
+| `.local` will not load | DHCP lease in router | Open the current IP. Use that IP or `.local` for browser saves. |
+| No WiFi | SSID/password, open or WPA2 network | Use setup AP or `provision.py`; do not write partial NVS images. Failed LAN credential changes roll back once. With saved credentials the device keeps retrying them and the setup AP closes after 10 minutes without a client (30 minutes at most); power-cycle to reopen it. |
+| No pairing prompt | VIN configured, `key_present`, BLE range, NFC card on reader | Place the keycard on the reader and wait for the automatic same-key retry with backoff, then confirm on the touchscreen. |
+| BLE connection fails | `/status.ble.connect_fail`, `car_connectable`, log cause | Move closer; disconnect another phone/fob if the car advertises non-connectable. |
+| Command times out | BLE availability and car asleep | An intentional wake may be needed; wait for the link and retry. Preserve keys and logs. |
+| evcc shows the car as disconnected while it is plugged in | BLE range, `link` in `/status` | Bring the device back into Bluetooth range. An unreachable car reports `charging_state: Unknown`, which evcc maps to status A until the car answers again. With a charger that reports its own status, only the vehicle card and vehicle detection change; [other chargers](API.md#evcc-integration) end the session. |
+| evcc has no SOC/current | `port: 80`, VIN, cache freshness | Inspect `.response.response.charge_state` from `vehicle_data`; active stale telemetry returns `503`. |
+| Key needs attention | `reauth`, stored session and BLE availability | Reconnection and same-key pairing run automatically. Place the NFC card on the reader and confirm a pairing prompt on the touchscreen. No firmware erase is required. |
+| MQTT save fails | `mqtt.error`; HTTP `400`, `502` or `503` | Check credentials, reachability or contiguous heap respectively. A failed probe saves nothing. |
+| Syslog says unreachable | Collector DNS and UDP delivery | ICMP is only advisory; a collector blocking ping may still receive logs. |
+| Restart or crash | `sys.reset_reason`, `last_crash`, `last_reboot`, heap trend | Retain evidence and match a dump to the same build's ELF before clearing it. |
+
+### Web status and pairing recovery
+
 The web page labels a failed or timed-out device connection and retains the last received values.
 A successful status refresh clears the notice. Vehicle actions use the named button inside the gauge;
 tapping the surrounding status card does not send a command.
@@ -175,27 +236,6 @@ Do not regenerate the key as a recovery step. Normal pairing has no extra key-se
 stopped for this process. HTTP diagnostics exist only when HTTP startup succeeded; early boot
 failures can require serial diagnostics. Keep the device powered and retain diagnostic evidence
 before following a recovery procedure.
-
-## Troubleshooting
-
-Inspect the web UI first, then `/status`, `/diag` and `/heap` as needed. Device requests require
-access to your trusted LAN. Commands, pairing, update checks, verbose logging and artifact deletion
-change state; distinguish them from reading an existing log or cached status.
-
-| Symptom | Check | Next step |
-|---|---|---|
-| Installer has no serial port | Data cable, browser Web Serial support, port already in use | Close other serial programs or tabs; hold BOOT while connecting or use BOOT + RESET. |
-| Installer: version not seen within 20 s | Adapter without reset lines, a native USB port that reconnected late, or an image that does not boot | The firmware is already on flash: press **Reset** or the board's RESET button, or reconnect the cable, and read the log. If it still does not start, reinstall with **Flash** rather than **Clean flash**. |
-| `.local` will not load | DHCP lease in router | Open the current IP. Use that IP or `.local` for browser saves. |
-| No WiFi | SSID/password, open or WPA2 network | Use setup AP or `provision.py`; do not write partial NVS images. Failed LAN credential changes roll back once. With saved credentials the device keeps retrying them and the setup AP closes after 10 minutes without a client (30 minutes at most); power-cycle to reopen it. |
-| No pairing prompt | VIN configured, `key_present`, BLE range, NFC card on reader | Place the keycard on the reader and wait for the automatic same-key retry with backoff, then confirm on the touchscreen. |
-| BLE connection fails | `/status.ble.connect_fail`, `car_connectable`, log cause | Move closer; disconnect another phone/fob if the car advertises non-connectable. |
-| Command times out | BLE availability and car asleep | An intentional wake may be needed; wait for the link and retry. Preserve keys and logs. |
-| evcc has no SOC/current | `port: 80`, VIN, cache freshness | Inspect `.response.response.charge_state` from `vehicle_data`; active stale telemetry returns `503`. |
-| Key needs attention | `reauth`, stored session and BLE availability | Reconnection and same-key pairing run automatically. Place the NFC card on the reader and confirm a pairing prompt on the touchscreen. No firmware erase is required. |
-| MQTT save fails | `mqtt.error`; HTTP `400`, `502` or `503` | Check credentials, reachability or contiguous heap respectively. A failed probe saves nothing. |
-| Syslog says unreachable | Collector DNS and UDP delivery | ICMP is only advisory; a collector blocking ping may still receive logs. |
-| Restart or crash | `sys.reset_reason`, `last_crash`, `last_reboot`, heap trend | Retain evidence and match a dump to the same build's ELF before clearing it. |
 
 ### Safe mode and fatal startup
 

@@ -10,19 +10,15 @@ concurrency. [API](API.md) owns external fields; [Security](SECURITY.md) owns tr
 | Orchestration | `vehicle_ctrl.*`, `vehicle_commands.cpp`, `vehicle_pairing.cpp`, `vehicle_telemetry.cpp` | Client/session access, serialized commands, pairing, caches |
 | Decisions | `main/logic/` | Hardware-free bounded state machines and validation |
 | HTTP/MCP | `http_server.cpp`, `http_*.cpp`, `mcp_server.cpp`, `command_exec.cpp` | Contained routing, validation, cache reads, shared command dispatch |
-| Presentation | `main/www/`, `display.cpp`, `led_status.cpp`, `mqtt_ha.cpp` | Cached snapshots; no hidden vehicle wake path |
+| Presentation | `main/www/`, `mqtt_ha.cpp` | Cached snapshots; no hidden vehicle wake path |
 | Platform | `main.cpp`, `net.cpp`, `ota_update.cpp`, `safe_mode.cpp` | Startup admission, connectivity, update/recovery |
 
 ## Repository agent architecture
 
-[AGENTS.md](../AGENTS.md) owns runner policy. `.agents/skills/` defines workflows;
-`.agents/subagents.json` defines read-only reviewers; `tools/agent-hooks/` contains lexical guards.
-`tools/agent-config/` mutation-tests configuration, ownership and exact reviewed skill content.
-Native `.codex/agents/*.toml`, `.codex/config.toml` and `.codex/hooks.json` are generated adapters;
-`sync-codex.mjs --check` verifies parity. Hook trust and primary-checkout loading are separate from
-adapter correctness; reviewer defaults can inherit parent runtime overrides ([Security](SECURITY.md#development-tooling-trust-boundary)).
-The trusted-base `pr-policy` workflow evaluates current-head records without executing PR code;
-server-side blocking requires repository rules to require its check.
+[AGENTS.md](../AGENTS.md) owns authorization, canonical skills/reviewers and generated runner
+adapters. [Development](DEVELOPMENT.md) owns setup and validation; [Security](SECURITY.md#development-tooling-trust-boundary)
+owns the trust boundary. The trusted-base `pr-policy` workflow evaluates current-head records
+without executing PR code; server-side blocking requires its check in repository rules.
 
 ## Web UI
 
@@ -45,7 +41,12 @@ activity. Charger input fields do not establish climate power consumption or an 
 `vehicle_loop` attempts one climate, drive, tires or closures slot roughly every 30 s, rotating
 domains with bounded missing-climate retries. Windowed telemetry uses `NO_WAKE_SKIP`;
 the supervisor's non-waking VCSEC health/enrollment requests use `NoWakeFail`.
+VCSEC status sampling does not apply Infotainment wake-policy decisions; `NoWakeSkip` would not
+suppress that VCSEC request. Each health probe shares one eight-second connect/response budget.
 Command/query ownership, including the VCSEC health probe, pauses windowed telemetry.
+The idle-window falling edge takes the same command owner without waiting, resamples command
+recency and defers disconnect while a command/probe owns it. Tick stamps are loaded before time
+samples, preserving unsigned counter wrap without treating a newly started command as old.
 Each entry point explicitly chooses foreground/background `ConnectOrigin`.
 
 Synchronous tesla-ble callbacks copy fixed nanopb state into latest-value mailboxes under a short
@@ -96,6 +97,43 @@ pinned ESP-TLS and `http_parser` components provide transport and incremental HT
 `esp_http_client` and `esp_https_ota` are not used by this OTA path. Authentication/publication
 remain in [Security](SECURITY.md#signed-ota-images).
 
+### Direct signed app upload
+
+`POST /ota/upload` streams an app-only binary while the configured OTA channel is `dev`.
+The wildcard handler applies its normal browser-origin checks, validates the bounded binary
+content type/length, reserves the same operation/probation/memory gate, and obtains an SDK
+async request copy. `HttpGuardContext.async_owned` transfers response and connection retirement
+to the existing `ota` coordinator task before it can run. The synchronous wildcard must not
+shut down RX after this transfer. Startup failure completes the owned request; the worker
+completes it on every other success/failure path. Shutdown occurs before async ownership is
+released so no later close can affect a reused socket.
+
+No network worker, TLS connection or manifest is started. The operation's existing 1024-byte
+mailbox buffer feeds `Coordinator::start_upload/upload/finish_upload`, which reuse the same
+prefix, inactive-slot writer, full SDK signature validation and boot-selection path. The
+nonrenewable operation budget starts at upload entry and tightens to Content-Length; every
+receive and flash boundary remains budgeted. Socket timeouts and heap-abort requests stop
+the transfer. Dev is checked at admission, in the receive loop and before final verification;
+normal configuration routes remain excluded while the operation is updating.
+
+Upload admission publishes `upload=true` and clears the old feed offer, PR and notes under the
+status mutex. Consumers can display progress without assigning a manifest target version.
+
+The upload-specific image policy accepts a canonical equal/newer version core without a feed
+version or suffix requirement, enabling repeat tests of signed local/PR builds. Ordinary feed
+eligibility is unchanged. The operation retains ownership after committed or uncertain boot
+selection, and aborts/reclaims only after actual writer quiescence on other failures. Success
+is returned after boot selection, followed by the usual restart and health/rollback policy.
+MCP `initialize.instructions` describes this HTTP workflow without adding a firmware-write
+tool or changing the vehicle tool set. [API usage and responses](API.md#direct-signed-firmware-upload)
+and [trust boundary](SECURITY.md#ota-self-update) own the external contract.
+`/ota/status` also publishes the running descriptor's complete ELF SHA-256, project/target,
+a once-per-boot random nonce, cached verification, actual busy flag and existing recovery
+threshold. No storage/vehicle query is added. These let a local caller distinguish a reboot
+into the selected image from an HTTP acknowledgement or a repeated version string.
+
+### Browser scheduling and metadata capture
+
 The browser waits for an in-flight general `/status` request to finish or time out, including
 body handling, before starting a check or install. It pauses new general polls through the OTA
 flow and its installation dialog. Small
@@ -107,7 +145,7 @@ TLS connection, so the manifest tree does not coexist with notes buffering and T
 
 HTTP metadata checks reserve the shared operation gate and enqueue one fixed capture on the same
 HTTP server. The pinned nonblocking work queue invokes its callback on a later server turn, after
-request parser scratch is freed. Only then does the unchanged entry memory screen run, before
+request parser scratch is freed. Only then does the entry memory screen run, before
 Operation/task/body/TLS allocation. The HTTP response accepts a request; later admission failure is
 reported through `/ota/status`. Native/background checks and image installation retain immediate
 admission. The capture owns the original time, PR and channel, never a request or stack pointer.
@@ -116,6 +154,8 @@ deadline. Refused or uncertain submission revokes the unstarted ticket before re
 reservation: a late callback cannot match a successor. Uncertain coordinator creation still retains
 the Operation and lease. The source contract restricts this entry to the
 synchronous wildcard handler and rejects blocking work-queue configuration.
+
+### Deadline and worker ownership
 
 Capture the operation origin before lock/job/task/URL/body allocation. Manifest, optional changelog,
 image, redirects, TLS retry conditions and trickled bytes share a single nonrenewable budget:
@@ -140,6 +180,8 @@ Lock-free targets use `fetch_or`; non-lock-free targets reuse the existing stron
 with acquire observation/failure and acquire/release success. Every retry recomputes the OR from
 its observed word, preserving phase and other flags. Already-set bits still perform a real RMW.
 
+### Memory admission and target observations
+
 Confirmation and OTA entry share the selected INTERNAL-largest threshold **59392 B** from
 `logic/ota_recovery_memory.hpp`. Their allocator phases are not identical. OTA entry may reclaim a
 clean previous Operation before sampling, before new Operation, task-stack, body or TLS allocations.
@@ -159,39 +201,21 @@ or prove a TLS allocation margin between samples. Image writing, OTA probation a
 allocator histories of the other three targets remain separate, unexercised boundaries of this
 series. It does not replace their build or delivery checks.
 
-The earlier S3 fixed-INTERNAL/TLS1.2 AS series performed three manifest-only checks on the private
-calibration profile. Post-reclaim operation-entry samples were 61440 B; one ordinary track sample
-was 57344 B and would wait/refuse under the selected policy. All sampled ordinary points in the
-final 104-s interval were 61440 B; this is not continuous instantaneous coverage. TLS pre/post policy
-samples were 31744 B, one header checkpoint 27648 B and a TLS status spot 25600 B; the boot-wide
-INTERNAL free-heap low-water reached 10308 B. The earlier AO series separately observed a 24576-B
-TLS status spot and 9540-B free-heap low-water. These discrete measures reveal no complete transient
-contiguous minimum and do not form an additive allocation ledger. The private profile held 4096 B
-and used simultaneous real record probes; that profile is not final non-injected delivery. These
-manifest-only observations establish no notes, redirect, image-write/probation or other-target
-physical allocator history.
+The recorded target observations below explain the target defaults. They are historical bench
+results with the stated workloads; they do not establish current fleet margins or delivery acceptance.
 
-ESP32-C3 shares one region between IRAM and DRAM. Before its target defaults reserved memory for
-OTA, an unpaired C3 bench (no BLE link, MQTT off) settled at a 38912-B INTERNAL largest block, so
-every check was refused, and an OTA-installed image without these settings stayed pending
-verification for 600 s and rolled back on the next reboot. `sdkconfig.defaults.esp32c3` therefore
-runs the WiFi hot paths from flash, disables BLE controller features the firmware never uses, sizes
-the controller activities and large NimBLE buffers for one connection plus scanning and keeps the
-static WiFi RX buffers at the RX block-ack window. With this configuration the same bench stayed
-above the threshold at runtime and completed a manifest check; an image download completed on an
-otherwise identical build with smaller inbound ACL and HCI event pools. Confirmation of an
-OTA-installed image with these settings, a paired link, live sessions and MQTTS have not been
-measured; MQTTS and a live link consume more INTERNAL memory.
+| Target | Memory configuration | Recorded evidence and limits |
+|---|---|---|
+| `esp32` | Separate IRAM: moving code does not free byte-addressable INTERNAL heap. One controller connection, halved large NimBLE buffers, static WiFi RX buffers at the RX block-ack window and a halved diagnostic ring. Classic-BT controller memory is already returned. | An unpaired, MQTT-off bench on the older layout without a core-dump partition rose from a 51200-B largest block to above the threshold before and after a manifest check. Its low point had the smallest observed target margin. Image download, confirmation, pairing, sessions and MQTTS were not measured. |
+| `esp32s3` | Shared IRAM/DRAM. The C3 settings move 23856 B of code out of IRAM, reduce the DRAM span reserved for IRAM by 24064 B and shrink controller/NimBLE pools. | A paired Ethernet S3 with a live vehicle link previously stayed pending for 600 s at 53248 B on v1.6.5's source; the earlier build had confirmed at 61440 B. Static RAM did not explain the runtime loss. A signed OTA preview with the new settings held 90112 B and confirmed after 90 s. Other S3 boards, including WiFi-only ones, were not measured. |
+| `esp32c3` | Shared IRAM/DRAM. WiFi hot paths run from flash; unused controller features are disabled; controller activities and large NimBLE pools serve one connection plus scanning; static WiFi RX buffers match the RX block-ack window. | An unpaired, MQTT-off bench previously held 38912 B and refused checks; an image without the settings remained pending for 600 s and rolled back on reboot. With the settings, a manifest check passed above the threshold. Image download passed on a variant with smaller inbound ACL/HCI event pools. Confirmation, pairing, sessions and MQTTS were not measured. |
+| `esp32c6` | Uses the same entry/confirmation threshold and its reviewed target defaults. | No physical allocator history is recorded here. Build success does not fill that gap. |
 
-The classic esp32 has the same shortfall. Its IRAM is a separate region, so code placement frees
-no byte-addressable INTERNAL heap, and NimBLE already returns the classic-BT controller memory. An
-unpaired esp32 bench under the same conditions, on the older layout without a core-dump partition,
-settled at a 51200-B largest block and refused every check. `sdkconfig.defaults.esp32` therefore
-configures one controller connection, halves the large NimBLE buffers, keeps the static WiFi RX
-buffers at the RX block-ack window and halves the `/diag` ring (`CONFIG_TESLA_DIAG_LOG_BYTES`). The
-bench then held its largest block above the threshold before and after a completed manifest check,
-whose low point left the smallest margin measured on any target. No esp32 image download,
-confirmation, paired link, live sessions or MQTTS have been measured; esp32c6 remains unmeasured.
+The settings are owned by `sdkconfig.defaults.esp32`, `.esp32s3` and `.esp32c3`. A live link and
+MQTTS consume additional INTERNAL memory; neither manifest-only success nor static RAM size
+establishes their transient contiguous minimum.
+
+### TLS phases and diagnostic checkpoints
 
 Every TLS leg still samples real INTERNAL largest before context creation and after that allocation,
 before connect. These later phases use a separate conservative single-record capacity screen:
@@ -223,6 +247,30 @@ it is not fully reclaimed idle and does not prove RTOS task reclamation.
 Sampling/log failures are contained. These finite checkpoints support a named bench TLS series;
 they do not measure a universal peak or establish a safe allocation floor.
 
+### Transport, manifest and version validation
+
+Each feed check captures the channel and a nonwrapping channel revision at admission. A real
+channel change invalidates completed and in-flight offers, including a change away and back;
+an unchanged save is a no-op. A separately owned nonwrapping generation advances for each
+accepted check, install or upload. Exhaustion disables feed offers until reboot rather than
+reusing an identity. A random per-boot nonce plus generation forms the opaque offer ID.
+The status mutex publishes bounded POD channel/PR/version, selected notes and candidate hashes
+as one record. Readers expose an offer only while both captured revision and generation match;
+`configured_channel` remains distinct from the checked source channel. Published error records
+carry their owner's captured channel and operation type. Upload progress publishes its upload
+flag with the initial status so polling can distinguish it from a feed install. If the metadata
+recheck refuses an admitted install, it publishes a single error record. The reader derives the
+[withdrawn-offer status](API.md#management) from a record that is no longer current.
+
+Feed installation requires that exact offer ID and PR under the operation owner. Acceptance
+consumes the offer once and copies its manifest, selected-note and image SHA-256 plus size into
+the owned operation. A fresh metadata check must reproduce all those fields before image
+download; a mismatch withdraws the offer without writing. The raw writer streams SHA-256 and
+counts the exact signed app bytes before the mandatory SDK signature verification and boot
+selection. Hash setup/update/finish failure follows the same abort/quarantine ownership rules.
+No unsigned manifest can change the firmware-owned download URL or partition. Direct signed
+Dev upload remains the explicit manifest-free path and invalidates any old feed offer.
+
 The incremental parser caps total headers at 8192 bytes, 64 fields, 64 field-name bytes, 1023
 field-value bytes, chunk metadata at 65536 bytes and chunk lines at 256 bytes; it permits at most
 two interim responses and ten redirects. URLs/locations use 1024-byte storage, and metadata bodies
@@ -233,7 +281,9 @@ Manifest intake reserves one bounded body (8192 B). Non-chunked data needs posit
 Content-Length and exact completion; chunked data needs non-empty bounded complete transport.
 Negative/early-zero reads and truncation fail. Before cJSON, the allocation-free gate requires valid
 UTF-8/escapes, ≤16 levels, no U+0000 and one fully consumed document. The root has unique keys and
-exactly one string version. Versions use a no-leading-zero numeric core, optional
+exactly one string version. The selected app part must occur exactly once with unique object
+keys, the expected path, offset `0x20000`, bounded integral size and lowercase SHA-256.
+Version-only manifests are refused. Versions use a no-leading-zero numeric core, optional
 `[0-9A-Za-z.-]+` suffix and ≤31 bytes; numeric cores compare as digit spans without overflow.
 Release body storage before copying version fields.
 
@@ -246,8 +296,11 @@ later release to advance it. Unparameterized checks return to the selected chann
 catches up. ConfigBlob v1 reserved bits store explicit channel choice without breaking downgrade
 compatibility; unrelated saves preserve an unset choice. Changelog intake is bounded to 1024 B.
 
+### Image confirmation and update admission
+
 Rollback health uses `logic/health_gate.hpp`: admitted runtime, acknowledged healthy NimBLE host,
-proven network lease, the shared ordinary-entry INTERNAL-largest requirement and 90 s uptime. At 600 s with an expected but
+proven network lease, the shared ordinary-entry INTERNAL-largest requirement and 90 s observation
+since the health-confirmation task starts. At 600 s of that observation with an expected but
 missing lease, leave PendingVerify armed; do not restart for a router outage. Setup mode never reaches
 Ready, so even its saved configuration cannot confirm an image.
 
@@ -326,28 +379,27 @@ NimBLE SMP/link-layer pairing and bonding are compiled out on all four targets
 (`CONFIG_BT_NIMBLE_SECURITY_ENABLE=n`); protection is Tesla application crypto and NFC/VCSEC key
 enrollment. No host link keys exist. A peer SMP request is dropped with no reply and one `rc=6`
 error; that numeric BLE_HS_ENOMEM means unsupported SMP here, not an allocation failure.
-Controller `BLE_INIT ... SMP:1` describes its separate unchanged capability. [ATT/SMP departures](adr/0005-tesla-ble-seam.md#2-platform-forced-departures-and-reference-deviations).
+On esp32c3 and esp32s3 the controller's link-layer encryption, advertising and DTM are compiled out
+as well (`CONFIG_BT_CTRL_BLE_SECURITY_ENABLE=n`, `CONFIG_BT_CTRL_BLE_ADV=n`,
+`CONFIG_BT_CTRL_DTM_ENABLE=n`), so their boot line reads `BLE_INIT: Feature Config, ADV:0, ..., DTM:0,
+..., SMP:0`. [ATT/SMP departures](adr/0005-tesla-ble-seam.md#2-platform-forced-departures-and-reference-deviations).
 
-All targets use the manifest-pinned v6.3.0 graph and lexical, hash-checked patch series. The firmware
+All targets use the manifest-pinned v6.4.0 graph and ordered, hash-checked patch series. The firmware
 uses `TeslaBLE::Client` directly; `main/logic/` owns framing, UUID/session tracking and an eight-slot
 command runner: VCSEC auth → wake → Infotainment auth → payload, with backoff. Strict 2-byte BE
 length framing has bounded buffering and inter-chunk timeout; TX preserves the builder's frame.
 
-Patches 0001–0003 are retired. Current patches trim unused Parental Controls (0004), align session
-counter `max(local, reported)` plus epoch/time with `signer.go` (0005), and port crypto to PSA with
-response-tag verification against the response's counter (0006). Upstream supplies that verification
-and counter; the PSA rebase preserves it, failure wiping and a separate response-AAD helper.
-Patch 0007 refuses message construction when routing-address or request-UUID randomness fails.
+Patches 0001–0003 are retired. [ADR-0005](adr/0005-tesla-ble-seam.md#5-delivered-architecture-and-patch-retirement)
+owns the complete active patch series, including existing-session key continuity and the PSA seam.
 Peer admission requires an initialized shared secret, including restored sessions. Domain request
 hashes remain isolated. Encrypted VCSEC requires an initialized peer and non-empty request hash;
 missing context, failed tags or repeated carried counters (including zero) drop before protobuf,
 sleep updates or callbacks, never falling through to plaintext. Passive plaintext VehicleStatus
 keeps its separate path. Native retries rebuild/sign new UUID/counter bytes; upstream Vehicle's
 identical-byte retry does not change this policy. Upstream C5 support does not add a firmware target.
-The v6.3.0 charging-power estimator belongs to upstream `Vehicle`; native charge telemetry still
-reports the vehicle's raw power and phase fields without inferred AC watts or phases.
-The v6.3.0 optional poll-result callback also belongs to upstream `Vehicle`; the native
-controller does not consume it or treat command completion as fresh telemetry.
+The upstream `Vehicle` estimator, poll-result callback and charge-schedule poll are outside the
+native controller's `Client` path. Native charge telemetry reports the vehicle's power and phase
+fields directly. Command completion and telemetry freshness are separate.
 [ADR-0005](adr/0005-tesla-ble-seam.md) records all departures;
 [ADR-0002](adr/0002-idf6-mbedtls4-crypto-seam.md) records wire/key compatibility.
 
@@ -356,50 +408,6 @@ cleanup. An armed `key_rotate` or uncertain probe blocks signing/construction. I
 retires `key_created` before clearing its journal because the timestamp cannot be bound to the key.
 VIN transitions use
 `vin_txn` so power loss cannot pair a new VIN with an old key/session.
-
-## On-device display and status LED
-
-The optional T-Dongle-S3 ST7735 uses the shared cache-only `UiSnapshot` and pure `display_model.hpp`
-presenter. BOOT rotates landscape 160×80/portrait 80×160 and their flips; `disp_rot` persists and
-migrates legacy `disp_flip`. The parity gate compares all 18 presenter fields across 14,114 cases,
-including signal bars/glyph state, both layouts and integer SoC/RSSI sweeps. It also compares
-98 native font/bitmap records and byte-checks the generated font header against the simulator
-source. Another 840 cases execute the actual native text primitives against the simulator,
-including clipped/outlined text, all byte values and UTF-8 byte widths. The panel has a printable
-ASCII font; each unsupported UTF-8 byte becomes a blank cell. Both preview montages include
-LAN, setup/search and punctuation examples with complete captions. These checks do not establish
-complete-frame pixel equality, physical animation or glyph legibility. A further 820 cases execute
-the actual frame-assembly/layout bodies with passive cache/drawing doubles, including SafeMode
-cache bypass and number/outline bounds for all integer percentages. The portrait battery interior
-leaves room for those outlines.
-
-Once the display has started, SafeMode overrides connection, pairing and charge heroes, hides the
-BLE header and shows "SAFE MODE" with "Open web UI" or, without a network lease, "Check network". Its latched input comes from `safe_mode_active()`;
-frame assembly bypasses the vehicle cache in recovery. Network header and SSID scrolling remain
-available; recovery itself is static. This presentation does not alter the boot latch, start vehicle
-work, issue a command or provide an initial-portal screen before display startup.
-Landscape geometry is hardware verified; portrait orientation still needs on-device confirmation.
-
-Auto-detection requires ≥4 of 6 TF-socket pull-up pins high; other S3 boards do not allocate the
-~25 KiB framebuffer or drive display pins. SPI is 40 MHz, BOOT GPIO0, backlight active-low.
-The optional APA102 (DI40/CI39) uses the same snapshot, shared SoC gradient and latched alerts.
-Charging requires Awake plus a known SoC; a retained charging flag cannot override Asleep or
-an uncertain link. This is not a charge-domain age guarantee. A failed current WiFi signal read
-uses the same network-search downgrade as the panel. Independent sampling and alert priorities
-can still produce different frames.
-
-Once the LED task has started, latched SafeMode takes priority over network, charging and OTA
-indications and blinks red. Recovery sampling reads the latch without consulting the vehicle cache,
-durable sessions or the OTA status mutex. It uses the existing error hold; this does not change
-startup order, enable the optional LED by default or provide a signal before that task starts.
-
-`logic/led_driver.hpp` owns the 15 s error/10 s warning holds, animation factors and 12-byte
-APA102 frame. The task samples alerts about once a second and sends frames about 30 times a
-second. Pixel transport is heap-free and disabled by default. The LED's OTA read copies only a
-state enum; initial mutex creation and session-presence probes can still allocate. Neither
-renderer wakes the car. The sampling helper isolates its snapshot temporary from the persistent
-render-loop frame; this does not prove composed stack headroom. The S3 primary CI leg additionally compiles the enabled
-LED task in isolation; that unsigned variant never enters publication artifacts or changes defaults.
 
 ## Home Assistant MQTT bridge
 
@@ -420,7 +428,8 @@ for that boot. Browser and restored estimates do not establish this timestamp. S
 no discovery entities.
 
 On reconnect: discovery → online availability → state; periodic snapshots follow. Invalid caches
-publish `{}` once to remove retained stale readings, then stay quiet. Sticky JSON ownership prevents
+publish `{}` once per connection to remove retained stale readings, then stay quiet. Reconnect
+rearms invalid-domain clears on the publisher task: outbox admission is not a PUBACK. Sticky JSON ownership prevents
 partial retained documents; every build/print/publish failure rearms the entire sequence.
 The 60 s watchdog is fed at loop boundaries and each completed publish, never around a stuck call.
 
@@ -461,8 +470,8 @@ a dismissed report is not replayed later. Syslog is best-effort and
 
 The ring lock covers bounded copies and sink snapshot only; invoke sinks after unlock. Chunked
 exports bind append count and clear epoch, stop on generation changes, discard a wrapped first line
-and redact overlong logical lines as a whole. Recognized complete V1 library records flatten
-embedded line breaks in the ring copy. A boot-installed sink replaces known credential-bearing MQTT
+and redact overlong logical lines as a whole. Recognized complete V1 library records and application records containing a known identifier
+marker flatten embedded line breaks in the ring copy. A boot-installed sink replaces known credential-bearing MQTT
 URI parse errors before every output even if the ring mutex fails; other raw Serial/Syslog records
 retain their bytes. The boot owner publishes mutex and previous-sink handles atomically; each
 consumer snapshots its handle once. Export limits live in
@@ -500,9 +509,9 @@ supervisor's own stack observation separately from Vehicle minima.
 
 Restart needs an actual FaultRestart lease, a fresh post-CAS INTERNAL/OTA check, raw Stable
 verification and two confirmed commits: one unit in the shared `boot_fails` ledger, then the
-separate `reboot_why=heap:<n>` diagnostic. All runtime modes use the same ledger. The fifth used
-unit exhausts automatic heap recovery; four units latch SafeMode on the next boot. A verified
-heap SW boot preserves its reservation, while a real fault boot adds one unit. Missing live,
+separate `reboot_why=heap:<n>` diagnostic. All runtime modes use the
+[shared restart ledger](#boot-loop-safe-mode); that section owns its five-unit cap, SafeMode
+admission and boot classification. Missing live,
 malformed, unreadable or unconfirmed counter state grants no reset. A lower visible count cannot
 erase the RAM mirror's confirmed floor. A failed reservation or final reason consumes the
 five-minute write-retry interval; a confirmed reservation is never undone after reason failure.
@@ -558,8 +567,12 @@ Board mappings are owned by [User guide](USER_GUIDE.md#wired-networking-optional
 ### Keeping the link up
 
 Before any successful lease, the 30 s boot window, or ten fast WiFi failures within it, ends the
-boot attempt. Without usable stored credentials the setup portal then waits for the form. With
-stored credentials the portal joins the station as APSTA and keeps retrying them in the background
+boot attempt. Without a running WiFi station or a successfully started Ethernet driver the setup
+portal waits for the form, including after Ethernet construction fails. With a started Ethernet
+driver but no running WiFi station it instead waits for a late wired lease,
+applies the same AP limits below and makes no station attempts. Closing that AP stops and
+deinitializes its WiFi driver before wired boot continues. With
+a running WiFi station the portal uses APSTA and keeps retrying stored credentials in the background
 (`logic/setup_portal.hpp`): first after 30 s, then with doubling backoff up to 5 min. Before the
 30 min open-time cap this policy starts no new attempt while a phone is on the setup AP. If the
 boot window timed out before the ten-failure budget was spent, the station event handler can
@@ -567,11 +580,16 @@ still use its remaining retries; the portal does not suspend that owner. Once a 
 exists, the portal is torn down and the boot continues in place. The open AP closes after 10 min
 without a client and 30 min after opening; retries continue. A failed AP close is retried with the
 same backoff, and the boot does not continue while the AP is up. Nothing here reboots: a timed restart would revert a pending OTA image,
-defeat the crash counter and re-seed the vehicle window. Once online, event-driven reconnect
-continues indefinitely. The 30 s gateway watchdog recovers after two failures only if the link
+defeat the crash counter and re-seed the vehicle window. A proven WiFi lease permits indefinite
+event-driven WiFi reconnect; Ethernet alone does not prove the radio credentials. A wired lease
+pauses redundant WiFi retries, and cable loss rearms an already-started station. A pending WiFi
+trial consumes its backup only after that WiFi attempt succeeds, never after wired rescue or an
+unpersisted rollback. The 30 s gateway watchdog recovers after two failures only if the link
 claims up and that transport's gateway answered at least once. Never-answering ICMP is unusable
 evidence. Probe setup errors fail open; missing lease/gateway or unanswered probes are unreachable.
 Recovery disconnects WiFi (the event handler reconnects) or restarts Ethernet; it never reboots.
+Repeated unchanged MQTT/gateway failures log on transitions and at most hourly thereafter.
+Configuration-read failures surface as service errors; valid legacy configuration remains supported.
 
 Ping state/semaphores are persistent. Each asynchronous session owns a generation. Timeout requests
 stop and waits a second bounded interval; without matching end, quarantine as PendingEnd. No handle
@@ -584,7 +602,8 @@ association that never answers therefore stays unrecovered rather than inheritin
 
 ## Sleep / link-state (the single source of truth)
 
-`VehicleController::link_state()` supplies UI, status and MQTT:
+`VehicleController::link_state()` supplies the web UI, `/status`, MCP, MQTT, the
+`wake_up` decision and the unreachable override of the REST `charging_state`:
 
 | State | Proof |
 |---|---|
@@ -621,6 +640,140 @@ range, non-connectable means BLE limit, connectable-but-failed means connection 
 90 s history drives the UI. Background logs report first cause, changes and hourly repeats;
 foreground failures always report. Named SCAN_RSP cannot freshen a stale primary connectability bit.
 Health/enrollment timeout policies are distinct from foreground command timeouts.
+
+## Startup and recovery
+
+### Startup failure policy (normative)
+
+`runtime_admission.hpp` permits Booting→Ready only after all essential services and both task
+allocations succeed. SafeMode/Fatal are terminal. Vehicle-active HTTP/MCP and commands fail 503
+before Ready; OTA health cannot spend rollback on partial boot. NimBLE admission also requires
+bounded host-sync acknowledgement; timeout stays terminal against late callbacks. Any post-admission
+host reset or loss of sync blocks confirmation.
+
+Essential: NVS, controller primitives/tasks, network primitives/watchdog, NimBLE, primary HTTP
+registration, early heap supervisor and OTA gate task. Fatal PendingVerify yields while a temporary
+operation owner is held, then freshly queries metadata under its own FaultRestart lease and marks
+invalid without confirmation. An uncertain SDK rollback effect retains the lease; Stable/unknown
+metadata releases it and parks with existing diagnostics rather than entering a reboot loop.
+VIN-journal repair and automatic WiFi rollback hold ConfigRestart across their entire mutation and
+committed restart; neither can confirm an image. Initial-key recovery retains its existing identity
+owner without recursively acquiring another lease. Optional MQTT and Syslog
+contain start failures, unwind partial resources and report disabled status.
+
+Fatal diagnostics use only the sinks already started: an NVS failure can halt before networking,
+Syslog or HTTP exists. Retain the serial boot record and its failed component; a missing web UI
+does not distinguish that halt from a network fault. See [recovery steps](USER_GUIDE.md#safe-mode-and-fatal-startup).
+
+### Boot-loop safe mode
+
+Four shared unhealthy-restart units before a qualified 30-minute normal run latch recovery:
+networking, web UI and OTA remain, while BLE, vehicle, auto-pair and MQTT stay down. The existing
+canonical-decimal `tesla_cfg/boot_fails` record is the common ledger, saturating at 100. Fault
+boots increment even beside a heap breadcrumb; verified heap SW boots preserve their prior
+charge. Non-Clean legacy enrollment takes the maximum of the verified old counter and heap
+streak before charging a current fault. This conservative floor cannot reconstruct the unknown
+historical sum; the single five-unit bound starts at that enrollment point. No new NVS key or
+encoding is introduced. Counter read/write/type/parse or exception failure enters SafeMode;
+unknown reset/reason evidence cannot lower a verified count or grant automatic recovery. Reason
+Error also vetoes healthy clear. Known Clean configuration/OTA/power/reset exits still require
+a valid counter read and confirmed zero commit.
+
+`logic/heap_supervision.hpp` qualifies recovery maintenance from 64-bit monotonic observations:
+Ready acquired before any BLE singleton read, current host sync, zero sticky host resets, a successful
+Vehicle iteration within 60 s, a network lease, INTERNAL largest block at least 4 KiB and no OTA.
+Sleeping/unpaired operation is eligible without a probe or wake. Known runner/parse failures do not
+publish successful progress; a terminal vehicle boundary first marks Fatal. Missing, backward,
+ineligible or more-than-60-second-gapped samples restart this healthy interval.
+
+Only this full interval can authorize the pending shared-counter clear. The actual HealthCommit
+owner, a second fresh health/elapsed check and a valid present counter precede the durable zero;
+only its confirmed success refills the RAM mirror and diagnostic streak. Failed/throwing or
+false-visible commits stay pending and retry no faster than five minutes. SafeMode, portal,
+Fatal, stale progress and raw uptime earn no clear. A normal boot may complete this healthy
+repair after a failed reservation/reason, without changing its live runtime admission to
+pseudo-SafeMode. Threshold four governs the next boot's admission.
+
+From verified zero, alternating heap/fault events share five units: H/F/H/F/H reaches SafeMode
+at four, permits the last Stable heap recovery at five, then refuses another. An all-heap path
+has the same cap; an actual fault consumes that same remaining credit. This bounds the cited
+loop when its fault-producing work is disabled in recovery. It cannot prevent externally forced
+resets, unrelated faults still occurring in SafeMode, later faults after a fully qualified
+healthy interval, or explicit known Clean recovery exits. Host multi-boot tests preserve one
+fake durable store and execute the actual startup, reservation and owner programs; they are not
+physical power-cut or live-vehicle evidence.
+
+The supervisor uses a 3072-byte task stack. Its static state, task/TCB allocation, startup
+overlap, INTERNAL largest block and own runtime minimum require separate measurement. Repeated
+resets or firmware rollback do not repair shared NVS. Preserve failure evidence and follow the
+[recovery steps](USER_GUIDE.md#safe-mode-and-fatal-startup).
+
+### Live stack-headroom evidence
+
+`stack_watch.cpp` caches current-task historical high-water samples in 25 explicit context lanes.
+The 24-byte bank publishes packed lanes with strong compare-exchange, recomputing after contention.
+On the single-core C3, the pinned SDK implements 32-bit atomics with short interrupt-masked POD
+operations; other targets require always-lock-free 32-bit atomics. Stack queries happen before
+publication, and atomic operations perform no allocation, logging or task-mutex wait.
+The four original aliases retain their names; values are conservative 256-byte lower bounds,
+measured zero is distinct from unknown, and saturation means at least 15872 bytes. Consumers emit the
+adjacent `stack_min_free_quantum_bytes:256` metadata and never use the diagnostic bank as health,
+restart or command admission. `test/stack_context_hook_owners.json` owns the exact entry-to-lane
+routes (`test/test_stack_context_hooks.py` pins their count), including separate fixed
+PingNet/PingSyslog callbacks without a larger callback argument.
+Actual task entries, iteration scopes and explicit no-unwind delete/restart samples complement
+callback exit scopes placed before local guards. Inner BLE enqueue-only adapters remain unchanged
+and are covered by their outer NimBLE task callbacks. A logger sample is a diagnostic aggregate,
+not proof of an otherwise unregistered caller task: its exit helper refuses ISR, masked-critical,
+nonrunning-scheduler and missing-current-task contexts before scanning. The pinned own-stack scan
+and atomic update chain performs no logger, allocator or application-lock operation; no recursion
+flag/TLS or foreign task handle is added. Unsafe/unexercised contexts remain unknown. Added scan
+work, caller-held SDK-lock cost, task frames, RAM/Flash and measured target minima require their
+own acceptance; configured stack sizes, finite source checks and host measurements cannot prove
+them. The supervisor's separate exact own-stack field keeps its existing semantics.
+All 25 contexts are present in status and MQTT; never-sampled contexts are null. A measured
+zero lower bound represents 0–255 free bytes and does not by itself prove stack overflow.
+The OTA network task has its own lane. Parser callbacks execute in their coordinator caller
+and use a separate OtaParser entry-context aggregate, not the network-task lane.
+Retrospective minima and compiler frame baselines prove different things. Bench policy floors are described in the
+[test guide](../test/README.md#whats-not-covered-by-design).
+
+### Clock authority and session restore
+
+Attempt Unix-clock restore **before** loading sessions. The inherited Unix-versus-vehicle-epoch
+comparison rejects persisted sessions after successful restore, but an absent/unreadable cache or
+failed clock set can leave negative-age acceptance. It is not a reliable 1-hour reuse window.
+True session reuse across reboot needs epoch/Unix alignment; [ADR-0005](adr/0005-tesla-ble-seam.md)
+records this limitation.
+
+Durable `key_created`, `paired_at` and MQTT `boot_time` require an acquired
+`clock_is_authoritative()` before sampling wall time (`time_sync.hpp`). Only a validated successful
+NTP application establishes this boot's authority. Browser time is a temporary estimate; it neither
+writes `last_time` nor permits durable dates. A restored checkpoint is also non-authoritative.
+Historical plausible dates have no stored source marker and remain readable; no provenance is
+invented for them. Date getters require canonical decimal seconds above 1600000000 and below
+the boot-time plausibility ceiling. Normal reproducible builds omit the app date, selecting the
+fallback year 2023 and an exclusive **2033-01-01** ceiling; builds with a valid date use its year
+plus ten. NTP, browser time and durable-date reads at or beyond the ceiling are rejected. The
+ceiling must be revised before 2033. The stricter clock/browser floor remains 1700000000.
+`paired_at` names the first status observation of a stored session with NTP time, not the vehicle's
+pairing event. A failed metadata save may be retried on a later status read.
+
+The strong IDF `sntp_sync_time` extension replaces the pinned weak clock write. NTP and browser
+writers share one boot-initialized static operation mutex; NTP applies once and commits its authority
+before release, so a later browser writer cannot overwrite that commit. Only IMMED mode is used.
+The 100 ms admission wait is not an operation deadline: libc timekeeping locks can wait indefinitely.
+Early `gettimeofday` initializes libc's private locks before producers; that SDK bootstrap can
+allocate and abort on OOM. No storage, logging or network operation runs under the application clock
+gate. The hook catches exceptions before returning to C; failed sync cannot clear prior authority.
+
+Checkpoint restore validates the full decimal value/window and applies it only while the warm clock
+is below the clock floor, checking the syscall result. Successful NTP samples offer a checkpoint on
+first sync and after six hours since the last confirmed save, with at least five minutes between
+attempts. Existing SNTP callbacks supply opportunities; there is no added task/timer or tight retry.
+The attempt is recorded before fallible work and save success only after storage confirms it.
+Checkpoint NVS/string/log work follows clock-gate release. This policy does not fix the inherited
+session-age epoch mismatch or prove RTC behavior on hardware.
 
 ## Pairing lifecycle / invalidation
 
@@ -692,48 +845,16 @@ Link loss, identity cleanup and authenticated domain repair invalidate the affec
 Ordinary command cancellation preserves it. Temporary identity admission failure hides the cache
 until rollback restores the same identity; a new identity cannot inherit the old metadata.
 `session_available` reports usable VCSEC RAM only. The supervisor, background eligibility and
-UI/display/LED presentation accept durable presence or usable VCSEC RAM, while retaining their
+UI presentation accepts durable presence or usable VCSEC RAM while retaining its
 existing recovery, sleep, wake and foreground arbitration. Infotainment availability is diagnostic
 only. Public `paired` and its guarded timestamp remain durable facts; persistence errors add no
 manual key action or automatic storage retry.
 
 NimBLE posts fixed LinkUp only. The vehicle task owns GATT-ready generation, materializes the MAC
 after unlock and persists it once outside shared locks. Startup MAC strings stay startup-only.
-Attempt Unix-clock restore **before** loading sessions. The inherited Unix-versus-vehicle-epoch
-comparison rejects persisted sessions after successful restore, but an absent/unreadable cache or
-failed clock set can leave negative-age acceptance. It is not a reliable 1-hour reuse window.
-True session reuse across reboot needs epoch/Unix alignment; [ADR-0005](adr/0005-tesla-ble-seam.md)
-records this limitation.
-
-New durable `key_created`, `paired_at` and MQTT `boot_time` require an acquired
-`clock_is_authoritative()` before sampling wall time (`time_sync.hpp`). Only a validated successful
-NTP application establishes this boot's authority. Browser time is a temporary estimate; it neither
-writes `last_time` nor permits durable dates. A restored checkpoint is also non-authoritative.
-Historical plausible dates have no stored source marker and remain readable; no provenance is
-invented for them. Date getters require canonical decimal seconds above 1600000000 and below
-January 1 of build year + 10. The stricter clock/browser floor remains 1700000000.
-`paired_at` names the first status observation of a stored session with NTP time, not the vehicle's
-pairing event. A failed metadata save may be retried on a later status read.
-
-The strong IDF `sntp_sync_time` extension replaces the pinned weak clock write. NTP and browser
-writers share one boot-initialized static operation mutex; NTP applies once and commits its authority
-before release, so a later browser writer cannot overwrite that commit. Only IMMED mode is used.
-The 100 ms admission wait is not an operation deadline: libc timekeeping locks can wait indefinitely.
-Early `gettimeofday` initializes libc's private locks before producers; that SDK bootstrap can
-allocate and abort on OOM. No storage, logging or network operation runs under the application clock
-gate. The hook catches exceptions before returning to C; failed sync cannot clear prior authority.
-
-Checkpoint restore validates the full decimal value/window and applies it only while the warm clock
-is below the clock floor, checking the syscall result. Successful NTP samples offer a checkpoint on
-first sync and after six hours since the last confirmed save, with at least five minutes between
-attempts. Existing SNTP callbacks supply opportunities; there is no added task/timer or tight retry.
-The attempt is recorded before fallible work and save success only after storage confirms it.
-Checkpoint NVS/string/log work follows clock-gate release. This policy does not fix the inherited
-session-age epoch mismatch or prove RTC behavior on hardware.
-
 ## Configuration durability
 
-New MQTT/Syslog targets are limited to 64 UTF-8 bytes across HTTP and the UI. The version1
+MQTT/Syslog target updates are limited to 64 UTF-8 bytes across HTTP and the UI. The version1
 encoder preserves existing targets up to 120 bytes through unrelated saves, including LAN WiFi
 trials and their credential rollback. The unchanged reader retains its 256-byte string sanity
 bound. Short-value wire bytes and CRC/layout are unchanged. Unchanged WiFi retains its no-write
@@ -772,6 +893,8 @@ on early route/Origin/admission rejection or exceptions. Bodyless requests keep 
 captive preflight failures return ESP_FAIL to reject unread input.
 
 `read_body_result()` distinguishes empty, oversize, OOM and receive failure (normal cap 2 KiB).
+The dev-only binary `/ota/upload` has a separate streamed slot-size bound and async owner;
+it does not raise the JSON/MCP cap or use the shared allocating body reader.
 
 | Case | REST | MCP |
 |---|---|---|
@@ -842,16 +965,6 @@ telemetry is omitted. The shared admission/exception fallbacks are not JSON-RPC 
 
 New code must fit this contract or revise it with implementation and evidence in the same change.
 
-Vehicle, display and LED iteration catches retain task-owned fault-report state across successful
-iterations. The first fault logs immediately; later reports are at least 30 monotonic seconds apart
-and include a saturating suppressed-error count. The shared helper advances state before calling
-the sink and contains sink exceptions. This changes reporting only; task delays and arbitration stay
-unchanged, and an outer terminal catch still reports its once-only task exit. Each task keeps its
-16-byte reporting state locally, outside the iteration, without increasing controller storage. The optional
-telemetry round keeps its snapshot and builders in a separate non-inlined frame; the loop retains
-its scheduling/attempt timestamp and exception boundary. Compiler frames do not bound composed
-runtime call depth.
-
 ### Lock hierarchy (`VehicleController`)
 
 | Primitive | Kind | Protects |
@@ -862,7 +975,7 @@ runtime call depth.
 | `result_mutex_` | mutex, RAII, leaf | the externally visible `last_error_` snapshot HTTP/MCP read after a foreground command |
 | `CommandCompletion::sem` | per-request binary semaphore, shared ownership | fixed callback result/error record and generation-checked completion, signalled even after its catch-all |
 | `StatusCompletion::sem` | per-request binary semaphore, shared ownership | fixed status-success fields; the C++ runner failure callback may allocate its request-owned `std::string error` before signalling |
-| `ble_events_.mux` | dedicated `portMUX`, bounded POD and lock-free timer read | every ready/queue push, pop and clear; same-generation/window RX bytes pack into16 static244-byte cells; arrival and empty-queue timestamps are linearized here; ordered link barriers; unlock before generation/Client/runner/storage/link work |
+| `ble_events_.mux` | dedicated `portMUX`, bounded POD and lock-free timer read | every ready/queue push, pop and clear; same-generation/window RX bytes pack into 16 static 244-byte cells; arrival and empty-queue timestamps are linearized here; ordered link barriers; unlock before generation/Client/runner/storage/link work |
 | `telemetry_pending_mux_` | `portMUX`, innermost, POD only | the fixed latest-value nanopb mailboxes, pending mask and charging-amps feedback generation written synchronously by tesla-ble callbacks |
 
 Order for identity/OTA-coordinated transactions: shared operation-gate admission →
@@ -873,15 +986,15 @@ independent leaves. `client_` has no public raw-pointer accessor; only controlle
 or starting controller tasks; those exclusive startup calls need no Vehicle lock. After publication,
 controller-owned runtime Client/runner access requires Vehicle ownership.
 The deferred mailbox owns its bytes; no callback-local buffer or mbuf pointer survives return.
-A callback of1..244 bytes is accepted completely or refused before mutation. The Vehicle consumer
-copies at most20 RX bytes per pop into an independent result, retaining the head offset until the
+A callback of 1..244 bytes is accepted completely or refused before mutation. The Vehicle consumer
+copies at most 20 RX bytes per pop into an independent result, retaining the head offset until the
 cell is exhausted. RX arrival time is sampled with the allocation-free, RTOS-lock-free
 `esp_timer_get_time()` under the mailbox mux. Coalescing retains first/last arrival times within
-one3s window; a later arrival starts a new cell. The framer checks the first arrival against the
+one 3 s window; a later arrival starts a new cell. The framer checks the first arrival against the
 previous batch and renews partial-frame expiry from the last, including when a cell fits one pop.
 Empty-queue observation and the periodic expiry clock share the same mux, so drain latency cannot
-erase a queued timely continuation or hide a real gap. The256-byte cell,32-byte pop and4100-byte
-queue limits remain fixed. One fresh2050-byte framed response within that window occupies nine cells even with one-byte
+erase a queued timely continuation or hide a real gap. The 256-byte cell, 32-byte pop and 4100-byte
+queue limits remain fixed. One fresh 2050-byte framed response within that window occupies nine cells even with one-byte
 notifications. This is not an unlimited-burst, scheduling or allocator-capacity guarantee. Old
 LinkDown remains a barrier; LinkUp/RX require the current stable generation. An observed overflow
 clears/reset/disconnects fail-closed; flag publication, queue clear and the entire drain are not one
@@ -904,6 +1017,8 @@ parsing or callbacks. Use `tk::SemGuard`/`MutexGuard` and `InFlightGuard` for un
   catch-all, without logging. `StatusCompletion` has a separate allocatable runner-error path; its
   success callback copies fixed fields. Runner callbacks execute synchronously under Vehicle
   ownership: normally on the Vehicle task, or in the controller caller during cancellation/clear.
+  They borrow the runner's error only until return and copy bounded visible bytes before signalling,
+  without an intermediate heap-owned error or nested completion adapter.
   They are not NimBLE-host or SDK C callbacks.
 - Command task publishes result text after waiting. `cmd_in_flight_` is set under command ownership;
   it pauses background work but orders no other fields.
@@ -922,7 +1037,7 @@ snapshots as leaves; do not call network, storage, logging or an external sink u
 | diagnostic `s_mtx` | ring bytes, append/clear generation and sink snapshots; capture uses zero wait and counts dropped lines, sinks run after unlock |
 | Syslog `s_status_mtx` | resolved/reachable/error snapshot; error strings may allocate, so RAII releases on failure |
 | Syslog queue and `s_ping` | the boot-published fixed queue lives until reboot; persistent generation-owned ping completion is not deleted/reused until its exact end acknowledgement |
-| OTA `s_lock` | bounded `OtaStatusPod` copy/update; string conversion and SDK/network/storage work run after unlock |
+| OTA `s_lock` | bounded POD status/offer/notes copy/update; hashing and SDK/network/storage work run after unlock |
 | OTA shared operation gate | mutually exclusive Ota, IdentityMutation, FaultRestart, HealthCommit or ConfigRestart owner; refusals do not acquire another owner's operation |
 | heap-trend `mutex()` | retained ring adoption, carry, seal and bounded snapshots; adoption logging runs after unlock, with no NVS or network operation under this lock |
 
@@ -931,6 +1046,16 @@ snapshot. Boot-owned handles and fixed queues are not deleted after publication.
 records and the ping end acknowledgement separately own their asynchronous lifetime.
 
 ### Task fault containment and explicit watchdog retirement
+
+Vehicle iteration catches retain task-owned fault-report state across successful
+iterations. The first fault logs immediately; later reports are at least 30 monotonic seconds apart
+and include a saturating suppressed-error count. The shared helper advances state before calling
+the sink and contains sink exceptions without changing task delays or arbitration. An outer
+terminal catch reports its once-only task exit. Each task keeps its
+16-byte reporting state locally, outside the iteration, without increasing controller storage. The optional
+telemetry round keeps its snapshot and builders in a separate non-inlined frame; the loop retains
+its scheduling/attempt timestamp and exception boundary. Compiler frames do not bound composed
+runtime call depth.
 
 The MQTT publisher explicitly confirms current-task TWDT removal or absence before self-deletion;
 unconfirmed cleanup parks that same task, emits one contained diagnostic and attempts feeding,
@@ -965,11 +1090,9 @@ The narrative inventory requires review alongside source changes; it is not gene
 | `auto_pair` | `kPrioAutoPair` = 4 | 8192 | `vehicle_ctrl.cpp` (fn: `vehicle_pairing.cpp`) | pairing supervisor: status/health probes and bounded automatic same-key enrollment |
 | `net_wd` | `kPrioWifiWatchdog` = 4 | 3072 | `net.cpp` | ghost-link watchdog (forces the active transport to re-establish, never reboots) |
 | `mqtt_pub` | `kPrioMqttPub` = 4 | 6144 | `mqtt_ha.cpp` | MQTT/HA publisher (reads the caches) |
-| `display` | `kPrioDisplay` = 3 | 6144 | `display.cpp` | ST7735 renderer (`CONFIG_TESLA_DISPLAY_ENABLED` builds) |
 | `ota_gate` | `kPrioOtaGate` = 3 | 3072 | `main.cpp` | one-shot OTA rollback health gate (polls every 5 s; commits on proven link and the shared `ImageConfirmation` INTERNAL-largest requirement from `logic/ota_recovery_memory.hpp` past 90 s under the shared owner, gives up at 600 s) |
 | `heapsup` | `kPrioHeapSupervisor` = 4 | 3072 | `heap_supervisor.cpp` | essential early independent INTERNAL heap sampling/recovery and qualified healthy-counter maintenance; own stack observation, no Vehicle handle |
 | `syslog_task` | `kPrioSyslog` = 3 | 6144 | `syslog.cpp` | best-effort UDP Syslog forwarder (opt-in; degraded-not-fatal on a failed start) |
-| `led` | `kPrioLed` = 2 | 3072 | `led_status.cpp` | APA102 status LED (`CONFIG_TESLA_LED_ENABLED` builds) |
 
 The two OTA allocations reuse the existing per-role 8192-byte value. Concurrent coordinator plus
 network stacks, dynamic operation, TLS peak, new translation units and composed frames need
@@ -989,7 +1112,7 @@ review generated `sdkconfig` when changing the SDK or target configuration.
 | `app_main` | `CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192` | startup and ownership publication |
 | NimBLE host | `CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=8192` | GAP/GATT/lifecycle callbacks; Link/RX adapters copy bounded bytes/barriers into the static mailbox, remaining callbacks use zero-wait locks |
 | primary HTTP server | `http_server.cpp`: `config.stack_size=8192` | synchronous REST/MCP/UI/diagnostic handlers |
-| setup HTTP server | `provisioning.cpp`: unchanged `HTTPD_DEFAULT_CONFIG()` stack | setup form handlers, while the vehicle stack is down |
+| setup HTTP server | `provisioning.cpp`: `hcfg.stack_size=6144` | setup form handlers, while the vehicle stack is down |
 | ESP timer task | `CONFIG_ESP_TIMER_TASK_STACK_SIZE=3584` | `ble_scan` timeout callback (not an ISR or the FreeRTOS timer service) |
 | default event loop | `CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=2304` | WiFi/IP/Ethernet lifecycle callbacks |
 | ESP-MQTT client tasks | locked component `MQTT_TASK_STACK`, default 6144; project does not override | publisher events and the transient configuration broker-probe callback in `http_config.cpp` |
@@ -1000,35 +1123,6 @@ The SDK also owns the FreeRTOS timer-service (`CONFIG_FREERTOS_TIMER_TASK_STACK_
 and driver tasks. A configured stack allocation
 does not prove callback headroom. The runtime-boundary inventory checks registrations/containment;
 it does not generate this table or establish maximum composed stack use.
-
-### Live stack-headroom evidence
-
-`stack_watch.cpp` caches current-task historical high-water samples in 27 explicit context lanes.
-The 24-byte bank publishes packed lanes with strong compare-exchange, recomputing after contention.
-On the single-core C3, the pinned SDK implements 32-bit atomics with short interrupt-masked POD
-operations; other targets require always-lock-free 32-bit atomics. Stack queries happen before
-publication, and atomic operations perform no allocation, logging or task-mutex wait.
-The four original aliases retain their names; values are conservative 256-byte lower bounds,
-measured zero is distinct from unknown, and saturation means at least 15872 bytes. Consumers emit the
-adjacent `stack_min_free_quantum_bytes:256` metadata and never use the diagnostic bank as health,
-restart or command admission. `test/stack_context_hook_owners.json` owns the exact 45 entry-to-lane
-routes, including separate fixed PingNet/PingSyslog callbacks without a larger callback argument.
-Actual task entries, iteration scopes and explicit no-unwind delete/restart samples complement
-callback exit scopes placed before local guards. Inner BLE enqueue-only adapters remain unchanged
-and are covered by their outer NimBLE task callbacks. A logger sample is a diagnostic aggregate,
-not proof of an otherwise unregistered caller task: its exit helper refuses ISR, masked-critical,
-nonrunning-scheduler and missing-current-task contexts before scanning. The pinned own-stack scan
-and atomic update chain performs no logger, allocator or application-lock operation; no recursion
-flag/TLS or foreign task handle is added. Unsafe/unexercised contexts remain unknown. Added scan
-work, caller-held SDK-lock cost, task frames, RAM/Flash and measured target minima require their
-own acceptance; configured stack sizes, finite source checks and host measurements cannot prove
-them. The supervisor's separate exact own-stack field keeps its existing semantics.
-All 27 contexts are present in status and MQTT; never-sampled contexts are null. A measured
-zero lower bound represents 0–255 free bytes and does not by itself prove stack overflow.
-The OTA network task has its own lane. Parser callbacks execute in their coordinator caller
-and use a separate OtaParser entry-context aggregate, not the network-task lane.
-Retrospective minima and compiler frame baselines prove different things. Bench policy floors are described in the
-[test guide](../test/README.md#whats-not-covered-by-design).
 
 ### Atomics doctrine
 
@@ -1041,7 +1135,7 @@ A change in memory order requires review of both producer and consumer.
 
 ### Exception containment (normative)
 
-Exceptions cannot escape C/RTOS frames. Vehicle, MQTT, display and LED loops contain expected
+Exceptions cannot escape C/RTOS frames. Vehicle and MQTT loops contain expected
 iteration failures with RAII cleanup and retry delays; their outer task boundaries may still stop.
 The network watchdog has an outer terminal catch and deletes its task after an unexpected
 exception; it does not automatically resume. One-shot OTA jobs publish terminal error. Callbacks catch locally or
@@ -1052,72 +1146,6 @@ blocked callback, so host/timer locks remain zero-wait. `app_main` contains fata
 `test_runtime_boundary_contract.py` derives tasks/callbacks from shipped sources and actual
 registrations, rejecting hidden or runtime-selected boundaries. Host tests prove containment
 structure and deterministic seams; the four-target IDF build proves C-frame integration.
-
-### Startup failure policy (normative)
-
-`runtime_admission.hpp` permits Booting→Ready only after all essential services and both task
-allocations succeed. SafeMode/Fatal are terminal. Vehicle-active HTTP/MCP and commands fail 503
-before Ready; OTA health cannot spend rollback on partial boot. NimBLE admission also requires
-bounded host-sync acknowledgement; timeout stays terminal against late callbacks. Any post-admission
-host reset or loss of sync blocks confirmation.
-
-Essential: NVS, controller primitives/tasks, network primitives/watchdog, NimBLE, primary HTTP
-registration, early heap supervisor and OTA gate task. Fatal PendingVerify yields while a temporary
-operation owner is held, then freshly queries metadata under its own FaultRestart lease and marks
-invalid without confirmation. An uncertain SDK rollback effect retains the lease; Stable/unknown
-metadata releases it and parks with existing diagnostics rather than entering a reboot loop.
-VIN-journal repair and automatic WiFi rollback hold ConfigRestart across their entire mutation and
-committed restart; neither can confirm an image. Initial-key recovery retains its existing identity
-owner without recursively acquiring another lease. Optional MQTT/Syslog/display/LED
-contain start failures, unwind partial resources and report disabled status.
-
-Fatal diagnostics use only the sinks already started: an NVS failure can halt before networking,
-Syslog or HTTP exists. Retain the serial boot record and its failed component; a missing web UI
-does not distinguish that halt from a network fault. See [recovery steps](USER_GUIDE.md#safe-mode-and-fatal-startup).
-
-### Boot-loop safe mode
-
-Four shared unhealthy-restart units before a qualified 30-minute normal run latch recovery:
-networking, web UI and OTA remain, while BLE, vehicle, auto-pair and MQTT stay down. The existing
-canonical-decimal `tesla_cfg/boot_fails` record is the common ledger, saturating at100. Fault
-boots increment even beside a heap breadcrumb; verified heap SW boots preserve their prior
-charge. Non-Clean legacy enrollment takes the maximum of the verified old counter and heap
-streak before charging a current fault. This conservative floor cannot reconstruct the unknown
-historical sum; the single five-unit bound starts at that enrollment point. No new NVS key or
-encoding is introduced. Counter read/write/type/parse or exception failure enters SafeMode;
-unknown reset/reason evidence cannot lower a verified count or grant automatic recovery. Reason
-Error also vetoes healthy clear. Known Clean configuration/OTA/power/reset exits still require
-a valid counter read and confirmed zero commit.
-
-`logic/heap_supervision.hpp` qualifies recovery maintenance from 64-bit monotonic observations:
-Ready acquired before any BLE singleton read, current host sync, zero sticky host resets, a successful
-Vehicle iteration within 60 s, a network lease, INTERNAL largest block at least 4 KiB and no OTA.
-Sleeping/unpaired operation is eligible without a probe or wake. Known runner/parse failures do not
-publish successful progress; a terminal vehicle boundary first marks Fatal. Missing, backward,
-ineligible or more-than-60-second-gapped samples restart this healthy interval.
-
-Only this full interval can authorize the pending shared-counter clear. The actual HealthCommit
-owner, a second fresh health/elapsed check and a valid present counter precede the durable zero;
-only its confirmed success refills the RAM mirror and diagnostic streak. Failed/throwing or
-false-visible commits stay pending and retry no faster than five minutes. SafeMode, portal,
-Fatal, stale progress and raw uptime earn no clear. A normal boot may complete this healthy
-repair after a failed reservation/reason, without changing its live runtime admission to
-pseudo-SafeMode. Threshold four governs the next boot's admission.
-
-From verified zero, alternating heap/fault events share five units: H/F/H/F/H reaches SafeMode
-at four, permits the last Stable heap recovery at five, then refuses another. An all-heap path
-has the same cap; an actual fault consumes that same remaining credit. This bounds the cited
-loop when its fault-producing work is disabled in recovery. It cannot prevent externally forced
-resets, unrelated faults still occurring in SafeMode, later faults after a fully qualified
-healthy interval, or explicit known Clean recovery exits. Host multi-boot tests preserve one
-fake durable store and execute the actual startup, reservation and owner programs; they are not
-physical power-cut or live-vehicle evidence.
-
-The permanent 3072-byte supervisor replaces a temporary 2560-byte timer. No steady-state RAM saving
-or worst-path stack margin follows from that replacement: static state, task/TCB allocation, startup
-overlap, INTERNAL largest block and own runtime minimum require separate measurement. Repeated
-resets or firmware rollback do not repair shared NVS. Preserve failure evidence and follow the
-[recovery steps](USER_GUIDE.md#safe-mode-and-fatal-startup).
 
 ### Deferred: owned BLE-ops queue
 
