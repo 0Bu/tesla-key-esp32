@@ -116,7 +116,7 @@ command_hook(
 )
 
 core_files = {
-    "agent_hook.py", "merge_payload.py", "pr-gate-lib.sh", "require-pr-gates.sh",
+    "agent_hook.py", "merge_payload.py", "parallel-checks.sh", "pr-gate-lib.sh", "require-pr-gates.sh",
     "run_with_timeout.py", "selftest.sh", "shell_read.py",
 }
 core_dir = root / "tools" / "agent-hooks"

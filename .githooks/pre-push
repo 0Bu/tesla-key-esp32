@@ -159,30 +159,26 @@ PY
 done
 fi
 
-# 3. Validate vehicle-command protocol sync if vehicle-relevant changes are detected
-if [[ "$has_vehicle_changes" -eq 1 ]]; then
+# 3. After PR policy passes, run the applicable local checks. The protocol check only reads
+#    repository sources, so it can overlap the one incremental firmware build.
+check_vehicle_protocol() {
   echo "🔍 Vehicle-command protocol changes detected in push."
   echo "   Running pre-push vehicle command sync validation..."
   if ! python3 "$root/scripts/check-vehicle-command-sync.py" --check; then
     echo "" >&2
     echo "❌ Push rejected: vehicle-command protocol invariants violated!" >&2
     echo "   Run 'python3 scripts/check-vehicle-command-sync.py --check' to inspect." >&2
-    exit 1
+    return 1
   fi
   echo "✅ Pre-push vehicle command sync check passed."
-fi
+}
 
-# 4. Validate the firmware size and stack-usage baselines if firmware-relevant changes are detected.
-#    These are CI's most common late failure (24 of the 25 build-target failures over 24 days) and
-#    18 of those tripped ONLY on esp32/esp32s3/esp32c3, so checking a single target is not enough.
-#    scripts/precheck-firmware.sh builds all four incrementally: the first run per checkout compiles
-#    each target cold (a few minutes each), later runs only rebuild what the push touched.
-#    PRE_PUSH_TARGETS="esp32s3 esp32c3" narrows it for a deliberate, targeted push.
-if [[ "$has_firmware_changes" -eq 1 ]]; then
+# The incremental build uses the shared ESP-IDF source tree, building one target at a time.
+check_firmware_baselines() {
   echo "🔍 Firmware-relevant changes detected in push."
   echo "   Running incremental firmware size/stack baseline pre-check (${PRE_PUSH_TARGETS:-all targets})..."
 
-  target_args=()
+  local target_args=() pre_push_target
   for pre_push_target in ${PRE_PUSH_TARGETS:-}; do
     target_args+=(--target "$pre_push_target")
   done
@@ -193,9 +189,19 @@ if [[ "$has_firmware_changes" -eq 1 ]]; then
     echo "   Run './scripts/precheck-firmware.sh' to reproduce (CI's size and stack gates only)." >&2
     echo "   If this growth was intentional and reviewed, follow the baseline-regeneration steps the" >&2
     echo "   precheck printed above (stack baseline first, then size) and commit the result." >&2
-    exit 1
+    return 1
   fi
   echo "✅ Pre-push firmware size/stack check passed."
+}
+
+if [[ "$has_vehicle_changes" -eq 1 && "$has_firmware_changes" -eq 1 ]]; then
+  # shellcheck source=/dev/null
+  . "$root/tools/agent-hooks/parallel-checks.sh"
+  run_parallel_checks check_vehicle_protocol check_firmware_baselines
+elif [[ "$has_vehicle_changes" -eq 1 ]]; then
+  check_vehicle_protocol
+elif [[ "$has_firmware_changes" -eq 1 ]]; then
+  check_firmware_baselines
 fi
 
 exit 0

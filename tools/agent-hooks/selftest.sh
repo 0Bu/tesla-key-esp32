@@ -821,6 +821,68 @@ else
   fail_case 'pre-push hook accepts valid push with verified gates and clean diff'
 fi
 
+# Run the shipped hook with inert local checks. The protocol worker cannot pass until
+# the firmware worker starts, and completion of both workers is required on failure too.
+parallel_repo="$tmp/parallel-pre-push"
+mkdir -p "$parallel_repo/.githooks" "$parallel_repo/scripts" "$parallel_repo/tools/agent-hooks"
+cp "$root/.githooks/pre-push" "$parallel_repo/.githooks/"
+cp "$root/tools/agent-hooks/parallel-checks.sh" "$parallel_repo/tools/agent-hooks/"
+cp "$root/tools/agent-hooks/pr-gate-lib.sh" "$parallel_repo/tools/agent-hooks/"
+cat > "$parallel_repo/tools/agent-hooks/require-pr-gates.sh" <<'SH'
+cat >/dev/null
+exit "${TEST_POLICY_EXIT:-0}"
+SH
+cat > "$parallel_repo/scripts/check-vehicle-command-sync.py" <<'PY'
+import os
+from pathlib import Path
+import sys
+import time
+
+assert sys.argv[1:] == ["--check"]
+Path("protocol-started").touch()
+deadline = time.monotonic() + 5
+while not Path("firmware-started").is_file() and time.monotonic() < deadline:
+    time.sleep(0.05)
+assert Path("firmware-started").is_file(), "checks did not overlap"
+Path("protocol-finished").touch()
+sys.exit(int(os.environ.get("TEST_PROTOCOL_EXIT", "0")))
+PY
+cat > "$parallel_repo/scripts/precheck-firmware.sh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+[ "$#" -eq 0 ]
+touch firmware-started
+sleep 0.2
+touch firmware-finished
+exit "${TEST_FIRMWARE_EXIT:-0}"
+SH
+chmod +x "$parallel_repo/scripts/precheck-firmware.sh"
+git -C "$parallel_repo" init -q
+git -C "$parallel_repo" -c user.name=Fixture -c user.email=fixture@example.invalid commit -qm base --allow-empty
+parallel_base="$(git -C "$parallel_repo" rev-parse HEAD)"
+mkdir "$parallel_repo/main"
+touch "$parallel_repo/main/vehicle_commands.cpp"
+git -C "$parallel_repo" add main/vehicle_commands.cpp
+git -C "$parallel_repo" -c user.name=Fixture -c user.email=fixture@example.invalid commit -qm feature
+parallel_head="$(git -C "$parallel_repo" rev-parse HEAD)"
+
+run_parallel_hook() (
+  cd "$parallel_repo" || exit 2
+  unset PRE_PUSH_TARGETS AGENT_PR_GATES_SKIP
+  rm -f protocol-started firmware-started protocol-finished firmware-finished
+  printf 'refs/heads/feature %s refs/heads/feature %s\n' "$parallel_head" "$parallel_base" \
+    | env "$@" .githooks/pre-push origin
+)
+
+expect_rc 0 'pre-push overlaps the two local checks and waits for both' run_parallel_hook
+expect_rc 1 'pre-push rejects a failed protocol worker' run_parallel_hook TEST_PROTOCOL_EXIT=5
+[ -f "$parallel_repo/firmware-finished" ] || fail_case 'protocol failure left the firmware worker running'
+expect_rc 1 'pre-push rejects a failed firmware worker' run_parallel_hook TEST_FIRMWARE_EXIT=6
+[ -f "$parallel_repo/protocol-finished" ] || fail_case 'firmware failure left the protocol worker running'
+expect_rc 1 'pre-push checks PR policy before starting local workers' run_parallel_hook TEST_POLICY_EXIT=2
+[ ! -e "$parallel_repo/protocol-started" ] && [ ! -e "$parallel_repo/firmware-started" ] \
+  || fail_case 'local worker started after PR policy failed'
+
 size_relevant_samples=(
   "main/main.cpp"
   "main/logic/config_request.hpp"

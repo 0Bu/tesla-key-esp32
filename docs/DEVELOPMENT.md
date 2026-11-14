@@ -133,6 +133,11 @@ protocol, repository/agent gates and Linux sanitizers, using the pinned Docker i
 on macOS. It performs no publication, real-key signing, device or vehicle operation. Standalone
 commands below remain available for focused iteration.
 
+Strict host checks run alongside repository policy and the BLE protocol harness.
+The handoff waits for both groups and reports each result with its output. Linux sanitizers
+then run on their own to limit contention with timed host gates. The optional four-target
+firmware build follows.
+
 The host runner reports elapsed time for each gate. Contract parsers reuse bounded immutable
 results for identical complete source strings within one process; changed fixture text is parsed
 again, and returned inventories are independent copies. Every mutation and failure-propagation
@@ -272,11 +277,19 @@ uses the same modes (`check-stack-usage.py --observed-dir dist --write-baseline 
 raise|tighten`) and lists every changed entry; a PR lists each raised entry with its cause.
 Stack tighten forbids growth and newly reviewed frames or translation units; it permits removed
 units and removed or below-threshold frames, then lowers the remaining maxima to measurements.
-`check-firmware-size.sh` builds all four targets by default. The pre-push hook runs the
-incremental `precheck-firmware.sh` on all four (`PRE_PUSH_TARGETS` narrows it deliberately); it
-checks only the size and stack gates, not CI's dependency, partition, otadata, semantics,
-artifact-identity, reproducibility or signing gates. Stack reports inventory frames, reject unbounded dynamic frames
-and frames over 4096 B; they do not prove call depth or runtime stack margin.
+`check-firmware-size.sh` builds all four targets by default. After PR policy passes, the
+[Git pre-push hook](../.githooks/pre-push) runs the vehicle-command sync check and the
+incremental size and stack check concurrently when both apply. Any failure rejects the push.
+The incremental check builds the four targets one at a time in the pinned ESP-IDF container
+because they share a component workspace. `PRE_PUSH_TARGETS` can narrow the incremental check.
+The full build additionally checks dependencies, partitions, otadata, compiler semantics,
+artifact identity, reproducibility and signing. Stack reports reject unbounded dynamic frames and
+frames over 4096 B. Runtime margin also depends on call depth.
+
+From a feature branch, invoke `.githooks/pre-push origin < /dev/null` to run the hook manually
+against the current branch without pushing. The manual check compares the branch with
+`origin/main` when available. Run `scripts/install-git-hooks.sh` to configure Git to use the
+repository hooks from the active worktree on push.
 
 ### ESP-IDF migration inputs
 
