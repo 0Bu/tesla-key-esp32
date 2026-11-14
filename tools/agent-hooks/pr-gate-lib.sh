@@ -126,13 +126,14 @@ gate_firmware_size_relevant() {
 #   inspected.
 gate_checkbox_status() {
   local content="$1" key="$2"
-  printf '%s' "$key" | grep -Eq '^(skill-audit|project-review|feature-docs|pr-hygiene|vehicle-command-audit)$' \
+  printf '%s' "$key" | grep -Eq '^(local-checks|skill-audit|project-review|feature-docs|pr-hygiene|vehicle-command-audit)$' \
     || { printf 'absent\n'; return 0; }
   printf '%s' "$content" | python3 -c '
 import re, sys
 
 key = sys.argv[1]
 spec = {
+    "local-checks": ("passed", "pre-push verification"),
     "skill-audit": ("clean", "PR create/push gate"),
     "project-review": ("clean", "merge gate"),
     "feature-docs": ("synced", "merge gate"),

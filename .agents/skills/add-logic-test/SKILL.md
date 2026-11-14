@@ -11,9 +11,10 @@ additional authorization. Canonical skills live under `.agents/skills/`; hooks e
 This project's local verification loop lives in [`test/`](../../../test/): IDF-free decision and
 conversion cores live in [`main/logic/`](../../../main/logic/), the firmware **delegates** to them,
 and [`test/test_logic.cpp`](../../../test/test_logic.cpp) exercises them with a plain host compiler.
-Strict macOS browser coverage uses Linux Docker. CI's `logic-test` job gates the firmware build on it,
-and the `Stop` handler in [`tools/agent-hooks/agent_hook.py`](../../../tools/agent-hooks/agent_hook.py)
-gates the end of a turn on it. This skill walks the exact
+Strict macOS browser coverage uses Linux Docker. The local handoff and protected publication
+require the strict host suite. The `Stop` handler in
+[`tools/agent-hooks/agent_hook.py`](../../../tools/agent-hooks/agent_hook.py)
+also checks local logic changes. This skill walks the exact
 steps to add a new unit without breaking those invariants.
 
 **Single source of truth is the whole point:** the *one* implementation the test pins must be the
@@ -79,7 +80,7 @@ Only when the consumer cannot include the header (browser JS, a Python tool). Fo
    source (never a copy), re-decides, diffs, and exits non-zero on any mismatch. Fail loudly if the
    markers are missing, so a renamed fence can't make the check pass vacuously.
 4. Wire `scripts/check-<name>-parity.sh` into [`scripts/run-mock-tests.sh`](../../../scripts/run-mock-tests.sh)
-   so CI's `logic-test` job gates on it.
+   so local verification and protected publication both exercise it.
 
 **Then prove the gate can fail**: diverge the mirror deliberately and confirm `run-mock-tests.sh`
 exits non-zero. A parity check nobody has seen go red is not yet a gate.

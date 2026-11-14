@@ -36,7 +36,7 @@ branch is tested by passive wiring fixtures; it is not a supported complete no-C
 `test_local_checks.py` covers reuse, source/runtime invalidation, partial-staging
 cache refusal, failures, concurrent consumers and bounded-process cancellation. The
 [local coordinator](../docs/DEVELOPMENT.md#validate-a-change) retains no remote CI or review state.
-Selected strict `--profile runtime` and `--profile browser` runs provide PR feedback only; shared
+Selected strict `--profile runtime` and `--profile browser` runs support focused local iteration. Shared
 native/browser parity runs in both. Local handoff, main/manual runs and eligible preview acceptance
 remain complete. `test_change_scope.py` drives the actual shell profiles and both lint modes with
 passive tools, including selected failures, unknown inputs and the default full mode.
@@ -66,12 +66,13 @@ cmake --build build_mock
 ctest --test-dir build_mock --output-on-failure
 ```
 
-CI splits host evidence into `logic-test` and `logic-harness`; both run alongside producer and
-independent per-target compiles, and final `build` fails unless both host jobs succeeded. Full
+Run the complete local handoff before pushing through `$deploy`. Ordinary PRs run only the
+local-record validation. Publication splits host evidence into `logic-test` and `logic-harness`.
+Both run alongside producer and independent per-target compiles and are required by `publish`. Full
 repository/agent preflight runs in `logic-harness` beside the mock suite. The harness no longer repeats
 the shared version, size, Pages, changelog and build-gate self-tests; their mandatory owner remains
-the full host build-contract gate. The harness retains its unique IDF checks. Independent assembly uses the prepared release version and can finish
-before `build`; publication still requires both joins and their exact-source byte comparison. Python gates use
+the full host build-contract gate. The harness retains its unique IDF checks. Both assembly jobs
+can finish before the host checks. Publication compares their exact-source bytes. Python gates use
 `scripts/with-host-python.sh` (Python ≥3.11). Linux sanitizer
 checks use ASan, UBSan and LSan, with deliberate tripwires proving the detectors work, plus a fixed-seed
 20,000-case fuzz corpus. Local host evidence is distinct from remote CI.

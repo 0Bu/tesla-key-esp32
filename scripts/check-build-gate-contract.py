@@ -1134,7 +1134,7 @@ def validate(root: Path) -> None:
         build_workflow.count("  independent-rebuild:") == 1
         and build_workflow.count("  publish:") == 1
         and build_workflow.count("  deploy:") == 1
-        and "needs: [build, independent-rebuild]" in build_workflow
+        and "needs: [logic-test, logic-harness, build, independent-rebuild]" in build_workflow
         and "needs: [build, publish]" in build_workflow
         and "(github.event_name == 'push' || github.event_name == 'workflow_dispatch')"
         in build_workflow

@@ -249,15 +249,16 @@ agent tools, logs, repository files or tests. Tests use throwaway keys only.
 
 Counts and file sets are enforced by validators: 53 allowlisted unsigned payloads, 12 root firmware
 files, 28 diagnostics, 40 stable Release assets and 16 manifest parts. Do not use globs to broaden them.
-The main DAG starts `prepare`, `logic-test` and `logic-harness` together. The producer matrix
-`build-target` and the matrix `independent-rebuild-target` each need only `prepare`, so producer
-and independent target compiles run concurrently before protected publication. The `build` join
-needs `prepare`, both host jobs and `build-target`; `independent-rebuild` needs `prepare` and every
-`independent-rebuild-target` leg, using the same prepared release version. The key-free independent
-join can finish before `build`; `publish` requires both successful joins, compares their complete
-inventories and bytes before key use, and then `deploy` follows. `build` is a required status
-check, and GitHub treats a check skipped because a need failed as passed, so `build` runs with
-`if: ${{ always() }}` and fails first unless every need succeeded. The independent join has no key.
+On main, `prepare` resolves the release version for both four-target matrices. The key-free
+`build` and `independent-rebuild` jobs assemble their inventories as soon as their own matrices
+finish, alongside `logic-test` and `logic-harness`. The producer join fails on failed or incomplete
+builds. `publish` requires both artifact joins and both host jobs to succeed, then compares the
+complete inventories and bytes before key use. The separate `deploy` job publishes Pages.
+
+Ordinary PRs skip the required `build` check and its producer jobs. The trusted-base
+`current-head-records` check validates the recorded local review results for the exact PR head.
+Those records are operator attestations. Protected publication requires GitHub's own build and
+acceptance evidence.
 
 `prepare` performs cumulative relevance classification once for scheduling. It does not grant
 publication authority; current-source and Pages/Release checks remain at every mutation boundary.
@@ -267,9 +268,8 @@ before provisioning the key. This warmup grants no signing authority and changes
 container limits or post-signing acceptance. Stable creation and immutable reuse are unchanged.
 Signed previews similarly resolve a trusted version, rebuild four targets on separate read-only
 runners, then join their complete inventory before the protected compare/sign stage.
-Selected PR feedback cannot authorize signing: eligible previews require additional complete
-host/protocol acceptance before the protected job. Main and manual publication always run full
-checks. Local cached successes are never consumed as publication or independent review evidence.
+Eligible previews require complete host/protocol acceptance before the protected job. Main and
+manual publication run the full host contract. Local cached successes apply to local checks.
 Only the protected publisher and key-free deploy checkouts use `filter: blob:none`: they retain
 complete history/tags and hydrate the entire exact-source tree, omitting unrelated historical blobs.
 Compiler and host checkouts remain self-contained for historical reads in read-only containers.
@@ -277,7 +277,7 @@ No Git history access or lazy fetch occurs while the signing key is provisioned.
 
 | Phase | Required proof and authority |
 |---|---|
-| Unprivileged build | Exact source SHA/fingerprint, four target graphs, size/stack/layout/effective-build checks and unsigned inventory; no signing key or write token. PRs build exact head. |
+| Unprivileged build | Exact source SHA/fingerprint, four target graphs, size/stack/layout/effective-build checks and unsigned inventory with read-only access. Requested previews build the exact PR head. |
 | Independent rebuild | Fresh cache-free exact-source target legs run concurrently with producer legs; the secret-free join assembles their inventory. The signer compares both complete inventories and payloads before key use. |
 | Protected publish | `firmware-signing` Environment; stage regular single-link files with O_NOFOLLOW, rehash, sign, remove key, verify RSA-PSS pin and minimal signed size. Emit only SHA/version-bound artifact. |
 | Deploy | No signing Environment/key/OIDC. Consume only named artifact, revalidate inventory/layout/site bytes and channel authority, then write branch-backed Pages and check live bytes. |

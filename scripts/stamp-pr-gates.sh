@@ -28,6 +28,7 @@ raw_gates = sys.argv[3:]
 only_confirmed = not body
 
 gate_specs = [
+    ("local-checks", "passed", "pre-push verification"),
     ("skill-audit", "clean", "PR create/push gate"),
     ("project-review", "clean", "merge gate"),
     ("pr-hygiene", "clean", "content gate"),
@@ -275,7 +276,7 @@ parse_gate_arg() {
     exit 2
   fi
   case "$name" in
-    skill-audit|project-review|pr-hygiene|feature-docs|vehicle-command-audit) ;;
+    local-checks|skill-audit|project-review|pr-hygiene|feature-docs|vehicle-command-audit) ;;
     *) echo "stamp-pr-gates: unknown gate name: $name" >&2; exit 2 ;;
   esac
   if [ -z "$token" ]; then

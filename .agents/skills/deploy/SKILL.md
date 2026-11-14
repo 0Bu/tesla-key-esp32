@@ -1,6 +1,6 @@
 ---
 name: deploy
-description: Publish a tesla-key-esp32 change through local checks, commit, push, PR creation, independent reviews, CI and canonical squash merge. Follow the Dev build and delegate firmware acceptance on the intended USB bench to deploy-bench.
+description: Verify and independently review a committed tesla-key-esp32 change locally before pushing, record the results in the PR, and squash merge the verified head. Follow the Dev build and delegate firmware acceptance on the intended USB bench to deploy-bench.
 ---
 
 Invoke `$deploy`. Read [AGENTS.md](../../../AGENTS.md) first. The user's explicit invocation
@@ -34,45 +34,44 @@ invalidates that candidate's evidence.
 
 Finish the scoped implementation and relevant checks. Synchronize
 [$feature-docs](../feature-docs/SKILL.md) when relevant, then stage only the intended files and
-commit with a concise English message. Reviews and records below bind that clean committed candidate.
+commit with a concise English message. Ensure the clean committed candidate includes the current
+`main` before verification so the local checks cover the integration result.
 
-Run the narrow checks for the change and the full applicable contract from
-[AGENTS.md](../../../AGENTS.md#implementation-and-evidence). Firmware integration requires the
-pinned four-target build, size/stack checks and disposable-key signing/reproducibility evidence;
-host tests alone are insufficient. Report unavailable checks as **not run** and stop at an unmet gate.
+Run `scripts/check-local.sh --candidate`. Add `--firmware` for firmware, installer runtime and
+build/signing pipeline changes that need the four-target release contract. This verifies
+compilation, size/stack, reproducibility and
+disposable-key signing on all four targets in the pinned container. An unavailable required check
+stops the push. Record the command, result, candidate SHA, base SHA and applicable target evidence
+alongside the `$local-checks` checkbox.
 
-Run independent [$skill-audit](../skill-audit/SKILL.md) and
-[$pr-hygiene](../pr-hygiene/SKILL.md) reviews of the exact committed candidate before PR creation
-or push. A validator or digest update does not replace an actual review. Fix findings in a new
-commit, then rerun the affected checks and current-head reviews before publication.
+Complete independent [$skill-audit](../skill-audit/SKILL.md) and
+[$project-review](../project-review/SKILL.md) reviews and the conditional
+[$vehicle-command-audit](../vehicle-command-audit/SKILL.md) on that candidate. Confirm any required
+feature catalog sync against the same commit. Run [$pr-hygiene](../pr-hygiene/SKILL.md) against the
+candidate and the intended PR title/body, including the test and review evidence. Keep the wording
+reviewed when adding its final hygiene record. Resolve findings and repeat verification for a new
+candidate before pushing.
 
-## Push, create the PR and complete CI
+## Record local results and push
 
-Push with the literal intended branch name. Create or update the scoped PR using an English
-summary, validation evidence and the [PR template](../../../.github/PULL_REQUEST_TEMPLATE.md).
-For multiline bodies use a file and `gh pr create --body-file <path>` or
-`gh pr edit <numeric-pr> --body-file <path>`.
+Prepare the English PR title/body from the [PR template](../../../.github/PULL_REQUEST_TEMPLATE.md).
+Set each earned checkbox to the same full candidate SHA. For an existing PR, preserve unrelated
+edits and publish the earned records for the proposed candidate before pushing. Check the proposed
+body locally with `tools/agent-hooks/require-pr-gates.sh --check --body-file <path> --head-sha
+<full-40-hex-sha> --changed-files-file <path>` using the complete rename-expanded diff.
 
-Records must name the full current head SHA. Only record reviews actually completed; leave
-unearned records unchecked. For an existing PR, the pre-push hook requires the new local head's
-skill-audit and hygiene records before push. An authorized PR-body update may publish those earned
-records; do not reuse old-head results.
-
-Monitor CI with `gh pr checks <numeric-pr> --watch` or [$ci-heal](../ci-heal/SKILL.md).
-For each fix, rerun the affected checks and commit the intended files. Independently review that
-clean commit, refresh its earned pre-push records in the existing PR body, then push. Re-read the
-remote head and CI afterward; refresh the remaining expired records only after their reviews.
-CI-heal neither authors fixes nor supplies independent review. Continue until the exact head is
-green and its current records are satisfied.
+Push the literal intended branch. Open a PR with that title and body if one is needed. Use
+`gh pr create --body-file <path>` or `gh pr edit <numeric-pr> --body-file <path>` for multiline
+bodies. Confirm the remote head and PR text match the locally verified candidate and wording.
+Wait for GitHub's required checks. On ordinary PRs, `current-head-records` validates the recorded
+results and the `build` check is skipped. An explicitly requested signed PR preview runs its
+artifact production and signing checks in GitHub Actions.
 
 ## Merge the exact reviewed head
 
-Before every merge, complete [$project-review](../project-review/SKILL.md) in its declared focused/full scope, including documentation
-quality, and a fresh `$pr-hygiene` review. Require `$feature-docs` and
-[$vehicle-command-audit](../vehicle-command-audit/SKILL.md) when the actual diff classifier applies.
-Resolve material findings and update only earned records under the existing PR-update authorization.
-
-Re-read the numeric PR, full head, base, mergeability, CI and required bench evidence. Verify the
+Re-read the numeric PR, full head, base, mergeability, required checks and any required bench
+evidence. If the checked source or base changed, verify the new integration candidate locally
+before another push. If the PR title or body changed, recheck hygiene locally. Verify the
 current records with `tools/agent-hooks/require-pr-gates.sh --pr <numeric-pr> --check`.
 Bind the user's workflow authorization to that concrete PR/head after the required verification;
 do not ask for another merge approval when the user already instructed `$deploy` for this task.

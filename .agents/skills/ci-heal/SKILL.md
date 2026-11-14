@@ -36,7 +36,7 @@ the self-test exercises them on an isolated copy of the script and through its `
   private identifiers). An uncommitted working tree stops the run. ci-heal only pushes when local
   `HEAD` descends from the PR head, and never rewrites history.
 - **It never invents a review.** A gate record is written only from `--attest <gate>=<evidence>`,
-  where the evidence names the independent review that was actually completed for the exact head
+where the evidence names the local check or independent review completed for the exact head
   being stamped (for example a report path and its finding count). A syntax or configuration
   check such as `node tools/agent-config/check.mjs` is **not** a `$skill-audit`, and a green CI
   run is **not** a `$project-review`. Without an attestation the run ends with exit code 3 and the
@@ -45,13 +45,14 @@ the self-test exercises them on an isolated copy of the script and through its `
   green CI on the PR head, local `HEAD` equal to that head, a clean working tree, the PR reporting
   `MERGEABLE`, and an unchanged head immediately before the body edit. Green CI means, for the
   latest run of every check at that head (earlier runs, such as the records failure before
-  stamping, are superseded), a successful `build` and no other check queued, running, cancelled or
-  failed (skipped and neutral checks are fine, but a skipped or missing `build` never counts).
+  stamping, are superseded), `build` completed successfully or skipped, and no other check queued,
+  running, cancelled or failed. Ordinary PRs skip the remote build and require the records check.
   Any mismatch stops the run before any merge-readiness record is stamped. `pr-policy /
   current-head-records` validates the records this workflow stamps, so a failure of that check
   alone counts as "records pending", not as red CI. If local `HEAD` then carries a committed review
   fix that descends from the PR head, ci-heal pushes it through Phase 3 and stops with exit code 3:
-  merge records for the new head need fresh reviews and a new run. After stamping, `READY FOR MERGE` and
+  start a new run against the confirmed remote head using that commit's existing attestations.
+  After stamping, `READY FOR MERGE` and
   `--auto-merge` also require a new run of that check to pass and every check to be green on the
   unchanged head. A stamp that leaves the body unchanged (the records were already current)
   starts no new run of that check, so the latest existing run of it must have passed instead.
@@ -78,7 +79,7 @@ flowchart TD
     P2 -->|Failure| P3[Phase 2: Log Triage & Local Repro]
     P3 --> P4[Phase 3: Operator commits fix, attested pre-push records, push]
     P4 --> P1
-    P2 -->|Green except current-head-records| P5[Phase 4: Independent reviews for the exact head]
+    P2 -->|Checks ready or awaiting records| P5[Phase 4: Confirm local reviews for the exact head]
     P5 --> P6{Findings?}
     P6 -->|P1/P2 Safety/Crypto| StopFail[Stop: Escalate P1/P2 Finding]
     P6 -->|Minor / Doc / Lint| P4
@@ -133,16 +134,19 @@ treated as fixable; the script stops and points at `gh pr checks`.
    implementation and commit authorization. Keep the fix minimal and within
    [`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md) and [`AGENTS.md`](../../../AGENTS.md).
    Do not use `git add -A`; stage only the files the fix touches.
-2. **Obtain independent pre-push reviews for the new commit.** The push hook requires current
-   `$skill-audit` and `$pr-hygiene` records for the exact commit being pushed. A reviewer other
-   than the fix's author runs both (read-only) against that commit; ci-heal only records them.
+2. **Verify the new commit locally.** Refresh `origin/main` and follow the complete local
+   check and review steps in [$deploy](../deploy/SKILL.md#prepare-and-verify-the-candidate).
+   Obtain all applicable attestations for that clean commit before calling ci-heal.
 3. **Re-run ci-heal with the attestations:**
    ```bash
    scripts/ci-heal.sh --pr <numeric-pr> \
+     --attest local-checks="<full local run and result>" \
      --attest skill-audit="<report reference, 0 findings>" \
+     --attest project-review="<report reference, clean>" \
      --attest pr-hygiene="<report reference, clean>"
    ```
-   ci-heal stamps both records for the local `HEAD`, pushes the branch, waits until GitHub reports
+   Include the conditional records when required. ci-heal stamps the completed checks and reviews
+   for the local `HEAD`, pushes the branch, waits until GitHub reports
    that commit as the PR head, and resumes monitoring; after a review fix it stops there instead. A
    later commit stales every record and needs fresh attestations.
 4. **Iteration Guard.** Iterations beyond the limit (default 3, maximum 5) stop the run. A run
@@ -153,8 +157,8 @@ treated as fixable; the script stops and points at `gh pr checks`.
 
 ## Phase 4: Independent Reviews for the Exact Head
 
-Once every check except `pr-policy / current-head-records` is green for the current commit (that
-check validates the records this workflow stamps), complete the reviews that produce the gate records:
+Complete these reviews before pushing through `$deploy`. For an already-pushed fix,
+`ci-heal` uses their attestations when preparing the records for the current commit:
 
 - `$skill-audit` — `./tools/agent-config/selftest.sh` supports it but does not replace it.
 - `$pr-hygiene` — English content and no private identifiers in commits, PR text and touched docs.
@@ -173,6 +177,7 @@ pairing or partition finding is a stop condition: escalate to the user.
 
 ```bash
 scripts/ci-heal.sh --pr <numeric-pr> \
+  --attest local-checks="<evidence>" \
   --attest skill-audit="<evidence>" --attest project-review="<evidence>" \
   --attest pr-hygiene="<evidence>"    # plus feature-docs / vehicle-command-audit when relevant
 ```

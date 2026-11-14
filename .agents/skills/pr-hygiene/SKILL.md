@@ -62,7 +62,7 @@ screens any content for private data.
 Work in this order — a single read-only pass: enumerate → check → report → stop.
 
 1. **Enumerate the exact content in scope for the current PR/commit range**: the PR title and
-   body (or, before a PR exists, the body about to be submitted), every commit message in
+   body (use the exact proposed title and body for any pre-push review), every commit message in
    `<merge-base>..HEAD`, and the prose of every touched `*.md` file (plus any other doc format the
    diff adds). Also skim the diff of touched non-doc files for an obviously real IP/MAC/VIN/SSID
    hardcoded as data or in a comment — the same leak is just as real inside source as inside a PR
@@ -95,10 +95,10 @@ against the new head.
 [`tools/agent-hooks/require-pr-gates.sh`](../../../tools/agent-hooks/require-pr-gates.sh), invoked
 by the project hook configuration, refuses to open a PR, push to one, or merge one until its
 `$pr-hygiene` record is uniquely present and stamped with the exact commit being published — the **strictest**
-of the PR gates: it is the only record required at all three actions, while `$skill-audit` gates
-create/push and `$project-review` (conditionally `$feature-docs` and `$vehicle-command-audit`)
-gates merge. The aggregate `--check` used by the `pr-policy` workflow requires every applicable
-record, `$skill-audit` included. There is no
+of the PR gates: it is the only record required at all three actions. `$skill-audit` gates
+create/push. Merge requires `$local-checks`, `$project-review` and the applicable conditional
+reviews (`$feature-docs` and `$vehicle-command-audit`). The aggregate `--check` used by the
+`pr-policy` workflow requires every applicable record, `$skill-audit` included. There is no
 file marker; pass state lives only in the PR body and is parsed by the neutral core, using the
 same CommonMark task-list record mechanism as the other gates (see `$skill-audit`'s *The PR gate*
 section for the exact recognized/rejected command shapes — duplicate, dynamic, hidden, fenced,

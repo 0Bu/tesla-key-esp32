@@ -24,7 +24,9 @@ frozen committed candidate. Keep independent review and publication authority se
 ## How to run a review
 
 0. **Step 0 — pin the baseline.** Run `git fetch origin` only through the permitted Git boundary;
-   verify HEAD equals current `origin/main` for a main audit or the exact target PR head.
+   verify HEAD equals current `origin/main` for a main audit or the exact target PR head for a
+   published review. For pre-push verification, pin the clean committed candidate and current
+   main base, then review their complete diff.
    **Fail-fast on divergence** or local/untracked drift; do not manufacture a clean gate from a
    stale or changing checkout. If synchronization is unavailable, report the limitation.
    **State reviewed SHA in report.**

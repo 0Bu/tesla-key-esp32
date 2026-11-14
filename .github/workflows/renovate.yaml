@@ -27,9 +27,8 @@ jobs:
           RENOVATE_AUTODISCOVER: true
           RENOVATE_AUTODISCOVER_FILTER: ${{ github.repository }}
           RENOVATE_CONFIG_MIGRATION: true
-          RENOVATE_AUTOMERGE: true
-          # Wait for required status checks (the build workflow) before automerging
-          # so a failing dependency bump is never merged automatically.
+          # A maintainer runs the local pre-push verification before submitting its record.
+          RENOVATE_AUTOMERGE: false
           RENOVATE_IGNORE_TESTS: false
           # 'auto' lets Renovate refresh/rebase its PR branches so they pick up
           # the latest target version and re-run required checks. 'never' froze
