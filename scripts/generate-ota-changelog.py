@@ -276,14 +276,27 @@ def build(channel: str, version: str, source_sha: str, published_ref: str) -> di
     prior = previous_source(channel, source_sha, published_ref)
     changelog_path = "dev/changelog.json" if channel == "dev" else "changelog.json"
     if prior == source_sha:
+        # A higher stable version can replace a release of the same source. Its notes
+        # still describe the same changes, provided they match the published manifest.
+        notes_version = version
+        if channel == "release":
+            if (
+                not published_version
+                or not STRICT_RELEASE_VERSION.fullmatch(published_version)
+                or not STRICT_RELEASE_VERSION.fullmatch(version)
+                or tuple(map(int, version.split(".")))
+                < tuple(map(int, published_version.split(".")))
+            ):
+                raise ChangelogError("invalid stable version for the already published source")
+            notes_version = published_version
         existing = read_json_at(published_ref, changelog_path)
         if (
             existing
-            and existing.get("version") == version
+            and existing.get("version") == notes_version
             and isinstance(existing.get("changelog"), str)
         ):
             text = existing["changelog"]
-            if notes_fit(version, text):
+            if notes_fit(notes_version, text) and notes_fit(version, text):
                 if channel == "dev":
                     if published_source != source_sha or published_version != version:
                         raise ChangelogError("same-source dev resume has inconsistent identity")
@@ -430,9 +443,23 @@ def self_test() -> None:
             source1 = commit_file("fix: initial release baseline", "v1.0.2\n")
             fixture_git("switch", "-c", "pages")
             write_json("manifest.json", {"version": "1.0.2", "sourceSha": source1})
-            fixture_git("add", "manifest.json")
+            write_json("changelog.json", {"version": "1.0.2", "changelog": "Initial release baseline"})
+            fixture_git("add", "manifest.json", "changelog.json")
             fixture_git("commit", "-m", "test: root-only Pages fixture")
             pages_without_dev = fixture_git("rev-parse", "HEAD")
+            for stable_version in ("1.0.2", "1.0.3", "1.0.10"):
+                assert build("release", stable_version, source1, pages_without_dev) == {
+                    "version": stable_version,
+                    "changelog": "Initial release baseline",
+                }
+            expect_build_error("release", "1.0.1", source1, pages_without_dev)
+
+            fixture_git("switch", "-c", "mismatched-pages")
+            write_json("changelog.json", {"version": "1.0.3", "changelog": "Wrong published version"})
+            fixture_git("add", "changelog.json")
+            fixture_git("commit", "-m", "test: mismatched stable changelog")
+            expect_build_error("release", "1.0.3", source1, "HEAD")
+            fixture_git("switch", "pages")
 
             dev1_history = "v1.0.3-dev.1 — Initial dev change"
             write_json("dev/manifest.json", {"version": "1.0.3-dev.1", "sourceSha": source1})
