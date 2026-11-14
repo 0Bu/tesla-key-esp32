@@ -34,7 +34,7 @@
   ],
   "packageRules": [
     {
-      "description": "Tracked firmware and installer dependencies require manual review, relevant protocol/runtime tests and separately authorized physical acceptance. CI success alone is not hardware evidence. Among GitHub Actions, only renovatebot/github-action is managed and eligible for the configured automerge; build and publication action pins remain manually reviewed trust boundaries.",
+      "description": "Tracked firmware and installer dependencies require manual review, relevant protocol/runtime tests and separately authorized physical acceptance. Among GitHub Actions, only renovatebot/github-action is managed. A maintainer verifies changes locally before merging.",
       "matchDepNames": [
         "yoziru/tesla-ble",
         "espressif/idf",

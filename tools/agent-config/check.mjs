@@ -116,19 +116,19 @@ const usbNoApprovalNeeded = /(?:live verification|HTTP requests?|(?:GET|POST|HTT
 const usbOtaNotStateChanging = /(?:GET|POST) \/ota\/check[^.!?]*(?:is not|isn't|not) state-changing/i;
 const usbAbsentApprovalProceeds = /(?:(?:approval|authorization)[^.!?]*(?:absent|missing|not obtained)|without (?:separate )?(?:approval|authorization))[^.!?]*(?:continue|proceed|run|contact|send|request)/i;
 const reviewedSkillSha256 = new Map([
-  ["add-logic-test", "aa979b5d1ac176c36d738bbe2644e0cbba9da7f4d584048dd01344f5eecacd9c"],
-  ["ci-heal", "dc84639ff9ac74ba436e994a653447d45eec85f63615a53851642ce08ed11128"],
-  ["deploy", "3c8a83233b8289e9c36f8c72883148d3e6d529f4367193818e4c3f750563e8ba"],
+  ["add-logic-test", "160508734a23ba67e53ad4b3c2d661010d097a848718e72dedb51a60be9bedc3"],
+  ["ci-heal", "9cc304435e2a4f429270bf5f7d9fdaf64235d2eab5f90d8f3187fe95177137a1"],
+  ["deploy", "d8a9796e3551bdd97dfe4bcff1e5b3f48c4ffbed503bfb0f216c8a26d8f3d4e8"],
   ["deploy-bench", "e3b3a781063b09598c04751e3fa2a29efc9a47b63a2838526a509d97ae4029e8"],
   ["device-diag", "d08f2540c21aa540a2d287d9139fdcce34abcd2214aa816684507b1747aa5fa7"],
   ["feature-docs", "fed1863c2a2e3b24598f2b9d41219d09aaecd67da7aa32c628f090cabec76e90"],
-  ["flash-esp32", "a480f4a8e6e206a70940484587f3d2c7c39848d98d6adffed07ab4c0064f2739"],
-  ["mock-test", "df0295017539d7f9d0d0e7df35806dd00938439c8892471d6c103804a0c4a636"],
+  ["flash-esp32", "fea18a035d952fa3fa4c8247d978f03fb33fb9d350245366ebbec820c62ae81c"],
+  ["mock-test", "dedc93432b89185b81f2f146cbbc51cb51dcaf17135b47f4f8e3e0c41e5d18c3"],
   ["ota-release-verify", "52a09232386f75c8382abbab08243b9a2b292e6b42a4f146c994343a22e4f433"],
-  ["pr-hygiene", "1f12e067bba7d7ee60e30da296e0436b9754a01b42813cfa472e2455130181ed"],
-  ["project-review", "438a271a0172c9a4fc48c07ba5a92bccc513bd4a9cf40e033fa0116661fe8298"],
-  ["ship", "cc866f822e39bcbc2b50e07e8408a12fa5f87435ffcf1d3371b1944f0d0b0e58"],
-  ["skill-audit", "2b6ac5d11968405556d27d3aa092786944acbfa74c4549a0ff6b823f3f47ee67"],
+  ["pr-hygiene", "3c24b9761da9b1128d7826775facf85cb94c718258488463b676d376640748a3"],
+  ["project-review", "39f7a9754d1c360b375467f64f2c6b4cfadb974a34b1dfd62f8a85b19037c680"],
+  ["ship", "8e3319d48ac7d4dfaead590e4173eac99cb304c94cccee080f42ab9f9fa047e2"],
+  ["skill-audit", "2f103e658ab3022eb45182cd2aa35a6747fa2e45954cc156ba11e11f94ff0ebe"],
   ["usb-recovery", "6ede9f07c6781dad4e9669918fc0805d7dcad8c085e801545ec0e07b3915d6ee"],
   ["vehicle-command-audit", "d250496f5bc17a765d831aa54ab5771269418e482c08cfc37dfa5006b190d80c"],
 ]);
@@ -355,11 +355,12 @@ for (const name of canonicalSkills) {
 for (const [relative, contracts] of new Map([
   ["AGENTS.md", ["`$pr-hygiene` is required at PR creation, every push, and every merge"]],
   [".github/PULL_REQUEST_TEMPLATE.md", [
-    "These boxes ARE the publish/merge gates",
+    "These boxes record completed local checks, reviews and catalog sync",
+    "`$local-checks` passed — pre-push verification @ <full-40-hex-sha>",
     "`$pr-hygiene` clean — content gate @ <full-40-hex-sha>",
   ]],
   ["docs/FEATURES.md", [
-    "Runner-neutral agent policy and five SHA-bound PR gates",
+    "Runner-neutral agent policy and SHA-bound PR records",
     "publishing personal/private identifiers or non-English PR/docs content",
   ]],
 ])) {
@@ -404,12 +405,12 @@ const multiTargetReviewer = normalizeProse(multiTargetReviewerObj?.Prompt || "")
 const multiTargetPublicationContracts = [
   "prepare, logic-test and logic-harness start concurrently",
   "build-target and independent-rebuild-target each need only prepare",
-  "publish -> deploy follows",
-  "build needs prepare, logic-test, logic-harness and build-target",
-  "fails first unless every need succeeded",
-  "independent-rebuild needs prepare and every independent-rebuild-target leg",
-  "using prepare's exact release version without waiting for build",
-  "protected publish job needs both successful joins",
+  "The key-free deploy job follows publish",
+  "build joins prepare and the producer matrix",
+  "Independent-rebuild joins prepare and every independent target leg",
+  "using the same release version",
+  "Both joins can finish before the host jobs",
+  "Protected publish requires both joins and both host jobs to succeed",
   "compares complete exact-source inventories and bytes before key use",
   "SHA/version-bound Actions artifact",
   "deploy consumes only that named artifact",

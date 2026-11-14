@@ -46,7 +46,7 @@ a real Linux browser: on macOS it delegates that gate to Docker, never native Ch
      scripts/run-sanitizer-tests.sh
      ```
 
-## Local reuse and PR feedback
+## Local reuse and focused checks
 
 `scripts/check-local.sh --firmware` runs the complete local handoff: agent/repository checks, full
 host, protocol, Linux sanitizers and the pinned four-target disposable-signing/reproducibility path.
@@ -58,10 +58,9 @@ reruns it. The coordinator binds actual working-tree inputs and runtime and neve
 review, signing or hardware. Pre-commit disables reuse for a working tree differing from the index.
 See [Development](../../../docs/DEVELOPMENT.md#validate-a-change) for limits and cancellation.
 
-PR CI can use `run-mock-tests.sh --require-all --profile runtime` or `--profile browser`; docs-only
-feedback uses repository lint. These selected profiles are not full handoff evidence. Unknown or
-combined runtime/browser code changes, main and manual publication runs retain full host coverage, protocol harness and
-sanitizers. Local handoff still runs the complete applicable contract.
+For focused local iteration, use `run-mock-tests.sh --require-all --profile runtime` or
+`--profile browser`. Use the full local handoff before a deploy push. Protected main, manual
+publication and eligible signed previews run their own complete acceptance checks.
 
 ## Boundaries and Guidelines
 

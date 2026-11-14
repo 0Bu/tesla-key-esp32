@@ -320,37 +320,37 @@ perl -0pi -e 's/a merge still needs the user/a merge needs the user/' "$fixture/
 expect_failure "ci-heal exception without the merge bound" "$fixture" "ci-heal-exception-bounded"
 
 fixture="$WORK/multi-target-publication-dag"; make_fixture "$fixture"
-perl -0pi -e 's/protected publish job needs\\n  both successful joins/protected publish job needs\\n  only the producer join/' \
+perl -0pi -e 's/Protected publish requires both joins and both host jobs to succeed/Protected publish requires only the producer join/' \
   "$fixture/.agents/subagents.json"
 expect_failure "multi-target publication DAG" "$fixture" \
   "multi-target reviewer is missing the independent-rebuild/publication DAG contract"
 
 fixture="$WORK/multi-target-independent-legs"; make_fixture "$fixture"
-perl -0pi -e 's/independent-rebuild needs prepare and every independent-rebuild-target leg/independent-rebuild needs prepare/' \
+perl -0pi -e 's/Independent-rebuild joins prepare and every\\n  independent target leg/Independent-rebuild joins prepare/' \
   "$fixture/.agents/subagents.json"
 expect_failure "multi-target independent-leg dependency" "$fixture" \
   "multi-target reviewer is missing the independent-rebuild/publication DAG contract"
 
 fixture="$WORK/multi-target-independent-prepare"; make_fixture "$fixture"
-perl -0pi -e 's/independent-rebuild needs prepare and every independent-rebuild-target leg/independent-rebuild needs every independent-rebuild-target leg/' \
+perl -0pi -e 's/using the same release version/using a separate release version/' \
   "$fixture/.agents/subagents.json"
 expect_failure "multi-target prepared-version dependency" "$fixture" \
   "multi-target reviewer is missing the independent-rebuild/publication DAG contract"
 
 fixture="$WORK/multi-target-pre-key-compare"; make_fixture "$fixture"
-perl -0pi -e 's/compares complete exact-source inventories and bytes before key use/compares complete exact-source inventories and bytes after key use/' \
+perl -0pi -e 's/exact-source inventories and bytes before key use/exact-source inventories and bytes after key use/' \
   "$fixture/.agents/subagents.json"
 expect_failure "multi-target pre-key byte comparison" "$fixture" \
   "multi-target reviewer is missing the independent-rebuild/publication DAG contract"
 
 fixture="$WORK/multi-target-host-gate"; make_fixture "$fixture"
-perl -0pi -e 's/build needs prepare, logic-test, logic-harness and build-target/build needs prepare and build-target/' \
+perl -0pi -e 's/and both host jobs to succeed/to succeed/' \
   "$fixture/.agents/subagents.json"
 expect_failure "multi-target host-gate dependency" "$fixture" \
   "multi-target reviewer is missing the independent-rebuild/publication DAG contract"
 
 fixture="$WORK/multi-target-skipped-build"; make_fixture "$fixture"
-perl -0pi -e 's/fails first unless every need succeeded/is skipped when a need fails/' \
+perl -0pi -e 's/build joins prepare and the producer matrix/build joins prepare only/' \
   "$fixture/.agents/subagents.json"
 expect_failure "multi-target fail-closed build join" "$fixture" \
   "multi-target reviewer is missing the independent-rebuild/publication DAG contract"

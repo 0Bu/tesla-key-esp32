@@ -158,7 +158,7 @@ board requests the same mDNS name, so `tesla-key-esp32.local` can reach another 
 > `sdkconfig.defaults`), the running app `abort()`s at startup when it carries no signature
 > block. So a plain `idf.py build` image still flashes fine (`Hash of data verified.`) but then
 > **reboot-loops before `app_main`** (`check_signature_on_update_check`, on every target).
-> A normal PR `build` job uploads only `firmware-unsigned`; it is never a flash source. Use either
+> The opt-in preview producer uploads `firmware-unsigned`, which cannot be flashed. Use either
 > the explicit local signing gate above or the opt-in, Environment-approved `signed-pr-preview`
 > workflow below. A disposable development key becomes that board's OTA trust anchor until a real
 > CI-signed image is USB-flashed again. Full detail: `docs/SECURITY.md`.
@@ -166,7 +166,7 @@ board requests the same mDNS name, so `tesla-key-esp32.local` can reach another 
 ## Flashing a specific PR / branch onto a real board (use the *signed* CI artifact)
 
 To test a PR/branch on a physical board, **do not USB-flash the local `scripts/idf-docker.sh`
-build or the regular PR `firmware-unsigned` artifact.** The real-key path is opt-in: a maintainer
+build or the preview producer's `firmware-unsigned` artifact.** The real-key path is opt-in: a maintainer
 adds `signed-preview`, the default-branch `signed-pr-preview` workflow validates the same-repo PR,
 waits for `firmware-signing` Environment approval, and uploads a signed artifact. If that workflow
 did not complete successfully, **stop**; there is no signed PR image to flash.

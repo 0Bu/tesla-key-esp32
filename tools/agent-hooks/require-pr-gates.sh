@@ -3,12 +3,11 @@
 #
 # Actions:
 #   * gh pr create / git push to an existing PR -> current $skill-audit and $pr-hygiene records
-#   * the one canonical gh pr merge command      -> current $project-review and $pr-hygiene records,
+#   * the one canonical gh pr merge command      -> current local checks, $project-review and $pr-hygiene,
 #                                                    plus the conditional $feature-docs and
 #                                                    $vehicle-command-audit records
-#   * --check (the CI current-head-records job)  -> the merge records plus $skill-audit
-#   Strict Renovate maintenance needs none of these merge or --check records except a relevant
-#   $vehicle-command-audit.
+#   * --check (the CI current-head-records job)  -> local verification and all applicable reviews
+#   Strict Renovate maintenance is exempt from manual review records.
 # MCP merges, auto-merge/queue activation, direct REST/GraphQL merges, ambiguous payloads, and
 # unverifiable network state fail closed. This lexical hook is defense in depth; branch protection
 # and human review remain authoritative.
@@ -350,10 +349,14 @@ PY
       echo "BLOCKED: changed-files input is malformed or exceeds the rename-expanded limit." >&2
       exit 2
     fi
+    body="$(cat "$body_file")" || exit 2
+    record_ok "$body" local-checks "$head_sha" || {
+      echo "BLOCKED: merge/check requires one current top-level \$local-checks record for $head_sha." >&2
+      exit 2
+    }
     if gate_is_renovate_maintenance "$files_file"; then
       :
     else
-      body="$(cat "$body_file")" || exit 2
       record_ok "$body" project-review "$head_sha" || {
         echo "BLOCKED: merge/check requires one current top-level \$project-review record for $head_sha." >&2
         exit 2

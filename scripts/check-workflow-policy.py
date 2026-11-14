@@ -211,7 +211,7 @@ SIGNING_ENVIRONMENT_JOBS = {
 # Signing, publication, preview eligibility and cleanup bodies are reviewed as complete units.
 # Scalar/step semantics below remain explanatory; exact bodies also close narrow-scanner gaps.
 EXPECTED_PRIVILEGED_JOB_SHA256 = {
-    ('build.yml', 'publish'): "937f48cf5e333b950ab165483ec557cd3a04390db92dd5887868230a14f19f96",
+    ('build.yml', 'publish'): "84b30cc48ceb4e72d31dfad96b8ea2413f13a96c68546bbea3c288af342a6526",
     ('build.yml', 'deploy'): "c6400a38c054e4c28a3694df6cbf3bdc5411c20691d4dfa93b3d9308f29b6370",
     ('signed-pr-preview.yml', 'sign-preview'): "2222beed0b8590b49bf7299032e20ce763342a31846e7824b93bef07b191d761",
     ('signed-pr-preview.yml', 'validate'): "adf2cdb72c38f71415d7e1b71b43f4af0806d706589a09805eab13d0da021cb6",
@@ -223,7 +223,7 @@ EXPECTED_PRIVILEGED_JOB_SHA256 = {
 # schedules requires reviewing and updating this inventory; comments do not affect these digests.
 EXPECTED_TRIGGER_SHA256 = {
     "bench-acceptance.yml": "68e21c743fa66c3f097aeb4e5b5c0df9cee49df0dc1977c52eadaca77595a00e",
-    "build.yml": "27425cc386bd907b87b2e080013a1b179e00ce3f9be2c073ff87e5de1c2b18df",
+    "build.yml": "0f085b92b085011b04de27225740efb938d10400a9e5f2a0b436a451cde1a59f",
     "pr-policy.yml": "96df64da9e79c5202cd8ca4113d400f3a79e1789691b33972709a6eed455ff85",
     "pr-preview-cleanup.yml": "a9b49e11119a21964df1ff72c05fc732af13b5f1ad81eb1b1bb821281f29efad",
     "renovate.yaml": "5bb540b32577ab414b7ef7b7133d0e289ba1d984e09867ec059e6f6cbd92a817",
@@ -231,19 +231,20 @@ EXPECTED_TRIGGER_SHA256 = {
 }
 EXPECTED_BUILD_MATRICES = {'build-target': {'target': ['esp32', 'esp32s3', 'esp32c3', 'esp32c6'], 'leg': '${{ fromJSON(github.ref == \'refs/heads/main\' && \'["primary"]\' || \'["primary","reproduction"]\') }}'}, 'independent-rebuild-target': {'target': ['esp32', 'esp32s3', 'esp32c3', 'esp32c6']}}
 YAML_MODELS = {}
-# The reviewed body of build.yml's first `build` step (after its name line): the required check's
-# verdict on every need.
+NON_PR = "github.event_name != 'pull_request'"
+PREVIEW_OR_NON_PR = (NON_PR + " || (github.event.pull_request.head.repo.full_name == github.repository "
+                     "&& contains(github.event.pull_request.labels.*.name, 'signed-preview'))")
+BUILD_JOIN_IF = "${{ always() && (" + NON_PR + " || needs.prepare.result != 'skipped') }}"
+PUBLICATION_NEEDS = ["logic-test", "logic-harness", "build", "independent-rebuild"]
+# Reviewed verdict on every dependency of the producer artifact join.
 BUILD_NEEDS_GATE = (
     "        env:\n"
     "          NEEDS_PREPARE: ${{ needs.prepare.result }}\n"
-    "          NEEDS_LOGIC_TEST: ${{ needs.logic-test.result }}\n"
-    "          NEEDS_LOGIC_HARNESS: ${{ needs.logic-harness.result }}\n"
     "          NEEDS_BUILD_TARGET: ${{ needs.build-target.result }}\n"
     "        run: |\n"
     "          set -euo pipefail\n"
     "          failed=0\n"
-    '          for pair in "prepare=$NEEDS_PREPARE" "logic-test=$NEEDS_LOGIC_TEST" \\\n'
-    '                      "logic-harness=$NEEDS_LOGIC_HARNESS" "build-target=$NEEDS_BUILD_TARGET"; do\n'
+    '          for pair in "prepare=$NEEDS_PREPARE" "build-target=$NEEDS_BUILD_TARGET"; do\n'
     '            if [ "${pair#*=}" != success ]; then\n'
     "              echo \"::error::needed job ${pair%%=*} ended '${pair#*=}', not success\"\n"
     "              failed=1\n"
@@ -527,8 +528,8 @@ def validate(root: Path) -> None:
                         require(not re.search(r"--(?:jq|template)(?:[=\s]|$)|(?:^|\s)-[qt]", gh_part),
                                 f"{name}:{job_name}: gh api --slurp cannot use --jq or --template")
             if key in {("build.yml", "logic-test"), ("build.yml", "logic-harness")}:
-                require(not ({"if", "continue-on-error"} & set(structured_job)),
-                        f"{name}:{job_name}: required host gate must not be conditional or tolerate job failure")
+                require(structured_job.get("if") == NON_PR and "continue-on-error" not in structured_job,
+                        f"{name}:{job_name}: host gate must run outside PRs and reject job failure")
             if key == ("build.yml", "build"):
                 require("continue-on-error" not in structured_job,
                         "build.yml:build must not be continue-on-error")
@@ -607,22 +608,18 @@ def validate(root: Path) -> None:
                 and 'case "$FIRMWARE_RELEVANT" in yes|no) ;; *) exit 1 ;; esac' in build[name]
                 and "./scripts/release-relevance.sh" not in build[name],
                 f"build.yml:{name} must consume the prepared firmware decision")
-    # build-target no longer waits for the host tests (only for the run mode / version), so a red
-    # host gate must be enforced where the jobs converge: `build` needs all three producers.
+    host_model = workflow_model(root / ".github/workflows/build.yml", contents["build.yml"])["jobs"]
+    require(" ".join(host_model["prepare"].get("if", "").split()) == PREVIEW_OR_NON_PR,
+            "build.yml:prepare must run on PRs only for a same-repository signed preview")
     require(job_has_need(build["build-target"], "prepare"),
             "build.yml:build-target must need prepare")
     require(job_has_need(build["build"], "prepare"), "build.yml:build must need prepare")
-    require(job_has_need(build["build"], "logic-test"), "build.yml:build must need logic-test")
-    require(job_has_need(build["build"], "logic-harness"),
-            "build.yml:build must need logic-harness")
     require(job_has_need(build["build"], "build-target"),
             "build.yml:build must need build-target")
-    # `build` is a required status check, and GitHub treats a job skipped because a need failed as
-    # a passed required check. The join must therefore always run, and its first, unconditional and
-    # fatal step must fail unless every need succeeded.
-    require(re.search(r"^    if: \$\{\{ always\(\) \}\}\s*$", build["build"], re.MULTILINE)
-            is not None,
-            "build.yml:build must run with if: ${{ always() }} so a failed need fails the required check")
+    require(host_model["build"].get("needs") == ["prepare", "build-target"],
+            "build.yml:build must join only prepare and the producer matrix")
+    require(host_model["build"].get("if") == BUILD_JOIN_IF,
+            "build.yml:build must skip ordinary PRs and surface failed producer jobs")
     gate_marker = "    steps:\n      - name: Require every needed job to succeed\n"
     gate_start = build["build"].find(gate_marker)
     require(gate_start != -1,
@@ -632,8 +629,7 @@ def validate(root: Path) -> None:
     gate_step = gate_body[: gate_end.start()] if gate_end else gate_body
     require(re.search(r"^        (if|continue-on-error):", gate_step, re.MULTILINE) is None,
             "build.yml:build need-result check must be unconditional and fatal")
-    for need, variable in (("prepare", "NEEDS_PREPARE"), ("logic-test", "NEEDS_LOGIC_TEST"),
-                           ("logic-harness", "NEEDS_LOGIC_HARNESS"),
+    for need, variable in (("prepare", "NEEDS_PREPARE"),
                            ("build-target", "NEEDS_BUILD_TARGET")):
         require(f"          {variable}: ${{{{ needs.{need}.result }}}}\n" in gate_step
                 and f'"{need}=${variable}"' in gate_step,
@@ -656,45 +652,17 @@ def validate(root: Path) -> None:
             "build.yml:independent-rebuild must need prepare")
     require(job_has_need(build["independent-rebuild"], "independent-rebuild-target"),
             "build.yml:independent-rebuild must need independent-rebuild-target")
-    require(job_has_need(build["publish"], "build") and
-            job_has_need(build["publish"], "independent-rebuild"),
-            "build.yml:publish must need both producer and independent rebuild")
+    require(host_model["publish"].get("needs") == PUBLICATION_NEEDS,
+            "build.yml:publish must need both host gates and both build inventories")
     require(
         job_has_need(build["deploy"], "build") and job_has_need(build["deploy"], "publish"),
         "build.yml:deploy must need both build and successful immutable Release publication",
     )
-    host_model = workflow_model(root / ".github/workflows/build.yml", contents["build.yml"])["jobs"]
     require(host_model["independent-rebuild"].get("needs") == ["prepare", "independent-rebuild-target"],
             "build.yml:independent-rebuild must join only prepare and all independent targets")
-    full = "steps.scope.outputs.profile == 'full'"
-    runtime = full + " || steps.scope.outputs.profile == 'runtime'"
-    selected = "steps.scope.outputs.profile == 'runtime' || steps.scope.outputs.profile == 'browser'"
-    conditions = {
-        "logic-test": {"Validate repository without repeating unrelated validator self-tests": "steps.scope.outputs.profile != 'full'",
-                       "Run host-side logic tests": full, "Run selected strict host feedback": selected},
-        "logic-harness": {"Validate runner-neutral agent configuration": full,
-                          "Validate repository syntax, links and workflow policy": full,
-                          "Run tesla-ble integration harness": runtime,
-                          "Prove and run Linux memory-safety instrumentation": runtime,
-                          "Test ESP-IDF build contracts": full, "Test the PR-gate command matcher": full},
-    }
-    for name, expected_conditions in conditions.items():
-        steps = host_model[name]["steps"]
-        selectors = [step for step in steps if step.get("id") == "scope"]
-        require(len(selectors) == 1 and set(selectors[0]) == {"name", "id", "env", "run"}
-                and selectors[0]["env"] == {"EVENT_NAME": "${{ github.event_name }}",
-                    "BASE_SHA": "${{ github.event.pull_request.base.sha }}",
-                    "HEAD_SHA": "${{ github.event.pull_request.head.sha }}"}
-                and selectors[0]["run"].strip() == 'python3 scripts/check-change-scope.py --event "$EVENT_NAME" --base "$BASE_SHA" --head "$HEAD_SHA" --github-output >> "$GITHUB_OUTPUT"',
-                f"build.yml:{name}: feedback selection must be unconditional and bound to the event/diff")
-        for label, condition in expected_conditions.items():
-            matches = [step for step in steps if step.get("name") == label]
-            require(len(matches) == 1 and matches[0].get("if") == condition
-                    and "continue-on-error" not in matches[0],
-                    f"build.yml:{name}: selected feedback conditions must preserve full main/publication coverage")
-    require('./scripts/run-mock-tests.sh --require-all --profile "$HOST_PROFILE"' in build["logic-test"]
-            and "HOST_PROFILE: ${{ steps.scope.outputs.profile }}" in build["logic-test"],
-            "build.yml selected host profile must bind to the validated scope")
+    for name in ("logic-test", "logic-harness"):
+        require(all(not ({"if", "continue-on-error"} & set(step)) for step in host_model[name]["steps"]),
+                f"build.yml:{name}: all publication host steps must run and propagate failure")
     full_steps = [step for step in host_model["logic-test"]["steps"] if step.get("name") == "Run host-side logic tests"]
     require(len(full_steps) == 1 and full_steps[0].get("run") == "./scripts/run-mock-tests.sh --require-all",
             "build.yml:logic-test must run the fail-closed host gate")
@@ -1138,7 +1106,7 @@ def validate(root: Path) -> None:
             "build.yml: untrusted build jobs must not write repository contents")
     require(
         build["logic-test"].count("fetch-depth: 0") == 1,
-        "build.yml:logic-test must fetch PR merge parents for commit whitespace validation",
+        "build.yml:logic-test must retain full history for host verification",
     )
 
     for label, job in host_model.items():
@@ -1624,8 +1592,9 @@ def self_test(root: Path) -> None:
         ("preview-full-host-need", "signed-pr-preview.yml", "needs: [validate, trusted-rebuild, trusted-host]", "needs: [validate, trusted-rebuild]", "validation and trusted rebuild"),
         ("preview-full-host-profile", "signed-pr-preview.yml", "./scripts/run-mock-tests.sh --require-all", "./scripts/run-mock-tests.sh --require-all --profile browser", "host acceptance commands must not be reduced"),
         ("preview-full-host-suite", "signed-pr-preview.yml", "suite: [logic, protocol]", "suite: [logic]", "both suites before signing"),
-        ("main-host-coverage", "build.yml", "if: steps.scope.outputs.profile == 'full'\n        run: ./scripts/run-mock-tests.sh --require-all", "if: false\n        run: ./scripts/run-mock-tests.sh --require-all", "full main/publication coverage"),
-        ("feedback-wrong-event", "build.yml", "EVENT_NAME: ${{ github.event_name }}\n          BASE_SHA:", "EVENT_NAME: pull_request\n          BASE_SHA:", "feedback selection must be unconditional"),
+        ("main-host-coverage", "build.yml", "        run: ./scripts/run-mock-tests.sh --require-all",
+         "        if: false\n        run: ./scripts/run-mock-tests.sh --require-all",
+         "all publication host steps must run"),
         ("prepared-relevance-missing", "build.yml", "firmware: ${{ steps.changes.outputs.firmware }}", "firmware: no", "cumulative fail-closed firmware decision"),
         ("prepared-relevance-stale", "build.yml", "FIRMWARE_RELEVANT: ${{ needs.prepare.outputs.firmware }}", "FIRMWARE_RELEVANT: no", "consume the prepared firmware decision"),
         ("preview-target-omission", "signed-pr-preview.yml", "target: [esp32, esp32s3, esp32c3, esp32c6]", "target: [esp32, esp32s3, esp32c3]", "exact four-target matrix"),
@@ -1683,20 +1652,20 @@ def self_test(root: Path) -> None:
          "top-level permissions must be exact"),
         ("build-dag", "build.yml", "    needs: prepare\n", "", "must need prepare"),
         ("build-host-gate", "build.yml",
-         "    needs: [prepare, logic-test, logic-harness, build-target]\n",
-         "    needs: [prepare, logic-harness, build-target]\n", "build must need logic-test"),
+         "    needs: [logic-test, logic-harness, build, independent-rebuild]\n",
+         "    needs: [logic-harness, build, independent-rebuild]\n", "both host gates and both build inventories"),
         ("build-run-mode", "build.yml",
-         "    needs: [prepare, logic-test, logic-harness, build-target]\n",
-         "    needs: [logic-test, logic-harness, build-target]\n", "build must need prepare"),
-        ("build-host-harness", "build.yml",
-         "    needs: [prepare, logic-test, logic-harness, build-target]\n",
-         "    needs: [prepare, logic-test, build-target]\n", "build must need logic-harness"),
+         "    needs: [prepare, build-target]\n",
+         "    needs: build-target\n", "build must need prepare"),
+        ("publish-missing-harness", "build.yml",
+         "    needs: [logic-test, logic-harness, build, independent-rebuild]\n",
+         "    needs: [logic-test, build, independent-rebuild]\n", "both host gates and both build inventories"),
         ("build-skips-on-red-need", "build.yml",
-         "    if: ${{ always() }}\n    needs: [prepare, logic-test, logic-harness, build-target]\n",
-         "    needs: [prepare, logic-test, logic-harness, build-target]\n",
-         "so a failed need fails the required check"),
-        ("build-ignores-harness-result", "build.yml",
-         '"logic-harness=$NEEDS_LOGIC_HARNESS" ', "", "fail unless logic-harness succeeded"),
+         "    if: " + BUILD_JOIN_IF + "\n", "", "must skip ordinary PRs and surface failed producer jobs"),
+        ("ordinary-pr-build", "build.yml", "      " + NON_PR + "\n",
+         "      true\n", "only for a same-repository signed preview"),
+        ("build-ignores-target-result", "build.yml",
+         ' "build-target=$NEEDS_BUILD_TARGET"', "", "fail unless build-target succeeded"),
         ("build-accepts-skipped-need", "build.yml",
          '            if [ "${pair#*=}" != success ]; then\n',
          '            if [ "${pair#*=}" = failure ]; then\n',
@@ -1732,29 +1701,29 @@ def self_test(root: Path) -> None:
          "          failed=0\n          exit 0\n          for pair in",
          "need-result check must equal the reviewed gate exactly"),
         ("build-job-nonfatal", "build.yml",
-         "    if: ${{ always() }}\n    needs: [prepare, logic-test, logic-harness, build-target]\n",
-         "    if: ${{ always() }}\n    continue-on-error: true\n"
-         "    needs: [prepare, logic-test, logic-harness, build-target]\n",
+         "    if: ${{ always() && (github.event_name != \'pull_request\' || needs.prepare.result != \'skipped\') }}\n    needs: [prepare, build-target]\n",
+         "    if: ${{ always() && (github.event_name != \'pull_request\' || needs.prepare.result != \'skipped\') }}\n    continue-on-error: true\n"
+         "    needs: [prepare, build-target]\n",
          "build must not be continue-on-error"),
         ("build-job-nonfatal-double-quoted", "build.yml",
-         "    if: ${{ always() }}\n    needs: [prepare, logic-test, logic-harness, build-target]\n",
-         '    if: ${{ always() }}\n    "continue-on-error": true\n'
-         "    needs: [prepare, logic-test, logic-harness, build-target]\n",
+         "    if: ${{ always() && (github.event_name != \'pull_request\' || needs.prepare.result != \'skipped\') }}\n    needs: [prepare, build-target]\n",
+         '    if: ${{ always() && (github.event_name != \'pull_request\' || needs.prepare.result != \'skipped\') }}\n    "continue-on-error": true\n'
+         "    needs: [prepare, build-target]\n",
          "build must not be continue-on-error"),
         ("build-job-nonfatal-single-quoted", "build.yml",
-         "    if: ${{ always() }}\n    needs: [prepare, logic-test, logic-harness, build-target]\n",
-         "    if: ${{ always() }}\n    'continue-on-error': true\n"
-         "    needs: [prepare, logic-test, logic-harness, build-target]\n",
+         "    if: ${{ always() && (github.event_name != \'pull_request\' || needs.prepare.result != \'skipped\') }}\n    needs: [prepare, build-target]\n",
+         "    if: ${{ always() && (github.event_name != \'pull_request\' || needs.prepare.result != \'skipped\') }}\n    'continue-on-error': true\n"
+         "    needs: [prepare, build-target]\n",
          "build must not be continue-on-error"),
         ("build-job-nonfatal-spaced-key", "build.yml",
-         "    if: ${{ always() }}\n    needs: [prepare, logic-test, logic-harness, build-target]\n",
-         "    if: ${{ always() }}\n    continue-on-error : true\n"
-         "    needs: [prepare, logic-test, logic-harness, build-target]\n",
+         "    if: ${{ always() && (github.event_name != \'pull_request\' || needs.prepare.result != \'skipped\') }}\n    needs: [prepare, build-target]\n",
+         "    if: ${{ always() && (github.event_name != \'pull_request\' || needs.prepare.result != \'skipped\') }}\n    continue-on-error : true\n"
+         "    needs: [prepare, build-target]\n",
          "build must not be continue-on-error"),
         ("build-job-nonfatal-escaped-key", "build.yml",
-         "    if: ${{ always() }}\n    needs: [prepare, logic-test, logic-harness, build-target]\n",
-         '    if: ${{ always() }}\n    "\\u0063ontinue-on-error": true\n'
-         "    needs: [prepare, logic-test, logic-harness, build-target]\n",
+         "    if: ${{ always() && (github.event_name != \'pull_request\' || needs.prepare.result != \'skipped\') }}\n    needs: [prepare, build-target]\n",
+         '    if: ${{ always() && (github.event_name != \'pull_request\' || needs.prepare.result != \'skipped\') }}\n    "\\u0063ontinue-on-error": true\n'
+         "    needs: [prepare, build-target]\n",
          "build must not be continue-on-error"),
         ("repro-leg-dropped", "build.yml", "|| '[\"primary\",\"reproduction\"]'", "|| '[\"primary\"]'",
          "exact four-target matrix"),
@@ -1768,8 +1737,8 @@ def self_test(root: Path) -> None:
          "        if: steps.changes.outputs.firmware == 'yes' && github.ref != 'refs/heads/main'\n",
          "      - name: Compare reproduction copies with the primary builds\n"
          "        if: steps.changes.outputs.firmware == 'yes'\n", "must compare the reproduction copies"),
-        ("independent-dag", "build.yml", "    needs: [build, independent-rebuild]\n",
-         "    needs: build\n", "both producer and independent rebuild"),
+        ("independent-dag", "build.yml", "    needs: [logic-test, logic-harness, build, independent-rebuild]\n",
+         "    needs: [logic-test, logic-harness, build]\n", "both host gates and both build inventories"),
         ("deploy-dag", "build.yml", "    needs: [build, publish]\n",
          "    needs: build\n", "must need both build and successful immutable Release"),
         ("strict-host", "build.yml", "./scripts/run-mock-tests.sh --require-all",
@@ -1780,18 +1749,19 @@ def self_test(root: Path) -> None:
          "      - name: Verify vendored installer source and notices\n        if: false\n", "vendored source gate"),
         ("vendor-source-ignored", "build.yml", "      - name: Verify vendored installer source and notices\n",
          "      - name: Verify vendored installer source and notices\n        continue-on-error: true\n", "vendored source gate"),
-        ("host-job-skipped", "build.yml", "  logic-test:\n", "  logic-test:\n    if: false\n",
-         "required host gate must not be conditional"),
+        ("host-job-skipped", "build.yml", "  logic-test:\n    if: " + NON_PR,
+         "  logic-test:\n    if: false", "host gate must run outside PRs and reject job failure"),
         ("host-job-failure-ignored", "build.yml", "  logic-test:\n", "  logic-test:\n    continue-on-error: true\n",
-         "required host gate must not be conditional"),
-        ("harness-job-skipped", "build.yml", "  logic-harness:\n", "  logic-harness:\n    if: false\n",
-         "required host gate must not be conditional"),
+         "host gate must run outside PRs and reject job failure"),
+        ("harness-job-skipped", "build.yml", "    if: " + NON_PR + "\n    runs-on: ubuntu-26.04\n    timeout-minutes: 10\n",
+         "    if: false\n    runs-on: ubuntu-26.04\n    timeout-minutes: 10\n",
+         "host gate must run outside PRs and reject job failure"),
         ("harness-job-failure-ignored", "build.yml", "  logic-harness:\n", "  logic-harness:\n    continue-on-error: true\n",
-         "required host gate must not be conditional"),
+         "host gate must run outside PRs and reject job failure"),
         ("logic-merge-history", "build.yml",
-         "          fetch-depth: 0\n      - name: Select host feedback scope",
-         "      - name: Select host feedback scope",
-         "fetch PR merge parents"),
+         "          fetch-depth: 0\n      - name: Verify vendored installer source and notices",
+         "          fetch-depth: 1\n      - name: Verify vendored installer source and notices",
+         "retain full history for host verification"),
         ("sanitizers", "build.yml", "./scripts/run-sanitizer-tests.sh --self-test",
          "true", "ASan/UBSan/LSan"),
         ("unique-build-contract", "build.yml",
@@ -1810,8 +1780,8 @@ def self_test(root: Path) -> None:
          "      contents: read\n    environment: firmware-signing\n    steps:\n",
          "protected Environment inventory drift"),
         ("unprivileged-write", "build.yml",
-         "  logic-test:\n    runs-on: ubuntu-26.04\n    timeout-minutes: 20\n    permissions:\n      contents: read",
-         "  logic-test:\n    runs-on: ubuntu-26.04\n    timeout-minutes: 20\n    permissions:\n      contents: write",
+         "  logic-test:\n    if: " + NON_PR + "\n    runs-on: ubuntu-26.04\n    timeout-minutes: 20\n    permissions:\n      contents: read",
+         "  logic-test:\n    if: " + NON_PR + "\n    runs-on: ubuntu-26.04\n    timeout-minutes: 20\n    permissions:\n      contents: write",
          "permissions must match the exact reviewed inventory"),
         ("unprivileged-arbitrary-write", "build.yml",
          "      contents: read\n    steps:\n",

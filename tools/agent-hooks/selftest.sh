@@ -464,8 +464,11 @@ SH
 chmod +x "$tmp/bin/git"
 export PATH="$tmp/bin:$PATH"
 
-# Aggregate offline records: all four gates, conditional feature-docs, and conditional vehicle-command-audit.
+local_checks_record='- [x] $local-checks passed — pre-push verification @ '"$sha"
+
+# Aggregate offline records cover local verification and all applicable reviews.
 make_body(){ printf '%s\n' \
+  "$local_checks_record" \
   '- [x] $skill-audit clean — PR create/push gate @ '"$sha" \
   '- [x] $project-review clean — merge gate @ '"$sha" \
   '- [x] $pr-hygiene clean — content gate @ '"$sha" \
@@ -482,7 +485,9 @@ expect_rc 2 'feature-relevant check requires feature-docs' env AGENT_POLICY_CI=1
 expect_rc 0 'docs-only check skips feature-docs' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/no-feature.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/docs.files" "$gate" --check --project-dir "$root"
 printf '%s\n' .github/workflows/renovate.yaml >"$tmp/renovate.files"
 : >"$tmp/no-gates.md"
-expect_rc 0 'Renovate maintenance PR satisfies check without gate records' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/no-gates.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/renovate.files" "$gate" --check --project-dir "$root"
+expect_rc 2 'Renovate maintenance PR requires local verification' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/no-gates.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/renovate.files" "$gate" --check --project-dir "$root"
+printf '%s\n' "$local_checks_record" > "$tmp/local-checks.md"
+expect_rc 0 'Renovate maintenance PR needs only local verification' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/local-checks.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/renovate.files" "$gate" --check --project-dir "$root"
 printf '%s\n' .github/workflows/renovate.yaml esp-idf-toolchain.txt >"$tmp/renovate-mixed.files"
 expect_rc 2 'mixed Renovate and toolchain PR requires gates' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/no-gates.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/renovate-mixed.files" "$gate" --check --project-dir "$root"
 grep -v vehicle-command-audit "$tmp/all.md" >"$tmp/no-vehicle.md"
@@ -496,6 +501,8 @@ expect_rc 0 'feature-only check skips vehicle-command-audit' env AGENT_POLICY_CI
 
 grep -v pr-hygiene "$tmp/all.md" >"$tmp/no-hygiene.md"
 expect_rc 2 'aggregate check requires pr-hygiene unconditionally' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/no-hygiene.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/docs.files" "$gate" --check --project-dir "$root"
+grep -v local-checks "$tmp/all.md" >"$tmp/no-local-checks.md"
+expect_rc 2 'completed reviews do not substitute for local verification' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/no-local-checks.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/docs.files" "$gate" --check --project-dir "$root"
 sed 's/@ [0-9a-f]*/@ deadbee/' "$tmp/all.md" >"$tmp/stale.md"
 expect_rc 2 'stale record SHA rejected' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/stale.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/feature.files" "$gate" --check --project-dir "$root"
 sed "s/$sha/$short_sha/g" "$tmp/all.md" >"$tmp/prefix.md"
@@ -591,12 +598,12 @@ case "$args" in
 esac
 SH
 chmod +x "$tmp/bin/gh"
-merge_body="$(printf '%s\n' '- [x] $project-review clean — merge gate @ '"$sha" '- [x] $pr-hygiene clean — content gate @ '"$sha" '- [x] $feature-docs synced — merge gate @ '"$sha")"
+merge_body="$(printf '%s\n' "$local_checks_record" '- [x] $project-review clean — merge gate @ '"$sha" '- [x] $pr-hygiene clean — content gate @ '"$sha" '- [x] $feature-docs synced — merge gate @ '"$sha")"
 printf '%s' "$canonical_payload" >"$tmp/payload.json"
 expect_rc 0 'canonical merge passes exact current-head evidence' env PATH="$tmp/bin:$PATH" TEST_HEAD="$sha" TEST_BODY="$merge_body" TEST_CHANGED=1 TEST_FILES_MODE=normal "$gate" --project-dir "$root" --payload-file "$tmp/payload.json"
 no_hygiene_merge_body="$(printf '%s\n' '- [x] $project-review clean — merge gate @ '"$sha" '- [x] $feature-docs synced — merge gate @ '"$sha")"
 expect_rc 2 'canonical merge requires pr-hygiene' env PATH="$tmp/bin:$PATH" TEST_HEAD="$sha" TEST_BODY="$no_hygiene_merge_body" TEST_CHANGED=1 TEST_FILES_MODE=normal "$gate" --project-dir "$root" --payload-file "$tmp/payload.json"
-vehicle_merge_body="$(printf '%s\n' '- [x] $project-review clean — merge gate @ '"$sha" '- [x] $pr-hygiene clean — content gate @ '"$sha" '- [x] $feature-docs synced — merge gate @ '"$sha" '- [x] $vehicle-command-audit clean — merge gate @ '"$sha")"
+vehicle_merge_body="$(printf '%s\n' "$merge_body" '- [x] $vehicle-command-audit clean — merge gate @ '"$sha")"
 expect_rc 0 'canonical merge passes vehicle evidence when vehicle-relevant' env PATH="$tmp/bin:$PATH" TEST_HEAD="$sha" TEST_BODY="$vehicle_merge_body" TEST_CHANGED=1 TEST_FILES_MODE=vehicle "$gate" --project-dir "$root" --payload-file "$tmp/payload.json"
 expect_rc 2 'canonical merge requires vehicle-command-audit when vehicle-relevant' env PATH="$tmp/bin:$PATH" TEST_HEAD="$sha" TEST_BODY="$merge_body" TEST_CHANGED=1 TEST_FILES_MODE=vehicle "$gate" --project-dir "$root" --payload-file "$tmp/payload.json"
 other_head=0000000000000000000000000000000000000000

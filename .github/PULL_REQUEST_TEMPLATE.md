@@ -1,8 +1,7 @@
 <!--
 Fill in each section below. Delete checklist lines that don't apply to this change.
 This template is used by human authors and coding agents — keep it short and honest:
-say what was actually verified, and note anything that couldn't be (a cloud session
-cannot build or USB-flash — see AGENTS.md).
+record the checks completed locally before the push and note inapplicable or unexercised checks.
 -->
 
 ## Summary
@@ -18,11 +17,9 @@ cannot build or USB-flash — see AGENTS.md).
 
 <!-- Name the reviewed baseline, focused/full scope and affected consumers; full audits apply to migrations, target/dependency/trust changes and unknown baselines. -->
 
-<!-- How this was checked. State what ran and what couldn't (e.g. no build in a cloud session). -->
-- [ ] `scripts/run-mock-tests.sh` passes (host-side logic tests — CI's `logic-test` gate)
-- [ ] `tools/agent-config/selftest.sh` passes when agent config, skills, or hooks changed
-- [ ] Firmware built (`scripts/idf-docker.sh idf.py build`, or relied on CI) — N/A in a cloud session (no Docker daemon / no USB)
-- [ ] Firmware size and stack budgets verified on all four targets (`scripts/precheck-firmware.sh`, or `scripts/check-firmware-size.sh` for the full build) — within the slot policy and the reviewed baselines
+<!-- Include the full candidate and base SHAs, the command and result, and any applicable per-target evidence. -->
+- [ ] `scripts/check-local.sh --candidate` passed before push (repository, strict host/browser, protocol and Linux sanitizer checks)
+- [ ] Added `--firmware` for firmware-relevant changes (pinned four-target build, size/stack, reproducibility and disposable-key signing)
 - [ ] Every raised size or stack baseline entry is listed here with its measured delta and cause (copy the update tool's change lines) — N/A when no maximum was raised
 
 ## Checklist
@@ -35,11 +32,10 @@ cannot build or USB-flash — see AGENTS.md).
 ## Gates
 
 <!--
-These boxes ARE the publish/merge gates — they replace the old on-disk markers. The
-runner-neutral gate under tools/agent-hooks/ reads them straight from this PR body, each matching
-its OWN box. After a CLEAN run, tick the box and replace <full-40-hex-sha> with the exact reviewed
-commit (`git rev-parse HEAD`). Prefixes are rejected. A later commit changes the SHA and re-stales the gate, forcing
-a fresh run. Do NOT tick a box without actually running the check.
+These boxes record completed local checks, reviews and catalog sync. GitHub checks the record format
+and SHA. After a clean local result, tick the box and enter the full reviewed commit SHA
+(`git rev-parse HEAD`). A new commit requires fresh evidence. Review the final PR wording for
+hygiene and repeat that check locally if the title or body changes.
 
 $feature-docs only arms when the diff reaches main/, test/, sdkconfig.defaults*, partitions.csv,
 the shipped Pages runtime, release-relevance logic, or the build/signed-preview/preview-cleanup/
@@ -63,6 +59,7 @@ scripts/tesla-ble-patch-state.json, scripts/check-dependency-contract.py,
 docs/adr/0005-tesla-ble-seam.md, sdkconfig.defaults*, or
 .agents/skills/vehicle-command-audit/ — delete its line only when the diff reaches none of these paths.
 -->
+- [ ] `$local-checks` passed — pre-push verification @ <full-40-hex-sha>
 - [ ] `$skill-audit` clean — PR create/push gate @ <full-40-hex-sha>
 - [ ] `$project-review` clean — merge gate @ <full-40-hex-sha>
 - [ ] `$pr-hygiene` clean — content gate @ <full-40-hex-sha>

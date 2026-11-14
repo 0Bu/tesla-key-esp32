@@ -77,12 +77,12 @@ workflow scripts and [deep document owners](../../../docs/README.md), not histor
   evidence; separate vehicle/cluster scope.
 - **`$ci-heal`**: the user's own invocation authorizes only attested stamping and fix pushes (the
   AGENTS.md exception); script never authors commits/reviews; explicit gate attestations, green current-head
-  CI (successful `build`, no other check queued, cancelled or failed; a lone failing
+  CI (`build` successful or skipped on an ordinary PR, no other check queued, cancelled or failed; a lone failing
   `current-head-records` counts as records pending), local HEAD equality, mergeability/relevance
   and unchanged-head check before merge-readiness stamping, then a passing new
   `current-head-records` run (or, when the stamp leaves the PR body unchanged and so starts no run,
   a passing latest run) and all checks green before readiness or merge; Phase 3 pre-push records attest the
-  independently reviewed local fix commit; iteration cap, actual red/green selftests and separate
+  locally checked and independently reviewed fix commit; iteration cap, actual red/green selftests and separate
   merge authority.
 - **`$vehicle-command-audit`**: upstream/local/pinned-library feasibility, lexical full patch chain,
   resolved upstream paths, role restrictions, replay/authentication/request binding and clock domains.
@@ -98,7 +98,7 @@ workflow scripts and [deep document owners](../../../docs/README.md), not histor
   `web-installer.mjs`, `docs/vendor/`),
   `.github/workflows/{build,signed-pr-preview,pr-preview-cleanup,pr-policy,bench-acceptance}.yml`
   and `scripts/release-relevance.sh`. A missing, truncated or incomplete `pr-gate-lib.sh` must block
-  `require-pr-gates.sh` before any of the five records is read; `scripts/test-pr-gates.sh` pins
+  `require-pr-gates.sh` before any verification or review record is read; `scripts/test-pr-gates.sh` pins
   those negative cases.
 - **`$skill-audit`**: discovered inventory, current fact pointers, exact head and report-only gate;
   report self-drift without correcting it.

@@ -137,10 +137,10 @@ capable host Python for gates. Hooks are lexical defense in depth, not authoriza
 
 ## PR and review
 
-- `$skill-audit` is required before PR creation or push; assess the changed contracts and every
-  affected skill/reviewer against the accepted baseline. `$project-review` is required before every
-  merge; review the diff, all affected consumers and documentation quality. Use full project/skill
-  audits for an explicit whole-project review, cross-cutting migrations, target/dependency or trust
+- Complete the full applicable local checks and reviews on the committed candidate before pushing.
+  `$skill-audit` assesses the changed contracts and affected skills/reviewers against the accepted
+  baseline. `$project-review` covers the diff, affected consumers and documentation quality. Use
+  full project/skill audits for an explicit whole-project review, cross-cutting migrations, target/dependency or trust
   boundary changes, and unknown/unverified baselines. Each report names baseline, scope, exclusions
   and evidence. Focused review never implies whole-project certification. Material `DOC-QUALITY`
   findings in scope prevent clean. `$pr-hygiene` is required at PR creation, every push, and every merge. It checks
@@ -150,15 +150,16 @@ capable host Python for gates. Hooks are lexical defense in depth, not authoriza
   required when the BLE/command relevance classifier in `tools/agent-hooks/pr-gate-lib.sh` applies.
   Consult those skills for exact scope; no silent relevance exemptions.
 - Strict Renovate maintenance (`gate_is_renovate_maintenance`, only `.github/workflows/renovate.yaml`
-  or `.github/renovate.json`) is exempt from manual records. Dependency updates are not exempt.
+  or `.github/renovate.json`) is exempt from manual review records. It still requires local
+  verification before merge. Dependency updates require the applicable checks and reviews.
 - Records name the exact current PR head and expire after every push. Local hooks/scripts enforce
   advisory records; server-side enforcement needs the required `pr-policy / current-head-records`
-  check. Report findings with severity, path/line, cause, impact and evidence; resolve P1/P2 and
-  rerun the affected independent review.
-- Local handoff requires the complete applicable checks. PR CI may select documentation, runtime
-  or browser feedback from the exact diff; unknown changes or combined runtime/browser code select full coverage. Main and
-  manual publication runs always execute the full host/protocol/sanitizer contract before signing,
-  alongside independent four-target rebuilds. Local receipts cannot satisfy these remote gates.
+  check. GitHub validates the recorded results. Report findings with severity, path/line, cause,
+  impact and evidence. Resolve P1/P2 and rerun the affected independent review.
+- Ordinary PRs skip GitHub test and compile jobs. An explicit `signed-preview` request starts the
+  PR artifact build and separate signing checks. Main and manual publication require the full
+  host/protocol/sanitizer contract alongside producer and independent four-target builds before
+  protected signing. Local records and receipts do not grant signing authority.
 - The only accepted, separately authorized merge shape is:
 
   ```text

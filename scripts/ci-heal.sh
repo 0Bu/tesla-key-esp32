@@ -8,12 +8,10 @@
 #   scripts/ci-heal.sh --help
 #
 # Boundaries (see .agents/skills/ci-heal/SKILL.md):
-#   * ci-heal NEVER authors a commit and NEVER runs a review. A gate record ($skill-audit,
-#     $pr-hygiene, $project-review, $feature-docs, $vehicle-command-audit) is written to the PR
-#     only from an explicit --attest <gate>=<evidence> that names the independent review which
-#     was actually completed for the exact head being stamped.
-#   * Stamping, READY and --auto-merge require: local HEAD == PR head, a successful `build` check
-#     and every other check green on that head (a lone failing current-head-records counts as
+#   * ci-heal never authors a commit or runs a review. It writes records from explicit
+#     attestations for local checks and independent reviews completed on the exact head.
+#   * Stamping, READY and --auto-merge require: local HEAD == PR head, a successful or intentionally
+#     skipped `build` check and every other check green on that head (a lone failing current-head-records counts as
 #     records pending; after stamping a new run of it must pass, or its latest run when the body
 #     did not change), the PR reporting MERGEABLE, and an
 #     attestation for every gate the PR needs (relevance comes from the same GitHub-side
@@ -42,7 +40,7 @@ done
 
 REPO_SLUG="0Bu/tesla-key-esp32"
 RECORDS_CHECK="current-head-records"
-ALL_GATES="skill-audit project-review pr-hygiene feature-docs vehicle-command-audit"
+ALL_GATES="local-checks skill-audit project-review pr-hygiene feature-docs vehicle-command-audit"
 
 usage() {
   cat <<'EOF'
@@ -55,8 +53,8 @@ Options:
   --pr <number>             Pull request number (default: auto-detect from branch)
   --max-retries <n>         Maximum monitoring/push iterations (default: 3, max: 5)
   --attest <gate>=<evidence>
-                            Attest that the named independent review was completed for the exact
-                            head being stamped. Repeatable. Gates: skill-audit, project-review,
+                            Attest that the named local check or review passed for the exact head.
+                            Repeatable. Gates: local-checks, skill-audit, project-review,
                             pr-hygiene, feature-docs, vehicle-command-audit. Evidence is a short
                             single-line reference (report path, finding count). ci-heal never
                             stamps a gate without it and never runs the review itself.
@@ -405,34 +403,46 @@ attestation_for() {
 
 # Prints the gates the PR needs, one per line — the same set the merge/check hook enforces.
 # Returns 1 when the changed-file list cannot be established (never guess).
-required_gates_for_pr() {
-  local pr="$1" files_file rc
-  files_file="$(mktemp)"
-  if ! gate_pr_changed_files "$pr" > "$files_file"; then
-    rm -f "$files_file"
-    return 1
-  fi
+required_gates_for_files() {
+  local files_file="$1" rc=0
+  echo "local-checks"
   if gate_is_renovate_maintenance "$files_file"; then
-    rm -f "$files_file"
     return 0
   fi
-  echo "skill-audit"
-  echo "project-review"
-  echo "pr-hygiene"
-  rc=0
+  printf '%s\n' skill-audit project-review pr-hygiene
   gate_feature_docs_relevant < "$files_file" || rc=$?
   if [ "$rc" -eq 0 ]; then
     echo "feature-docs"
   elif [ "$rc" -ne 1 ]; then
-    rm -f "$files_file"
     return 1
   fi
   if gate_vehicle_command_relevant < "$files_file"; then
     echo "vehicle-command-audit"
   fi
-  rm -f "$files_file"
-  return 0
 }
+
+required_gates_for_pr() (
+  local files_file
+  files_file="$(mktemp)" || return 1
+  trap 'rm -f -- "$files_file"' EXIT
+  gate_pr_changed_files "$1" > "$files_file" || return 1
+  required_gates_for_files "$files_file"
+)
+
+required_gates_for_candidate() (
+  local candidate="$1" base remote_main files_file
+  base="$(git rev-parse --verify refs/remotes/origin/main)" || return 1
+  remote_main="$(git ls-remote --exit-code https://github.com/0Bu/tesla-key-esp32.git refs/heads/main)" || return 1
+  [ "$remote_main" = "$base"$'\t'refs/heads/main ] || return 1
+  git_is_ancestor "$base" "$candidate" || return 1
+  files_file="$(mktemp)" || return 1
+  trap 'rm -f -- "$files_file"' EXIT
+  git -c core.fsmonitor=false -c core.quotePath=false diff --no-renames --name-only "$base" "$candidate" > "$files_file" || return 1
+  # Git quotes paths containing literal tabs, newlines, quotes and backslashes.
+  # Refuse those paths so quoting cannot hide an anchored review classifier.
+  if grep -q '^"' "$files_file"; then return 1; fi
+  required_gates_for_files "$files_file"
+)
 
 # Fails (exit 3) unless every listed gate has an attestation. Prints what is missing.
 require_attestations() {
@@ -444,7 +454,7 @@ require_attestations() {
   done
   if [ "${#missing[@]}" -gt 0 ]; then
     echo "ci-heal: $purpose withheld — no attestation for: ${missing[*]}" >&2
-    echo "ci-heal: complete the independent review(s) for exactly $head_sha, then re-run with" >&2
+    echo "ci-heal: complete the local checks and reviews for exactly $head_sha, then re-run with" >&2
     for g in "${missing[@]}"; do
       echo "ci-heal:   --attest $g=<evidence>" >&2
     done
@@ -502,21 +512,21 @@ only_records_check_failing() {
   [ "$seen" -eq 1 ]
 }
 
-# Succeeds only when the rollup is readable, a `build` check succeeded and no other check is
+# Succeeds only when the rollup is readable, `build` completed or skipped and no other check is
 # anything but SUCCESS, NEUTRAL or SKIPPED (queued, running, cancelled, failed and commit-status
 # entries all count as not green). Mode `records` allows the records check alone to be not green;
-# mode `all` allows nothing. A skipped or missing `build` is never green enough.
+# mode `all` requires the records check to have succeeded. A missing `build` remains pending.
 ci_green_except_records() {
   local mode="$2" rows name status conclusion nongreen=""
   rows="$(check_rollup "$1")" || return 1
-  printf '%s\n' "$rows" | grep -Fxq 'build|COMPLETED|SUCCESS' || return 1
+  printf '%s\n' "$rows" | grep -Eq '^build\|COMPLETED\|(SUCCESS|SKIPPED)$' || return 1
   while IFS='|' read -r name status conclusion; do
     [ -n "$name" ] || continue
     case "$conclusion" in SUCCESS|NEUTRAL|SKIPPED) continue ;; esac
     nongreen+="$name | $status | $conclusion"$'\n'
   done <<< "$rows"
   if [ "$mode" = all ]; then
-    [ -z "$nongreen" ]
+    [ -z "$nongreen" ] && printf '%s\n' "$rows" | grep -Fxq "$RECORDS_CHECK|COMPLETED|SUCCESS"
     return
   fi
   only_records_check_failing "$nongreen"
@@ -593,8 +603,7 @@ run_heal() {
     is_sha "$head_sha" || { echo "ci-heal: error: unreadable PR head SHA '$head_sha'" >&2; return 1; }
     local_sha="$(git_local_head)"
 
-    # `gh pr checks --watch` passes skipped checks and can return before `build` exists, so a green
-    # watch also needs the whole-rollup rule (successful `build`, nothing else not green).
+    # A green watch also needs the complete rollup, including the current records check.
     if watch_pr_checks "$target_pr" && ci_green_except_records "$target_pr" all; then
       echo "ci-heal: all CI checks on PR #$target_pr are GREEN for $head_sha."
       green=1
@@ -672,10 +681,16 @@ run_heal() {
       return 1
     fi
 
-    # A fix commit is ready. The push hook needs current $skill-audit and $pr-hygiene records for
-    # the exact commit being pushed, and only an attested review can supply them.
+    if ! gates="$(required_gates_for_candidate "$local_sha")"; then
+      echo "ci-heal: cannot establish the local candidate diff against current main. Refresh origin/main." >&2
+      return 1
+    fi
+    local prepush_gates=()
+    while IFS= read -r g; do
+      [ -n "$g" ] && prepush_gates+=("$g")
+    done <<< "$gates"
     rc=0
-    require_attestations "pre-push gate records" "$local_sha" skill-audit pr-hygiene || rc=$?
+    require_attestations "pre-push gate records" "$local_sha" "${prepush_gates[@]}" || rc=$?
     if [ "$rc" -ne 0 ]; then
       duration=$(( $(date +%s) - start_time ))
       evaluate_and_optimize "$target_pr" "FAILED" "$iteration" "$max_retries" "$duration" "$root_cause_detected" 0 0
@@ -684,7 +699,11 @@ run_heal() {
 
     # run_heal is called as `run_heal || rc=$?`, which disables errexit here: check every mutation.
     echo "ci-heal: stamping attested pre-push records for $local_sha and pushing '$branch'..."
-    if ! stamp_attested_gates "$target_pr" "$local_sha" skill-audit pr-hygiene; then
+    if [ "$(git_local_head)" != "$local_sha" ] || git_tree_dirty; then
+      echo "ci-heal: the checked local candidate changed before push." >&2
+      return 1
+    fi
+    if ! stamp_attested_gates "$target_pr" "$local_sha" "${prepush_gates[@]}"; then
       echo "ci-heal: stamping the pre-push records failed; nothing was pushed." >&2
       return 1
     fi
@@ -696,11 +715,9 @@ run_heal() {
       echo "ci-heal: error: GitHub did not report $local_sha as the PR head after the push." >&2
       return 1
     fi
-    # The merge attestations of this run describe reviews of the previous head. A review fix
-    # changes the reviewed bytes, so its merge records need fresh reviews and a new run.
+    # Reconfirm the PR metadata and attestations in a fresh readiness run after a review fix.
     if [ "$review_fix" -eq 1 ]; then
-      echo "ci-heal: pushed review fix $local_sha. Its merge gate records need fresh independent" >&2
-      echo "ci-heal: reviews of that head; re-run ci-heal with their attestations." >&2
+      echo "ci-heal: pushed review fix $local_sha. Re-run against the new remote head." >&2
       return 3
     fi
     iteration=$((iteration + 1))
@@ -735,6 +752,10 @@ run_heal() {
     return 1
   fi
   check_pr_mergeability "$target_pr" || return 1
+  if ! required_gates_for_candidate "$final_head" >/dev/null; then
+    echo "ci-heal: the verified candidate must include current main before merge." >&2
+    return 1
+  fi
 
   if ! gates="$(required_gates_for_pr "$target_pr")"; then
     echo "ci-heal: could not establish which gates PR #$target_pr needs (changed-file list unreadable)." >&2
@@ -744,7 +765,7 @@ run_heal() {
   while IFS= read -r g; do
     [ -n "$g" ] && gate_list+=("$g")
   done <<< "$gates"
-  echo "ci-heal: gates required for $final_head: ${gate_list[*]:-none (maintenance PR)}"
+  echo "ci-heal: gates required for $final_head: ${gate_list[*]}"
 
   if [ "$dry_run" -eq 1 ]; then
     if [ "$records_pending" -eq 1 ]; then
@@ -1025,6 +1046,10 @@ self_test() {
     fetch_failed_runs()       { printf '%s' "$STUB_FAILED"; }
     run_local_verifications() { echo "verify $1" >> "$LOG_VERIFY"; [ "$STUB_REPRO" != fail ]; }
     gate_pr_changed_files()   { [ "$STUB_FILES_FAIL" != 1 ] && printf '%s' "$STUB_FILES"; }
+    required_gates_for_candidate() {
+      printf '%s' "$STUB_FILES" > "$T/candidate-files"
+      required_gates_for_files "$T/candidate-files"
+    }
     # Every stamp changes the PR body unless STUB_BODY_UNCHANGED is set (the records were already
     # current); only a changed body fires `edited`.
     get_pr_body() {
@@ -1094,8 +1119,8 @@ self_test() {
   expect_no_out() { ! printf '%s' "$last_out" | grep -Fq -- "$2" || { echo "self-test: $1: output must not contain: $2" >&2; fail=1; }; }
   expect_lines()  { local n; n="$(grep -c . "$2" || true)"; [ "$n" = "$3" ] || { echo "self-test: $1: expected $3 line(s) in $(basename "$2"), got $n" >&2; fail=1; }; }
   base_attest() {
-    attest_names=(skill-audit project-review pr-hygiene)
-    attest_evidence=("audit-a" "review-b" "hygiene-c")
+    attest_names=(local-checks skill-audit project-review pr-hygiene)
+    attest_evidence=("check-a" "audit-a" "review-b" "hygiene-c")
   }
 
   # F03: the red-CI entry used to abort on a toplevel `local` before any diagnosis
@@ -1137,24 +1162,22 @@ self_test() {
   # A pushed fix without attested $skill-audit/$pr-hygiene must not be stamped or pushed
   sc_push_unattested() { STUB_SEQ="red"; STUB_FAILED="build | COMPLETED | FAILURE | u"; STUB_LOCAL="$SHA_B"; STUB_ANCESTOR=1; }
   run_case sc_push_unattested 3
-  expect_out push_unattested "no attestation for: skill-audit pr-hygiene"
+  expect_out push_unattested "no attestation for: local-checks skill-audit project-review pr-hygiene"
   expect_lines push_unattested "$LOG_PUSH" 0; expect_lines push_unattested "$LOG_STAMPS" 0
 
-  # Attested fix: stamp for the LOCAL head, push once, then CI goes green; project-review is still
-  # unattested, so readiness stays withheld and no second stamp is written.
+  # Refuse a push until the local checks and every applicable review are attested.
   sc_push_attested() {
     STUB_SEQ="red green"; STUB_FAILED="build | COMPLETED | FAILURE | u"; STUB_LOCAL="$SHA_B"; STUB_ANCESTOR=1
     attest_names=(skill-audit pr-hygiene); attest_evidence=("audit-a" "hygiene-c")
   }
   run_case sc_push_attested 3
-  expect_lines push_attested "$LOG_PUSH" 1; expect_lines push_attested "$LOG_STAMPS" 1
-  grep -Fq -- "--head $SHA_B" "$LOG_STAMPS" || { echo "self-test: push_attested: pre-push stamp not bound to the pushed head" >&2; fail=1; }
-  expect_out push_attested "no attestation for: project-review"; expect_no_out push_attested "READY FOR MERGE"
+  expect_lines push_attested "$LOG_PUSH" 0; expect_lines push_attested "$LOG_STAMPS" 0
+  expect_out push_attested "no attestation for: local-checks project-review"
 
   # GitHub never reports the pushed commit as the PR head: stop instead of monitoring a stale head.
   sc_push_head_not_reported() {
     STUB_SEQ="red"; STUB_FAILED="build | COMPLETED | FAILURE | u"; STUB_LOCAL="$SHA_B"; STUB_ANCESTOR=1
-    attest_names=(skill-audit pr-hygiene); attest_evidence=("audit-a" "hygiene-c")
+    base_attest
     git_push_branch() { echo "push $1" >> "$LOG_PUSH"; }
   }
   run_case sc_push_head_not_reported 1
@@ -1164,7 +1187,7 @@ self_test() {
   # The iteration guard ends a run whose pushed fix exhausted the limit without green CI.
   sc_retry_limit() {
     STUB_SEQ="red"; STUB_FAILED="build | COMPLETED | FAILURE | u"; STUB_LOCAL="$SHA_B"; STUB_ANCESTOR=1
-    attest_names=(skill-audit pr-hygiene); attest_evidence=("audit-a" "hygiene-c"); max_retries=1
+    base_attest; max_retries=1
   }
   run_case sc_retry_limit 1
   expect_out retry_limit "reached maximum retry limit (1)"; expect_lines retry_limit "$LOG_PUSH" 1
@@ -1172,7 +1195,7 @@ self_test() {
   # One push per run: after it the local HEAD is the PR head, so a red re-check has nothing to push.
   sc_red_after_push() {
     STUB_SEQ="red red"; STUB_FAILED="build | COMPLETED | FAILURE | u"; STUB_LOCAL="$SHA_B"; STUB_ANCESTOR=1
-    attest_names=(skill-audit pr-hygiene); attest_evidence=("audit-a" "hygiene-c")
+    base_attest
   }
   run_case sc_red_after_push 1
   expect_out red_after_push "nothing to push"; expect_no_out red_after_push "maximum retry limit"
@@ -1238,7 +1261,7 @@ self_test() {
     STUB_SEQ="red green"; STUB_FAILED="$RECORDS_CHECK | COMPLETED | FAILURE | u"
   }
   run_case sc_records_review_fix 3
-  expect_out records_review_fix "committed review fix"; expect_out records_review_fix "need fresh independent"
+  expect_out records_review_fix "committed review fix"; expect_out records_review_fix "Re-run against the new remote head"
   expect_no_out records_review_fix "READY FOR MERGE"
   expect_lines records_review_fix "$LOG_VERIFY" 1; expect_lines records_review_fix "$LOG_PUSH" 1
   expect_lines records_review_fix "$LOG_STAMPS" 1; expect_lines records_review_fix "$LOG_MERGE" 0
@@ -1249,7 +1272,7 @@ self_test() {
     STUB_SEQ="red"; STUB_FAILED="$RECORDS_CHECK | COMPLETED | FAILURE | u"
   }
   run_case sc_records_review_fix_unattested 3
-  expect_out records_review_fix_unattested "no attestation for: skill-audit pr-hygiene"
+  expect_out records_review_fix_unattested "no attestation for: local-checks skill-audit project-review pr-hygiene"
   expect_lines records_review_fix_unattested "$LOG_PUSH" 0; expect_lines records_review_fix_unattested "$LOG_STAMPS" 0
 
   sc_records_review_fix_diverged() {
@@ -1291,12 +1314,12 @@ self_test() {
   expect_no_out records_with_cancelled "READY FOR MERGE"
   expect_lines records_with_cancelled "$LOG_STAMPS" 0; expect_lines records_with_cancelled "$LOG_MERGE" 0
 
-  # A skipped or missing `build` is never green enough
+  # Ordinary PRs intentionally skip the firmware build. Records remain required.
   sc_records_build_skipped() {
     base_attest; STUB_SEQ="red"; STUB_BUILD=SKIPPED; STUB_FAILED="$RECORDS_CHECK | COMPLETED | FAILURE | u"
   }
-  run_case sc_records_build_skipped 1
-  expect_lines records_build_skipped "$LOG_STAMPS" 0; expect_no_out records_build_skipped "READY FOR MERGE"
+  run_case sc_records_build_skipped 0
+  expect_lines records_build_skipped "$LOG_STAMPS" 1; expect_out records_build_skipped "READY FOR MERGE"
 
   sc_records_build_missing() {
     base_attest; STUB_SEQ="red"; STUB_BUILD=""; STUB_FAILED="$RECORDS_CHECK | COMPLETED | FAILURE | u"
@@ -1363,7 +1386,7 @@ self_test() {
   # run_heal runs without errexit, so every failed mutation must stop the run explicitly
   sc_prepush_stamp_fails() {
     STUB_SEQ="red"; STUB_FAILED="build | COMPLETED | FAILURE | u"; STUB_LOCAL="$SHA_B"; STUB_ANCESTOR=1
-    attest_names=(skill-audit pr-hygiene); attest_evidence=("audit-a" "hygiene-c"); STUB_STAMP_FAIL=1
+    base_attest; STUB_STAMP_FAIL=1
   }
   run_case sc_prepush_stamp_fails 1
   expect_out prepush_stamp_fails "nothing was pushed"; expect_lines prepush_stamp_fails "$LOG_PUSH" 0
@@ -1379,7 +1402,7 @@ self_test() {
 
   sc_push_fails() {
     STUB_SEQ="red"; STUB_FAILED="build | COMPLETED | FAILURE | u"; STUB_LOCAL="$SHA_B"; STUB_ANCESTOR=1
-    attest_names=(skill-audit pr-hygiene); attest_evidence=("audit-a" "hygiene-c"); STUB_PUSH_FAIL=1
+    base_attest; STUB_PUSH_FAIL=1
   }
   run_case sc_push_fails 1
   expect_out push_fails "pushing 'feature' failed"
@@ -1420,9 +1443,13 @@ self_test() {
   expect_lines all_five "$LOG_STAMPS" 1
   grep -Fq -- "--gate vehicle-command-audit=vehicle-e" "$LOG_STAMPS" || { echo "self-test: all_five: vehicle gate not stamped" >&2; fail=1; }
 
-  sc_renovate() { STUB_FILES=".github/renovate.json"; }
+  sc_renovate() {
+    STUB_FILES=".github/renovate.json"
+    attest_names=(local-checks); attest_evidence=("check-a")
+  }
   run_case sc_renovate 0
-  expect_lines renovate "$LOG_STAMPS" 0; expect_out renovate "READY FOR MERGE"
+  expect_lines renovate "$LOG_STAMPS" 1; expect_out renovate "READY FOR MERGE"
+  grep -Fq -- "--gate local-checks=check-a" "$LOG_STAMPS" || { echo "self-test: Renovate local checks not stamped" >&2; fail=1; }
 
   rm -rf "$T"
   trap - EXIT
