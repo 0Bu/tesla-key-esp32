@@ -426,8 +426,8 @@ target overlays.
 
 ## What the gate proves
 
-`scripts/check-esp-idf-matrix.py` runs through `scripts/repo-lint.sh`, and therefore in the CI
-`logic-test` job of every pull request. It compares this document with the tree in both directions
+`scripts/check-esp-idf-matrix.py` runs through `scripts/repo-lint.sh` before a deploy push
+and in publication CI. It compares this document with the tree in both directions
 and fails when:
 
 - **Pins disagree.** The metadata targets, the ESP-IDF version in any per-target lockfile, the

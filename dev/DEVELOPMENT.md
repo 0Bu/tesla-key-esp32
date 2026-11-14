@@ -124,7 +124,11 @@ Start with checks relevant to the diff. Host suite scope and prerequisites are i
 [test guide](../test/README.md); no host result establishes hardware or vehicle behavior.
 
 Run the complete local handoff once with `scripts/check-local.sh`; add `--firmware` for the
-four-target build, disposable-key signing and reproducibility contract. The entry point runs host,
+four-target build, disposable-key signing and reproducibility contract. For `$deploy`, add
+`--candidate` to bind the run to a clean committed candidate. Verify it on the current main base
+before pushing and record the candidate SHA, base SHA, commands and results in the PR.
+GitHub validates the local verification and review records for that head and
+skips ordinary PR test and compiler jobs. The entry point runs host,
 protocol, repository/agent gates and Linux sanitizers, using the pinned Docker image for sanitizers
 on macOS. It performs no publication, real-key signing, device or vehicle operation. Standalone
 commands below remain available for focused iteration.
@@ -137,11 +141,10 @@ effects. Deploy-policy fixtures copy their workflow/checker inputs without local
 Shared dependency, otadata and Release-acceptance self-tests have one owner in
 `test-build-contracts.sh`; the full host wrapper does not repeat them. CI also leaves its shared
 version, size, Pages, changelog and build-gate self-tests with that mandatory full host gate.
-On main, full repository/agent preflight runs in `logic-harness` alongside the longer mock suite;
-both remain required by `build`. The independent artifact join uses `prepare`'s release version
-without waiting for `build`; protected publication still needs both successful joins and compares
-their full exact-source inventories and bytes before key use. Main and trusted preview
-acceptance still execute the complete remote contract before signing, without local receipts.
+On main, the repository/agent preflight and host tests run alongside both four-target builds.
+Both artifact joins can finish while the host gates run. Protected publication requires both host
+gates and both exact-source inventories, then compares the inventories and bytes before key use.
+Main and trusted preview signing use their complete remote acceptance contracts.
 
 For repeated local host checks, use:
 
@@ -209,16 +212,16 @@ CI computes cumulative firmware relevance once in `prepare`, conservatively buil
 published baseline cannot be verified. Target jobs consume that scheduling decision; signing and
 publication revalidate current source and authority at their own boundaries. The primary matrix verifies all four supported targets. Independent main builds use the same target defaults.
 
-PR feedback is selected by `scripts/check-change-scope.py`: ordinary Markdown-only changes use repository
-lint without firmware compilation; browser changes use strict browser checks; firmware source uses
-runtime, protocol and sanitizer checks. The PR template, feature catalog and third-party notices
-are executable checker inputs and select full coverage. Protocol vectors and shared native/browser
-parity run in both profiles. The strict runtime gate includes the retained MQTT JSON/registry owner;
-Linux sanitizers execute that same owner with instrumentation. Unknown,
-combined runtime/browser code, test, policy, build and dependency changes use full coverage. `repo-lint.sh --quick` keeps
-actual validators while omitting their unrelated mutation self-tests. Local handoff and main/manual
-publication remain full. Main still reconciles shipped documentation through the existing signed
-site pipeline; PR selection does not change that publication/source contract.
+Use the host runner's runtime and browser profiles for focused local iteration. The full local
+handoff before push runs both surfaces, the protocol harness and sanitizer checks. The change
+scope classifier remains in the signed-preview producer to skip builds for documentation-only
+changes. Main still reconciles published documentation through the signed site pipeline.
+
+During rollout, keep the required `build` check configured. The workflow reports it as skipped
+on ordinary PRs so the existing branch protection can accept it. Keep `current-head-records`
+required to validate the documented reviews. The PR that introduces the workflow may still be
+subject to checks from the previously configured policy. For already-open PRs, verify and record
+the local checks in the body after rollout to trigger validation using the updated base policy.
 
 ## Build and evidence contracts
 
@@ -468,9 +471,9 @@ read-only target jobs rebuild the exact PR head concurrently, without producer a
 A secret-free join requires every target and assembles the complete source/version-bound inventory.
 The protected signer compares producer and independent payloads, revalidates the live PR and stable
 version, and never checks out PR code.
-Eligible previews additionally require both complete host/protocol acceptance suites, parallel with
-the target legs. Selected PR feedback never suffices for signing. A source run without the unsigned
-firmware artifact is ineligible, so a documentation-only PR does not start preview rebuilds.
+Adding the `signed-preview` label to a same-repository PR requests its unsigned producer build.
+Eligible previews also require both complete host/protocol suites, parallel with the independent
+target legs. A source run without the unsigned firmware artifact is ineligible.
 
 After signed preview publication, `scripts/check-pr-preview-served.py` runs trusted default-branch
 code without keys or repository tokens. It validates the local signed four-target site against the
