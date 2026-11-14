@@ -51,7 +51,8 @@ where the evidence names the local check or independent review completed for the
   current-head-records` validates the records this workflow stamps, so a failure of that check
   alone counts as "records pending", not as red CI. If local `HEAD` then carries a committed review
   fix that descends from the PR head, ci-heal pushes it through Phase 3 and stops with exit code 3:
-  merge records for the new head need fresh reviews and a new run. After stamping, `READY FOR MERGE` and
+  start a new run against the confirmed remote head using that commit's existing attestations.
+  After stamping, `READY FOR MERGE` and
   `--auto-merge` also require a new run of that check to pass and every check to be green on the
   unchanged head. A stamp that leaves the body unchanged (the records were already current)
   starts no new run of that check, so the latest existing run of it must have passed instead.
@@ -78,7 +79,7 @@ flowchart TD
     P2 -->|Failure| P3[Phase 2: Log Triage & Local Repro]
     P3 --> P4[Phase 3: Operator commits fix, attested pre-push records, push]
     P4 --> P1
-    P2 -->|Green except current-head-records| P5[Phase 4: Independent reviews for the exact head]
+    P2 -->|Checks ready or awaiting records| P5[Phase 4: Confirm local reviews for the exact head]
     P5 --> P6{Findings?}
     P6 -->|P1/P2 Safety/Crypto| StopFail[Stop: Escalate P1/P2 Finding]
     P6 -->|Minor / Doc / Lint| P4
