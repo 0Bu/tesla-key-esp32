@@ -305,7 +305,9 @@ var ICON={
   pencil:'<use href="#ic-pencil"/>',
   key:'<use href="#ic-key"/>',
   link:'<path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/>',
-  search:'<circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/>'
+  search:'<circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/>',
+  fan:'<circle cx="12" cy="12" r="2"/><path d="M10 12c-4 0-7-2-7-5a3 3 0 0 1 6 0c0 1 1 2 2 3m3 2c4 0 7 2 7 5a3 3 0 0 1-6 0c0-1-1-2-2-3M12 10c0-4 2-7 5-7a3 3 0 0 1 0 6c-1 0-2 1-3 2m-2 3c0 4-2 7-5 7a3 3 0 0 1 0-6c1 0 2-1 3-2"/>',
+  snowflake:'<path d="M12 2v20m-3-18 3 3 3-3m-6 16 3-3 3 3M3.34 7l17.32 10M3.6 10.6l4.1-1.1-1.1-4.1m10.8 13.2-1.1-4.1 4.1-1.1M3.34 17 20.66 7M3.6 13.4l4.1 1.1-1.1 4.1m10.8-13.2-1.1 4.1 4.1 1.1"/>'
 };
 function iconSVG(name){ return '<svg viewBox="0 0 24 24" aria-hidden="true">'+(ICON[name]||'')+'</svg>'; }
 
@@ -345,45 +347,48 @@ function gaugeHTML(o){
   }
   var center='';
   if((mode==='soc'||mode==='charging'||mode==='complete')&&pct!=null){
-    center='<span class="gnum"><b>'+Math.round(pct)+'<small>%</small></b>'+(o.limit!=null?'<i>Limit '+o.limit+' %</i>':'')+'</span>';
+    center='<span class="gnum">'+Math.round(pct)+'<small>%</small></span>';
   } else if(o.glyph){
     center='<span class="gglyph'+(mode==='waking'?' shake':'')+'">'+iconSVG(o.glyph)+'</span>';
   }
   return s+'<span class="gcenter">'+center+'</span>';
 }
 
-// hero detail chips; tone: ok | warn | info | ''
-function stat(k,val,unit,tone){
-  return '<div class="stat'+(tone?' '+tone:'')+'"><div class="k">'+k+'</div><div class="v">'+val+
+// Retained charge information is labeled separately from the live status readings.
+function stat(k,val,unit){
+  return '<div class="stat"><div class="k">'+k+'</div><div class="v">'+val+
          (unit?'<small>'+unit+'</small>':'')+'</div></div>';
+}
+function chargeValue(label,value,unit){
+  return '<div class="status-value charge-value"><span class="sr-only">'+label+' </span><span>'+Math.round(value)+
+         ' <small>'+unit+'</small></span></div>';
 }
 function chargeStats(v,charging){
   if(!v||!charging) return '';
-  var c=[];
-  if(v.power>0) c.push(stat('Power',   Math.round(v.power), 'kW', 'ok'));
-  if(v.amps>0)  c.push(stat('Current', Math.round(v.amps),        'A',  'ok'));
-  return c.join('');
+  return (v.power>0?chargeValue('Charging power',v.power,'kW'):'')+
+         (v.amps>0?chargeValue('Charging current',v.amps,'A'):'');
 }
 /* Climate has no per-domain age in /status. Show explicitly cached settings/states, never
    infer current activity from another domain's last_seen_s or attribute charger input to a
    climate function. Raw charger_phases also does not establish the AC topology multiplier. */
-function copChip(s){
-  var c=s&&s.tele&&s.tele.climate;
-  if(!c||(c.cop!=='On'&&c.cop!=='FanOnly')) return '';
-  var tip='Last reported cabin overheat protection setting; current activity and power are unknown'+
-          (c.cop_temp?' · '+c.cop_temp:'');
-  return '<div class="stat cached" title="'+esc(tip)+'"><div class="k"><span>Overheat</span></div>'+
-         '<div class="v">'+(c.cop==='FanOnly'?'Fan only':'On')+'<small> (set)</small></div></div>';
-}
-function defrostChip(s){
-  var c=s&&s.tele&&s.tele.climate;
-  if(!c) return '';
-  var p=[]; if(c.front_defrost===true)p.push('Front'); if(c.rear_defrost===true)p.push('Rear');
-  if(c.defrost_mode==='Normal'||c.defrost_mode==='Max')p.push(c.defrost_mode);
-  if(!p.length) return '';
-  var tip='Last reported defrost state; current activity and power are unknown';
-  return '<div class="stat cached" title="'+tip+'"><div class="k"><span>Defrost (cached)</span></div>'+
-         '<div class="v">'+p.join(' / ')+'</div></div>';
+function climateStatus(c){
+  if(!c) return null;
+  var states=[], defrost=[];
+  if(c.on===true) states.push('Climate control: On');
+  if(c.preconditioning===true) states.push('Preconditioning: Active');
+  if(c.cop==='On'||c.cop==='FanOnly'){
+    var setting=c.cop==='FanOnly'?'Fan only':'On';
+    if(c.cop_temp==='Low'||c.cop_temp==='Medium'||c.cop_temp==='High') setting+=' · '+c.cop_temp;
+    states.push('Cabin overheat protection setting: '+setting);
+  }
+  if(c.cop_cooling===true) states.push('Cabin overheat protection: Cooling');
+  if(c.front_defrost===true) defrost.push('Front');
+  if(c.rear_defrost===true) defrost.push('Rear');
+  if(c.defrost_mode==='Normal'||c.defrost_mode==='Max') defrost.push(c.defrost_mode);
+  if(defrost.length) states.push('Defrost: '+defrost.join(' / '));
+  if(!states.length) return null;
+  return {icon:(defrost.length||c.cop_cooling===true)?'snowflake':'fan',
+          tip:'Last reported:\n'+states.join('\n')+'\nCurrent activity and power are unknown.'};
 }
 // battery at/above its target and not charging → starting a charge is a no-op the car only
 // rejects as "complete". charge_limit is emitted by /status only when the car reported it, so
@@ -479,7 +484,7 @@ function render(s){
 
   // setHTML preserves the hero animation phase between unchanged polls.
   var hic=$("hicon"), hl=$("hlabel"), hs=$("hsub"), hst=$("hstats");
-  var g={mode:'neutral', pct:null, glyph:null, busy:false, limit:null}, head='', sub='', chips='';
+  var g={mode:'neutral', pct:null, glyph:null, busy:false, limit:null}, head='', sub='', chips='', readings='', climate=null;
   var act=null, actLabel='', actIcon='bolt', busyText=null;
   $("hero").classList.remove('hide');
   var blocked=s.pairing_blocked;
@@ -506,7 +511,8 @@ function render(s){
     g={mode:charging?'charging':(complete?'complete':'soc'), pct:soc, busy:chgBusy, limit:num(v.charge_limit), glyph:(soc==null?'car':null)};
     head=complete?'Charge complete':(v.status||'Idle');
     if(soc==null) sub='Battery level not reported yet';
-    chips=chargeStats(v,charging)+copChip(s)+defrostChip(s);
+    readings=chargeStats(v,charging);
+    climate=climateStatus(s.tele&&s.tele.climate);
     if(chgBusy) busyText='Sending command…';
     else if(!complete){ act=toggleCharge; actLabel=charging?'Stop charging':'Start charging'; }
   } else if(paired){
@@ -581,8 +587,15 @@ function render(s){
   setHTML(hic, act ? '<button type="button" class="gbtn" onclick="heroTap()" aria-label="'+esc(actLabel+lvl)+'" title="'+esc(actLabel)+'">'+gm+'</button>'
                    : (busyText ? '<button type="button" class="gbtn" disabled aria-label="'+esc(busyText+lvl)+'">'+gm+'</button>' : gm));
   setHTML(hl,'<span>'+esc(head)+'</span>');
+  $("hlimit").textContent=g.limit==null?'':'Limit '+g.limit+' %';
   hs.textContent=sub;
   hs.style.display=sub?'':'none';
+  setHTML($("hcharge"),readings);
+  var climateInfo=$("hclimate"), climateTip=$("hclimateTip"), tip=climate?climate.tip:'';
+  climateInfo.classList.toggle('hide',!climate);
+  if(!climate) climateInfo.open=false;
+  setHTML($("hclimateIcon"),climate?iconSVG(climate.icon):'');
+  if(climateTip.textContent!==tip) climateTip.textContent=tip;
   setHTML(hst,chips);
   setHeroAct(actLabel,actIcon,act,busyText);
 
@@ -1593,7 +1606,12 @@ function askOtaInstall(status, changelog){
 
 if(typeof document!=='undefined' && typeof document.addEventListener==='function'){
   wireModalFieldSelection(document);
+  var climateDetails=$("hclimate");
+  if(climateDetails && typeof climateDetails.addEventListener==='function'){
+    climateDetails.addEventListener('pointerleave',function(){ climateDetails.classList.remove('dismissed'); });
+  }
   document.addEventListener('click', function(e){
+    if(climateDetails && climateDetails.open && !climateDetails.contains(e.target)) climateDetails.open=false;
     var modalBackdrop = $("otaBackdrop");
     if(modalBackdrop && e.target === modalBackdrop){
       closeOtaModal(false);
@@ -1618,6 +1636,9 @@ if(typeof document!=='undefined' && typeof document.addEventListener==='function
       var modal = $("otaModal");
       if(modal && modal.classList && typeof modal.classList.contains==='function' && !modal.classList.contains('hide')){
         closeOtaModal(false);
+      } else if(climateDetails){
+        climateDetails.open=false;
+        if(climateDetails.matches && climateDetails.matches(':hover')) climateDetails.classList.add('dismissed');
       }
     } else if(e.key==='Enter' && askOpenNow && e.target === $("askInput")){
       e.preventDefault();

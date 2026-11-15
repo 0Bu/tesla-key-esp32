@@ -714,7 +714,7 @@ test("render initializes channel state from running version or status ota channe
   assert.equal(uiDev.element("fwSub").textContent, "Release channel");
 });
 
-test("climate chips label cached settings without inferring AC power or current activity", () => {
+test("climate details label cached settings without inferring AC power or current activity", () => {
   const { context, element } = loadUi();
   for (const phases of [undefined, 0, 1, 2, 3]) {
     for (const last_seen_s of [undefined, 0, 300, 86400]) {
@@ -723,45 +723,52 @@ test("climate chips label cached settings without inferring AC power or current 
         vehicle: { status: "Stopped", actual_amps: 16, volts: 230, phases },
         tele: { climate: { cop: "On", cop_cooling: true, front_defrost: true } }
       });
-      const chips = element("hstats").innerHTML;
-      assert.match(chips, /<span>Overheat<\/span>/);
-      assert.match(chips, /On<small> \(set\)<\/small>/);
-      assert.match(chips, /Defrost \(cached\)/);
-      assert.match(chips, /Last reported cabin overheat protection setting/);
-      assert.match(chips, /Last reported defrost state/);
-      assert.match(chips, /current activity and power are unknown/);
-      assert.doesNotMatch(chips, /kW|AC draw|class="stat (warn|info)"/);
+      const tip = element("hclimateTip").textContent;
+      assert.match(tip, /^Last reported:\nCabin overheat protection setting: On/);
+      assert.match(tip, /Cabin overheat protection: Cooling/);
+      assert.match(tip, /Defrost: Front/);
+      assert.match(tip, /Current activity and power are unknown/);
+      assert.doesNotMatch(tip, /kW|AC draw/);
+      assert.equal(element("hcharge").innerHTML, "");
     }
   }
 });
 
 test("climate settings do not require charger input and reject unknown active states", () => {
   const { context } = loadUi();
-  assert.match(context.copChip({ tele: { climate: { cop: "FanOnly" } } }), /Fan only<small> \(set\)<\/small>/);
-  assert.match(context.defrostChip({ tele: { climate: { rear_defrost: true, defrost_mode: "Max" } } }), /Rear \/ Max/);
+  assert.equal(context.climateStatus({ cop: "FanOnly", cop_temp: "Medium" }).icon, "fan");
+  assert.match(context.climateStatus({ cop: "FanOnly", cop_temp: "Medium" }).tip, /Fan only · Medium/);
+  assert.match(context.climateStatus({ rear_defrost: true, defrost_mode: "Max" }).tip, /Rear \/ Max/);
+  assert.equal(context.climateStatus({ rear_defrost: true }).icon, "snowflake");
+  assert.equal(context.climateStatus({ cop_cooling: true }).icon, "snowflake");
+  assert.match(context.climateStatus({ on: true, preconditioning: true }).tip, /Climate control: On\nPreconditioning: Active/);
   for (const cop of [undefined, "Off", "Unknown", "<script>"]) {
-    assert.equal(context.copChip({ tele: { climate: { cop } } }), "");
+    assert.equal(context.climateStatus({ cop }), null);
   }
   for (const defrost_mode of [undefined, "Off", "Unknown", "<script>"]) {
-    assert.equal(context.defrostChip({ tele: { climate: { front_defrost: false, rear_defrost: false, defrost_mode } } }), "");
+    assert.equal(context.climateStatus({ front_defrost: false, rear_defrost: false, defrost_mode }), null);
   }
-  const escaped = context.copChip({ tele: { climate: { cop: "On", cop_temp: '<img src=x onerror="alert(1)">' } } });
-  assert.doesNotMatch(escaped, /<img/);
-  assert.match(escaped, /&lt;img/);
-  assert.equal(context.copChip({}), "");
-  assert.equal(context.defrostChip({}), "");
+  const ignored = context.climateStatus({ cop: "On", cop_temp: '<img src=x onerror="alert(1)">' });
+  assert.doesNotMatch(ignored.tip, /<img/);
+  assert.equal(context.climateStatus(), null);
 });
 
-test("charging power remains vehicle-reported alongside explicitly cached climate chips", () => {
+test("charging power remains vehicle-reported alongside explicitly cached climate details", () => {
   const { context, element } = loadUi();
   context.render({
     paired: true, last_seen_s: 0,
     vehicle: { status: "Charging", power: 11, amps: 16, actual_amps: 16, volts: 230, phases: 2 },
     tele: { climate: { cop: "On", front_defrost: true } }
   });
-  assert.match(element("hstats").innerHTML, /Power.*11<small>kW/);
-  assert.match(element("hstats").innerHTML, /Defrost \(cached\)/);
-  assert.doesNotMatch(context.copChip(context.state) + context.defrostChip(context.state), /kW/);
+  assert.match(element("hcharge").innerHTML, /Charging power.*11 <small>kW/);
+  assert.match(element("hclimateTip").textContent, /Defrost: Front/);
+  assert.doesNotMatch(element("hclimateTip").textContent, /kW/);
+  context.render({ paired: true, vehicle: { status: "Starting", soc: 42, charge_limit: 80 } });
+  assert.equal(element("hlimit").textContent, "Limit 80 %");
+  assert.doesNotMatch(element("hicon").innerHTML, /Limit/);
+  assert.match(element("hicon").innerHTML, /42<small>%/);
+  assert.equal(element("hcharge").innerHTML, "");
+  assert.equal(element("hclimate").classList.contains("hide"), true);
 });
 
 test("awake without fresh charge shows last-known battery and offers no action", () => {
@@ -773,6 +780,9 @@ test("awake without fresh charge shows last-known battery and offers no action",
     assert.match(element("hstats").innerHTML, /Last battery/);
     assert.doesNotMatch(element("hstats").innerHTML, /Power|kW|Idle/);
     assert.match(element("hstats").innerHTML, />0<\/span>/);
+    assert.equal(element("hlimit").textContent, "");
+    assert.equal(element("hcharge").innerHTML, "");
+    assert.equal(element("hclimate").classList.contains("hide"), true);
     assert.equal(context.heroActFn, null);
     if (charge_age_s !== undefined) assert.match(element("hstats").innerHTML, /Updated/);
   }
@@ -2734,7 +2744,7 @@ test("a paired vehicle without a reported battery level shows no 0 % gauge", () 
   context.render({ paired: true, key_present: true, vin: "5YJ3E1EB8NF123456",
                    vehicle: { status: "Idle" } });
   const gauge = element("hicon").innerHTML;
-  assert.doesNotMatch(gauge, /<b>0<small>%/, "an unknown level must not read as an empty battery");
+  assert.doesNotMatch(gauge, /class="gnum"/, "an unknown level must not read as an empty battery");
   assert.doesNotMatch(gauge, /battery 0 %/);
   assert.doesNotMatch(gauge, /garc/, "no arc is drawn for an unknown level");
   assert.match(gauge, /gglyph/, "an unknown-level glyph is shown instead of a number");
@@ -2742,10 +2752,10 @@ test("a paired vehicle without a reported battery level shows no 0 % gauge", () 
   // A real level, including a genuine 0 %, is still rendered.
   context.render({ paired: true, key_present: true, vin: "5YJ3E1EB8NF123456",
                    vehicle: { status: "Idle", soc: 0 } });
-  assert.match(element("hicon").innerHTML, /<b>0<small>%/);
+  assert.match(element("hicon").innerHTML, /class="gnum">0<small>%/);
   context.render({ paired: true, key_present: true, vin: "5YJ3E1EB8NF123456",
                    vehicle: { status: "Idle", soc: 64 } });
-  assert.match(element("hicon").innerHTML, /<b>64<small>%/);
+  assert.match(element("hicon").innerHTML, /class="gnum">64<small>%/);
 });
 
 test("a failed BLE link without any RSSI shows no 0 dBm reading", () => {

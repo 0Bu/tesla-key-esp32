@@ -136,6 +136,7 @@ The device HTTP API has no authentication or TLS; use it only on a trusted LAN
 | In-RAM diag ring (`GET /diag`) | `main/diag_log.cpp` (size `CONFIG_TESLA_DIAG_LOG_BYTES`, `main/Kconfig.projbuild`), `main/http_status.cpp` | Network log reads holding the ring lock |
 | MQTT device diagnostics | `main/mqtt_ha.cpp` | Missing reset, heap and stack fleet diagnostics |
 | Explicit web-feed availability and gauge actions | `main/www/app.js`, `index.html`, `style.css`; `test/web_ui_http.test.mjs`, `web_ui_browser_gate.py` | Failed polling presenting stale data as live |
+| Cache-aware vehicle status card and climate details | `main/www/app.js`, `index.html`, `style.css`; `test/web_ui_http.test.mjs`, `web_ui_browser_gate.py` | Presenting a retained climate setting as current activity or attributing charger power to climate |
 | Golden-pinned `/status` contract | `logic/status_model.hpp`, `test/test_logic.cpp` | Silent status schema drift |
 | Independent live ChargeState freshness | `logic/charge_control.hpp`, `logic/status_model.hpp`, `vehicle_ctrl.cpp`, `http_status.cpp`, `main/www/app.js`; [status API](API.md#status-fields) | Unrelated telemetry refreshing a stale charge sample |
 | evcc numeric field availability | `logic/vehicle_data.hpp`, `test/test_cjson_oom.cpp`; [vehicle data](API.md#vehicle-data) | Absent numbers reported as zero or invalid odometer success |
