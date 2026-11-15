@@ -326,7 +326,40 @@ console.error = function() {
     const evccText = window.__browserGateEvccExample.replace(/^(#[^\n]*\n)+/, "")
       .split("DEVICE_HOST").join("192.0.2.10").split("REPLACE_WITH_VIN").join(evccVin);
     check(evccText.startsWith("title:") && !/DEVICE_HOST|REPLACE_WITH_VIN/.test(evccText), "evcc example fixture");
-    render({vin: evccVin, ip: "192.0.2.10", key_present: true, paired: true, paired_at: 1781222400});
+    const settingsFrame = {vin: evccVin, ip: "192.0.2.10", key_present: true, paired: true,
+      paired_at: 1781222400, key_created: 1781222400, key_fingerprint: "00:11:22:33",
+      eth: {link: true, speed: 100, full_duplex: true},
+      ble: {connected: true, addr: "02:00:00:00:00:01", rssi: -72}, link: "awake",
+      mqtt: {configured: true, connected: true, broker: "192.0.2.20:1883"},
+      syslog: {configured: true, resolved: true, reachable: true, host: "192.0.2.30"}, version: "1.6.0"};
+    render(settingsFrame);
+    const settings = document.getElementById("paneSettings");
+    const settingsBackground = getComputedStyle(settings).backgroundColor;
+    const settingsFont = getComputedStyle(settings.querySelector(".rl"));
+    for (const row of settings.querySelectorAll(".row")) {
+      const box = row.getBoundingClientRect(), icon = row.querySelector(".ri").getBoundingClientRect();
+      check(Math.abs(box.top + row.clientTop - icon.top) <= 1 && Math.abs(box.bottom - icon.bottom) <= 1,
+            row.id + " icon spans the row content height");
+      for (const text of row.querySelectorAll(".rl,.rv,.rs")) {
+        const style = getComputedStyle(text);
+        check(style.fontFamily === settingsFont.fontFamily && style.fontSize === settingsFont.fontSize,
+              text.id + " uses the common settings typography");
+        check(contrast(style.color, settingsBackground) >= 4.5, text.id + " settings contrast >=4.5");
+      }
+      check(row.scrollWidth <= row.clientWidth + 1, row.id + " content fits its row");
+    }
+    const mqttStatus = document.getElementById("mqttSt");
+    const normalStatusColor = getComputedStyle(mqttStatus).color;
+    check(mqttStatus.textContent === "Connected", "healthy MQTT has one textual status");
+    render({...settingsFrame, mqtt: {...settingsFrame.mqtt, connected: false,
+      error: "Connection timed out while trying to reach the configured broker"}});
+    const warningColor = getComputedStyle(mqttStatus).color;
+    check(mqttStatus.textContent.includes("Connection timed out") && warningColor !== normalStatusColor &&
+          contrast(warningColor, settingsBackground) >= 4.5, "MQTT failure remains readable and highlighted");
+    check(mqttStatus.scrollWidth <= mqttStatus.clientWidth + 1, "a long failure reason wraps inside the row");
+    render(settingsFrame);
+    check(mqttStatus.textContent === "Connected" && getComputedStyle(mqttStatus).color === normalStatusColor,
+          "a recovered connection clears the warning style");
     const evccPill = document.getElementById("evccBtn"), vinPencil = document.getElementById("vinBtn");
     const vehicleRow = document.getElementById("rowVeh");
     check(getComputedStyle(evccPill).display !== "none", "evcc pill is visible with a VIN and lease");

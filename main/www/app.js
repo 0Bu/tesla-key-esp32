@@ -409,11 +409,10 @@ function heroTap(){ if(heroActFn) return heroActFn(); }
 function setHeroAct(label,icon,fn,busyText){ heroActFn=busyText?null:fn; }
 
 /* ---------- render ---------- */
-// Connection row: tone ('ok' | 'warn' | '') colours the icon dot, status line and signal glyph.
+// Highlight warnings. Routine states and signal indicators share the neutral text color.
 function setRow(key,tone,valueHTML,statusHTML,barsMarkup){
-  var d=$(key+'Dot'); if(d) d.className='dot'+(tone?' '+tone:'');
   setHTML($(key+'Val'),valueHTML);
-  var st=$(key+'St'); if(st){ st.className='rs'+(tone&&tone!=='err'?' '+tone:''); setHTML(st,statusHTML); }
+  var st=$(key+'St'); if(st){ st.className='rs'+(tone?' '+tone:''); setHTML(st,statusHTML); }
   var b=$(key+'Bars'); if(b){ b.className='rbar'+(tone?' '+tone:''); setHTML(b,barsMarkup||''); }
 }
 function lastChips(s){
@@ -443,17 +442,17 @@ function render(s){
   if(e && e.link){
     $("wifiLbl").textContent='Ethernet';
     if(wi&&wi.classList) wi.classList.add('hide'); if(ei&&ei.classList) ei.classList.remove('hide');
-    setRow('wifi','ok', e.speed?esc(e.speed+' Mbit'+(e.full_duplex?' full duplex':' half duplex')):'Link up', 'Connected', '');
+    setRow('wifi','', e.speed?esc(e.speed+' Mbit'+(e.full_duplex?' full duplex':' half duplex')):'', 'Connected');
   } else {
     $("wifiLbl").textContent = w.std || 'Wi-Fi';   // standard sits in the label, e.g. "Wi-Fi 4"
     if(wi&&wi.classList) wi.classList.remove('hide'); if(ei&&ei.classList) ei.classList.add('hide');
     if(w.ssid||s.ip){
       var wr=num(w.rssi);
-      setRow('wifi','ok', w.ssid?esc(w.ssid):'Connected', 'Connected'+(wr!=null?' · '+wr+' dBm':''), (wr!=null)?barsHTML(wr):'');
+      setRow('wifi','', esc(w.ssid||''), 'Connected'+(wr!=null?' · '+wr+' dBm':''), (wr!=null)?barsHTML(wr):'');
     } else {
       // not connected — the bars fill up one after another while the device keeps reconnecting.
       // setHTML keeps the same bar nodes between polls so the fill animation doesn't restart.
-      setRow('wifi','warn','Searching…','Reconnecting',searchBarsHTML());
+      setRow('wifi','warn','','Reconnecting…',searchBarsHTML());
     }
   }
 
@@ -588,9 +587,9 @@ function render(s){
   setHeroAct(actLabel,actIcon,act,busyText);
 
   // setup tiles ----------------------------------------------------
-  $("vehVal").innerHTML=hasVin?esc(s.vin):'<span class="ph">Not set</span>';
-  var pairedTxt=s.paired_at?('Session first observed '+new Date(s.paired_at*1000).toLocaleDateString(undefined,{year:'numeric',month:'short',day:'numeric'})):'Paired with the vehicle';
-  setSub("vehSub", paired?pairedTxt:(hasVin?'Not paired yet':'Add the VIN to begin'), '');
+  setHTML($("vehVal"), hasVin?esc(s.vin):'No VIN configured');
+  var pairedTxt=paired&&s.paired_at?('Session first observed '+new Date(s.paired_at*1000).toLocaleDateString(undefined,{year:'numeric',month:'short',day:'numeric'})):'';
+  $("vehSub").textContent=pairedTxt;
   var vinTx=hasVin?'Change VIN':'Add VIN';
   var vb=$("vinBtn"); if(vb){ vb.setAttribute('aria-label',vinTx); vb.setAttribute('title',vinTx); }
   var eb=$("evccBtn"); if(eb) eb.classList.toggle('hide',!evccYaml(s));
@@ -607,13 +606,13 @@ function render(s){
       '<span class="btlist">'+devs.map(function(x){ var r=num(x.rssi); return '<span>'+esc(x.addr)+(r!=null?' · '+r+' dBm':'')+'</span>'; }).join('')+'</span>',
       'Add a VIN to pair', '');
   } else if(d.row==='discovering'){
-    // No VIN and nothing seen yet — the one "Searching…" with nothing to count down.
-    setRow('ble','warn','Searching…','Scanning for Teslas',searchBarsHTML());
+    // Without a VIN, discovery runs without a connection countdown.
+    setRow('ble','','','Scanning for Teslas…',searchBarsHTML());
   } else if(d.row==='linked'){
     // The GATT link is up. Stateless (paired but reachability unknown/stale) shows the amber wave
-    // instead of healthy green bars — the link is connected yet knows nothing.
+    // instead of the usual signal bars — the link is connected yet knows nothing.
     var br=num(ble.rssi);
-    setRow('ble', d.stateless?'warn':'ok', ble.addr?'<span class="mono">'+esc(ble.addr)+'</span>':'Connected',
+    setRow('ble', d.stateless?'warn':'', esc(ble.addr||''),
       (d.stateless?'Connected · status unknown':'Connected')+(br!=null?' · '+br+' dBm':''),
       d.stateless?waveBarsHTML():(br!=null?barsHTML(br):''));
   } else if(d.row==='failed'){
@@ -621,15 +620,15 @@ function render(s){
     // (the signal is fine, the link slot is not). Null-safe "strongest nearby advert" fallback:
     // take the first, then the least-negative RSSI; empty devices[] → null.
     var sr=num((ble.rssi!=null)?ble.rssi:(ble.devices||[]).reduce(function(a,x){return (a==null||x.rssi>a)?x.rssi:a;},null));
-    setRow('ble','warn', (ble.car_connectable===false)?'At connection limit':'Connection failed',
-      'Failed'+(sr!=null?' · '+sr+' dBm':''), barsHTML(sr));
+    setRow('ble','warn','', ((ble.car_connectable===false)?'At connection limit':'Connection failed')+
+      (sr!=null?' · '+sr+' dBm':''), barsHTML(sr));
   } else if(d.row==='scanning'){
     // A bounded connect attempt is running. The countdown lives in its own node (painted by
     // paintCd) so the bar fill animation is never restarted by the 1 s tick.
-    setRow('ble','warn','Searching…','Connecting · '+cdHTML(d.cd),searchBarsHTML(true));
+    setRow('ble','','','Connecting · '+cdHTML(d.cd),searchBarsHTML(true));
   } else {
     // Link down, next attempt scheduled (or none). Outlined empty bars hold the row's shape.
-    setRow('ble','','Disconnected', d.cd==='retries'?'Waiting · '+cdHTML(d.cd):'Idle', emptyBarsHTML());
+    setRow('ble','','','Disconnected'+(d.cd==='retries'?' · '+cdHTML(d.cd):''), emptyBarsHTML());
   }
   // Paint immediately after a push so replaced countdown nodes are never blank.
   cdSync(d.cd,num(ble.phase_s));
@@ -638,19 +637,19 @@ function render(s){
   // MQTT — Home Assistant bridge
   var mq=s.mqtt||{};
   if(!mq.configured && mq.error) setRow('mqtt','warn','','Error · '+esc(mq.error));
-  else if(!mq.configured) setRow('mqtt','','<span class="ph">Not configured</span>','Disabled');
-  else if(mq.connected) setRow('mqtt','ok',esc(mq.broker||''),'Connected'+(mq.tls?' · secured':''));
-  else { setRow('mqtt','warn',esc(mq.broker||''),'Disconnected · '+esc(mq.error||'not connected')); }
+  else if(!mq.configured) setRow('mqtt','','','Not configured');
+  else if(mq.connected) setRow('mqtt','',esc(mq.broker||''),'Connected'+(mq.tls?' · secured':''));
+  else setRow('mqtt','warn',esc(mq.broker||''),'Disconnected'+(mq.error?' · '+esc(mq.error):''));
 
   // Syslog — UDP diag-log forwarder. Delivery is gated on DNS only (resolved); reachability is an
   // advisory ping hint, so a resolved-but-not-answering host still shows the destination, flagged.
   var sy=s.syslog||{};
   if(sy.error){ setRow('syslog','warn',esc(sy.host?(sy.host+':'+(sy.port||514)):''),'Error · '+esc(sy.error)); }
-  else if(!sy.configured) setRow('syslog','','<span class="ph">Not configured</span>','Disabled');
+  else if(!sy.configured) setRow('syslog','','','Not configured');
   else if(sy.resolved){
-    setRow('syslog',sy.reachable?'ok':'warn',esc(sy.host+':'+(sy.port||514)),sy.reachable?'Sending · UDP':'Not answering ping');
+    setRow('syslog',sy.reachable?'':'warn',esc(sy.host+':'+(sy.port||514)),sy.reachable?'Sending · UDP':'Not answering ping');
   }
-  else { setRow('syslog','warn','Resolving…','Resolving'); }
+  else setRow('syslog','','','Resolving…');
 
   // header + firmware pane
   renderIpLine();
@@ -675,20 +674,16 @@ function render(s){
   var keyTx=s.key_present?'Regenerate key':'Generate key';
   var kbBtn=$("keyBtn");
   if(kbBtn){ kbBtn.setAttribute('aria-label',keyTx); kbBtn.setAttribute('title',keyTx); }
-  if(s.key_present){
-    $("keyVal").innerHTML=esc(s.key_fingerprint||'');
-    var created=s.key_created?('Created '+new Date(s.key_created*1000).toLocaleDateString(undefined,{year:'numeric',month:'short',day:'numeric'})):'';
-    if(s.reauth) setSub("keySub",'Existing key preserved — connection needs attention','warn');
-    else if(paired) setSub("keySub",created?created+' · paired':'Paired with the vehicle','ok');
-    else setSub("keySub",(created?created+' · ':'')+'not paired yet','');
-  } else {
-    $("keyVal").innerHTML='<span class="ph">Not generated</span>';
-    setSub("keySub",'No key yet','');
-  }
+  setHTML($("keyVal"), s.key_present?esc(s.key_fingerprint||''):'');
+  var keyStatus=$("keySub"), keyWarning=!!(s.key_present&&s.reauth);
+  var created=s.key_created?new Date(s.key_created*1000).toLocaleDateString(undefined,{year:'numeric',month:'short',day:'numeric'}):'';
+  keyStatus.classList.toggle('warn',keyWarning);
+  if(!s.key_present) keyStatus.textContent='Not generated';
+  else if(keyWarning) keyStatus.textContent='Existing key preserved — connection needs attention';
+  else keyStatus.textContent=(paired?'Paired':'Not paired')+(created?' · Created '+created:'');
 
   if(typeof syncOtaUi === 'function') syncOtaUi();
 }
-function setSub(id,txt,cls){ var e=$(id); if(e){ e.className='rs'+(cls?' '+cls:''); e.textContent=txt; } }
 
 function formatVerVerbatim(v){
   var raw = String(v || '').trim();
@@ -700,9 +695,7 @@ function renderIpLine(){
   var el = $("ipline");
   if(!el) return;
   var host = (typeof location !== 'undefined' && location.host) ? location.host : '';
-  var ip = (state && state.ip) ? state.ip : host;
-  var ver = formatVerVerbatim(state && state.version);
-  el.textContent = ip + (ver ? (' · ' + ver) : '');
+  el.textContent = (state && state.ip) ? state.ip : host;
 }
 
 function renderFwVer(){

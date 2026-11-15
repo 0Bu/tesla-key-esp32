@@ -623,7 +623,7 @@ test("setup form enforces the shared WiFi credential contract without optimistic
 
 test("firmware card exposes update channel modal and update check button", () => {
   const html = fs.readFileSync(new URL("../main/www/index.html", import.meta.url), "utf8");
-  assert.match(html, /<button type="button" class="ver-btn" id="verLink" onclick="openChannelSelect\(\)" title="Change update channel"/);
+  assert.match(html, /<button type="button"[^>]*id="verLink" onclick="openChannelSelect\(\)" title="Change update channel"/);
   assert.match(html, /<button type="button" class="ib" id="fwCheckBtn" onclick="openFwUpdate\(\)" aria-label="Check for firmware updates"/);
   assert.match(html, /id="chanModal"[\s\S]*?id="chanOptRelease"[\s\S]*?id="chanOptDev"/);
   assert.match(html, /id="verLink"[\s\S]*?id="fwVer"[\s\S]*?id="fwCheckBtn"/);
@@ -1526,7 +1526,8 @@ test("index.html defines SVG symbols, harmonizes setup rows, and drops dead butt
   assert.doesNotMatch(html, /id="keyBtnTx"/);
 
   // Harmonized settings card
-  assert.match(html, /<section class="pane pane-setup card rows"[^>]*aria-label="Device settings"/);
+  assert.match(html, /<section class="pane pane-setup card rows"[^>]*aria-labelledby="settingsTitle"/);
+  assert.match(html, /<h2[^>]*id="settingsTitle">Device settings<\/h2>/);
   assert.match(html, /<div class="row" id="rowVeh">[\s\S]*?id="vehVal"[\s\S]*?id="vinBtn"/);
   assert.match(html, /<div class="row" id="rowKey">[\s\S]*?id="keyVal"[\s\S]*?id="keyBtn"/);
 });
@@ -1606,7 +1607,7 @@ test("otaProgress throttles download toasts to 10% milestones while maintaining 
   assert.equal(element("otaFill").style.width, "100%");
 });
 
-test("firmware version formatting and header ipline display", () => {
+test("firmware version stays in its row and the header shows the device address", () => {
   const { context, element } = loadUi();
 
   // Verbatim version formatting (F13: no invented suffixes)
@@ -1617,13 +1618,12 @@ test("firmware version formatting and header ipline display", () => {
   assert.equal(context.formatVerVerbatim(""), "");
   assert.equal(context.formatVerVerbatim(null), "");
 
-  // Header ipline rendering: <ip> · <version>
   context.render({
     ip: "192.0.2.1",
     version: "1.6.0",
     key_present: false
   });
-  assert.equal(element("ipline").textContent, "192.0.2.1 · v1.6.0");
+  assert.equal(element("ipline").textContent, "192.0.2.1");
   assert.equal(element("fwVer").textContent, "v1.6.0");
 });
 
@@ -2105,7 +2105,7 @@ test("firmware card displays version with accessible verLink button and channel 
   assert.match(html, /<div class="row row-fw" id="rowFw">[\s\S]*?id="verLink"[\s\S]*?id="fwCheckBtn"/);
   assert.doesNotMatch(html, /id="chanBtn"/);
   assert.match(html, /id="fwSub"/);
-  assert.match(html, /<button type="button" class="ver-btn" id="verLink" onclick="openChannelSelect\(\)"/);
+  assert.match(html, /<button type="button"[^>]*id="verLink" onclick="openChannelSelect\(\)"/);
 
   const { context, element } = loadUi();
   context.render({ version: "1.4.0", ota: { channel: "release" } });
