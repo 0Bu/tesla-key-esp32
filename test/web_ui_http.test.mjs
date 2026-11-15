@@ -724,7 +724,8 @@ test("climate chips label cached settings without inferring AC power or current 
         tele: { climate: { cop: "On", cop_cooling: true, front_defrost: true } }
       });
       const chips = element("hstats").innerHTML;
-      assert.match(chips, /Overheat setting/);
+      assert.match(chips, /<span>Overheat<\/span>/);
+      assert.match(chips, /On<small> \(set\)<\/small>/);
       assert.match(chips, /Defrost \(cached\)/);
       assert.match(chips, /Last reported cabin overheat protection setting/);
       assert.match(chips, /Last reported defrost state/);
@@ -736,7 +737,7 @@ test("climate chips label cached settings without inferring AC power or current 
 
 test("climate settings do not require charger input and reject unknown active states", () => {
   const { context } = loadUi();
-  assert.match(context.copChip({ tele: { climate: { cop: "FanOnly" } } }), /Fan only/);
+  assert.match(context.copChip({ tele: { climate: { cop: "FanOnly" } } }), /Fan only<small> \(set\)<\/small>/);
   assert.match(context.defrostChip({ tele: { climate: { rear_defrost: true, defrost_mode: "Max" } } }), /Rear \/ Max/);
   for (const cop of [undefined, "Off", "Unknown", "<script>"]) {
     assert.equal(context.copChip({ tele: { climate: { cop } } }), "");
@@ -1525,9 +1526,8 @@ test("index.html defines SVG symbols, harmonizes setup rows, and drops dead butt
   assert.doesNotMatch(html, /id="vinBtnTx"/);
   assert.doesNotMatch(html, /id="keyBtnTx"/);
 
-  // Harmonized settings card
-  assert.match(html, /<section class="pane pane-setup card rows"[^>]*aria-labelledby="settingsTitle"/);
-  assert.match(html, /<h2[^>]*id="settingsTitle">Device settings<\/h2>/);
+  // The settings card has an accessible name and starts directly with the Vehicle row.
+  assert.match(html, /<section class="pane pane-setup card rows"[^>]*aria-label="Device settings">\s*<div class="row" id="rowVeh">/);
   assert.match(html, /<div class="row" id="rowVeh">[\s\S]*?id="vehVal"[\s\S]*?id="vinBtn"/);
   assert.match(html, /<div class="row" id="rowKey">[\s\S]*?id="keyVal"[\s\S]*?id="keyBtn"/);
 });

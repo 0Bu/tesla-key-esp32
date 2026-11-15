@@ -372,8 +372,8 @@ function copChip(s){
   if(!c||(c.cop!=='On'&&c.cop!=='FanOnly')) return '';
   var tip='Last reported cabin overheat protection setting; current activity and power are unknown'+
           (c.cop_temp?' · '+c.cop_temp:'');
-  return '<div class="stat cached" title="'+esc(tip)+'"><div class="k"><span>Overheat setting</span></div>'+
-         '<div class="v">'+(c.cop==='FanOnly'?'Fan only':'On')+'</div></div>';
+  return '<div class="stat cached" title="'+esc(tip)+'"><div class="k"><span>Overheat</span></div>'+
+         '<div class="v">'+(c.cop==='FanOnly'?'Fan only':'On')+'<small> (set)</small></div></div>';
 }
 function defrostChip(s){
   var c=s&&s.tele&&s.tele.climate;

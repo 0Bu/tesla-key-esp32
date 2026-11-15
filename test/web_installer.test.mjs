@@ -2168,11 +2168,11 @@ test("the installer's flash layout mirrors partitions.csv", () => {
   assert.equal(rows.get("ota_1").offset + rows.get("ota_1").size, 0x400000, "the table fills exactly 4 MB");
 });
 
-test("the published page keeps one card, one always visible log and the Tesla styling", () => {
+test("the published page shows one always visible log above the after-flashing card", () => {
   const html = fs.readFileSync(new URL("../docs/index.html", import.meta.url), "utf8");
   for (const id of ["web-installer", "connect-button", "disconnect-button", "reset-button", "flash-button",
     "clean-flash-button", "serial-monitor-output", "serial-monitor-live", "firmware-version-value", "firmware-meta",
-    "firmware-channel-value", "firmware-source-link"]) {
+    "firmware-channel-value", "firmware-source-link", "after-title"]) {
     assert.equal((html.match(new RegExp(`id="${id}"`, "g")) || []).length, 1, id);
   }
   // Device controls come first; until the page has checked its offer and a device they are greyed out.
@@ -2183,18 +2183,20 @@ test("the published page keeps one card, one always visible log and the Tesla st
     assert.doesNotMatch(tag, /\shidden\b/, id);
   }
   assert.match(html, /<button[^>]*id="disconnect-button"[^>]*hidden disabled>/);
+  assert.match(html, /id="connect-button"[^>]*title="Restarts the board to check its chip, layout and firmware"/);
+  assert.match(html, /href="https:\/\/github\.com\/0Bu\/tesla-key-esp32\/blob\/main\/docs\/USER_GUIDE\.md#updates-and-recovery"[^>]*>USB help<\/a>/);
   assert.match(html, /<div class="installer-group" aria-label="Firmware">\s*<button[^>]*id="flash-button"[^>]*>Flash<\/button>\s*<button[^>]*id="clean-flash-button"[^>]*>Clean flash<\/button>\s*<\/div>/);
   assert.match(html, /id="flash-button"[^>]*title="Keeps WiFi, VIN, pairing key and sessions"/);
   assert.match(html, /id="clean-flash-button"[^>]*title="Erases all flash, including WiFi, VIN and the pairing key; asks for confirmation"/);
-  // One card: no step rail, choice tiles, progress bar, success banner, monitor toggle or permission button.
+  // Keep the controls compact, with progress inside the active button.
   assert.doesNotMatch(html, /installer-rail|installer-step|install-mode|type="radio"|installer-progress|role="progressbar"|installer-success|serial-monitor-button|release-serial-port|Remove browser permission|page-status/);
   // The log has a fixed height, keeps long lines unwrapped and cannot be collapsed.
-  assert.match(html, /\.installer-monitor-output \{[^}]*height:clamp\(240px, 55vh, 480px\);[^}]*overflow-x:auto;[^}]*white-space:pre;/s);
+  assert.match(html, /\.installer-monitor-output \{[^}]*height:clamp\(180px, 41\.25vh, 360px\);[^}]*overflow-x:auto;[^}]*white-space:pre;/s);
   assert.match(html, /<pre class="installer-monitor-output" id="serial-monitor-output" role="log"><\/pre>/);
   // Progress fills the clicked button; colours set background-color only, so they never wipe it.
   assert.match(html, /\.installer-button\[data-progress\] \{[^}]*opacity:1;[^}]*linear-gradient\(to right, var\(--progress-fill\) var\(--progress, 0%\)/s);
   assert.doesNotMatch(html, /(installer-button[^{]*|#clean-flash-button) \{[^}]*\bbackground:/);
-  // Tesla red is reserved for the primary action and errors; installer lines are bold, not red.
+  // Secondary buttons use neutral colors. Installer status lines use the foreground color.
   assert.match(html, /--accent:#E82127;/);
   assert.match(html, /\.installer-button-secondary \{ color:var\(--fg\); background-color:var\(--card\); border:1px solid var\(--line\); \}/);
   assert.match(html, /\.installer-monitor-line-status \{ color:var\(--fg\); \}/);
@@ -2202,12 +2204,15 @@ test("the published page keeps one card, one always visible log and the Tesla st
   assert.match(html, /<span class="installer-logo" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M13 2 4 14h6l-1 8 9-12h-6l1-8z"\/><\/svg><\/span>/);
   // The commit link never leaves a running install.
   assert.match(html, /<a id="firmware-source-link" target="_blank" rel="noopener noreferrer"><\/a>/);
-  // Short notes below the card; WiFi and VIN are entered in the setup network, not on this page.
-  assert.match(html, /<strong>Clean flash<\/strong> erases WiFi, VIN, MQTT, the pairing key and sessions after a confirmation; then join <code>tesla-key-esp32-setup<\/code> and enter WiFi and VIN\. <strong>Flash<\/strong> keeps all of it\./);
-  assert.match(html, /<code>http:\/\/tesla-key-esp32\.local<\/code>\. Key setup and pairing run automatically; when pairing is needed, place a Tesla keycard on the console reader/);
+  // The instructions follow the log in their own card, with three device setup steps.
+  const after = /<section class="installer-card installer-after" aria-labelledby="after-title">([\s\S]*?)<\/section>/.exec(html);
+  assert.ok(after && after.index > html.indexOf('id="serial-monitor-output"'));
+  assert.match(after[1], /<h2[^>]*id="after-title">After flashing<\/h2>/);
+  assert.equal((after[1].match(/<li>/g) || []).length, 3);
+  assert.match(after[1], /<strong>Clean flash<\/strong> erases WiFi, VIN, MQTT, the pairing key and sessions after a confirmation; then join <code>tesla-key-esp32-setup<\/code> and enter WiFi and VIN\. <strong>Flash<\/strong> keeps all of it\./);
+  assert.match(after[1], /<code>http:\/\/tesla-key-esp32\.local<\/code>\. Key setup and pairing run automatically; when pairing is needed, place a Tesla keycard on the console reader/);
   assert.doesNotMatch(html, /generate the key/i, "the key is created automatically; regenerating it destroys a pairing");
-  assert.match(html, /<strong>Connecting restarts the board:<\/strong>/);
-  assert.match(html, /<strong>Two USB ports\?<\/strong>/);
+  assert.doesNotMatch(html, /Connecting restarts the board|Two USB ports\?/);
   assert.doesNotMatch(html, /type="password"|name="vin"/i);
   // Licence notices ship with the page; every link opens beside a running install.
   assert.match(html, /<a href="\.\/LICENSE" target="_blank" rel="noopener noreferrer">AGPL-3\.0<\/a>/);
