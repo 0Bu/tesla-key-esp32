@@ -19,101 +19,34 @@ upstream support becomes available. The old deadline is superseded; it is no lon
 
 ## Execution (2026-09-24)
 
-The maintainer decided to execute option A ahead of the dated trigger instead of waiting for
-upstream. The evaluation recorded in #61 found no reason for a fork:
+Patch 0006 ported v5.2.0 to PSA on ESP-IDF v6.1. PSA owns P-256 key generation/agreement,
+AES-128-GCM, HMAC-SHA256, hashes and RNG. `mbedtls_pk` still imports/exports legacy SEC1 PEM,
+preserving enrolled keys and NVS. A failed nonce draw aborts encryption. First-boot key load and
+generation run with SAR-ADC entropy before the radios start.
 
-- **Delivery vehicle: patch, not fork.** The port is one more entry in the ordered, hash-checked
-  `patches/tesla-ble/` series (0006, after 0004/0005) against the unchanged pin `v5.2.0`. The
-  Component Manager only verifies local modifications of managed components when
-  `IDF_COMPONENT_STRICT_CHECKSUM` is set, so the existing apply step works on ESP-IDF 6 as it
-  did on 5.x. Renovate keeps tracking upstream, a tesla-ble change that touches the patched
-  lines fails the build instead of silently mis-applying, and the same diff can be offered
-  upstream. A fork would carry identical code and flash cost plus a second repository.
-- **Scope of 0006.** `crypto_context.{h,cpp}`, `include/peer.h`, `peer.cpp`, `client.h` and `vin_utils.cpp`: the
-  client key lives in the PSA key store (`psa_generate_key`, `psa_raw_key_agreement`,
-  `psa_export_public_key`), AES-128-GCM and HMAC-SHA256 use `psa_aead_*`/`psa_mac_compute`,
-  SHA-1/SHA-256 use `psa_hash_compute`, and `psa_generate_random` replaces CTR-DRBG.
-  `mbedtls_pk` remains only for SEC1 PEM import/export, so stored keys and pairings survive. The
-  firmware's key-fingerprint helper moved to the same public PK→PSA path. A failed RNG read for a
-  GCM nonce now fails `encrypt` instead of encrypting under an unfilled nonce.
-- **Response authentication — the one behaviour change in September.** Upstream v5.2.0 computed the AES-GCM tag of an
-  encrypted response (`mbedtls_gcm_finish`) and never compared it, so the ESP-IDF 5 firmware
-  accepted any response tag. `psa_aead_verify` compares it, and 0006 keeps that, as
-  vehicle-command's `Signer.Decrypt` does. Verifying the tag exposed an upstream departure the
-  unchecked tag had hidden: tesla-ble built the response metadata from its own request counter,
-  while protocol.md and `Signer.Decrypt` bind `TAG_COUNTER` to the counter the response carries
-  (the vehicle counts responses per request; VCSEC sends up to three). 0006 follows the reference:
-  `Peer::decrypt_response` takes the response's counter, `construct_response_ad_buffer` builds
-  the response metadata, `construct_ad_buffer` refuses the response type, and all three call
-  sites (tesla-ble `client.cpp` and `vehicle.cpp`, `VehicleController::handle_vcsec_frame_()`)
-  pass it. ADR-0005 lists the departure.
-- **Wire and key invariants, with evidence.** `test/test_tesla_ble_harness.cpp` part V1 runs the
-  vehicle-command protocol vectors through the patched library, built against the Mbed TLS commit
-  ESP-IDF v6.1 pins (`MBEDTLS_REF` in `scripts/test-tesla-ble-harness.sh`; the host builds its
-  builtin software drivers, while the firmware sends AES-GCM through the ESP PSA driver): official
-  client public key, ECDH session key `SHA1(X)[:16]`, session-info HMAC and the official
-  session-info tag, AES-GCM bytes and tag for prescribed request metadata against an independent one-shot reference,
-  response metadata serialized independently from protocol.md with a response counter that
-  differs from the request counter (an AAD from the request counter is refused), tampered-tag
-  rejection with plaintext wiping, VIN BLE name, an export matching the expected legacy SEC1 PEM
-  fixture and successful reload, and a host mirror of the firmware fingerprint
-  (`compute_key_fingerprint_()` itself is IDF code) equal to tesla-ble's key id. These checks do not
-  independently exercise the production request-metadata builder or execute Mbed TLS 3.6 to
-  establish export equivalence. Later native tests have their own source-bound evidence.
-- **Randomness.** ESP-IDF 6 configures `MBEDTLS_PSA_CRYPTO_EXTERNAL_RNG`: every PSA random draw
-  (key generation, key-parse blinding, GCM nonces) reads the hardware RNG at call time; there is
-  no DRBG seeded once. `main/main.cpp` keeps SAR-ADC entropy enabled across key load and
-  first-boot key generation, before Wi-Fi/BLE supply RF entropy.
-- **Toolchain.** ESP-IDF v6.1 (Mbed TLS 4.1.0 / TF-PSA-Crypto 1.1.0, GCC 15.2, Picolibc), with
-  `espressif/mdns` and `espressif/w5500` (esp32s3 only) taken from their Git release sources,
-  and `espressif/cjson` 1.7.19~2 and `espressif/mqtt` 1.1.0 from the component registry, all
-  pinned per target in `dependencies.lock.*`. The two registry components carry Git submodules
-  (upstream cJSON; the paho MQTT test broker); a Git resolution hashes the submodule's `.git`
-  gitlink, whose `gitdir:` path depends on where the Component Manager cache sits, so such a
-  lock hash only verifies on the machine that wrote it. The registry archives are fixed bytes
-  built from the same sources.
-  `esp_https_ota` partial download is not used, so its new opt-in stays off.
-- **Bootloader compatibility.** ESP-IDF supports booting apps built by a newer IDF with an older
-  bootloader, which is the OTA path from 5.5.5 firmware; the chip-revision bounds and the 64 KiB
-  flash MMU page layout are unchanged. The reverse is not supported: a device installed with the
-  v6.1 bootloader must not be downgraded to a 5.x-built release.
-- **Bench evidence (2026-09-24).** A bench esp32s3 as installed in the field (v5.5.5
-  second-stage bootloader, pre-coredump partition table, a key in NVS that is not enrolled in the
-  car). OTA URLs are compile-time and the signed PR preview rebuilds with the pin on the default
-  branch (the intended trust boundary), so a real OTA from 5.5.5 used a bench channel: a v5.5.5
-  build of the default branch whose manifest URL points at a local HTTPS server, with a throwaway
-  CA appended to the bundle. Every image was signed with the production key and verified against
-  `scripts/ota-signing-public-key.sha256`; bench versions sat below the current release so the
-  board returned to production over the real Pages channel. Proven: OTA 5.5.5 → 6.1 with the
-  v5.5.5 bootloader booting the v6.1 app and the health gate committing it; OTA 6.1 → 6.1;
-  `/ota/check` against Pages and OTA 6.1 → the production release; signature enforcement on 6.1
-  (a throwaway-key-signed and an unsigned image are both rejected); key fingerprint, key creation
-  time, VIN and Wi-Fi unchanged through every step; BLE finds the car by its VIN-derived name.
-- **Live acceptance before merge (owner decision, 2026-09-24).** The enrolled-key checks run on
-  the production esp32s3 W5500 board: BLE session setup with the existing enrolled key, signed
-  commands, telemetry, the evcc end-to-end path, sleep/wake, and the W5500 Ethernet path, which
-  no bench board covers. Once #327 added OTA from signed PR preview channels, the owner moved them
-  ahead of the merge: the board installs this PR's signed preview (`/ota/check?pr=<N>`,
-  `/ota/update?offer=<checked-ID>&pr=<N>`), whose `<release>-PR-<N>` version a plain update check replaces with the
-  stable release of the same core. An image that never gets a lease stays pending under the
-  health gate, and the next power cycle rolls the board back. The health gate checks NimBLE host
-  health; vehicle sessions and commands still require separate live acceptance. esp32, esp32c3 and esp32c6
-  are covered by builds only.
-- **Mbed TLS optimization.** ESP-IDF 6 builds the Mbed TLS / TF-PSA-Crypto libraries at `-Os` by
-  default, as a component-private option. `sdkconfig.defaults` pins it and
-  `scripts/check-build-semantics.py` enforces it: at `-Og` esp32c6 reaches a projected signed
-  `0x1f1000`, past the `0x1e8000` policy and the slot. It is not the rejected whole-build `-Os`
-  (ADR-0004); the live acceptance runs under the evcc + BLE load that froze whole-build `-Os`.
-- **USB recovery.** Because a v6.1 bootloader does not boot a 5.x-built app, `$usb-recovery`
-  reads the installed bootloader's ESP-IDF version and refuses an app built by an older one.
-- **Other ESP-IDF 6.1 defaults the firmware inherits.** Picolibc replaces newlib (the
-  double-precision `printf`/`scanf` variants are linked, so cJSON number output is unchanged);
-  `CONFIG_FREERTOS_IN_IRAM` is off (ISR-context FreeRTOS functions stay in IRAM, and the firmware
-  installs no ISR of its own); `CONFIG_MBEDTLS_THREADING_C` is on (PSA key-store locking);
-  `CONFIG_MBEDTLS_SSL_KEEP_PEER_CERTIFICATE` is off; `CONFIG_HTTPD_ENABLE_EVENTS`,
-  `CONFIG_ESP_HTTP_CLIENT_STRICT_HEADER_BUFFER` and `CONFIG_ESP_HTTPS_OTA_VERIFY_SPI_MODE` are on.
-  Assertions stay enabled in silent mode, so `CONFIG_COMPILER_ASSERT_NDEBUG_EVALUATE=n` has no
-  effect, and `CONFIG_FREERTOS_ISR_STACKSIZE` stays 2096 because the core dump is enabled.
+The previous binding computed but did not check response tags. `psa_aead_verify` verifies them.
+Response AAD uses the counter in the response (`TAG_COUNTER`), which can differ from the request
+counter. Failed authentication wipes plaintext. [Protocol mapping](0005-tesla-ble-seam.md#2-platform-forced-departures-and-reference-deviations)
+
+V1 uses the pinned Mbed TLS software drivers and tests P-256 public export, `SHA1(X)[:16]` ECDH
+derivation, session HMAC/tag, GCM ciphertext/tag, independent response AAD, wrong-counter and
+tampered-tag refusal, VIN BLE name, legacy PEM export/reload and the mirrored key fingerprint.
+It does not execute Mbed TLS 3.6, the target's PSA hardware driver or the firmware fingerprint
+helper. See the [protocol harness](../../test/README.md#logic-ble-protocol-and-presentation).
+
+The pinned v6.1 build uses registry archives for cJSON and MQTT: Git resolution of their
+submodules hashes cache-dependent gitlink paths. IDF's component-private Mbed TLS `-Os` remains
+necessary: the historical C6 `-Og` variant projected signed `0x1f1000`, beyond slot and policy.
+[Current build inputs and flags](../DEVELOPMENT.md#build-and-evidence-contracts)
+
+| Historical scope | Result or required proof |
+|---|---|
+| ESP32-S3 bench, IDF 5.5.5 bootloader, pre-coredump table and unenrolled key | Signed OTA to 6.1, 6.1-to-6.1 and return via Pages passed. Unsigned and throwaway-key candidates were refused. Key fingerprint/creation time, VIN and WiFi persisted. BLE found the VIN-derived name. The local HTTPS bench channel used a dedicated CA. |
+| Enrolled W5500 S3 | The owner required separate pre-merge signed-preview checks for existing-key sessions, commands, telemetry, evcc, sleep/wake and Ethernet. OTA health confirmation does not establish those results. |
+| esp32, esp32c3, esp32c6 | Build evidence only in this evaluation. |
+
+The forward 5.5.5-to-6.1 OTA reused the installed bootloader. Do not install a 5.x-built app
+under a v6.1 bootloader. [Retained-bootloader admission](../DEVELOPMENT.md#retained-bootloader-references)
 
 ## Rebase onto v5.3.0 (2026-10-11)
 

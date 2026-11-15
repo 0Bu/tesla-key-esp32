@@ -1,33 +1,25 @@
 # Configuration-only USB recovery
 
-The default-off maintenance role implements configuration-only repair over a physical console.
-Host qualifiers exercise the actual Store, transaction, run and transport bodies with
-passive SDK/NVS/PSA effects, including failure and omission/restoration controls. They do not prove
-real flash, cryptography, USB operation or device retention. Qualify the enabled target profile and
-exact signed artifact separately before physical use; the unsigned builder below neither signs
-nor authorizes a repair.
+The default-off maintenance role repairs one recognized corrupt `tesla_cfg/cfg` blob over the
+physical USB console. It leaves `tesla_ble` and other logical NVS records intact and starts no
+normal services. App-only firmware replacement alone cannot repair corrupt settings.
 
-Ordinary app-only USB installation preserves NVS but cannot fix a truly corrupt configuration
-blob. This separate maintenance path replaces only `tesla_cfg/cfg` after explicit identity checks.
-It neither deletes that entry to force legacy fallback nor touches the `tesla_ble` namespace.
-It does not start WiFi, HTTP, MQTT, Bluetooth, pairing, normal boot counters or automatic recovery.
+**Physical use requires a qualified target, exact signed artifact and explicit cfg-write scope.**
+[Qualification](#qualification-and-physical-use-boundaries)
 
 ## Select the correct recovery class
 
-| Pre-HTTP failure class | Initial key-preserving route and limit |
+| Failure | Key-preserving route |
 |---|---|
-| Clock bootstrap/mutex, configuration verification or driver/task allocation failure | USB-only when no HTTP service started. Retain serial evidence; a provenance-verified compatible signed app-only install changes code without erasing NVS. The maintenance variant enters before ordinary clock/config/service startup, but does not repair physical clock, memory or board faults. |
-| Recognized `TKC1` v1 blob with corrupt CRC/body or truncation retaining its five-byte header | The cfg-only maintenance repair may apply after qualification if NVS, existing key and independent same-device/key/VIN authority are valid and both identity journals are absent. Headerless, foreign or over-bound data refuses. |
-| Intact newer/unknown schema | Use a verified signed application compatible with that schema. The older maintenance reader refuses; it cannot assume a version byte is corruption. |
-| NVS initialization/open/type/read failure; missing or unparseable private key | USB-only diagnosis. No erase, namespace reset, replacement identity or successful restoration is promised. A firmware reader regression can be repaired by compatible app-only code; damaged secret storage needs its separately reviewed recovery/backup decision. |
-| VIN journal, key-rotation journal or ambiguous initial-key/Vehicle initialization | The generic cfg-only path refuses even empty/malformed/unknown journals. Preserve them and use transaction-specific diagnosis; do not infer old VIN from a legacy mirror, damaged bytes or a short fingerprint. |
-| WiFi/Ethernet initialization/cleanup, W5500 probe cleanup, setup AP/HTTP handlers, primary HTTP startup | USB-only if startup never exposed HTTP. Preserve NVS and use compatible signed app-only code/board diagnosis. Network credentials are not assumed to explain driver or allocation failures. |
-| LAN watchdog, OTA health task, Vehicle task/host/admission failures after successful HTTP | The existing recovery dashboard/diagnostics can remain reachable; otherwise use USB-only evidence and app-only delivery. Fatal status does not promise a functioning network. |
-| Exception before HTTP | USB-only until the actual failing component is identified; the cfg-only write is refused unless every narrow admission rule independently holds. |
+| Pre-HTTP clock, driver, memory, network or startup failure | Retain serial evidence and diagnose the failing component. Use a compatible signed app-only install for a firmware defect. |
+| Recognized `TKC1` v1 corrupt CRC/body or truncated blob with its five-byte header | Consider cfg-only repair if existing NVS/key and independent board/key/VIN evidence pass and both identity journals are absent. Foreign, headerless and over-bound data refuse. |
+| Intact newer or unknown schema | Use a verified signed reader for that schema. An old reader cannot classify an unknown version as corruption. |
+| NVS init/open/type/read failure or missing/unparseable private key | USB diagnosis. Damaged secret storage needs a separate backup/recovery decision. Preserving NVS cannot recreate lost bytes. |
+| VIN or key journal, including malformed/empty entries, or ambiguous identity initialization | Preserve evidence and diagnose the specific transaction. Do not infer VIN from mirrors, damaged data or a short fingerprint. |
+| Fatal task/service failure after HTTP startup | Keep available recovery dashboard/diagnostics. Use serial evidence if HTTP is unavailable. |
 
-`main/main.cpp`, `net.cpp` and `provisioning.cpp` own this inventory. A new fatal label/callsite or
-changed HTTP-start order must update and test the mapping. No runbook can recover bytes already
-lost to physical storage damage merely by preserving the partition.
+The [startup inventory](ARCHITECTURE.md#startup-failure-policy-normative) owns fatal categories.
+Use the [app-only USB procedure](DEVELOPMENT.md#delivery) when firmware repair is appropriate.
 
 ## Narrow maintenance transaction
 
@@ -113,7 +105,7 @@ unchanged.
 After integration and independent source review, this is the unsigned qualification command:
 
 ```bash
-scripts/idf-docker.sh python3 scripts/build-config-repair.py --source-sha <full-current-source-head>
+scripts/idf-docker.sh python3 scripts/build-config-repair.py --source-sha '<full-current-source-head>'
 ```
 
 The driver takes no single-target or skip-budget option. It creates fresh exact-source primary and
@@ -180,8 +172,8 @@ no host mock establishes those facts.
 
    ```bash
    python3 maintenance/config-repair/exchange_once.py \
-     --port <exact-approved-local-serial-port> --owner-file <protected-owner-json> \
-     --evidence-directory <new-private-directory> --execute-once-explicit-config-write
+     --port '<exact-approved-local-serial-port>' --owner-file '<protected-owner-json>' \
+     --evidence-directory '<new-private-directory>' --execute-once-explicit-config-write
    ```
 
    Without the final flag it does not open a port. It scans at most 64 KiB over 15 seconds for one complete
@@ -199,26 +191,14 @@ no host mock establishes those facts.
 
 ## Qualification and physical-use boundaries
 
-Host qualification covers source/role/artifact crossings, the actual host exchange and complete
-maintenance Store/run/RawConsole bodies against passive SDK effects. It exercises namespace,
-type/length/iterator, identity/journal/raw-state, cfg-only write, readback and non-cfg retention
-failures, including uncertain visible commits. Transport fixtures cover partial I/O, deadlines,
-zero progress and routing. Source/role and omission/restoration controls cover startup order,
-owner/namespace/key, retention, single-write, artifact-role and timeout boundaries. These qualifiers
-are not real cryptography, NVS flash/power-loss, target ABI
-or physical USB evidence. The parked run path also does not prove task reclamation at process exit.
+Host qualifies actual Store, run, transport and exchange with passive effects and synthetic
+records. It covers identity, journals, one cfg write, uncertain commit, readback/retention,
+partial I/O and timeout/ownership. See the [test guide](../test/README.md#configuration-maintenance-backend-and-transport).
+Actual crypto, flash/power loss, ABI, task reclamation, USB timing and device retention need
+separate evidence.
 
-Keep the normal host/sanitizer/protocol contracts and all four normal builds separate from the
-enabled-role primary/reproduction and size/stack gates above. Artifact admission and disposable
-signature controls verify their own boundaries; they do not grant authority to sign or deploy.
-Every pre-HTTP fatal must reach a recovery surface or have documented USB-only handling with a
-key-preserving procedure. This requirement does not itself mandate a physical synthetic-NVS repair
-experiment, and no host or compile result establishes actual-device key/session retention.
-
-An actual repair remains a separately qualified physical operation: independently admit the signed
-maintenance and restoration artifacts, protected-artifact handling, exact board/target and USB/NVS
-scope, plus the private backup and retention plan. Use synthetic records for physical qualification
-before secret-bearing repair; that deployment evidence is separate from the documented recovery
-criterion. Ambiguous effects never authorize retry. A damaged partition, missing private key,
-unknown schema or unresolved journal stays outside this narrow procedure; preserving NVS cannot
-recreate lost bytes.
+Keep normal all-target builds and host/protocol/sanitizer evidence separate from the enabled
+role's primary/reproduction, size and stack checks. Independently qualify both signed artifacts,
+board/target/port, storage backup, app-only write and restoration. Use synthetic records for
+physical qualification before secret-bearing repair. Follow the [single exchange](#concrete-physical-procedure-after-qualification).
+An ambiguous effect never authorizes retry.

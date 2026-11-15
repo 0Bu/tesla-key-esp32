@@ -1,43 +1,17 @@
 # ESP-IDF feature matrix
 
-This is the source-linked inventory of ESP-IDF and official Espressif features considered by
-`tesla-key-esp32`. It separates APIs the firmware calls directly, linked backends and managed
-components from features that were evaluated and are not used. It also records the ULP and
-LP-core assessment. Behavior, trust boundaries and build contracts stay with their owners:
-[Architecture](ARCHITECTURE.md), [Security](SECURITY.md) and [Development](DEVELOPMENT.md).
-[FEATURES](FEATURES.md) locates mechanisms by concern; this matrix inventories ESP-IDF components,
-configuration and adoption decisions.
-
-`esp-idf-toolchain.txt` pins **ESP-IDF v6.1** and its container digest. Every per-target
-`dependencies.lock.<target>` resolves exact **ESP-IDF 6.1.0**, and `main/idf_component.yml`
-requires `idf: ">=6.1,<7.0"`. The firmware targets **esp32, esp32s3, esp32c3 and esp32c6**.
-Documentation links use the ESP-IDF `v6.1` channel. A generic feature links the esp32 page; a
-target-specific feature links the page of its target. Official components extracted from ESP-IDF
-link to the Espressif Component Registry.
+Inventory of required components, active defaults, included headers and adoption decisions.
+Targets are esp32, esp32s3, esp32c3 and esp32c6. Locks resolve ESP-IDF 6.1.0, the toolchain channel
+is v6.1 and the manifest requires `>=6.1,<7.0`.
+[Build contract](DEVELOPMENT.md) · [Runtime](ARCHITECTURE.md) · [Security](SECURITY.md)
 
 <!-- esp-idf-matrix:metadata {"targets":["esp32","esp32s3","esp32c3","esp32c6"],"version":"6.1.0","idf_floor":">=6.1,<7.0"} -->
 
 ## Scope and status
 
-The **used** table covers the current firmware surface. That surface is the explicit CMake
-`REQUIRES`, the direct managed dependencies, and every active assignment in the five application
-`sdkconfig.defaults*` files and the five maintenance overlays. It also covers the ESP-IDF headers
-included under `main/`.
-
-The **evaluated** table is curated. It cannot prove that it names every feature in the upstream
-ESP-IDF universe. [What the gate proves](#what-the-gate-proves) describes the offline check.
-
-| Status | Meaning |
-|---|---|
-| ✅ Direct | Firmware code calls the API directly or enables the capability explicitly |
-| 🧩 Backend | Linked or configured below another API; firmware code does not call it directly |
-| 📦 Managed | Direct dependency resolved by the Component Manager |
-| 🔬 Evaluate | A bounded change could plausibly improve the project |
-| ⏸ Conditional | Useful only after a product, security or hardware requirement changes |
-| 🚫 Not planned | Available, but no current use case justifies its cost |
-| ⛔ Unsupported | Not native on the named target hardware or current toolchain contract |
-
-**Targets** means all four targets unless the row names a subset.
+The used inventory covers direct and backend APIs, managed dependencies, application/maintenance
+defaults and ESP-IDF includes. The evaluated inventory records selected adoption decisions.
+**All** means the four supported targets. [Inventory gate](#what-the-gate-proves)
 
 ## Used ESP-IDF and Espressif features
 
@@ -106,13 +80,8 @@ move the feature into the used table and add real source evidence.
 
 ## ULP and LP-core assessment
 
-This assessment asks two questions. Could a ULP or LP core keep vehicle telemetry flowing to MQTT
-while an OTA runs and the device restarts? Which coprocessor uses from other ESP32 firmware fit
-this product?
-
-It concludes that no target can do so. The high-power (HP) CPUs keep BLE and MQTT running during
-the download, and the remaining gap follows the restart. RTC retention memory (N02) can narrow that
-gap without a coprocessor.
+BLE and MQTT continue on the main CPUs during download. The restart interrupts both.
+A validated retention snapshot could reduce the gap without a coprocessor.
 
 ### Coprocessor per target
 
@@ -142,25 +111,13 @@ documentation sources at ESP-IDF tag `v6.1`.
 
 ### OTA and restart behavior
 
-1. **Download.** The firmware does not pause telemetry. Only the heap supervisor reads
-   `ota_is_busy()` ([`heap_supervisor.cpp`](../main/heap_supervisor.cpp)).
-2. **Commit.** The coordinator waits 1.2 s and calls `esp_restart()`, without a clean MQTT
-   disconnect ([`ota_update.cpp`](../main/ota_update.cpp)). When the broker applies the retained
-   `offline` LWT depends on its keepalive and session-takeover handling (not measured).
-3. **Boot.** The restart is a clean boot, so the firmware seeds the five-minute active window
-   ([`vehicle_ctrl.cpp`](../main/vehicle_ctrl.cpp)).
-   - Within that window, the charge cadence and the domain rotation refill all five vehicle domains
-     with `NO_WAKE_SKIP`, unless the car reports that it is asleep.
-   - Vehicle-state topics that are still invalid at the first MQTT round are cleared once with
-     `{}`. The device topic publishes immediately.
-   - Owners: [read-only telemetry](ARCHITECTURE.md#read-only-telemetry-and-command-correctness) and
-     [MQTT topics](API.md#mqtt-topics).
-4. **Remaining gap.** If the car stays asleep, its domains stay unknown until it wakes by itself.
-   After the window closes, charge and drive refill through the wake or bootstrap one-shot.
-   Climate, tires and closures wait for a command or for charging. The firmware never wakes a
-   parked car with an explicit wake command merely to refresh cached status. `NO_WAKE_SKIP` can still
-   allow Infotainment and SessionInfo traffic when sleep state is unknown or awake; its physical
-   wake effects have not been measured.
+After commit, the coordinator waits 1.2 s and restarts without a clean MQTT disconnect.
+Broker LWT timing is unmeasured. Boot seeds the five-minute activity window. Polls use
+`NO_WAKE_SKIP`. Unknown or awake state can still allow Infotainment or SessionInfo traffic.
+Physical wake effects are unmeasured. After the window, wake/bootstrap refreshes charge and drive.
+Other domains wait for charging or a command. Invalid MQTT domains clear once per connection.
+[Telemetry scheduling](ARCHITECTURE.md#read-only-telemetry-and-command-correctness) ·
+[MQTT state](ARCHITECTURE.md#home-assistant-mqtt-bridge)
 
 ### Restart behavior that matters for retained data
 
@@ -245,20 +202,8 @@ The v6.1 linker scripts place DRAM `.noinit` directly after `.dram0.data`
 
 ### Other ESP32 firmware
 
-As of November 2026, open-source ESP32 firmware uses the coprocessor for sampling during deep sleep
-on battery devices:
-
-- [ESP-IDF examples](https://github.com/espressif/esp-idf/tree/v6.1/examples/system/ulp);
-- the ESPHome [`esp32_ulp`](https://github.com/esphome/esphome/tree/dev/esphome/components/esp32_ulp)
-  component;
-- Tasmota's [Berry `ULP` module](https://github.com/arendst/Tasmota/blob/development/tasmota/tasmota_xdrv_driver/xdrv_52_3_berry_ulp.ino);
-- MicroPython [`esp32.ULP`](https://github.com/micropython/micropython/blob/master/ports/esp32/esp32_ulp.c)
-  with [`micropython-esp32-ulp`](https://github.com/micropython/micropython-esp32-ulp);
-- the Arduino [HULP](https://github.com/boarchuz/HULP) helper;
-- Espressif's [low-power guidance](https://github.com/espressif/esp-iot-solution/blob/master/docs/en/low_power_solution/esp32_lowpower_solution.rst).
-
-A source search of always-on radio bridges found no ULP API use: OpenMQTTGateway, ESPresense,
-WLED, Theengs, Meshtastic and ESPHome `bluetooth_proxy`.
+The pinned [ESP-IDF ULP examples](https://github.com/espressif/esp-idf/tree/v6.1/examples/system/ulp)
+illustrate low-power sensing. This project keeps the main CPUs and radio available as a LAN bridge.
 
 ### Evidence status
 
@@ -426,38 +371,8 @@ target overlays.
 
 ## What the gate proves
 
-`scripts/check-esp-idf-matrix.py` runs through `scripts/repo-lint.sh` before a deploy push
-and in publication CI. It compares this document with the tree in both directions
-and fails when:
-
-- **Pins disagree.** The metadata targets, the ESP-IDF version in any per-target lockfile, the
-  manifest floor or the `esp-idf-toolchain.txt` channel differ from this document. A
-  docs.espressif.com link or an ESP-IDF GitHub or raw source link is off that channel, an ESP-IDF
-  commit link appears, or a link names an unsupported target.
-- **Components disagree.** A `REQUIRES` component of `main/CMakeLists.txt` (including the
-  config-repair `list(APPEND ...)` entries) or a direct dependency in `main/idf_component.yml` has
-  no used row. A used row names a component that is no longer required. `REQUIRES` contains an
-  unknown CMake variable. Quoted component names are accepted; line and bracket comments do not
-  count as dependencies.
-- **Configuration disagrees.** An active assignment, including a repeated occurrence, in a `sdkconfig.defaults*` or
-  `maintenance/config-repair/sdkconfig.defaults*` file is missing, stale or out of file order, or
-  maps to a missing used row. A defaults overlay names an unsupported target.
-- **Headers disagree.** A non-project, non-standard header included under `main/` is not listed, or
-  a listed header is no longer included. A file type under `main/` (outside `www/`) that is neither
-  C/C++ source nor a known non-source file fails closed. Includes inside line-leading block comments
-  are ignored.
-- **Rows are malformed.** A row has a duplicate id, an invalid status or no official documentation
-  link. A table loses its expected columns, or the evaluated ULP or `esp_https_ota` decision
-  disappears.
-
-`--self-test` copies the tree, reintroduces each listed failure as a mutation, and also runs a
-clean control, which must pass, with block-commented and standard includes.
-
-**Limits:**
-
-- The check reads source text, not the preprocessor. An include assembled by macros is not seen,
-  an include under `#if 0` still counts, and a string literal whose line starts with `/*` could
-  hide a following include until the next `*/`.
-- It proves that the listed inventory matches the tree, not that a decision text is still right;
-  `$project-review` judges those.
-- An ESP-IDF pin change always sends the whole document back through review.
+`scripts/check-esp-idf-matrix.py` compares pins, supported targets, official link channels, CMake
+requirements, managed dependencies, ordered active defaults and IDF includes in both directions.
+It rejects malformed rows and missing ULP or `esp_https_ota` decisions. `--self-test` checks mutations
+and a clean control. The source scan counts inactive preprocessor branches and cannot expand macro
+includes. Review decision text and the whole matrix when the ESP-IDF pin changes.

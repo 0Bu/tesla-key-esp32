@@ -1,72 +1,41 @@
 # tesla-key-esp32
 
-Use an ESP32 as a Tesla Bluetooth key for local charging control with [evcc](https://evcc.io).
-The firmware provides a web UI, HTTP and MCP APIs, MQTT/Home Assistant telemetry and signed OTA
-updates. It needs no Tesla cloud API. The enrolled key has the **Charging Manager** role: charging,
-wake and read access.
+An ESP32 Bluetooth key for local Tesla charging control with [evcc](https://evcc.io).
+**Charging Manager** access covers charging, wake and vehicle data. Includes a web UI, HTTP/MCP,
+MQTT/Home Assistant telemetry and signed OTA updates.
 
 ## Requirements
 
-- An esp32, esp32s3, esp32c3 or esp32c6 board with at least 4 MB flash; classic esp32 requires
-  revision v3.0 or newer. [Board details](docs/USER_GUIDE.md#hardware).
-- A USB data cable and desktop browser with Web Serial support for installation.
-- The car's 17-character VIN and an existing Tesla NFC keycard.
-- Permanent power near the parking spot and a trusted LAN. The API has no authentication or TLS;
-  never expose it to the internet. [Security model](docs/SECURITY.md#http-api-exposure).
+- **ESP32, ESP32-S3, ESP32-C3 or ESP32-C6** with at least 4 MB flash. Classic ESP32 needs rev. v3.0+.
+  [Board details](docs/USER_GUIDE.md#hardware)
+- USB data cable, desktop browser with Web Serial, 17-character VIN and Tesla NFC keycard.
+- Continuous power within Bluetooth range of the car. Keep the unauthenticated HTTP API on a trusted LAN.
 
 ## 1. Install and configure
 
-1. Open the [web installer](https://0bu.github.io/tesla-key-esp32/), click **Connect** and select
-   the serial port. The installer reads the installed firmware. Use **Clean flash** for a first
-   installation; it erases all flash after a confirmation. **Flash** keeps configuration and keys
-   and is offered for an existing tesla-key-esp32 installation. If the log says the installed
-   firmware is unknown, use Flash only when the board already runs tesla-key-esp32. The log then
-   shows the new boot.
-2. Join `tesla-key-esp32-setup`. Open `http://192.168.4.1` if the setup page does not appear.
-3. Save WiFi credentials and VIN. After the reboot, open `http://tesla-key-esp32.local`, or use
-   the IP shown by your router. The installer itself does not configure WiFi.
+1. In the [web installer](https://0bu.github.io/tesla-key-esp32/), click **Connect** and select the
+   serial port. For a first install, use **Clean flash** (erases all flash). For an existing
+   installation, see [USB recovery](docs/USER_GUIDE.md#updates-and-recovery).
+2. Join the open `tesla-key-esp32-setup` network. Save WiFi credentials and VIN at `http://192.168.4.1`.
+3. After reboot, open `http://tesla-key-esp32.local` or the IP shown by your router.
 
-An ESP32-S3 with a supported wired board uses DHCP; configure its VIN in the web UI.
+Supported [Ethernet boards](docs/USER_GUIDE.md#wired-networking-optional-esp32s3) use DHCP. Set the
+VIN in the web UI.
 
 ## 2. Pair with the car
 
-After a VIN is configured, the device creates its first key if needed and sends it automatically.
-
-1. Park within Bluetooth range, approximately 10 m, and wait for the web UI to show **Ready to pair**.
-2. Place an existing Tesla NFC keycard on the center-console reader behind the cup holders.
-3. Confirm **Add key** on the car's touchscreen while the card is present. The web UI shows
-   **paired** after the session is established; the car lists an **Unknown key**.
-
-If pairing fails, check [troubleshooting](docs/USER_GUIDE.md#troubleshooting). Tesla's roughly
-three simultaneous BLE connections are shared with phone keys and fobs.
+Wait for **Ready to pair**. Place the Tesla keycard on the console reader and approve **Add key**
+on the touchscreen. The web UI confirms pairing when the session is established.
 
 ## 3. Connect evcc
 
-In the web UI, tap **evcc** beside the VIN on the **Vehicle** row and choose **Copy**. It copies the
-[custom vehicle example](docs/examples/evcc-custom-vehicle.yaml) with the VIN and the device's
-IPv4 lease, or the page's hostname when no lease is available. Reserve the device's address in
-your router if you use the IPv4 lease.
-In evcc, open **Settings → Vehicles → Add → Custom device**, paste it and adjust the battery
-capacity. To use the example file directly, replace `DEVICE_HOST` and `REPLACE_WITH_VIN` in every
-URI; the device uses HTTP port 80.
-The Settings editor takes the example as-is, without `name`, `type` or a `vehicles` wrapper.
+1. In the device web UI, choose **Vehicle → evcc → Copy**.
+2. In evcc, open **Settings → Vehicles → Add → Custom device**, paste the YAML and set the battery
+   capacity. [Manual configuration](docs/USER_GUIDE.md#evcc)
 
-For a hand-edited `evcc.yaml`, create one item under `vehicles:` with `name: tesla` and
-`type: custom`, then indent the example's entire mapping beneath that item and restart evcc.
-The example sets 30 s on reads and writes to cover the firmware's 20 s command budget with
-reserve; queued requests can still exceed it. Reads use cached telemetry. A timeout does not
-prove that a command failed: check vehicle state before repeating an uncertain action.
-See the [command contract](docs/API.md#commands).
+## Updates and help
 
-## Further use
+- Update from the web UI's **Firmware** row. [Updates and recovery](docs/USER_GUIDE.md#updates-and-recovery)
+- [Troubleshooting](docs/USER_GUIDE.md#troubleshooting) · [Documentation](docs/README.md)
 
-- [User guide](docs/USER_GUIDE.md): hardware, MQTT, Syslog, updates and troubleshooting.
-- [Documentation index](docs/README.md): APIs, development, architecture and security.
-
-Update through the web UI's **Firmware** row. OTA preserves WiFi, VIN and pairing keys; use the
-USB installer for first installation or recovery. Do not erase flash to resolve an ordinary
-connection problem.
-
-Inspired by [TeslaBleHttpProxy](https://github.com/wimaha/TeslaBleHttpProxy).
-Licensed under [AGPL-3.0](LICENSE), including the linked tesla-ble library. Network users must have
-access to the corresponding source for the firmware version they use.
+[AGPL-3.0](LICENSE) · Inspired by [TeslaBleHttpProxy](https://github.com/wimaha/TeslaBleHttpProxy).
