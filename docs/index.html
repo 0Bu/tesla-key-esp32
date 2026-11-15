@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'sha256-Rja76Y9MM7FnRTW8B1G6DUO/0DorzAqN/dR+Ap9PHL8='; connect-src 'self'; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-src 'none'; worker-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'sha256-reWJ+Gbf9dMNwviR55H72b8hwZfGxvLO9yo/84S1Dko='; connect-src 'self'; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-src 'none'; worker-src 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#e82127">
 <title>Install tesla-key-esp32</title>
@@ -52,7 +52,7 @@ h1 { margin:0; font-size:17px; font-weight:600; letter-spacing:-.01em; }
 }
 .installer-button-primary { color:#fff; background-color:var(--accent); border:1px solid var(--accent); }
 .installer-button-primary:hover:not(:disabled) { background-color:var(--accent-hover); border-color:var(--accent-hover); }
-/* Red is reserved for the primary action and errors; secondary actions stay neutral. */
+/* Secondary actions stay neutral. */
 .installer-button-secondary { color:var(--fg); background-color:var(--card); border:1px solid var(--line); }
 .installer-button-secondary:hover:not(:disabled) { background-color:var(--soft); }
 .installer-button:focus-visible { outline:3px solid color-mix(in srgb,var(--accent) 35%,transparent); outline-offset:2px; }
@@ -80,7 +80,7 @@ button:disabled { cursor:default; opacity:.5; }
 .installer-live[data-state="error"]::before { background:var(--err); }
 .installer-monitor-output {
   /* A fixed height that depends only on the window: new lines scroll inside, the page never moves. */
-  height:clamp(240px, 55vh, 480px); margin:0; padding:10px 12px; overflow-x:auto; overflow-y:auto;
+  height:clamp(180px, 41.25vh, 360px); margin:0; padding:10px 12px; overflow-x:auto; overflow-y:auto;
   color:var(--log-fg); font:12px/1.55 var(--mono); white-space:pre; overflow-wrap:normal;
 }
 .installer-monitor-output:empty::before { content:"Connect the board over USB."; color:var(--muted); font-family:var(--font); font-size:13px; }
@@ -91,11 +91,17 @@ button:disabled { cursor:default; opacity:.5; }
 .installer-monitor-line-warning { color:var(--warn); }
 .installer-monitor-line-error { color:var(--err); }
 
-.installer-notes { margin:16px 4px 0; color:var(--muted); font-size:13px; }
-.installer-notes p { margin:0; }
-.installer-notes ol { margin:4px 0 8px; padding-left:20px; }
-.installer-notes li { margin:2px 0; }
-.installer-notes strong { color:var(--fg); font-weight:600; }
+.installer-after { margin-top:20px; box-shadow:0 8px 24px rgb(0 0 0 / .08), 0 1px 2px rgb(0 0 0 / .06); }
+.installer-after-title { margin:0; color:var(--muted); font-size:11px; font-weight:750; letter-spacing:.08em; text-transform:uppercase; }
+.installer-after-list { list-style:none; margin:8px 0 0; padding:0; counter-reset:after-step; }
+.installer-after-list li { display:flex; align-items:flex-start; gap:12px; padding:10px 0; border-top:1px solid var(--line); color:var(--muted); font-size:13px; }
+.installer-after-list li:first-child { border-top:0; }
+.installer-after-list li::before {
+  counter-increment:after-step; content:counter(after-step) / ""; flex:none; width:22px; height:22px;
+  border:1px solid var(--line); border-radius:50%; background:var(--accent-tint); color:var(--accent-hover);
+  font-size:12px; font-weight:700; line-height:20px; text-align:center;
+}
+.installer-after-list strong { color:var(--fg); font-weight:600; }
 .installer-footer { margin:14px 4px 0; color:var(--muted); font-size:12px; text-align:center; }
 .installer-footer a { color:inherit; }
 
@@ -120,7 +126,8 @@ button:disabled { cursor:default; opacity:.5; }
 
     <div class="installer-actions">
       <div class="installer-group" aria-label="Device">
-        <button class="installer-button installer-button-primary" type="button" id="connect-button" disabled>Connect</button>
+        <button class="installer-button installer-button-primary" type="button" id="connect-button"
+                title="Restarts the board to check its chip, layout and firmware" disabled>Connect</button>
         <button class="installer-button installer-button-secondary" type="button" id="disconnect-button" hidden disabled>Disconnect</button>
         <button class="installer-button installer-button-secondary" type="button" id="reset-button" disabled>Reset</button>
       </div>
@@ -141,18 +148,17 @@ button:disabled { cursor:default; opacity:.5; }
     </section>
   </section>
 
-  <section class="installer-notes" aria-label="After installing">
-    <p><strong>After installing</strong></p>
-    <ol>
-      <li><strong>Clean flash</strong> erases WiFi, VIN, MQTT, the pairing key and sessions after a confirmation; then join <code>tesla-key-esp32-setup</code> and enter WiFi and VIN. <strong>Flash</strong> keeps all of it.</li>
-      <li>Open <code>http://tesla-key-esp32.local</code>. Key setup and pairing run automatically; when pairing is needed, place a Tesla keycard on the console reader and approve the request on the touchscreen.</li>
-      <li>Later updates install over the air from the device page.</li>
+  <section class="installer-card installer-after" aria-labelledby="after-title">
+    <h2 class="installer-after-title" id="after-title">After flashing</h2>
+    <ol class="installer-after-list" role="list">
+      <li><span><strong>Clean flash</strong> erases WiFi, VIN, MQTT, the pairing key and sessions after a confirmation; then join <code>tesla-key-esp32-setup</code> and enter WiFi and VIN. <strong>Flash</strong> keeps all of it.</span></li>
+      <li><span>Open <code>http://tesla-key-esp32.local</code>. Key setup and pairing run automatically; when pairing is needed, place a Tesla keycard on the console reader and approve the request on the touchscreen.</span></li>
+      <li><span>Later updates install over the air from the device page.</span></li>
     </ol>
-    <p><strong>Connecting restarts the board:</strong> the check enters its bootloader and the log starts the firmware again. A single port this page is paired with reconnects when the page loads, or when the board is plugged in more than 5 s after it was unplugged; otherwise click <strong>Connect</strong>.</p>
-    <p><strong>Two USB ports?</strong> Choose the board's native port (<code>USB JTAG/serial debug unit</code>), not the UART bridge.</p>
   </section>
   <footer class="installer-footer"><a href="./LICENSE" target="_blank" rel="noopener noreferrer">AGPL-3.0</a> ·
     <a href="./THIRD_PARTY.md" target="_blank" rel="noopener noreferrer">Third-party notices</a> ·
+    <a href="https://github.com/0Bu/tesla-key-esp32/blob/main/docs/USER_GUIDE.md#updates-and-recovery" target="_blank" rel="noopener noreferrer">USB help</a> ·
     <a href="https://github.com/0Bu/tesla-key-esp32" target="_blank" rel="noopener noreferrer">Source</a> · not affiliated with Tesla, Inc.</footer>
 </main>
 

@@ -120,14 +120,14 @@ svg{display:block}
 .htext{display:flex; flex-direction:column; gap:4px; align-items:center; margin:0}
 .hlabel{margin:0; font-size:20px; font-weight:650; letter-spacing:-.5px; line-height:1.2; text-align:center}
 .hsub{margin:0; font-size:13px; font-weight:550; color:var(--muted); max-width:32ch; text-align:center; white-space:normal; overflow-wrap:break-word}
-.hstats{display:flex; flex-wrap:wrap; gap:10px; width:100%; max-width:340px; margin-top:4px}
+.hstats{display:flex; flex-wrap:wrap; gap:8px 12px; width:100%; max-width:340px; margin-top:4px}
 .hstats:empty{display:none}
-.stat{flex:1 1 120px; min-width:0; background:var(--card); border:1px solid var(--border); border-radius:var(--r-tile);
-  padding:8px 10px; display:flex; flex-direction:column; gap:2px; text-align:left}
-.stat .k{display:flex; align-items:center; gap:6px; font-size:10px; font-weight:650; letter-spacing:.5px; text-transform:uppercase; color:var(--muted)}
+.stat{flex:1 0 auto; min-width:0; max-width:100%; padding:2px 0;
+  display:flex; flex-direction:column; gap:2px; text-align:left}
+.stat .k{display:flex; align-items:center; gap:4px; font-size:10px; font-weight:650; letter-spacing:.35px; text-transform:uppercase; color:var(--muted)}
 .stat .k:before{content:""; width:6px; height:6px; border-radius:50%; background:var(--muted); flex:none}
-.stat .v{font-size:18px; font-weight:650; letter-spacing:-.3px; font-variant-numeric:tabular-nums; white-space:nowrap}
-.stat .v small{font-size:12px; margin-left:2px}
+.stat .v{font-size:17px; font-weight:650; letter-spacing:-.3px; font-variant-numeric:tabular-nums; white-space:nowrap}
+.stat .v small{font-size:11px; margin-left:2px}
 .stat.cached .k span{min-width:0; overflow-wrap:anywhere}
 .stat.cached .v{white-space:normal; overflow-wrap:anywhere}
 .stat.ok .v{color:var(--ok-text)} .stat.ok .k:before{background:var(--ok)}
@@ -136,8 +136,8 @@ svg{display:block}
 
 /* Settings rows */
 .rows{padding:0; gap:0; overflow:hidden; width:100%}
-.settings-title{margin:0; padding:12px 16px; font-size:16px; font-weight:650}
-.row{display:flex; align-items:center; gap:10px; min-height:62px; padding-right:8px; border-top:1px solid var(--border)}
+.row{display:flex; align-items:center; gap:10px; min-height:62px; padding-right:8px}
+.row+.row{border-top:1px solid var(--border)}
 .ri{flex:none; width:48px; align-self:stretch; background:var(--soft); color:var(--muted); display:grid; place-items:center}
 .ri svg{width:24px; height:24px; stroke-width:1.75}
 .rb{flex:1; min-width:0; display:flex; flex-direction:column; gap:2px; padding:9px 0; font-size:14px;
@@ -292,22 +292,6 @@ svg{display:block}
   .hstats{
     max-width:100%;
     margin-top:auto;
-  }
-  .stat{
-    padding:10px 12px;
-  }
-  .stat .k{
-    font-size:11px;
-  }
-  .stat .k:before{
-    width:7px;
-    height:7px;
-  }
-  .stat .v{
-    font-size:22px;
-  }
-  .stat .v small{
-    font-size:13px;
   }
   #paneSettings{
     grid-column:2;

@@ -216,8 +216,8 @@ console.error = function() {
     check(primaryClicks === 1, "only the gauge button invokes the primary action once");
     heroActFn = actualHeroAction;
     const climateChips = document.getElementById("hstats");
-    check(climateChips.textContent.includes("Overheat setting"), "COP is a setting");
-    check(climateChips.textContent.includes("Fan only"), "COP setting is readable");
+    check(climateChips.querySelector(".k").textContent === "Overheat", "compact COP label");
+    check(climateChips.textContent.includes("Fan only (set)"), "COP is visibly marked as a setting");
     check(climateChips.textContent.includes("Defrost (cached)"), "defrost remains explicitly cached after fresh charge contact");
     check(!climateChips.textContent.includes("kW"), "charger fields are not attributed to climate power");
     check(Array.from(climateChips.children).every(chip => chip.title.includes("current activity and power are unknown")),
@@ -231,6 +231,19 @@ console.error = function() {
       }
     };
     checkChipBounds();
+    render({paired: true, last_seen_s: 0,
+      vehicle: {status: "Charging", power: 5, amps: 16}, tele: {climate: {cop: "On"}}});
+    const chargeChips = Array.from(climateChips.children);
+    const chipTop = chip => chip.getBoundingClientRect().top;
+    check(chargeChips.length === 3 && chargeChips.every(chip =>
+      chipTop(chip) === chipTop(chargeChips[0]) && getComputedStyle(chip).borderStyle === "none"),
+      "Power, Current and Overheat fit in one borderless row");
+    checkChipBounds();
+    climateChips.style.maxWidth = "160px";
+    check(chargeChips.some(chip => chipTop(chip) > chipTop(chargeChips[0])),
+      "status values wrap when the available width is narrow");
+    checkChipBounds();
+    climateChips.style.maxWidth = "";
     render({paired: true, last_seen_s: 0,
       vehicle: {status: "Charging", power: 11, amps: 16, actual_amps: 16, volts: 230, phases: 2},
       tele: {climate: {cop: "FanOnly", front_defrost: true, rear_defrost: true, defrost_mode: "Max"}}});
@@ -334,6 +347,10 @@ console.error = function() {
       syslog: {configured: true, resolved: true, reachable: true, host: "192.0.2.30"}, version: "1.6.0"};
     render(settingsFrame);
     const settings = document.getElementById("paneSettings");
+    const firstSettingsRow = document.getElementById("rowVeh");
+    check(firstSettingsRow === settings.firstElementChild && firstSettingsRow.clientTop === 0 &&
+          firstSettingsRow.getBoundingClientRect().top === settings.getBoundingClientRect().top + settings.clientTop,
+          "settings start with the Vehicle row at the card border");
     const settingsBackground = getComputedStyle(settings).backgroundColor;
     const settingsFont = getComputedStyle(settings.querySelector(".rl"));
     for (const row of settings.querySelectorAll(".row")) {
