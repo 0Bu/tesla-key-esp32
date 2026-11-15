@@ -1,128 +1,98 @@
 # User guide
 
-Install and pair using the [quick start](../README.md). This guide covers ongoing operation.
+[Quick start](../README.md)
 
 ## Hardware
 
-Supports **esp32, esp32s3, esp32c3 and esp32c6**, with 2.4 GHz WiFi/BLE and at least 4 MB flash
-for dual OTA; PSRAM is not required. First installation needs a USB data cable. Classic esp32
-requires revision v3.0 (ECO3) or newer. The installer refuses a detected pre-ECO3 revision before
-flashing; if the revision cannot be read, it continues and the bootloader remains the final check.
-An unreadable revision is not evidence of compatibility. esp32c3 builds keep ESP-IDF's default minimum of revision v0.3; esp32s3 and esp32c6
-have no revision floor. ESP32-S2 lacks BLE; H2/P4 lack WiFi.
+- **ESP32, ESP32-S3, ESP32-C3 and ESP32-C6** need at least 4 MB flash for dual OTA. WiFi uses 2.4 GHz.
+- Classic ESP32 requires rev. v3.0 (ECO3) or newer. The installer blocks older detected revisions.
+  If detection fails, the bootloader checks the revision at startup.
+- ESP32-C3 requires rev. v0.3 or newer. Its 10 dBm WiFi limit can reduce range and is intended to
+  mitigate [reported Super Mini startup failures](https://github.com/0Bu/tesla-key-esp32/issues/415).
+  If startup fails, retain the serial log and check USB power and the antenna.
 
-The esp32c3 image limits WiFi transmit power to **10 dBm**, including the setup AP and station
-startup. This is intended to mitigate the reported Super Mini startup failures in
-[#415](https://github.com/0Bu/tesla-key-esp32/issues/415), but can reduce WiFi range. The report has
-no serial reset log, so a brownout is not confirmed. If startup still fails, retain a serial boot
-log and check the USB cable, power supply and board antenna before erasing configuration.
-
-The pinned library also declares C5, but this firmware does not support it: restoring C5 requires
-separate firmware, signing-size and hardware acceptance. Undeclared chips such as esp32c61 need
-upstream support first. [Target decision](adr/0004-drop-esp32c5-target.md).
+[C5 target decision](adr/0004-drop-esp32c5-target.md)
 
 ### Wired networking (optional, esp32s3)
 
-The esp32s3 image also drives a **WIZnet W5500 over SPI**, so the device can run on Ethernet —
-including **PoE** (one cable for power and network). That matters because BLE range to the car is
-signal-limited, so mounting the device where the car is beats any radio tweak. Verified pinouts,
-probed in order: **M5Stack AtomS3 Lite on an ATOMIC PoE Base** (802.3af; SCLK 5 / CS 6 / MISO 7 /
-MOSI 8) and **Waveshare ESP32-S3-ETH** (SCLK 13 / CS 14 / MISO 12 / MOSI 11); custom builds can
-prepend a validated four-pin mapping through Kconfig.
+The ESP32-S3 image supports **WIZnet W5500 Ethernet** via SPI. It probes these pinouts in order.
 
-If wired boot obtains a DHCP lease before fallback, WiFi **never starts**, removing WiFi/BLE radio
-coexistence and freeing ~57 KB of contiguous heap. No WiFi credentials are needed; set the VIN in
-the web UI. Without a usable wired link it falls back to WiFi or the setup portal. A cable plugged
-in later takes over routing but can leave WiFi running. Without WiFi credentials, a successfully
-started Ethernet driver keeps waiting for a late lease. That lease closes the setup portal,
-releases its WiFi driver and continues boot without a restart. While waiting, the open AP closes
-after 10 minutes without a client or 30 minutes with one; power-cycle the board to reopen it.
-If driver construction fails and no WiFi station can recover, setup stays open for the form.
-The **same** esp32s3 image serves a LilyGo T-Dongle-S3, a bare ESP32-S3 and both PoE boards, each
-detected at boot; the driver is not compiled into the other targets. Design:
-[ARCHITECTURE](ARCHITECTURE.md#wifi--lan-connectivity).
+| Board | SCLK | CS | MISO | MOSI |
+|---|---:|---:|---:|---:|
+| M5Stack AtomS3 Lite + ATOMIC PoE Base (802.3af) | 5 | 6 | 7 | 8 |
+| Waveshare ESP32-S3-ETH | 13 | 14 | 12 | 11 |
+
+Custom builds can prepend a pinout in Kconfig. Connect Ethernet before boot. With an early DHCP
+lease, WiFi stays off. Set the VIN in the web UI. Without a lease, the device falls back to WiFi or
+the setup portal. Late Ethernet can coexist with station WiFi. See
+[network startup and fallback](ARCHITECTURE.md#wifi--lan-connectivity).
 
 ## Provision without rebuilding
 
-Use the device's transactional HTTP path; **never generate and flash a partial NVS image** — it spans
-the whole `0x6000` partition and erases the private key, pairing sessions and every omitted setting.
-On a first boot join `tesla-key-esp32-setup`, then:
+Use `provision.py` over HTTP to preserve NVS. A partial NVS image replaces the entire partition,
+including private keys and sessions. On first boot, join `tesla-key-esp32-setup` and run the command below.
 
 ```bash
 python3 provision.py --url http://192.168.4.1 --ssid MyNet --vin '<VIN>'
 # password is prompted without echo; automation: --password-stdin or a chmod-600 --password-file
 ```
 
-For an already reachable device use `--url http://tesla-key-esp32.local`, which calls
-`POST /set_wifi` with its one-shot rollback. Every board requests that same mDNS name, so with more
-than one board on the network use the target board's IP address: the name can reach another board.
-A vehicle identity change is deliberately separate because it clears the old pairing:
+On the LAN, use `--url http://tesla-key-esp32.local` or the board's IP address. Use the IP address
+when there are multiple boards. Failed WiFi changes roll back once. Use the separate VIN command
+only for an intentional identity change, which clears pairing.
 
 ```bash
-python3 provision.py --url http://<ESP32-IP> --mode lan \
+python3 provision.py --url 'http://<ESP32-IP>' --mode lan \
   --vin-only --vin '<VIN>' --confirm-vin-change
 ```
 
-The retired `--port` path fails closed with a data-loss explanation; for genuine low-level recovery,
-make and verify a complete NVS backup before writing at `0x9000`. All three provisioning paths
-require a 1–32-byte UTF-8 SSID. The password is an 8–63-byte UTF-8 WPA2 passphrase or exactly
-64 ASCII hex characters (raw PSK). In the setup portal and LAN API an empty password means an
-open network; the host tool requires `--open-network` to select that explicitly. Enterprise
-authentication is not supported.
+- SSID must be 1–32 UTF-8 bytes. Use an 8–63-byte UTF-8 WPA2 passphrase or 64 ASCII hex digits for a raw PSK.
+- For open WiFi, leave the password blank in the setup portal or LAN API. Use `--open-network` with
+  `provision.py`.
+- For low-level recovery, verify a complete NVS backup before writing to `0x9000`.
 
 ## Pairing and identity
 
-A configured VIN is required before pairing. The device sends its existing Charging Manager key
-automatically; there is no manual send button or HTTP endpoint. Place the Tesla NFC keycard on the
-console reader and approve the request on the touchscreen. The hero shows the pairing status.
-Sending the request does not confirm vehicle approval; wait for the session to be established.
+With a VIN configured, the device sends its Charging Manager key automatically. If the session is
+still unconfirmed, retries back off to 60, 120, 240 and then 300 seconds. Keep the keycard on the
+console reader and watch for the prompt. A failed storage read or active OTA pauses enrollment.
 
-Before each attempt the device probes status. Unconfirmed attempts use backoff of 60, 120, 240,
-then 300 seconds, allowing a keycard placed later to complete pairing. Connection-recovery hints
-can request the same bounded flow with an existing session; they never replace the key or delete
-sessions. A failed storage read or active OTA operation prevents enrollment.
+Changing VIN or regenerating the key clears the old pairing. Re-saving the same VIN is a no-op.
+Connection recovery reuses the existing key. [Pairing lifecycle](ARCHITECTURE.md#pairing-lifecycle--invalidation)
 
-Changing VIN or forcing key generation removes the old pairing. Re-saving the same VIN is a no-op.
-Use these operations only for an intentional identity change, then pair again. Connection timeouts
-alone do not require a new key. [Pairing lifecycle](ARCHITECTURE.md#pairing-lifecycle--invalidation).
+If identity recovery is pending (`409`) or unreadable (`503`), leave VIN blank to save network
+settings. Finish identity recovery before setting the VIN.
 
-The setup portal refuses a first VIN while an identity-recovery journal is pending (HTTP 409) or
-unreadable (503). Leave VIN blank to save network settings, then finish identity recovery before
-setting the VIN. This preserves the pending recovery record.
+## evcc
+
+- The web UI fills in the VIN and prefers the device's IPv4 address. Reserve that address in your
+  router if evcc uses it.
+- For the [YAML example](examples/evcc-custom-vehicle.yaml), replace `DEVICE_HOST` and
+  `REPLACE_WITH_VIN` in every URI. The device uses HTTP port 80.
+- Paste the mapping directly into **Custom device**. In `evcc.yaml`, put the mapping inside one
+  `vehicles:` list item with `name: tesla` and `type: custom`, then restart evcc.
+- Check vehicle state before repeating a command after a timeout. [Request deadlines and results](API.md#commands)
 
 ## Updates and recovery
 
-In the web UI, click the download icon on **Firmware**, confirm the offered update and wait for
-the device to reboot. Click the version to select **Release** (official releases, default) or
-**Development** (main builds). OTA preserves configuration and keys.
-The update dialog shows up to five change entries at once. Scroll inside the list to read more.
-The dialog keeps the channel and version from its check. If another client changes the channel
-or checks again, or the published candidate changes, the old confirmation is refused. Check
-again and confirm the new offer. A check that finishes with another client's channel or PR asks
-you to check again. The Firmware row shows the device's current channel for the next check.
-Saving the same channel leaves a checked offer valid.
+In **Firmware**, click the version to choose **Release** (default) or **Development** (main builds).
+Click the download icon, confirm the update and wait for reboot. OTA preserves configuration and
+keys. If a channel change, another check or an updated candidate invalidates the offer, check again.
 
-For USB recovery, **Connect** checks the chip and reads the installed partition table and firmware
-without writing. This restarts the board through its bootloader; the log then follows its boot.
-**Flash** writes the bootloader, partition table, app and OTA selector and keeps WiFi, VIN, pairing
-and sessions; it is offered for tesla-key-esp32 on a layout with the same NVS partition. Otherwise
-only **Clean flash** remains. Clean flash and a merged-image write erase WiFi, VIN and pairing, and
-Clean flash asks for confirmation first; back up secret NVS before an intentional destructive
-recovery. If the log reports `Installed firmware unknown`, both choices stay available: use Flash
-only when the board already runs tesla-key-esp32, because Flash over another firmware's data can
-stop the new firmware at boot.
+In the USB installer, **Connect** restarts the board to read its chip, layout and firmware. Choose
+the write mode based on the result.
+
+| Mode | Effect |
+|---|---|
+| **Flash** | Updates the bootloader, partition table, app and OTA selector. Preserves WiFi, VIN, pairing and sessions on a compatible tesla-key-esp32 layout. If the log reports `Installed firmware unknown`, choose this only for a known tesla-key-esp32 installation. |
+| **Clean flash** | Erases all flash after confirmation. Use for first installation or intentional recovery. Back up NVS before erasing an existing configuration. |
 
 - After an install the log shows `Booted <version>`, or a warning after 20 s.
-- **Disconnect** also removes the browser's permission for the port where the browser supports it.
-- A single port that is still paired reconnects by itself when the page loads, or when the board
-  is plugged in more than 5 s after it was unplugged or last used by the page; that check restarts
-  the board. Sooner, for example after the board's own reset, the log asks for **Connect**, so the
-  board is not reset again. Several paired ports always wait for **Connect**.
-- After a timeout, **Reset**, **Flash** and **Clean flash** stay disabled until the stopped serial
-  operation has released the port; then retry.
-- After a USB disconnect, plug the board back in; click **Connect** if it does not reconnect.
-- If the log says the port remains reserved, reconnect the board and reload the page.
-- Add `?trace` to the installer address to log esptool-js's packet trace.
+- A single authorized port can auto-reconnect and reset the board. After a board reset or with
+  several authorized ports, follow the log's prompt to click **Connect**.
+- After a timeout, wait for the serial operation to release the port. If the port remains reserved,
+  reconnect the board and reload the page.
+- Add `?trace` to the installer URL for a serial packet trace.
 
 Never flash an unsigned local build: it cannot boot. [Verified delivery procedures](DEVELOPMENT.md#delivery).
 
@@ -159,21 +129,14 @@ chip/bootloader compatibility and NVS-preservation checks. A signed app alone in
 
 ## Home Assistant (MQTT)
 
-`main/mqtt_ha.cpp` mirrors every cached reading to MQTT using Home Assistant's
-[MQTT Discovery](https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery), so a **Tesla Key**
-device with all entities appears automatically — no YAML. **Read-only:** no command topics are
-subscribed, so HA cannot control or wake the car. The bridge runs in its own task, independent of
-evcc, BLE and pairing. Runtime design:
-[ARCHITECTURE](ARCHITECTURE.md#home-assistant-mqtt-bridge).
+Edit the broker (`host:port` or URI) in the web UI's **MQTT** row. The device stores it as `mqtt_uri`
+and reboots. [MQTT Discovery](https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery)
+adds a **Tesla Key** device with read-only telemetry.
 
-**Enable:** set the broker in the web UI (**MQTT** row, pencil icon, `IP:PORT`); it is stored in NVS
-(`mqtt_uri`) and applied after the reboot it triggers. Compile-time defaults/credentials live in
-`scripts/idf-docker.sh idf.py menuconfig` → *Tesla Key Configuration*:
+Use `mqtts://` for credentials and check `mqtt.tls` and `mqtt.error` in `/status`.
+[Transport selection and trust](SECURITY.md#mqtt-transport)
 
-A broker without a scheme uses TLS (`mqtts://`) when a username or URI userinfo is present,
-otherwise plaintext (`mqtt://`). An explicit scheme is honored. TLS verifies the bundled CA
-roots and never falls back to plaintext after a failure. Check the secured MQTT row and
-`/status.mqtt.tls`/`error`; see the [transport trust boundary](SECURITY.md#mqtt-transport).
+Build defaults are in `scripts/idf-docker.sh idf.py menuconfig` → *Tesla Key Configuration*.
 
 | Option | Default | Purpose |
 |--------|---------|---------|
@@ -185,18 +148,12 @@ roots and never falls back to plaintext after a failure. Check the secured MQTT 
 
 ## Syslog
 
-`main/syslog.cpp` forwards the same output as `GET /diag` — the device's console log — to a UDP
-Syslog collector (RFC 5424), best-effort. Useful to watch a pairing/reconnect live, or to keep history
-past the in-RAM ring (16 KB, 8 KB on the classic esp32) and past a reboot. It is
-**cleartext and unredacted**
-([SECURITY](SECURITY.md#syslog-and-diagnostic-export)); design: [ARCHITECTURE](ARCHITECTURE.md#syslog-forwarder).
+The device forwards console logs over UDP (RFC 5424) in **cleartext and unredacted**. Set `host:port`
+in the **Syslog** row, or leave it blank to disable. Port 514 is the default. The device stores
+`syslog_uri`, overriding `CONFIG_TESLA_SYSLOG_SERVER`, and reboots.
 
-**Enable:** set the server in the web UI (**Syslog** row, pencil icon, `IP:PORT`, e.g.
-`192.0.2.1:514`; a bare host defaults to 514) — stored in NVS (`syslog_uri`), applied after the reboot
-it triggers; empty disables. Compile-time default: `CONFIG_TESLA_SYSLOG_SERVER` (`""`), overridden by
-NVS. Delivery only needs the hostname/IP to resolve (UDP, no ack); `/status.syslog.reachable` is an
-advisory ARP/ICMP hint, so a collector behind firewalled ICMP still receives lines with
-`reachable:false` shown.
+`syslog.reachable` in `/status` is an ARP/ICMP hint. Check the collector for actual delivery.
+[Diagnostic export](SECURITY.md#syslog-and-diagnostic-export)
 
 ## Troubleshooting
 
@@ -213,7 +170,7 @@ change state; distinguish them from reading an existing log or cached status.
 | No WiFi | SSID/password, open or WPA2 network | Use setup AP or `provision.py`; do not write partial NVS images. Failed LAN credential changes roll back once. With saved credentials the device keeps retrying them and the setup AP closes after 10 minutes without a client (30 minutes at most); power-cycle to reopen it. |
 | No pairing prompt | VIN configured, `key_present`, BLE range, NFC card on reader | Place the keycard on the reader and wait for the automatic same-key retry with backoff, then confirm on the touchscreen. |
 | BLE connection fails | `/status.ble.connect_fail`, `car_connectable`, log cause | Move closer; disconnect another phone/fob if the car advertises non-connectable. |
-| Command times out | BLE availability and car asleep | An intentional wake may be needed; wait for the link and retry. Preserve keys and logs. |
+| Command times out | BLE availability and vehicle state | Check whether the command took effect before retrying. [Command results](API.md#commands) |
 | evcc shows the car as disconnected while it is plugged in | BLE range, `link` in `/status` | Bring the device back into Bluetooth range. An unreachable car reports `charging_state: Unknown`, which evcc maps to status A until the car answers again. With a charger that reports its own status, only the vehicle card and vehicle detection change; [other chargers](API.md#evcc-integration) end the session. |
 | evcc has no SOC/current | `port: 80`, VIN, cache freshness | Inspect `.response.response.charge_state` from `vehicle_data`; active stale telemetry returns `503`. |
 | Key needs attention | `reauth`, stored session and BLE availability | Reconnection and same-key pairing run automatically. Place the NFC card on the reader and confirm a pairing prompt on the touchscreen. No firmware erase is required. |
