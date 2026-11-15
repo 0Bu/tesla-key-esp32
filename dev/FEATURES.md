@@ -85,7 +85,7 @@ Implementation index. `logic/` paths are under `main/`. See the [ESP-IDF invento
 | Fresh OTA probation admission and cached verification diagnostics | `logic/health_gate.hpp`, `logic/ota_contract.hpp`, `main/ota_update.cpp`, `http_ota.cpp`, `http_status.cpp` | New installs before image verification |
 | OTA update channel (Release vs Dev) | `logic/ota_contract.hpp`, `main/ota_update.cpp`, `http_ota.cpp`; [security](SECURITY.md) | Unintended Dev updates on production boards |
 | Firmware row: channel modal + on-demand check | `main/www/app.js`, `index.html`, `style.css`, `test/web_ui_http.test.mjs`, `test/web_ui_browser_gate.py` | Hidden refusals or inaccessible OTA controls |
-| Keyboard focus and ≥4.5:1 feedback contrast | `main/www/style.css`, `test/web_ui_browser_gate.py` | Lost focus and unreadable action feedback |
+| Readable device settings and keyboard feedback | `main/www/index.html`, `main/www/app.js`, `main/www/style.css`, `test/web_ui_browser_gate.py` | Clipped warnings, lost focus or feedback below 4.5:1 contrast |
 | Bug-report redaction | `logic/redact.hpp`, `diag_log.cpp`, `GET /status?redact=1`, `GET /diag?redact=1`; `test/test_diagnostic_export_guidance.py` | Exposing vehicle, network or credential data in reports |
 | Device-bound HTTP origin/Host checks and UI frame denial | `logic/http_origin.hpp`, `http_route.hpp`, `device_hostname.hpp`, `main/http_server.cpp`, `http_status.cpp`; [HTTP exposure](SECURITY.md#http-api-exposure) | Foreign browser mutations and framed controls |
 | Private wake capture | `scripts/capture_wake.py` | Publishing raw VIN and authenticated BLE frames |
