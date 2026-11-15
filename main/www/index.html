@@ -32,7 +32,7 @@
     <header class="top">
       <div class="brand">
         <span class="logo top-logo" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#ic-bolt"/></svg></span>
-        <div class="ttl"><h1>tesla-key-esp32</h1><span class="host mono" id="ipline"></span><span class="feed-status hide" id="feedStatus" role="status"></span></div>
+        <div class="ttl"><h1>tesla-key-esp32</h1><span class="host" id="ipline"></span><span class="feed-status hide" id="feedStatus" role="status"></span></div>
       </div>
     </header>
 
@@ -57,45 +57,65 @@
         </div>
       </section>
 
-      <!-- settings card: all settings in one compact card, one row each -->
-      <section class="pane pane-setup card rows" id="paneSettings" aria-label="Device settings">
+      <section class="pane pane-setup card rows" id="paneSettings" aria-labelledby="settingsTitle">
+        <h2 class="settings-title" id="settingsTitle">Device settings</h2>
         <div class="row" id="rowVeh">
-          <span class="ri"><svg viewBox="0 0 24 24"><use href="#ic-car"/></svg><span class="dot" id="vehDot"></span></span>
-          <span class="rb"><span class="rl">Vehicle</span><span class="rv mono" id="vehVal">&mdash;</span><span class="rs" id="vehSub"></span></span>
-          <button type="button" class="ib hide" id="evccBtn" onclick="openEvcc()"><span class="chip-badge">evcc</span></button>
-          <button type="button" class="ib" id="vinBtn" onclick="editVin()" aria-label="Change VIN" title="Change VIN"><svg viewBox="0 0 24 24"><use href="#ic-pencil"/></svg></button>
+          <span class="ri" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#ic-car"/></svg></span>
+          <span class="rb">
+            <span class="rl">Vehicle</span>
+            <span class="rd"><span class="rv" id="vehVal">&mdash;</span><span class="rs" id="vehSub"></span></span>
+          </span>
+          <div class="row-actions">
+            <button type="button" class="ib hide" id="evccBtn" onclick="openEvcc()"><span class="chip-badge">evcc</span></button>
+            <button type="button" class="ib" id="vinBtn" onclick="editVin()" aria-label="Change VIN" title="Change VIN"><svg viewBox="0 0 24 24"><use href="#ic-pencil"/></svg></button>
+          </div>
         </div>
         <div class="row" id="rowKey">
-          <span class="ri"><svg viewBox="0 0 24 24"><use href="#ic-key"/></svg><span class="dot" id="keyDot"></span></span>
-          <span class="rb"><span class="rl">Security key</span><span class="rv mono" id="keyVal">&mdash;</span><span class="rs" id="keySub"></span></span>
+          <span class="ri" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#ic-key"/></svg></span>
+          <span class="rb">
+            <span class="rl">Security key</span>
+            <span class="rd"><span class="rv" id="keyVal">&mdash;</span><span class="rs" id="keySub"></span></span>
+          </span>
           <button type="button" class="ib danger" id="keyBtn" onclick="genKey()" aria-label="Regenerate key" title="Regenerate key"><svg viewBox="0 0 24 24"><use href="#ic-refresh"/></svg></button>
         </div>
         <div class="row" id="rowWifi">
-          <span class="ri"><svg id="wifiIcon" viewBox="0 0 24 24"><use href="#ic-wifi"/></svg><svg id="ethIcon" class="hide" viewBox="0 0 24 24"><path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z"/></svg><span class="dot" id="wifiDot"></span></span>
-          <span class="rb"><span class="rl" id="wifiLbl">Wi-Fi</span><span class="rv" id="wifiVal">&mdash;</span><span class="rs" id="wifiSt"></span></span>
-          <span class="rbar" id="wifiBars"></span>
+          <span class="ri" aria-hidden="true"><svg id="wifiIcon" viewBox="0 0 24 24"><use href="#ic-wifi"/></svg><svg id="ethIcon" class="hide" viewBox="0 0 24 24"><path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z"/></svg></span>
+          <span class="rb">
+            <span class="rl" id="wifiLbl">Wi-Fi</span>
+            <span class="rd"><span class="rv" id="wifiVal">&mdash;</span><span class="rs" id="wifiSt"></span></span>
+          </span>
+          <span class="rbar" id="wifiBars" aria-hidden="true"></span>
         </div>
         <div class="row" id="rowBle">
-          <span class="ri"><svg viewBox="0 0 24 24"><use href="#ic-bt"/></svg><span class="dot" id="bleDot"></span></span>
-          <span class="rb" id="bleConn"><span class="rl">Bluetooth</span><span class="rv" id="bleVal">&mdash;</span><span class="rs" id="bleSt"></span></span>
-          <span class="rbar" id="bleBars"></span>
+          <span class="ri" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#ic-bt"/></svg></span>
+          <span class="rb" id="bleConn">
+            <span class="rl">Bluetooth</span>
+            <span class="rd"><span class="rv" id="bleVal">&mdash;</span><span class="rs" id="bleSt"></span></span>
+          </span>
+          <span class="rbar" id="bleBars" aria-hidden="true"></span>
         </div>
         <div class="row" id="rowMqtt">
-          <span class="ri"><svg viewBox="0 0 24 24"><path d="M4.9 19.1C1 15.2 1 8.8 4.9 4.9"/><path d="M7.8 16.2a6 6 0 0 1 0-8.5"/><path d="M16.2 7.8a6 6 0 0 1 0 8.5"/><path d="M19.1 4.9C23 8.8 23 15.1 19.1 19"/><circle cx="12" cy="12" r="2"/></svg><span class="dot" id="mqttDot"></span></span>
-          <span class="rb"><span class="rl">MQTT</span><span class="rv mono" id="mqttVal">&mdash;</span><span class="rs" id="mqttSt"></span></span>
+          <span class="ri" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4.9 19.1C1 15.2 1 8.8 4.9 4.9"/><path d="M7.8 16.2a6 6 0 0 1 0-8.5"/><path d="M16.2 7.8a6 6 0 0 1 0 8.5"/><path d="M19.1 4.9C23 8.8 23 15.1 19.1 19"/><circle cx="12" cy="12" r="2"/></svg></span>
+          <span class="rb">
+            <span class="rl">MQTT</span>
+            <span class="rd"><span class="rv" id="mqttVal">&mdash;</span><span class="rs" id="mqttSt"></span></span>
+          </span>
           <button type="button" class="ib" id="mqttBtn" onclick="editMqtt()" aria-label="Edit MQTT broker" title="Set the MQTT broker"><svg viewBox="0 0 24 24"><use href="#ic-pencil"/></svg></button>
         </div>
         <div class="row" id="rowSyslog">
-          <span class="ri"><svg viewBox="0 0 24 24"><path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/></svg><span class="dot" id="syslogDot"></span></span>
-          <span class="rb"><span class="rl">Syslog</span><span class="rv mono" id="syslogVal">&mdash;</span><span class="rs" id="syslogSt"></span></span>
+          <span class="ri" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/></svg></span>
+          <span class="rb">
+            <span class="rl">Syslog</span>
+            <span class="rd"><span class="rv" id="syslogVal">&mdash;</span><span class="rs" id="syslogSt"></span></span>
+          </span>
           <button type="button" class="ib" id="syslogBtn" onclick="editSyslog()" aria-label="Edit Syslog server" title="Set the Syslog server"><svg viewBox="0 0 24 24"><use href="#ic-pencil"/></svg></button>
         </div>
         <div class="row row-fw" id="rowFw">
-          <span class="ri"><svg viewBox="0 0 24 24"><use href="#ic-chip"/></svg><span class="dot ok" id="fwDot"></span></span>
+          <span class="ri" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#ic-chip"/></svg></span>
           <span class="rb">
             <span class="rl">Firmware</span>
-            <button type="button" class="ver-btn" id="verLink" onclick="openChannelSelect()" title="Change update channel">
-              <span class="rv mono" id="fwVer">&mdash;</span>
+            <button type="button" class="rd ver-btn" id="verLink" onclick="openChannelSelect()" title="Change update channel">
+              <span class="rv" id="fwVer">&mdash;</span>
               <span class="rs" id="fwSub">Release channel</span>
             </button>
           </span>
