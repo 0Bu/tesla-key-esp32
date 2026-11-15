@@ -1,152 +1,81 @@
 # Host tests
 
-The host suite exercises IDF-free decisions and selected production glue with deterministic stubs.
-`run-mock-tests.sh` prints elapsed seconds for each completed gate. Contract parsers use bounded,
-process-local caches of immutable text analyses, with fresh inventory copies for callers; they do
-not cache filesystem verdicts or bypass changed mutations. Passive shell-flow spies check required
-arguments, execution order and failure propagation while avoiding repeated Python interpreter startup. Real
-compilation, runtime tests, browser checks and sanitizers retain their separate execution.
-Fast C++ and normal host checks run without Docker. Strict mode on macOS also requires Docker
-for the real Linux browser check. No host check requires USB or a vehicle. Firmware compilation is a separate
-[development gate](../docs/DEVELOPMENT.md#validate-a-change).
+Host tests cover pure logic and selected production code with controlled SDK, transport and storage
+effects. For the complete handoff and firmware builds, see [Development](../docs/DEVELOPMENT.md#validate-a-change).
 
 ## Run it
 
 ```bash
-scripts/run-mock-tests.sh               # available local checks, reports missing capabilities
-scripts/run-mock-tests.sh --require-all # fail closed: CI/Stop prerequisites are mandatory
-scripts/with-host-python.sh python3 scripts/run-local-checks.py --require-all # reuse identical local host evidence
-scripts/check-local.sh --firmware     # complete local handoff, including pinned four-target contracts
+scripts/run-mock-tests.sh
+scripts/run-mock-tests.sh --require-all
+scripts/run-mock-tests.sh --require-all --profile runtime
+scripts/run-mock-tests.sh --require-all --profile browser
 ```
 
-The complete runner needs CMake, Python 3.11+, C11 and C++17 compilers, Ruby, jq and rsync.
-The portable direct native loop is `run-fast-tests.sh`; it does not certify the full contract suite.
-The evcc example check uses Ruby's standard YAML parser and `jq` to execute the shipped status
-expression, verify explicit setter deadlines and reject the historical `Starting` mapping.
-The separate real v6.4.0 tesla-ble/PSA harness requires C++20; pure firmware logic remains C++17.
-Strict mode requires Git, Python, Node, Ruby, jq, CMake, compiler and every gate file, with bounded subprocesses.
-Missing tooling is failure, not reduced coverage reported green. A failed check fails its binary:
-the pure-logic suite and the tesla-ble harness report every failed check before exiting 1, while the
-NVS, runtime-boundary, cJSON OOM and MQTT JSON binaries and the fuzz smoke stop at the first failure.
+Strict mode fails on missing tools, gate files or timeouts. It requires Git, CMake, C11/C++17
+compilers, Python 3.11+, Node, Ruby, jq and rsync. The separate real-library BLE/PSA harness
+requires C++20. Strict browser checks on macOS require Docker.
 
-The full wrapper executes `runtime_boundary_contract`, `eth_startup_cleanup_controls` and
-`f137_task_host_contract` once through its direct Python gates. They remain registered for standalone
-CTest and are excluded only from the wrapper's CTest invocation. The retained direct-compiler
-branch is tested by passive wiring fixtures; it is not a supported complete no-CMake runner.
-`test_local_checks.py` covers reuse, source/runtime invalidation, partial-staging
-cache refusal, failures, concurrent consumers and bounded-process cancellation. The
-[local coordinator](../docs/DEVELOPMENT.md#validate-a-change) retains no remote CI or review state.
-Selected strict `--profile runtime` and `--profile browser` runs support focused local iteration. Shared
-native/browser parity runs in both. Local handoff, main/manual runs and eligible preview acceptance
-remain complete. `test_change_scope.py` drives the actual shell profiles and both lint modes with
-passive tools, including selected failures, unknown inputs and the default full mode.
+The two profiles are for local iteration. Both include shared protocol and browser parity checks.
+Complete handoff uses the full profile. CTest registers all native targets and wrappers. The full
+shell runner executes the runtime-boundary, Ethernet cleanup and F137 direct Python gates once
+and excludes those duplicates from its CTest invocation. For local result reuse, see
+[Development](../docs/DEVELOPMENT.md#validate-a-change).
 
 ### Focused checks and sanitizers
 
 ```bash
-scripts/run-fast-tests.sh --logic    # pure decisions
-scripts/run-fast-tests.sh --boundary # native runtime boundaries
-scripts/run-fast-tests.sh --all      # portable logic, NVS and native runtime families
-scripts/run-fast-tests.sh --self-test # compiler prerequisite only, no test execution
+scripts/run-fast-tests.sh --logic
+scripts/run-fast-tests.sh --boundary
+scripts/run-fast-tests.sh --all
+scripts/run-fast-tests.sh --self-test                  # compiler prerequisite only
+cmake -S test -B build_mock
+cmake --build build_mock
+ctest --test-dir build_mock --output-on-failure
 ```
 
-On Linux, prove the sanitizer detectors and then run the instrumented suite:
+Run these sanitizer commands on Linux. On macOS, `scripts/check-local.sh` uses pinned IDF Docker.
 
 ```bash
 scripts/run-sanitizer-tests.sh --self-test
 scripts/run-sanitizer-tests.sh
 ```
 
-Sanitizers require Linux; the script refuses other hosts. Firmware compilation remains separate.
-For direct CMake iteration:
-
-```bash
-cmake -S test -B build_mock
-cmake --build build_mock
-ctest --test-dir build_mock --output-on-failure
-```
-
-Run the complete local handoff before pushing through `$deploy`. Ordinary PRs run only the
-local-record validation. Publication splits host evidence into `logic-test` and `logic-harness`.
-Both run alongside producer and independent per-target compiles and are required by `publish`. Full
-repository/agent preflight runs in `logic-harness` beside the mock suite. The harness no longer repeats
-the shared version, size, Pages, changelog and build-gate self-tests; their mandatory owner remains
-the full host build-contract gate. The harness retains its unique IDF checks. Both assembly jobs
-can finish before the host checks. Publication compares their exact-source bytes. Python gates use
-`scripts/with-host-python.sh` (Python ≥3.11). Linux sanitizer
-checks use ASan, UBSan and LSan, with deliberate tripwires proving the detectors work, plus a fixed-seed
-20,000-case fuzz corpus. Local host evidence is distinct from remote CI.
-
-The build-contract suite runs the real Pages assembler with and without a published ref using its
-invoking Bash, including macOS Bash 3.2. Output-only corruption cases restore independent copies
-of one validated site instead of rebuilding identical inputs; missing/extra-target cases still
-invoke the actual assembler.
-
+The self-test trips ASan, UBSan and LSan on purpose. The run instruments host targets and a
+fixed-seed 20,000-case fuzz corpus. Both must complete for sanitizer evidence.
 
 ### Browser prerequisites
 
-Automatic browser processes run only on Linux. macOS is refused before binary lookup or process
-creation, including an explicit `BROWSER_BIN`. Optional local mode reports a skip; `--require-all`
-on macOS invokes the Linux container and fails if it cannot complete the actual browser check. `scripts/run-browser-tests-linux.sh` builds a local
-Chromium test image and runs the real three-width gate with no network and a read-only source
-mount. The image build needs package access; Docker is required. Run the wrapper once to
-prepare a cold image before the strict suite, whose container sub-gate retains a 120 s deadline. Linux CI runs the same DOM gate
-in the strict host suite. Launch-policy unit tests use controlled processes and do not prove DOM
-behavior. Use the provided in-app Browser for an optional offline visual inspection on macOS.
+Use Linux Chrome/Chromium. On macOS, prepare a cold image with
+`scripts/run-browser-tests-linux.sh` before the strict 120 s sub-gate. The wrapper builds a
+Chromium image, then runs with a read-only source mount and networking disabled. Package access is
+needed for the image build. Native macOS launches are refused even with `BROWSER_BIN`.
 
-One isolated browser uses a local CDP pipe (no TCP listener) and a 110 s absolute work deadline,
-including its 45 s startup allowance; bounded process-group termination fits within the 120 s outer
-gate. CSS hover/focus emulation is restored before trusted keyboard events. The keyboard fixture
-starts from the document, retains the actual button handler, replaces only its action with a passive
-spy and refuses extra requests. This is browser default activation, not physical typing or a full
-accessibility audit. Missing browser
-capability must be reported and fails strict mode. Deterministic DOM/presenter tests do not replace
-real-browser evidence. Validator `--self-test` modes use representative mutations to show rejection;
-firmware compilation and signed-artifact checks remain independent.
-
+`web_ui_browser_gate.py` runs on a local CDP pipe with a 110 s work deadline including 45 s for
+startup. It checks populated 390, 768 and 1200 px layouts, console and request failures, contrast,
+ordered CSS rules, OTA and evcc sheets, and Tab/Enter/Space activation with passive actions.
+`browser_cdp.py` policy/transport tests use controlled peers. DOM checks do not replace a full
+accessibility audit. Optional local visual inspection can use an offline fixture in the in-app Browser.
 
 <a id="beyond-the-pure-logic-binary"></a>
 
 ## Gate index
 
-The canonical runner owns the complete invocation list; these groups identify the evidence and its limits.
+The [runner](../scripts/run-mock-tests.sh) owns exact order, timeouts and profiles.
 
-| Gate | What it verifies |
+| Gate | Coverage |
 |---|---|
-| `test_runtime_boundaries.cpp` | Production glue with RTOS/NVS/log/ping stubs: post-unlock sinks, safe partial cleanup, durable-before-restart, task/admission handshakes, callback-generation quarantine, W5500 acquisition unwind |
-| `test_diagnostic_export_guidance.py` | Actual bug-form diagnostic description, owned export URL, manual/serial sanitation and nine negative wording mutations |
-| HTTP security contract and UI request tests | Actual POST gate ordering, bounded provenance headers, socket/live-mDNS ownership, diagnostic Host checks, redaction selectors, exact UI proof header, no CORS grant and both anti-framing headers; 16 source mutations must fail. IPv6 enablement is rejected; these checks do not establish live network/browser attack behavior. |
-| `test_runtime_boundary_contract.py` | Shipped CMake source closure and actual task/callback registration; contained or mechanically bounded C boundaries; fixed mailbox/completion ownership, no forbidden work under locks, production JSON/OTA/MQTT wiring and closed source/flag surface |
-| `test_ble_lifecycle.py` | Actual BLE scan, deferred termination, pending-service and failed-connect bodies against passive RTOS/NimBLE doubles: mutex contention, generation replacement, retry exhaustion and retired-link repair. This is host interleaving evidence, not a radio or vehicle test. |
-| `test_ci_checkout.py` | Real local Git fetches with and without blob filtering: complete history/tags, offline exact-source archive and metadata reads, and omitted unrelated historical Pages payloads. No GitHub access. |
-| `test_pages_publish_control.py` | Empty, regular, single-link root `.nojekyll` creation and idempotence; refusal of nonempty files, directories, links and FIFOs without changing their targets. |
-| `test_pages_publish.py` | Actual branch publisher against disposable local Git repositories: filesystem failures, stale-source and concurrent-push retries, static marker preservation and effective guard omission. Each case copies independent object stores/refs/worktrees from one source fixture without hardlinks. Shell pass-throughs avoid Python startup for ordinary Git calls; fault injection retains its Python owner. A refusing sentinel checks remote isolation and real Git exit-status propagation. |
-| `test_release_pages_recovery.py` | Authenticated original ZIP, immutable/latest/source/run authority, all four producer and independent targets, full host gates, key-removal/reuse evidence and exact candidate-site bytes plus only the empty root control marker. Legacy/current artifacts and changed/extra payload rejection. Passive API/Git and publisher controls; no real key, Release or Pages mutation. |
-| `test_charge_presentation.py` | Compiled actual charge cache snapshot with passive RTOS facades: coherent value/stamp, tick zero/wrap, missing sample, lock failure and post-unlock publication. Pure status fixtures independently age charge while common contact stays fresh; browser fixtures verify the retained-data presentation without commands. |
-| `test_command_outcomes.py` | Actual start/stop/default producers and enqueue helpers feed the real runner with passive RTOS/completion/builders. All three actual admission blocks reject positive budgets exhausted during mutex acquisition; individual guard omissions restore the invalid enqueue. Matching, inverse, default, missing-counter and unauthenticated outcomes retain one callback and no additional payload. Pure runner tests cover queued-ID policy guards, slot reuse and expired/cancelled/cleared requests; actual REST/MCP emitters print and reparse their completion results. No live command or cryptographic frame is sent. |
-| `test_patch_incremental.py` | Shipped CMake admission block and unchanged validator functions with synthetic digest constants; ordinary incremental input/inventory changes stop before the forced compiler, while valid revalidation proceeds. Does not compile tesla-ble or establish real dependency bytes. |
-| `test_dependency_sources.py` / `test_dependency_harness.py` | Owned local Git/cache admission, exact tracked links, preserved mtimes, maintenance-policy omission, object namespaces and actual optional/strict harness ordering. A subprocess spy verifies full-source flow-cache identity and uncached failures. No network or compiler. |
-| `test_dependency_cmake.py` | Actual root CMake and named passive component/ELF targets in Make/Ninja: same-size/mtime changes, missing warm state, a valid omitted build-admission delegation and restoration. These are ordering fixtures, not IDF/compiler proof. |
-| `test_dependency_process.py` | Real bounded data/status pipes, owned groups and atomic cleanup; actual CMake/canonical-runner outer timeouts and parent SIGKILL, exited leaders, resistant descendants and malformed status. Separate valid liveness-EOF and atomic-cleanup omissions restore the delayed effect. Internal deadline uses a clock offset; signal/observation failures use explicit doubles and independently confirmed fixture cleanup. No fetch or hardware. |
-| `run-cjson-oom-tests.sh` | Rehashed pinned cJSON; real producers/parser, finite evcc numeric wire fields, every allocation failpoint, exact IDs, ownership and early input release. Effect-aware reply renderer and extracted real handlers/outer catch exercise degraded outcomes, clock-plus-refused-OTA, typed identity recovery, original restart admission and terminal transport failures. |
-| `run-mqtt-json-publish-tests.sh` | Every production discovery/state factory, full/minimal branches and all registry rows; build/print/publish faults cannot replace retained data and rearm discovery. Extracted real discovery rounds refresh the configuration address without changing identity/state topics; missing/racing/failed address reads omit it. Network and broker adapters remain passive. |
-| `scripts/check-nvs-contract.py` | Exact registered namespace/key/API/owner/retention/secrecy surface, session aliases and direct NVS calls; wrong-name/API/collision/missing-record mutations |
-| `scripts/repo-lint.sh` | Syntax/local links, workflow-policy and host-gate mutation canaries, ESP-IDF matrix audit, logic ownership and protocol wiring |
-| `test_deploy_candidate.py` | Actual downloaded-candidate YAML step, four-target argument/order and failure propagation for both channels, disposable RSA fixtures and semantic consumer-omission/restoration controls. Host registration executes the shipped shell prefix with passive tools and catches commented, skipped, backgrounded or ignored-failure calls. Initial inventory commands are explicit inert spies; no publication or production key. |
-| `tools/agent-config/selftest.sh` / `test_codex_setup.py` | Canonical skills/reviewers/hooks, native adapter parity/trust boundaries, read-only scopes, owner contracts, exact content and approval/artifact canaries |
-| `test_hook_read_contract.py` | Offline complete-hook payloads and parser controls: literal search/JSON-query data, active option parsing, config/preprocessor/glob/wrapper/substitution refusals, isolated hash-pinned partition reader and input ownership. Payload commands are never executed; no device, publication or NVS operation. |
-| `scripts/release-relevance.sh --self-test` | Mandatory release/Dev/PR selectors and publication-authority fixtures; the strict host suite gives this separate serial gate 120 seconds. |
-| `scripts/test-build-contracts.sh` | No arguments retain the complete standalone contract, including relevance. The explicit `--build-and-manifest` profile runs the remaining block only after the strict host suite's mandatory relevance gate; it has its own 120-second limit. The two serial gates permit 240 seconds combined. Targets, pins, partitions, generated artifacts, size/stack/effective-build and publication contracts; validator self-tests isolate offsets, digest syntax, unsigned-prefix/size reuse, production pins, signed padding/image binding and complete Release/Pages bytes with deterministic disposable fixtures. Pages controls cover build-state/CLI consumption, bounded backoff beyond 50 seconds, delayed size/hash/404 failures for each of 16 parts, independent complete retries, bounded persistent failures, separate manifest/Release-byte delegation and immutable-input rejection before polling; no real signing key |
-| `scripts/test-pr-gates.sh` | Exact-head review records, relevance, canonical Git command boundaries and shared-library loss using fixtures; `ci-heal.sh` refusals with stubbed `git`/`gh` |
-| `test_pages_changelog.py` and Pages checker/relevance self-tests | Actual assembler delegation and metadata admission; exact root/Dev served bytes, complete fresh retries, immutable same-commit baseline files, and shipped Markdown add/edit/rename/delete through all three relevance decisions. Synthetic firmware and owned offline Git fixtures prove no delivery or live CDN behavior. |
-| `test_inline_assets.py` | Bounded CSS/JavaScript byte fixtures, legal and HTML-sensitive text, unsupported multiline JS rejection, Node ASI/regex controls, preserved code tokens and line boundaries, exact CMake output, raw-marker rejection, stale-output cleanup and the real incremental helper dependency. The Linux browser fixture compares the ordered raw CSSOM with the DOM stylesheet. |
-| `web_ui_browser_gate.py` / `browser_cdp.py` and their policy/transport tests | Linux-only assembled page in Chrome/Chromium: console/request failures, degraded poller, escaping, computed contrast, OTA notes and uncertainty, the evcc pill and copy sheet; populated 390/light, 768/light and 1200/dark layouts; real trusted CDP Tab navigation, focus-visible ring and exactly one action each for Enter and Space. Controlled Python peers test pipe framing/limits/FD ownership and cleanup separately from DOM behavior; the host contract executes the actual strict shell with passive tools on Linux/Darwin branches and rejects commented, disabled or early-exit test invocations |
-| `web_installer.test.mjs` | Actual installer with passive serial/flasher adapters: installed-firmware check and when Flash is offered, phase ordering with the OTA selector last, abort/release including esptool's reset lines and buffered reads, one serial open per connection, explicit Clean flash confirmation, the boot-version check, and `eraseAll:false` on every write. No physical flash or NVS-preservation proof. |
-| `serial_port_release.test.mjs` | Port leases, quarantine and permission removal of the installer. |
-| `test_provision.py` / `test_capture_wake.py` | Passive HTTP provisioning and wake-capture client contracts; no live device requests. |
-| `test_evcc_vehicle.rb` / `test_log_origin_contract.py` | Shipped evcc jq mapping/setter contracts and actual logging-origin source controls. |
-| `web_ui_http.test.mjs` | Actual `app.js` in a Node VM with stubbed DOM and fetch. Covers request helpers, configuration, OTA and sheet flows. The evcc sheet must match the YAML example with the host and VIN filled in. Tests cover copying, manual selection after refusal, and focus return. |
-| `run-config-repair-backend.sh` | Actual default-off maintenance backend and raw transport bodies against passive SDK/NVS facades. |
+| `scripts/repo-lint.sh` | Repository syntax, links, workflow and host gate contracts, ESP-IDF inventory and logic ownership |
+| `test_codex_setup.py`, `test_hook_read_contract.py`, `tools/agent-config/selftest.sh` | Canonical policy, native adapters and hook boundaries, with controlled payloads |
+| `scripts/test-pr-gates.sh`, `test_change_scope.py`, `test_local_checks.py` | Head-bound records, local receipt invalidation and cleanup, selected profiles and failure propagation |
+| `scripts/release-relevance.sh --self-test`, `scripts/test-build-contracts.sh` | Release/Dev/PR selectors, four-target layout and artifact contracts, real Pages assembler, disposable RSA fixtures |
+| `test_ci_checkout.py`, `test_deploy_candidate.py` | Filtered exact-source Git checkout and actual consumer steps with disposable fixtures |
+| `test_pages_publish.py`, `test_pages_publish_control.py`, `test_release_pages_recovery.py`, `test_pages_changelog.py` | Local Git publication, static marker, immutable recovery and change notes, with controlled Git/API/time |
+| `test_dependency_sources.py`, `test_dependency_cmake.py`, `test_dependency_harness.py`, `test_dependency_process.py`, `test_patch_incremental.py` | Exact Git/cache admission, actual CMake/runner order, timeout cleanup and mutation refusals |
+
+Standalone `scripts/test-build-contracts.sh` includes release relevance. Strict host runs relevance
+and `--build-and-manifest` as two consecutive gates, each with 120 s. Artifact fixtures use test
+keys. They establish neither signed delivery nor live Pages behavior.
 
 <a id="whats-covered"></a>
 
@@ -154,566 +83,94 @@ The canonical runner owns the complete invocation list; these groups identify th
 
 ### Runtime, storage and fault adapters
 
-The real NVS/config tests observe a synthetic serialization buffer through the passive save shim:
-maximal 473-byte payloads, complete 512-byte wipe on success/refusal/failure/exception, synchronous
-reentry and a bounded controlled thread collision. They preserve the original blob-before-mirrors
-fault matrix. No production buffer accessor or live NVS data is used; this does not simulate power
-loss, flash durability or prove runtime heap margins.
-
-`clock_runtime_tests` compiles the actual clock shell and date getters with passive RTOS/libc/storage
-doubles. It covers writer orderings, typed failures, authority-before-sampling, restore and checkpoint
-faults. Pure clock/window/parser/checkpoint decisions and key-date stamp-or-retire callbacks have
-registered logic ownership; the latter also runs through the real NVS adapter fault matrix. These
-checks do not emulate SDK timekeeping, flash durability, RTC behavior, NTP networking or hardware.
-
-Native runtime tests compile the actual `SemGuard`, `InFlightGuard` and stack-watch shell. They
-check normal/standard/unknown-exception unwinding, failed acquisition, independent sampled slots,
-monotonic minimum retention and visible zero through passive semaphore/high-water-mark doubles.
-These tests do not measure physical task margins or prove scheduler/RTOS timing.
-
-The real-library harness also runs `test_dependency_guards.py` over the exact patched Peer
-decrypt body and pinned logging macros/formatter. Synthetic PSA drivers write before returning
-update/verify errors with zero reported length; capacity and guard-byte checks reject partial or
-removed wipes while preserving successful output. INFO retains ERROR/WARN/INFO and avoids
-DEBUG/VERBOSE formatting and argument evaluation; default/debug-enabled controls fail this oracle.
-Linux repeats these probes with ASan/UBSan/LSan. This is driver-failure modeling, separate from
-the real V1 crypto vectors, ESP-driver behavior and physical key/session preservation.
-The runtime source contract pins the 2 KiB shell cap, reviewed vehicle-task allocation, leaf-helper
-logging exclusions, lexical Vehicle-lock/wait scopes, and generation/command-owned completion
-branches. Mutation canaries test each seam; this is not a general C++ dataflow or interleaving proof.
-
-Iteration-fault tests simulate 15 minutes at vehicle/display error cadences, including alternating
-successful iterations. The shipped sink helper runs against throwing/passive sinks; source controls
-bind all three catches to task-owned state and a 64-bit monotonic clock. This does not induce a
-firmware exception or exercise the physical scheduler and logging transport.
-
-`config_commit_tests` compiles the shipped request and health-commit leases, shared runtime sampler,
-raw-state/config confirmation, full timed health task and setup portal, plus unmodified pinned SDK
-CRC/query fragments through an explicit passive type/I/O bridge. It exercises five occupied owners,
-raw NEW/PENDING/VALID/UNDEFINED, blank/CRC/query errors, timed Wait/Stop/GiveUp, fresh post-owner
-refusals, returned/exceptional SDK effects, cache-before-diagnostic ordering, portal outer catches
-and partial replies. The actual portal handler also exercises missing, pending and unreadable VIN
-journals and a throwing journal read: only proven absence permits a first VIN, while network-only
-saves skip the journal probe. Controlled timers and task-deletion doubles bound these scenarios; neither
-executes the physical scheduler. Pure sampler tests check reader order, short circuits and heap
-boundaries; the configuration path keeps its existing offline confirmation policy.
-Locked-cJSON tests run actual HTTP handlers across matching/different WiFi submissions and preserve
-known image results in normal/degraded responses. The C and C++ objects both run under Linux
-sanitizers. The fixture is bound to the toolchain-file hash; a migration requires a fresh SDK review.
-These checks model SDK mark effects; they do not execute flash writes, the bootloader, RTOS or
-physical restart, and cannot prove runtime heap/stack or key preservation.
-
-`test_identity_recovery_contract.py` extracts complete automatic first-key/reload/caller,
-runtime facade, raw image query, operation-owner and MQTT-emitter bodies. Its retained positive
-route uses the exact owned-process helper with bounded streams, deadlines, group cleanup and
-source/include identities; it never removes outputs or restores a fixture after unknown cleanup.
-The native matrix includes Fatal during the real query/probe seams, competing claim/Fatal CAS,
-late Fatal publication, defensive local-reservation loss, cached HTTP/MQTT visibility and park.
-First-Fatal source canaries require the actual first executable Main statement. Runtime/UI
-omission recipes are retained in `identity_recovery_omission_cases.json` as unqualified plans;
-this positive-only driver does not execute or report those negatives as passing. A separate
-reviewed operator must establish each exact first failure and restored positive before closure.
-The sanitizer route runs the same positive native matrix; it does not qualify SDK, physical
-restart, persisted identity or resource fit.
-
-`heap_supervisor_tests` compiles complete shipped supervisor/admission bodies, extracted real
-operation owners and bootstrap repair/rollback sites, plus real BootGuard/trend shells. Passive
-clock, task, host, SDK and storage doubles cover qualified maintenance, stale/missing progress,
-pre-Ready host-read exclusion, competing owners, false/throwing commits, visible-but-unconfirmed
-writes, SafeMode carry, shared crash/heap ledger, conservative legacy enrollment and postcommit
-parking. Its multi-boot witness retains distinct visible/durable fake storage across actual
-reason consumption, reset classification, BootGuard and supervisor startup. H/F/H/F/H, all-heap,
-fault-first, failed reservations/reasons, false-visible/false-durable commits and failed healthy
-zero exercise the same real owners; they do not simulate a physical NVS power cut. The doubles do not execute the RTOS,
-flash, bootloader or vehicle; host stack observations do not certify target runtime margin. Native
-process memory does not prove retained noinit bytes survive a physical reset.
-The structural runtime gate binds its unique checked startup before network and portal entries.
-The host wiring gate checks the generator/CTest graph and executes fallback, fast and sanitizer
-shell flow with passive tools, including omitted/disabled calls and a failing Heap executable.
-These flow probes establish invocation and failure propagation, not an actual compiler or sanitizer run.
-
-`syslog_runtime_tests` compiles the shipped formatter and boot-replay bodies with passive socket,
-cache and application-description adapters. It checks BOOT INFO/CRASH ERROR, ordinary-message
-classification, default-argument behavior, live dismissal, no replay retry after an allocation
-exception, bounded packet formatting and socket/send errors. It opens no socket and does not
-establish UDP delivery or live-device behavior. The fast boundary selector also runs this adapter.
-
-`eth_startup_cleanup_tests` compiles the complete production Ethernet resource owner, cleanup and
-fatal/fallback callers. Passive SDK doubles retain pending RX even after a successful stop; every
-post-activation result must retain the whole graph. Pre-activation acquisition prefixes, failed
-unregister/glue/uninstall/MAC/PHY/SPI steps and exact release order run through the actual body.
-The controls runner rejects four compiled unsafe variants and restores the passing source.
-The model admits only the reviewed IDF toolchain and W5500 git/path/version. CMake, direct fallback,
-fast boundary and Linux sanitizer paths execute the native matrix; wiring controls reject omissions
-and propagate failures. These are modeled ownership/order checks, not real SDK ABI, cross-core task
-quiescence, physical RX, reboot, heap/stack margin or hardware proof.
-
-`crash_runtime_xtensa_tests` and `crash_runtime_riscv_tests` compile actual `diag_crash.cpp`
-against passive SDK/partition/PSA facades. They cover each boot read failure/exception, hash API
-failure, foreign/short identity, absent/error partition lookup, wrong installed extent, allocation
-failure, request contention, header changes and erase success/error/partial effect. The same tests
-run in direct fallback, the fast boundary selector and Linux sanitizers. Facade ABI declarations
-are synthetic; only pinned compilation on all four targets establishes SDK layout compatibility.
-Boot ERROR records, full-hash fallback, suppressed ordinary/dismissed records and partial log
-failures run through the actual shell with a passive severity-aware sink.
-The live snapshot borrows immutable boot payload; actual shell tests check pointer ownership,
-no payload-copy allocation, retained metadata after erase and the separate export authority.
-Pure owned/view presenters must match. Generation suppression has deterministic before/after
-cases and a shell contract binding the final acquire load after view construction. This does
-not claim an executed erase precisely after view construction; the real header-read/erase
-interleaving remains covered separately. Status models, SDK queries and renderers can allocate.
-
-Locked-cJSON tests compile the actual crash HTTP bodies and serializer/outer catch, exhaust
-post-erase JSON allocations and fail each header/read/chunk. They verify no second response, clean
-failed-stream terminator, automatic retry or false dismissal. No real crash dump or flash is used.
-
+- `test_runtime_boundary_contract.py` binds actual source closure and C task/callback registration.
+  Runtime tests exercise lock release, exception containment, restart admission and late callback retirement.
+- Native targets cover clock/session time, durable config, NVS blob/mirrors and serialization-buffer
+  wipe, heap supervision, stack sampling, Ethernet/portal cleanup, Syslog and both crash architectures.
+  `test_identity_recovery_contract.py` runs the actual first-key, reload and restart paths.
+- `scripts/check-nvs-contract.py` checks registered namespaces, keys, APIs, owners and retention
+  against call sites. Device storage and power-loss behavior require separate evidence.
 
 ### Logic, BLE protocol and presentation
 
-[`logic_test_ownership.json`](logic_test_ownership.json) is the complete machine-checked inventory
-of logic headers, concrete test functions and evidence. Each function must have one definition and
-one real invocation; headers compile standalone. Firmware delegation is required for production
-behavior claims. Mirrored C++/Python/JS presenters need parity checks, not merely copied unit tests.
-
-| Area | Evidence |
-|---|---|
-| Decisions/state machines | `test_logic.cpp`: VIN/identity, units, link/sleep, active window/wake retry, automatic same-key enrollment cadence/admission, commands, OTA versions/intake, config/storage, watchdog, admission, asynchronous generations, presenters |
-| Real tesla-ble/PSA seam | `scripts/test-tesla-ble-harness.sh --require-all`: pinned library/patches, Nanopb and pinned Mbed TLS4/TF-PSA-Crypto; production frame/key helpers, compiled native CarServer response and identity-cleanup methods, and V1 crypto vectors |
-| Browser presenter mirrors | `check-ble-row-parity.sh` compares shipped JavaScript with C++ references for the BLE row, warning threshold, SoC colours and RSSI glyph counts. |
-| Public protocol vectors | `tesla_protocol_vectors.test.mjs`: VIN, ECDH/HMAC/AES-GCM and patch contracts, public test keys only |
-| External JSON contract | Golden status output, command registry/bounds, MQTT registry/fields/presence and exact MCP IDs |
-
-The v6.4.0 real-library harness also checks fresh/forced/established/cleared-secret peer admission,
-monotonic session counters, domain request-hash isolation and invalid-domain lookup.
-The crypto harness checks official client/session derivation, HMAC/tag, the library-built request
-metadata against the official TLV vector, and a real Client request against independently rebuilt
-wire metadata and AES-GCM ciphertext/tag. Changed counter, expiry, epoch, flags and tag controls
-exercise that comparison. The real peer replay window checks zero, duplicates, reordering, the
-63/64-counter boundary and a fresh window after the next request. It also checks response-counter
-AAD (different from request counter), tampered-tag refusal, PEM compatibility and invalid keys.
-Disabling the real PSA RNG must refuse handshake and payload construction without emitting a frame.
-Fingerprint derivation remains covered by a host mirror; the IDF crypto shell is not compiled on
-the host. The production text formatter is tested directly against the previous representation
-and the VIN-journal parser. Extracted actual HTTP adapters reject an empty journal before writes.
-The native NVS suite exercises actual config-save ordering, blob/mirror set/commit failures and a
-real vector-allocation failure after the length probe. Source pins cover every configuration
-read-modify-save refusal and fatal boot configuration validation. These do not simulate NVS durability.
-Presenter parity likewise proves decisions, not physical pixels.
-
-The runtime source gate also pins Charging Manager enrollment, explicit background no-wake
-policies, the cache/local accessor allowlist for status/MQTT/MCP consumers, command-owned
-slot cleanup, three-valued sleep inputs and reset/evidence-gated boot activity. Its source mutation
-controls are lexical checks, not a general C++ dataflow proof or physical no-wake acceptance.
-The charge/climate getters and shared active window have exact call-name inventories. Mutation
-controls reject added vehicle operations, overwritten window inputs, early charge output and
-removal of cache-seam checks from the contract runner.
-`test_setup_portal` also runs a two-hour Ethernet-only wait without station attempts. The existing
-Ethernet cleanup runner compiles the actual portal wait/close bodies with passive SDK/clock
-doubles, checks partial-stop retries and rejects omitted WiFi deinitialization, ignored stop
-errors and physical detection substituted for successful Ethernet activation. A detected chip
-whose driver failed construction retains the terminal setup form. SDK event timing and physical
-recovery remain hardware evidence.
-
-The native command-completion fixture executes the actual wait/flush methods against the real
-runner. One-shot and persistent allocation failures cover completed-error copies and timeout
-diagnostics, including cancellation allocations and an exceptional disconnect double. FIFO
-ownership must be released before propagating an exception; this is host fault evidence, not a
-target heap margin or physical command acceptance claim.
-
-SessionInfo continuity checks use the existing published V1 vector for initial and established
-refreshes in both domains. Ordinary direct-API cases reject missing, malformed or different keys
-before peer, native availability or storage changes, including temporarily invalid sessions.
-`test_dependency_guards.py` compiles the actual Client verifier with passive crypto drivers to
-check domain/retained-secret selection and serialized-payload bounds, six removed-check controls and a pre-log key-validation
-control with fully backed buffers. These selector checks do
-not generate protocol messages or establish cryptographic answers; the real-library V1 harness
-owns those answers. Explicit peer reset remains a fresh-bootstrap boundary, not a durable key pin.
-
-The deferred-delivery cases use `generate_ble_deferred_adapter.py` to extract both real
-callback adapters, enqueue/ready/pop/clear helpers, the actual mailbox declarations and the whole
-`process_ble_host_events_` body without rewriting. The existing native Client/Peer/PSA, dispatcher,
-framer and response handlers remain real. Only the RTOS/clock/lock, readiness/link and storage/cache
-sinks are passive. Tests queue all 743/2050 wire bytes before consuming, with 20/244/one-byte/mixed
-PDUs and overwritten input lifetimes, then require authenticated native completion. A real pinned
-Nanopb descriptor must show that the synthetic outer padding tag is unknown; padding preserves
-signed fields but is not a captured natural vehicle response. Independent byte oracles also cover
-ignored padding. Barriers, wrap/full-tail/preflight, generation, overflow's next observation,
-framer allocation/lock refusal, in-dispatch reset, duplicate frames and periodic timeout are separate
-checks. External-sink lock spies and a closed producer/consumer source contract complement them.
-
-`test_logic.cpp` registers the actual pure FIFO and therefore exercises it through fast/mock/CMake
-and the existing logic ASan/UBSan/LSan target. The real-PSA deferred consumer is part of the required
-native harness. Its ordinary build is not an instrumented native/PSA sanitizer run; do not claim it
-is. Any additional instrumented native run must rebuild the real library/Nanopb/PSA and harness in
-an isolated sanitizer-specific object namespace, with matching runtimes and no fallback/skips.
-These finite host tests do not measure target RAM/stack/allocator peaks, real scheduling, radio,
-pairing, NVS/session retention or vehicle delivery. Four-target compilation and physical workflows
-remain separate; source preparation is not an execution PASS.
-
-The native VCSEC harness compiles the production routing and response methods with the real
-patched Client, Peer and CommandRunner. It covers status/action/auth/wake admission, proactive
-HMAC-verified session repair, failed writes, stale attempts, passive wake progress and zero-inclusive
-GCM replay. A full auth → wake → Info auth → payload → authenticated response sequence checks
-retirement and ordinary-address restoration. The native RNG fault facade simulates a failed public
-RNG status; its normal path delegates to the real helper. This is offline evidence, not hardware or
-entropy-failure acceptance.
-
-The same native harness pins all 29 universal fault enum numbers and exercises independently sealed
-fault/AAD replies, foreign routing/UUID, bad tags, replay, delayed safe retry, uncertain writes and
-10-minute no-resend simulations. It also compiles the actual result callback, timeout, publication
-and FIFO invalidation methods against deterministic semaphore/link sinks. Controls cover typed
-failure delivery, stale generations, callback exceptions, missing semaphore notification, permanent
-rejection allocation failure and committed-success fallback. These are host execution checks, not
-physical ATT or live API/vehicle acceptance.
-
-Session-availability cases compile the actual cache, persistence, restore and link-reset methods.
-They cover save-false and throwing storage with and without older records, RAM-only command
-completion, current-save error recovery, domain isolation, identity gating/epoch changes, ordinary
-FIFO cancellation, authenticated repair and throwing link-loss callbacks. Ten simulated minutes of
-cache reads must add neither frames nor writes. Restore uses a deterministic clock facade; this
-does not prove physical NVS retention or correct persisted-session age conversion.
-
-Wake cases compile the actual wake method, generic VCSEC wrappers, clock helpers and result
-callback. The blocking-send handoff uses controlled early failures or the real native BLE driver
-with successful/false-after-submission writes. Controlled cache inputs pass through the production
-link-state model; they are not live telemetry. Checks cover early definite return, original uncertain
-reason retention despite shared-error changes, later Info confirmation, no TX-only reachability
-stamp and ten-minute no-resend controls. They do not establish physical wake or vehicle acceptance.
-
+- [Logic ownership](logic_test_ownership.json) maps pure headers to executable coverage in
+  `test_logic.cpp` or another exact owner. Tests cover sleep, caches, health, commands and retries.
+- `scripts/test-tesla-ble-harness.sh --require-all` uses the exact patched library, Nanopb and
+  pinned Mbed TLS/PSA. It exercises framing, key/session continuity, vectors, authenticated
+  response admission, UUID/counter isolation, VCSEC/wake, deferred RX and actual completion.
+  Protocol rationale and departures are in [ADR-0005](../docs/adr/0005-tesla-ble-seam.md).
+- `test_ble_lifecycle.py`, `test_command_outcomes.py` and `test_charge_presentation.py` exercise
+  actual producers and interleavings with passive RTOS/NimBLE, time and transport adapters.
+- `tesla_protocol_vectors.test.mjs` uses public test keys. `check-ble-row-parity.sh` compares
+  actual JavaScript with the C++ references for BLE and charge presentation.
 
 ### HTTP, provisioning and diagnostics
 
-The effect/reply suite compiles the actual REST VIN matcher and command handler. It checks exact
-case-sensitive configured-VIN acceptance, null/mismatched VIN refusal, and `404` before dispatch.
-VIN tokenization is a passive fixture here; these cases do not validate the real URI parser or
-contact a vehicle.
-
-Changed-VIN admission also checks the actual handler with its identity guard refused: no reset
-transaction, persistence, effects or restart may begin. Literal fault counts and elapsed times pin
-the four-fault SafeMode threshold and five-minute heap hold independently of their constants.
-Heap-ring cases retain the open bucket and minima across decreasing timestamps. Structural source
-checks bind the heap restart cap to its durable counter and the sole NimBLE start to the actual
-SafeMode branch; they do not execute the ESP-IDF scheduler or radios.
-
-Provisioning fixtures derive their wrapper and field keys from the actual straight-line
-`http_common.cpp` `make_response` producer and fail closed if its shape changes. LAN WiFi/VIN
-successes must read the nested boolean; refusals, misleading flat success and wrong-typed values
-never trigger a second request. Success output distinguishes accepted configuration from an
-immediate reboot and does not claim a changed VIN preserves pairing. These tests mock HTTP
-and perform no provisioning or NVS writes.
-
-The BLE/browser parity gate also compares the actual web SoC function, rendered RSSI glyph counts
-and warning constant with native helpers: all integer SoC values, clamp cases, signed-byte RSSI
-and integer extrema. It preserves float32 intermediates and native rounding ties. Hero tests pin
-both consumers of the warning threshold. It does not measure physical display pixels or live RSSI.
-
-The mock runner compiles the locked cJSON intake/OOM matrix when Python is available; strict
-mode requires it. A cold cache needs network access to the Espressif registry and archive host.
-Prepare it with `bash test/run-cjson-oom-tests.sh` before an offline run. Every run re-hashes the
-warm cache against the four lockfiles. The matrix checks the 64-value
-request boundary, unchanged allocation counts for valid input, zero parser allocations for a
-2 KiB over-budget array, generic/OTA default compatibility, decoded duplicate keys, canonical
-numeric strings and leak-free parser failpoints. The fuzz gate compares counted and uncounted
-syntax outcomes so the request budget cannot hide malformed/depth/NUL errors. Request-shell
-contracts and 12 comment-decoy mutations bind all three caps, terminal rejections, shared duplicate
-checks and integer readers to production adapters. These are host checks, not heap measurements
-on a device.
-
-API reply contracts bind the REST body/status helper, command 502, unknown-tool code, all five
-configuration OTA 409 guards, notification/exception policies and the MCP cache-only charge gate.
-Eleven comment-decoy mutations exercise those bindings. The real-cJSON state builder checks
-both available and unavailable charge snapshots; an unavailable snapshot omits all charge fields
-even if a producer accidentally leaves its telemetry flags set. Existing pure cache-policy tests
-cover the active-window age boundary and deliberate idle last-known data.
-
-The diagnostic adapter exercises actual formatted capture, RAM ring, chunk framing and fixed-buffer
-redaction for application SSIDs, library connection and WiFi block-ack AP addresses, with embedded CR/LF, forged prefixes, wrap
-and truncation. It checks that ordinary raw sinks receive the original bytes and known MQTT URI parser errors
-reach all three sinks only as a fixed replacement, including failed ring allocation and repeated
-initialization. The host log stub maps the early `vprintf` fallback to a named test facade;
-it does not depend on libc symbol interposition or disable fortified stdio or sanitizers.
-This is qualified V1-callback evidence; it does not prove closed
-WiFi-driver callback framing, a physical exported log or complete sanitation.
-
+- `run-cjson-oom-tests.sh` uses the pinned parser and actual producers/handlers. It checks bounds,
+  ownership, every allocation failpoint, exact MCP IDs, pre-effect refusals and correlated
+  degraded replies after effects. `test_diagnostic_export_guidance.py` checks bug-form guidance.
+- `test_provision.py`, `test_capture_wake.py` and `test_evcc_vehicle.rb` cover passive client
+  flows and the shipped jq mapping, including setter deadlines and the `Starting` state.
+- `test_inline_assets.py` exercises the actual CMake generator and incremental dependency.
+  `web_ui_http.test.mjs` tests shipped JavaScript with stubbed DOM/fetch, including copy and focus
+  return. The separate [Linux browser gate](#browser-prerequisites) exercises actual DOM behavior.
 
 ### OTA, bootloader and restart adapters
 
-The effect-reply gate compiles functions extracted from the shipped HTTP/MCP adapters and handlers,
-not rewritten models. Device/storage/vehicle/RTOS operations remain passive doubles. IDF faults are
-return codes with simulated partial bytes; generic renderer spies also throw after the terminal
-latch. A separately named shell injection throws after a real handler response to exercise the
-actual outer catch. These tests do not claim a C IDF function throws. Browser/CLI regressions keep
-received uncertainty visible and forbid automatic follow-up mutations on a degraded channel reply.
-
-`test_ota_admission.cpp` compiles extracted production raw-state/cache queries in the runtime
-boundary target. Startup and ownership live in the complete application fixture because a fake
-integer task argument would conceal its allocated operation. `test_ota_tls_admission.cpp`, run
-by the pinned-cJSON host/sanitizer runner, compiles the complete actual status/entry/lease and
-application family extracted by `generate_ota_tls_adapter.py`, with the real transport, parser,
-coordinator and raw-writer TUs. Passive SDK counters cover fragmented INTERNAL heap, pre/post-TLS
-context refusal, null context, body reserve OOM and explicit raw SDK NoMemory versus generic
-failure. Prefix/payload write refusal must abort a live handle once; final-verification refusal
-must preserve NoMemory without aborting its already consumed handle. These doubles exercise no
-actual TLS, network or flash.
-
-Direct-upload cases execute the same extracted application family and actual coordinator/writer:
-Release-channel refusal, probation, memory/startup/copy failure, busy admission, malformed/older
-images, forbidden partitions, interrupted/short uploads, heap abort, final-read and final-verification
-deadline expiry, and SDK signature failure. Separate `upload-commit`/`upload-uncertain` processes
-assert byte identity, no TLS/feed call, exactly-once async completion and retained terminal owner.
-They use passive SDK doubles; they do not verify a physical flash or real signature implementation.
-The effect-reply fixture also executes the actual upload HTTP handler and outer retirement guard,
-checking header/size/query intake and that only an async handoff skips synchronous RX shutdown.
-`test_dev_ota_upload.py` exercises the actual maintainer uploader with isolated Git/source
-fixtures, disposable RSA images and passive process/transport doubles. It checks complete
-untracked-source binding, failed/missing/edited receipts, actual read-only reviewer invocation,
-signature/chip/image identity, private board/channel admission, one consumed attempt, timeout,
-reboot/health/retention acceptance and separate changed-behavior evidence. These are offline
-controls; no production board, signing key, vehicle or actual model review is used by the test.
-
-[The shared OTA recovery policy](../main/logic/ota_recovery_memory.hpp)
-owns the common nonzero INTERNAL-largest comparison and phase requirements. Production uses its
-shared operation-entry/image-confirmation selector and separate TLS record-capacity screen; these
-are operating-point policies, not universal allocation guarantees. Native fixtures replace only
-the immutable requirement provider and separately inject
-12345B into actual TLS pre/post-context guards, timed probation (including post-owner resampling)
-and successful user-save confirmation. Default regressions remain mandatory. These
-host-only boundary values do not calibrate a safe production requirement. Literal 59391/59392/59393
-regressions also cover the selected shared entry/confirmation decision and health sampler; restoring
-the old 61440-B policy must reject the naturally observed 59392-B operating point and fail those checks.
-The physical series and its limits are recorded in the [architecture](../docs/ARCHITECTURE.md#ota-self-update).
-MQTT keeps its existing
-`logic/tls_memory.hpp` policy. Runtime omission recipes remain unqualified until independently
-executed with exact first CHECKs and restoration positives.
-Effect-reply tests separately exercise all typed HTTP outcomes
-and preserve an earlier clock effect when OTA is definitely refused.
-
-
-The runtime boundary binary also compiles the shipped background-enqueue method with the real
-bounded command runner. A staged foreground-start interleaving must leave its queue and builders
-untouched; accepted polls retain read-only, no-wake admission. Passive clock/identity inputs do not
-exercise FreeRTOS scheduling, BLE transmission or hardware.
-
-`test_bootloader_preflight.py` executes the shared compatibility CLI and the shipped flash guard
-against passive esptool metadata/write adapters for all four targets. Older, unknown, unreadable
-or wrong-chip metadata must stop before a stubbed write. Consumer-omission controls pin the local,
-preview, ship and recovery paths. These tests do not inspect a board, validate a signature or prove
-that a collected bootloader belongs to the chosen port; the delivery plan owns that binding.
-Reference-catalog cases (no ESP-IDF version reported) copy the actual checker and use explicitly synthetic catalog
-digests. Exact image/full-region positives and byte, padding, provenance-shape and downgrade
-negatives exercise CLI admission. Real catalog bytes require separate provenance verification;
-fixture success does not establish it. See [reference maintenance](../docs/DEVELOPMENT.md#retained-bootloader-references).
-
-The runtime source contract pins the complete cross-TU OTA application/transport/parser/coordinator/
-raw-writer family. It discovers the actual HTTP parser callback tables and keeps the worker free of
-writer/status/lease authority. Source canaries cover fresh entry origin, probation, TLS admission,
-certificate hostname policy, cleanup publication, bounds, version/partition/signature/selector order
-and sticky grace. A changed complete program requires independent source review; a hash table is
-not itself semantic or runtime evidence.
-
-The retained cJSON gate compiles the complete actual OTA status, entry, lease and application
-family together with the real parser/coordinator/transport/raw-writer TUs and pinned SDK parser C.
-Only SDK/RTOS/TLS/clock/flash effects are doubles. Normal-process cases cover fragmented INTERNAL
-heap, pre/post-context refusal, null allocation, body OOM, optional changelog failure, fresh
-probation/start admission, writer validation failure and a blocked connect that completes after
-retirement without granting a new effect. The old cheap runtime target retains raw query/cache
-cases; startup is no longer represented by a fake integer task parameter.
-
-The same fixture compiles actual update/status/notes/channel handlers against that OTA application.
-Two-client cases cover channel ABA, same-channel no-op, superseding checks, bound notes,
-missing/stale/duplicate IDs and mismatched PRs with zero image effects. Current Release, Dev and PR
-offers assert the exact returned status and bound notes; an old ID cannot read a same-channel
-successor's notes. Immediate and deferred checks changed before completion assert the returned
-status, source/configured channels and notes. These keep their captured source: deferred memory,
-queue, deadline and task-creation refusals (memory, deadline and task creation also after a later
-setting change); ordinary-check entry memory and task-creation failures; upload refusals and
-failures; replaced or no-longer-newer Dev installs; and identity exhaustion. An early PR check
-refusal after a refused upload must report feed status with the new PR. A completed offer
-withdrawn by a channel change, including ABA, reports `offer_changed`. Same-version manifest
-and selected-note changes refuse before image transfer. Dev and PR candidates reach mandatory
-SDK verification, and both generation/channel exhaustion remain fail-closed while signed direct
-upload stays available. Altered payloads and short/long images never reach SDK end/selection.
-The focused local `bash test/run-cjson-oom-tests.sh --ota-offer-omissions` also requires precise
-runtime assertion failures after separately omitting the actual digest and final byte-count guard;
-ordinary CI runs the regression cases without these repeated compilations.
-Passive PSA hashing uses CommonCrypto
-on macOS or the OpenSSL 3 runtime (`libcrypto.so.3`) on Linux, with a known SHA-256 answer and
-injected compute/setup/update/finish failures. This exercises control flow and byte identity,
-not the target PSA driver, cryptographic ABI or physical flash. The complete actual OTA adapter
-and its translation units compile with host `-Os`, including sanitizer and omission modes,
-so optimized control flow is exercised alongside the target size profile.
-
-Effective-build self-tests exercise the six OTA size-profile sources through matching compile
-and Ninja vectors on all four targets. Missing, duplicate, reordered and overriding flags,
-foreign object owners, basename aliases and changed/extra CMake property blocks must refuse.
-The real four-target builds separately verify that the exact `-Og -Os` profile reaches these
-sources, with `-Og` retained elsewhere, unchanged stack limits and independent app/ELF byte checks.
-
-The manifest-lifetime case tracks allocations from the real pinned cJSON parser for a multi-part
-manifest and requires them to be freed before reserving the notes body. It still checks the copied
-version, two metadata connections and no image-write effect. The UI fixtures hold a general status
-response after its headers and verify that check/install wait for the complete JSON body, pause
-new general polls, preserve the original deadline and ignore cancelled or replaced delayed starts.
-Polling resumes after the flow ends; reboot verification keeps its separate direct requests.
-
-The actual HTTP adapter must reserve a check on its copied server handle. Native SDK doubles hold
-request scratch until explicit cleanup: no entry sample, Operation/task or TLS may occur before
-that cleanup, while genuinely insufficient memory afterwards still refuses. Deferred cases cover
-queue refusal/uncertainty, original-budget expiry, sticky abort, captured channel/PR, stale and
-duplicate tickets, exhaustion, callback exceptions and uncertain coordinator creation. The source
-contract inventories all local callers, including new untracked C++ files, to preserve the single
-HTTP-task premise; blocking queue configuration must fail compilation. These host models complement
-pinned SDK source review and repeated warm hardware checks; they do not prove universal availability.
-
-The `budget` fixture jumps its SDK-double clock after actual raw begin/prefix beyond the real
-CL-tightened coordinator deadline but below the worker's initial maximum. It requires abort
-before a later raw write/end/selector. Removing only the production Budget bound must trip the
-actual raw-effect admission spy, rather than relying on an outer timer. The `cleanup-cas` fixture
-enables only the existing host transport hook, pauses after the actual old-word read, and lets
-the real coordinator expire/retire before publication. It checks preserved Retired plus Ack before
-joining; an unchecked stale store must fail that CHECK rather than hang in join. Both positive
-modes join the worker and reclaim the operation normally. Their real scheduling waits are bounded
-fixture setup; a wait failure is never runtime omission credit.
-
-Separate commit/uncertain fixtures assert retained ownership at their irreversible terminal effect
-and exit the disposable process. `cleanup-failed` first establishes a real offer, then makes only
-changelog TLS destruction fail. It requires withdrawn result/status, released writer authority,
-quarantined CleanupFailed slot and refused successor. Clean 404 and successful notes remain
-separate positives. Failed destruction cannot truthfully synthesize Ack/free, so this fixture
-also exits before destructor/LSan reclamation. The normal, budget and cleanup-cas positives join
-workers and explicitly clean owned contexts. None of these terminal fixtures proves per-task
-lifetime or leak reclamation. Native SDK layouts and
-TLS/flash/crypto doubles establish no target ABI, real CA/signature acceptance, network latency,
-FreeRTOS scheduling or physical restart evidence.
-
-Both configured OTA URLs retain unconditional compile-time HTTPS assertions. The predicate does
-not validate a full URL or TLS peer. The parser test fixture is byte-bound to the existing pinned
-SDK component; SDK execution additionally compares it with that actual component.
-
-The shared-restart native suite also executes the complete activity-seed conditional from
-`VehicleController::init`, including the actual `last_cmd_ticks_` store. Passive reset/boot-record
-and clock seams cover every reset code, absent/present/error evidence and tick boundaries.
-Confirmed healthy maintenance cannot reopen an automatic window closed by immutable boot
-evidence. This narrow init slice does not exercise library initialization or actual tasks.
-`stack_sample_tests` compiles the actual stack watcher shell and pure codec. Its independent
-spies require current-task-only HWM queries; deterministic competing CAS and real atomic
-threads test monotonic preservation. CTest, fast, fallback and sanitizer paths must execute it
-and propagate failure. Nullable context fields and the 256-byte quantum are literal status/MQTT
-goldens. These host tests do not establish target stack headroom or callback timing.
-The inert operator controls also exercise the complete outer driver with disposable fixtures and
-passive command/restore spies. Missing, malformed, false and unreadable control receipts quarantine
-the fixture before restoration or the next stage; confirmed setup/stage failures retain restoration.
-A valid omitted quarantine guard must fail that same driver oracle, then pass after exact restore.
-These controls neither launch a compiler nor establish a real escaped-child or hardware result.
-
-
-The complete OTA application adapter also checks fixed INTERNAL diagnostic checkpoints against
-independent heap/log spies: exact guard samples, fragmented completed headers, TLS destroy ordering,
-known cleanup references and contained diagnostic failures. The six OTA modes and their
-assertions remain mandatory; `f146_runtime_omissions.json` records unqualified runtime
-omission recipes. Passive SDK doubles do not establish target heap minima or TLS allocation safety.
+- `test_ota_admission.cpp` and the shared restart/OTA fixtures exercise actual raw-state
+  interpretation, memory admission, ownership, health, rollback decisions, budget expiry,
+  stale offers, loss of transport and uncertain terminal effects against passive SDK doubles.
+- The cJSON gate drives actual OTA entry, status, update, notes, channel and raw-upload bodies,
+  including prefix and hash validation, manifest lifetime and ownership at commit.
+- `test_dev_ota_upload.py` covers source/build/image/review binding and consumed attempts.
+  `test_bootloader_preflight.py` checks retained-bootloader admission and USB consumer wiring.
+- `web_installer.test.mjs` and `serial_port_release.test.mjs` cover installed-layout decisions,
+  one serial open, port leases/quarantine, Clean flash confirmation and activation last.
+  Serial and flash effects are passive.
 
 <a id="f137-actual-task-host-layer"></a>
 <a id="actual-task-and-runtime-layers"></a>
 
 ### MQTT and network task adapters
 
-`test/test_f137_host.py` regenerates complete MQTT publisher and network watchdog/gateway/recovery
-bodies with the real current-task WDT helper and `PingProbeControl`. Passive SDK/RTOS facades
-exercise explicit unsubscribe-before-self-delete, unconfirmed cleanup parking, contained network
-iteration faults, fresh gateway proof and exact late-ping ownership. The accepted callback probe
-and its template are carried byte-for-byte; its 42 assertions are not rewritten. CMake/CTest,
-fast/mock and Linux sanitizer entry points require this layer. Valid source omissions must compile
-and fail an actual runtime CHECK; restored positives must pass. Compiler or generator failure is
-not a successful negative control. The host layer does not prove SDK registration/ABI, task/heap
-fit, real network/DNS recovery or hardware. Each acceptance remains bound to its exact tested source
-and recorded scope.
-The host operator keeps an owned liveness guardian until atomic group termination, reaps it and
-requires actual group absence before any next source mutation or restoration. Unknown cleanup
-quarantines the scratch tree. Setup, stage failures and independent restoration/readback failures
-are retained when the private output directory is writable. Each stdout/stderr retains at most
-256KiB; the whole driver stops launching at 105 s inside the existing 120 s outer gate. Inert
-process controls include timeout descendants, output caps and a valid liveness-EOF omission with
-restoration; they do not claim an observed external-parent-kill experiment.
-
-Task fixtures preserve `_Exit` rather than unwinding the actual self-delete path. Linux sanitizer
-mode explicitly invokes the recoverable LSan check before `_Exit`, and an intentional leak must
-produce actual LeakSanitizer output and a failing detector witness. Sanitizer acceptance requires a
-completed exact-source run; it does not establish SDK or live acceptance.
-The exact MQTT cleanup/reset/net source contracts retain
-all generic boundary checks and include 15 source canaries; existing DNS-delay contracts remain.
-Target task/heap/ABI and static limiter storage still need separate qualification.
-
+- `run-mqtt-json-publish-tests.sh` exercises production state/discovery builders and retained
+  publish failure handling against a passive broker.
+- `test_f137_host.py` extracts actual MQTT/network task bodies. It tests WDT unsubscribe before
+  self-delete, parked cleanup, iteration containment, fresh gateway proof and late ping ownership.
+  Mutations must compile and fail an actual CHECK, followed by a passing restoration. The runner
+  quarantines unknown process cleanup. Sanitizer coverage detects an intentional leak before the
+  task fixture's `_Exit`.
 
 ### Configuration-maintenance backend and transport
 
-`test_config_repair_backend.cpp` directly includes the complete production `IdfStore` header.
-`generate_config_repair_backend.py` retains the complete run/finish/report/park and RawConsole/
-console_entry programs, removing only their exact inventoried includes. Production transaction,
-NVS enumeration/getters, length checks, identity/journal refresh and cfg-only set/commit are not
-reimplemented by the test. The native facade supplies SDK effects, owner/raw-image state, clock
-and local I/O. NVS declarations and the USB driver header are the retained pinned SDK bodies;
-other small facade types are source-call-compatible representations, not target ABI declarations.
-
-The positive operation supplies only synthetic records and a clearly non-key placeholder to a
-passive PK/PSA facade. It checks the actual sorted, framed non-cfg bytes against an independent
-literal golden, including every supported numeric type, zero-length blob, string terminator,
-unknown namespace, session and same cfg key in a different namespace. The hash facade assigns
-injective per-process transcript tokens. It is deliberately **not SHA-256**, key parsing or curve
-validation. Direct backend returns normally and checks handles/iterator/null-end/key/hash cleanup;
-run() terminates at its actual park with the sealed owner and static Store alive. The latter
-exits the disposable process and provides no per-task/LSan reclamation proof.
-
-Native cases cover a confirmed cfg-only run, false-visible set/commit, mismatched/corrupt
-readback, changed non-cfg retention, exact lengths, iterator failures, identity/journal/owner/raw
-refresh refusal and terminal Console failures. All four host conditional routes run actual UART/
-USB transport bodies for partial progress, zero progress, deadline, invalid counts, existing-driver
-refusal and init-failure parking. These are host branch/call-contract tests, not physical driver,
-FIFO/ISR, wall-time, NVS persistence or four-target SDK evidence. Separate maintenance SDK frame
-qualification, signing, physical procedure and authorized restoration remain required.
-
-The private positive-first operator uses the separately qualified exact guardian and closed input
-inventories, sanitized allowlist environment, retained streams/tool/pre-execution binary identity,
-60-second commands and a 600-second whole budget. An unknown group blocks all subsequent work.
-It does not execute the unqualified runtime omission recipes: their concrete first CHECKs and
-restoration positives still need a separately reviewed mutation operator and actual independent
-acceptance.
+`run-config-repair-backend.sh` exercises actual Store, transaction and UART/USB transport
+bodies with synthetic records and passive SDK/PSA. It covers both identity journals, single cfg
+commit, non-cfg retention, ambiguous effects and terminal transport behavior across four host
+routes. The hash/crypto facade and the terminal parked process do not prove real SHA-256, keys,
+ABI, flash durability, serial timing or task reclamation. See
+[maintenance qualification](../docs/CONFIG_RECOVERY.md#qualification-and-physical-use-boundaries).
 
 ### Served preview adapters
 
-`test_pr_preview_served.py` exercises the actual key-free served-preview helper and cleanup
-decision producer with injected HTTP/time and an inert local GitHub/publisher facade. It checks
-four-target signed fixture admission, source/version/authority pins, complete fresh retries,
-end-manifest consistency, response/deadline bounds, and required 404/410 evidence after removal.
-The build-gate contract also rejects omitted publication and both cleanup invocation points.
-These tests do not publish a preview, remove real Pages content or establish live CDN propagation.
-
+`test_pr_preview_served.py` exercises four-target admission, fresh byte checks, bounded retries
+and required 404/410 after removal with controlled HTTP/time and a passive publisher. See
+[served acceptance](../docs/DEVELOPMENT.md#served-pr-preview-acceptance) for live evidence.
 
 ## What's *not* covered (by design)
 
-Host stubs do not exercise actual esp_http_server, NimBLE, flash/NVS, device scheduling, OTA rollback
-or the car. Pinned cJSON tests use real emitters but deterministic transport/publish seams.
-Four-target IDF build, disposable signing, remote CI, bench/USB, OTA and vehicle E2E are separate
-proofs and authorization boundaries. Never infer physical acceptance from green host tests.
-
-Vehicle-free bench ingest validates schema-v2 report identity and plausibility, then fingerprints and
-uploads that exact report. Firmware signature, NVS preservation and physical observations are operator
-declarations. Final normal-workload stack floors are httpd/vehicle ≥1024 B, MQTT ≥768 B and optional
-auto-pair ≥1024 B. Recovery starts/ends with zero boot-failure count, includes ≥4 fault resets to latch
-safe mode, then a distinct non-fault reboot (≥5 planned), with final normal stack evidence. These are
-policy margins, not hardware-derived alarm thresholds.
-The setup portal explicitly reserves 6144 bytes for CaptiveHttp. Measuring the minimum free stack
-while saving portal settings requires a board test.
-
+Host stubs cannot establish actual SDK scheduling, radio behavior, flash/NVS durability or OTA
+rollback. Record four-target IDF compilation, disposable signing, remote CI, browser,
+USB/bench, OTA and vehicle/API evidence separately. Bench ingest checks report identity,
+stack floors and recovery sequence. Firmware, NVS and physical observations require actual
+same-board evidence. [Report policy](../scripts/check-bench-acceptance.py) ·
+[Bench procedure](../.agents/skills/deploy-bench/SKILL.md)
 
 ## Adding to it
 
-1. Put bounded hardware-free logic in `main/logic/`; firmware delegates to it.
-2. Add meaningful normal/boundary/error/transition CHECKs in `test_logic.cpp`, including repeated
-   cycles and quiescence for timers/state machines.
-3. Register the concrete owner in `logic_test_ownership.json`; mirrored code also needs parity and
-   a negative control proving drift is caught.
-4. Run the relevant host gate. Add a CMake/direct-fallback target only when real glue or stubs need it.
-5. Update the owning documentation and [feature catalog](../docs/FEATURES.md) for a changed contract.
-
-Use `$add-logic-test` for the detailed workflow. Integration-shell changes still need pinned IDF.
+1. Put bounded pure logic in `main/logic/` and link its executable checks in
+   [logic ownership](logic_test_ownership.json).
+2. Cover boundaries and transitions, including repeats and quiescence for state machines. Mirrored
+   code needs parity and a mutation that proves drift is caught.
+3. Add an integration target when actual glue needs SDK facades. Run focused checks before the
+   full handoff. Changes to firmware integration also need pinned IDF compilation.
+4. Update the owner document and [feature catalog](../docs/FEATURES.md) for a changed contract.

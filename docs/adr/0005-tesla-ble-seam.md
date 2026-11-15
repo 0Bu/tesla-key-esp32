@@ -332,22 +332,17 @@ This architecture leaves `crypto_context.cpp` and `peer.cpp` upstream in `yoziru
 
 ### 5. Delivered Architecture and Patch Retirement
 
-The native BLE orchestration layer is implemented across:
-- `main/logic/rx_framing.hpp`: Deterministic 2-byte BE length-prefix framing (`tk::RxFramer`) and the TX framing helpers `drive_command_runner_()` uses (`tk::build_ble_tx_frame`, `tk::is_well_formed_ble_frame`).
-- `main/logic/ble_dispatcher.hpp`: Multi-slot UUID and domain dispatcher (`tk::BleDispatcher`).
-- `main/logic/session_state.hpp`: Thin `tk::SessionTracker` mirror with monotonic counter progression (`max(local, reported)`), zero in-house crypto.
-- `main/logic/command_runner.hpp`: Command state machine arbitrating VCSEC auth, Wake, infotainment auth, and payload dispatch.
-- `main/logic/command_result.hpp`: Local exact `already_set` and command-context charging outcome policies.
-- `main/vehicle_ctrl.{hpp,cpp}`, `main/vehicle_commands.cpp`, `main/vehicle_telemetry.cpp`, `main/vehicle_pairing.cpp`: Direct integration with `TeslaBLE::Client`.
-- Native transactional key generation: `tk::regenerate_private_key()` in `main/logic/key_rotation.hpp` (2048 B PEM export, fail-closed rollback), called by `regenerate_key_native_()` in `main/vehicle_pairing.cpp`.
-- `test/test_tesla_ble_harness.cpp` (`scripts/test-tesla-ble-harness.sh`, run in the CI `logic-harness` job) exercises the TX framing helpers, `tk::regenerate_private_key()` and the protocol-vector known answers (V1) against the real patched tesla-ble v6.4.0, Nanopb and the exact Mbed TLS 4.1 / TF-PSA-Crypto commit that ESP-IDF v6.1 pins.
+Native orchestration uses `TeslaBLE::Client` directly. See
+[implementation](../ARCHITECTURE.md#pinned-tesla-ble-and-native-orchestration) and
+[real-library coverage](../../test/README.md#logic-ble-protocol-and-presentation).
 
-With this architecture in place, patches 0001, 0002, 0003, and the `vehicle.cpp` portion of 0005 were retired. The active patch series in `patches/tesla-ble/` consists strictly of:
-1. `0004-drop-unused-parental-controls-actions.patch` (trim unused Nanopb message descriptors for target size budget)
-2. `0005-align-session-counter-replay-with-signer-go.patch` (`peer.cpp` session counter monotonic progression alignment per `signer.go`)
-3. `0006-port-crypto-bindings-to-psa.patch` (crypto bindings on PSA Crypto for ESP-IDF 6 / Mbed TLS 4; wire bytes and key format unchanged, response tags now verified against the response's own counter, see §2)
-4. `0007-fail-closed-on-request-entropy-errors.patch` (reject message construction if routing-address or request-UUID randomness fails)
-5. `0008-bind-existing-session-info-key.patch` (domain-specific existing-peer key/secret continuity before SessionInfo refresh or state changes)
+Patches 0001–0003 and the `vehicle.cpp` portion of 0005 were retired. The active series is:
+
+1. `0004-drop-unused-parental-controls-actions.patch` trims unused Nanopb descriptors.
+2. `0005-align-session-counter-replay-with-signer-go.patch` preserves monotonic peer counters.
+3. `0006-port-crypto-bindings-to-psa.patch` ports bindings and preserves wire/key invariants. [ADR-0002](0002-idf6-mbedtls4-crypto-seam.md)
+4. `0007-fail-closed-on-request-entropy-errors.patch` rejects failed address/UUID entropy.
+5. `0008-bind-existing-session-info-key.patch` binds refresh to the domain's existing peer material.
 
 ### 6. Compilation of Dead Translation Units (TESLABLE_SRCS)
 
@@ -355,54 +350,28 @@ Upstream `CMakeLists.txt` lists `vehicle.cpp` and `tb_logging.cpp` in `TESLABLE_
 
 ## v5.3.0 migration (2026-10-11)
 
-The protocol core now stores request hashes separately for VCSEC and Infotainment, requires a
-shared secret before a peer becomes valid, and bounds message builders. Native session admission
-requires `Peer::is_initialized()` after an update, including restored NVS sessions, so metadata
-without a public key cannot mark a fresh peer established. The real-library harness checks fresh,
-forced, established and cleared-secret sessions, monotonic counter updates, cross-domain request
-hash isolation and invalid-domain lookup, in addition to the unchanged V1 crypto/key vectors.
-
-The firmware still bypasses upstream `Vehicle`/`MessageProcessor`. New upstream timeout/retry,
-logging controls and additional action builders therefore do not change native command policy or
-expose new HTTP/MCP commands. **Payload retry departure**: native `CommandRunner` rebuilds and
-signs a payload for each bounded retry (new UUID/counter), whereas v5.3.0's upstream `Vehicle` can
-resend identical serialized bytes. The native policy and its dispatcher request window remain
-unchanged; this migration does not import that upstream orchestration behavior. Existing PEM keys,
-NVS formats, pairing identity, sleep/wake arbitration and the four firmware targets are preserved.
+Upstream isolates VCSEC/Infotainment request hashes, bounds builders and requires a shared
+secret before peer validity. Native admission checks `Peer::is_initialized()` after restore
+and update. The harness checks session admission, domain isolation and monotonic counters.
+Native retries keep rebuilding UUID/counter/signature bytes. Upstream identical-byte
+`Vehicle` retries are outside the direct `Client` path.
 
 ## v6.1.1 migration (2026-10-16)
 
-The pin resolves to `283490ab49c0624c0ac628761f70459a5ce4b9ae`. Patch 0006 is rebased onto
-upstream's removal of session-key logging and preserves the PSA wire/key invariants. Patches
-0004 and 0005 still apply. Patch 0007 rejects a failed PSA RNG before encoding or recording a
-new request: upstream otherwise uses a clock/address-seeded PRNG for UUIDs and routing addresses.
-The harness disables the real PSA RNG to exercise both failure paths, alongside the V1 vectors.
+Commit `283490ab49c0624c0ac628761f70459a5ce4b9ae`. Rebased 0006 after removal of
+session-key logging. Patch 0007 rejects RNG failure before request recording or encoding.
+The real-library harness checks both request entropy paths and V1.
 
-Upstream's request queues, wake arbitration, key-not-paired callbacks and unsigned-fault handling
-are in `Vehicle`, which this firmware bypasses. They do not replace native command arbitration,
-authentication or the firmware's advisory recovery-hint policy. The new software-update parser
-argument is optional and unused; additional action builders expose no new HTTP/MCP commands. `Client` is now immovable;
-the firmware already owns it through `unique_ptr`.
-
-Native scans still connect only to the exact VIN-derived `S<16 hex>C` name. Upstream now accepts
-other beacon suffixes and `Tesla <VIN suffix>` names, but that broader helper does not expand the
-firmware's connection policy. PEM/NVS formats, pairing identity, session persistence and the four
-firmware targets are unchanged. Builds and host vectors require separate signed hardware and
-live vehicle acceptance.
+The firmware retains native command/fault policy and exact `S<16 hex>C` scan admission.
+Broader upstream beacon names and `Vehicle` queues do not enter this path.
+The immovable `Client` remains owned by `unique_ptr`.
 
 ## v6.2.0 migration (2026-10-18)
 
-The pin resolves to `a00f3872bf4ed166e1c81100ad33a072b126efa1`. All four repository patches
-apply unchanged. Upstream adds `ChargingPowerEstimator` and invokes it from `Vehicle` without
-changing generated protobufs, `Client`, `Peer`, message builders or crypto bindings. The firmware
-uses `Client` directly, so this update does not activate inferred AC power or effective phases:
-`parse_charge_state()` still copies vehicle-reported power and phase fields. It adds no commands,
-polls or wake paths and changes no PEM/NVS format, pairing identity or session policy.
-
-The comparison uses `teslamotors/vehicle-command` at
-`a4b43c1eff0e09d77deb9f2dce97031141fe8c8a`, whose `pkg/vehicle/state.go` returns the decoded
-vehicle data. The optional upstream estimator does not change that wire contract. Host vectors
-and pinned builds remain separate from signed hardware and live vehicle acceptance.
+Commit `a00f3872bf4ed166e1c81100ad33a072b126efa1`. Four patches apply unchanged.
+`ChargingPowerEstimator` is used only by upstream `Vehicle`. Native charge telemetry still
+copies reported power/phases, consistent with decoded state at vehicle-command
+`a4b43c1eff0e09d77deb9f2dce97031141fe8c8a`.
 
 ## v6.4.0 migration (2026-11-10)
 
@@ -417,19 +386,10 @@ dispatch, pairing and key/session storage paths retain their behavior.
 
 ## v6.3.0 migration (2026-10-27)
 
-The pin resolves to `f7e288e026a19e6bfac0b207922086e57460d860`. All five repository patches
-apply unchanged. The ordered patch hashes stay fixed; the source commit and complete
-`src/vehicle.cpp` preimage/postimage hashes advance with the upstream source.
-
-Upstream adds an optional terminal-result callback for individual, bulk and follow-up telemetry
-polls in `Vehicle`. A completion is an operation outcome, not a fresh state observation. The native
-controller uses `Client` directly and does not register or call this API. `polling_policy.h` changes
-only its explanation of idle timing. Generated protobufs, `Client`, `Peer`, message builders and
-crypto bindings are byte-identical to v6.2.0. No new commands, polls or wake paths are activated;
-PEM/NVS formats, pairing identity and session policy remain unchanged.
-
-The existing vehicle-command comparisons and V1 crypto vectors still apply to these unchanged
-protocol sources. Host tests and pinned builds do not establish hardware or live vehicle acceptance.
+Commit `f7e288e026a19e6bfac0b207922086e57460d860`. All five patches apply unchanged.
+The inventory advances the commit and `src/vehicle.cpp` hashes. Its optional terminal poll
+callback reports operation outcome. The firmware does not register it. Generated protobuf,
+Client, Peer, builders and crypto bytes match v6.2.0.
 
 ## Established-session continuity (2026-10-23)
 
@@ -459,8 +419,7 @@ checks; they do not prove HMAC correctness or radio/vehicle behavior. No real co
 
 ## Consequences
 
-- **Framing Robustness**: Eliminates buffer-recovery heuristics and log storms. BLE stream reassembly matches Tesla reference behavior.
-- **Security & Anti-Replay**: Eliminates the plaintext CarServer replay window. Response attribution is strictly bound by request UUID.
-- **NVS & Key Preservation**: Existing NVS schemas and key/session formats support reuse under the current loading policy.
-- **Memory evidence**: Pure decisions in `main/logic/` have host tests. Compiler frames and runtime stack minima are separate checks under the [concurrency contract](../ARCHITECTURE.md#concurrency-normative-contract); neither establishes a universal bound on composed call depth or heap demand.
-- **Dependency Contract**: Upstream `yoziru/tesla-ble` dependency pin (v6.4.0) and four firmware targets remain explicit; upstream also declares esp32c5.
+Reuse existing PEM/NVS keys under the current peer/session admission rules. Keep the patch
+series and [four-target build contract](../DEVELOPMENT.md#build-and-evidence-contracts) in sync.
+Host protocol checks, compiler frame sizes and [runtime stack minima](../ARCHITECTURE.md#live-stack-headroom-evidence)
+are separate evidence. Physical vehicle acceptance requires its own test.
