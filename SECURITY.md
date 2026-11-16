@@ -5,32 +5,20 @@ This document owns exposure, secrets, signing and publication trust. Runtime rec
 
 ## Threat model
 
-The NVS P-256 private key is a valid Tesla **Charging Manager** key: it can read, wake and control
-charging, but cannot unlock or drive. NVS also holds WiFi credentials, VIN and MQTT configuration.
+NVS contains the P-256 Tesla **Charging Manager** key, WiFi credentials, VIN and MQTT settings.
+The key grants vehicle reads, wake and charging. Protect it as a vehicle credential.
 
-| Boundary | Risk and mitigation |
+| Boundary | Risk and control |
 |---|---|
-| Physical USB/JTAG | Factory flash is readable and firmware replaceable; protection requires separately planned hardware hardening. |
-| LAN/API | Unauthenticated plaintext control; trusted LAN, firewall/VLAN or authenticated reverse proxy. |
-| BLE | Encrypted replies are authenticated and replay-checked. Legacy plaintext replies remain accepted under request UUID/address and one-response checks; those checks do not authenticate the sender. NimBLE SMP/bonding is compiled out on all targets. |
-| Build/publication | Pinned inputs, independent rebuild, protected signing and byte-bound artifacts. |
+| USB/JTAG | Physical access can read secrets and replace firmware. [Hardware protection](#enabling-flash-encryption--secure-boot-recommended-irreversible) |
+| LAN/API | Plain HTTP control is unauthenticated. [Network isolation](#http-api-exposure) |
+| BLE | Encrypted replies are authenticated and replay-checked. UUID/address and one-response checks on accepted plaintext replies do not authenticate the sender. SMP and bonding are compiled out. [Protocol departures](adr/0005-tesla-ble-seam.md#2-platform-forced-departures-and-reference-deviations) |
+| Build/publication | Pinned source, independent rebuild, protected signing and byte-bound artifacts. [Publication pipeline](#release-pipeline-and-trust-boundaries) |
 
-First-boot key generation enables hardware entropy before WiFi/BLE. IDF6 PSA draws from the hardware
-RNG. Devices keyed before this fix need a deliberate re-key/re-pair, not an automatic identity change.
-Remote pairing faults and error text are advisory only: they cannot rotate the key or erase sessions.
-Automatic enrollment reuses the stored Charging Manager key with bounded backoff after status
-probes; a recovery hint is not proof that the car removed a key. Vehicle approval still requires
-the NFC keycard and touchscreen confirmation. See [pairing](USER_GUIDE.md#pairing-and-identity).
-Rotation rolls back failed persistence and blocks signing while identity/cleanup is ambiguous.
-VIN transitions durably journal cross-namespace work. Protocol/key compatibility and reference
-departures are recorded in [ADR-0002](adr/0002-idf6-mbedtls4-crypto-seam.md) and
-[ADR-0005](adr/0005-tesla-ble-seam.md).
-
-An existing domain peer binds SessionInfo refreshes to its retained vehicle public key and secret,
-even if its session is temporarily invalid. Rejected key changes preserve peer state, availability
-and session storage. Explicit peer clear/reset removes that binding; it is not a persistent
-VIN-to-vehicle-key pin across reconnects or reboots. The exact lifetime and bootstrap limits are in
-[ADR-0005](adr/0005-tesla-ble-seam.md#established-session-continuity-2026-10-23).
+First-boot generation enables hardware entropy before WiFi/BLE. IDF6 PSA uses the hardware RNG.
+Keys from before the entropy fix need deliberate re-key/re-pair. Remote faults cannot authorize
+identity rotation or session erase. See [pairing lifecycle](ARCHITECTURE.md#pairing-lifecycle--invalidation)
+and the [lifetime of an established peer binding](adr/0005-tesla-ble-seam.md#established-session-continuity-2026-10-23).
 
 ## Unencrypted-flash reality (factory devices)
 
@@ -41,48 +29,26 @@ log, commit, upload, publicly attach or casually inspect them.
 
 ### NVS retention
 
-`main/logic/nvs_contract.hpp` owns the exact application/pinned-library namespace/key/API/retention inventory and records
-which entries contain secrets. The secret flag is classification metadata; it does not encrypt or
-redact stored values. The storage adapter rejects unknown records, wrong APIs, collisions and names
-over 15 bytes.
+[`nvs_contract.hpp`](../main/logic/nvs_contract.hpp) owns application and library namespaces,
+stored keys, APIs, owners, retention and secret classification. The adapter rejects unknown
+records, aliases that collide, invalid APIs and names over 15 bytes. Secret classification
+provides neither encryption nor redaction. The same partition also holds SDK WiFi and PHY records.
+Legacy display keys are ignored and left in NVS.
 
-SDK-owned WiFi settings and PHY calibration also share this partition. Its secrecy and
-preservation requirements cover those records as well; they are outside the application registry.
+NVS stays at `0x9000/0x6000`. OTA and verified app-only USB preserve it. The runtime accepts OTA
+slots at `0x20000` and `0x210000`, each `0x1f0000` bytes. Historical slot layouts need separate
+key-preserving USB/layout recovery. App-only writes leave the partition table intact.
+[App-only procedure and layout proof](DEVELOPMENT.md#installed-layout-proof)
 
-| Namespace / logical key (stored key where different) | Owner | Retention |
-|---|---|---|
-| `tesla_cfg/cfg` | HTTP/provisioning atomic config; separately gated default-off physical cfg repair | durable across OTA |
-| `tesla_cfg/wifi_ssid`, `wifi_pass`, `vin`, `mqtt_uri`, `syslog_uri` | legacy config mirror | downgrade compatibility |
-| `tesla_cfg/last_time` | clock | replaceable cache |
-| `tesla_cfg/vin_txn` | VIN transition | recovery journal |
-| `tesla_cfg/ble_mac` | BLE discovery | replaceable cache |
-| `tesla_cfg/reboot_why` | independent heap supervisor | recovery journal |
-| `tesla_cfg/boot_fails` | boot guard | recovery journal |
-| `tesla_ble/private_key` | pinned tesla-ble library | durable across OTA |
-| `tesla_ble/session_vcsec` (`sess_vcsec`), `session_infotainment` (`sess_info`) | pinned tesla-ble library | replaceable session cache |
-| `tesla_ble/paired_at` | pairing | replaceable metadata |
-| `tesla_ble/key_created` | pairing | durable across OTA |
-| `tesla_ble/key_rotate` | key rotation | recovery journal |
+Installer **Flash** preserves NVS by checking the installed boot-slot project and the NVS range.
+An inconclusive read leaves both options available. In that case select **Flash** only for a known
+tesla-key-esp32 installation. Use the flasher stub: the ROM loader's 16 KiB erase blocks can hit
+NVS during a partition-table write. A foreign NVS layout or contents can prevent boot.
 
-Legacy `tesla_cfg/disp_rot` and `tesla_cfg/disp_flip` values are ignored and left in NVS.
-
-OTA, verified signed app-only USB delivery and installer **Flash** preserve NVS. The installer
-offers **Flash** only when the device's own partition table places `nvs` at `0x9000`/`0x6000` and
-its boot slot runs `tesla-key-esp32`; this read-only check is a safeguard, not an authorization,
-and a device that cannot be read keeps both choices. Flash over another firmware's NVS can stop this
-firmware at boot, because it never erases an NVS partition it cannot initialize. Installer writes
-require the flasher stub: the ROM loader erases 16 KiB blocks, so the partition-table write would
-reach into `nvs`.
-
-Runtime OTA accepts only the canonical OTA-slot offsets `0x20000`/`0x210000`, each `0x1f0000`
-bytes. Historical larger-flash partition layouts are not grandfathered into OTA; they need a
-separately authorized USB/layout recovery that preserves secret NVS. App-only USB delivery does
-not rewrite a partition table. The OTA writer uses raw `esp_ota_*`, not `esp_https_ota`.
-
-Installer **Clean flash**, merged-image writes and full flash erases destroy NVS. Each **Clean
-flash** requires a separate confirmation with a secret-NVS backup reminder before any flash work
-starts. Firmware rollback does not restore keys/configuration. Destructive or identity work needs
-explicit authorization and a backup/rollback plan.
+**Clean flash**, merged writes and whole-chip erase destroy NVS. Confirm the destructive action
+and arrange a private NVS backup before writing. Firmware rollback cannot restore keys or settings.
+Identity changes and NVS writes require their own authorized scope.
+[Installer operation](USER_GUIDE.md#updates-and-recovery)
 
 ## MQTT transport
 
@@ -153,51 +119,29 @@ intentional dismissal/deletion.
 
 ## OTA self-update
 
-Fixed compile-time HTTPS URLs, bundled-CA verification, target checks and RSA signatures protect
-OTA intake. A LAN peer can choose Release, Dev or an available signed PR preview through the
-channel and PR selectors, subject to the device's intake/version rules, and can initiate expensive
-fetch/reboot work. A peer cannot supply a custom download URL through the API. Signatures
-authenticate bytes, not freshness; app-descriptor/channel checks enforce versions.
-No eFuse anti-rollback is burned. Pending images retain rollback until runtime health is proven;
-[Architecture](ARCHITECTURE.md#ota-self-update) owns confirmation rules and allowed channel transitions.
+Fixed HTTPS URLs and bundled CA verification protect feed transport. The pinned signature
+authenticates application bytes. Channel and descriptor admission enforce the version floor.
+There is no eFuse anti-rollback. A LAN peer can change channel, select a signed preview and
+consume fetch/reboot resources, but cannot supply a custom feed URL.
+[Runtime OTA and rollback](ARCHITECTURE.md#ota-self-update)
 
-Feed installs also require a current checked offer ID bound to channel revision, PR, version,
-selected notes and manifest/image SHA-256 and size. Channel changes and replacement checks
-invalidate old confirmations; candidate changes require another check. The received image must
-match the confirmed bytes before SDK signature verification. The opaque ID prevents accidental
-cross-client substitution; it is not authentication, a secret or a CSRF credential. Hashes bind
-an unsigned manifest's claims and do not replace the pinned RSA authority.
+Offer IDs bind confirmation to the checked channel, PR, notes/version and image hash/size.
+They prevent accidental substitution. Treat neither the opaque ID nor the unsigned manifest as
+authentication or a CSRF credential. Verify the confirmed image bytes and existing RSA authority.
+[Offer API](API.md#management)
 
-In `dev`, a LAN peer can also supply a raw signed app through `POST /ota/upload` without
-publishing it to a feed. This uses the same trusted RSA signature, target/slot validation,
-operation exclusion, probation and health/rollback checks. It accepts an equal/newer canonical
-version core, including same-version and PR/local builds; ordinary feed rules are unchanged.
-Release-channel uploads are refused. The channel is an operator opt-in, not authentication:
-the existing unauthenticated `/set_ota` API can select `dev`. Possession of LAN access alone
-still does not authorize unsigned or foreign-key firmware. HTTP does not bind uploaded bytes
-to a Git source SHA or attest PR gates; the operator must select an eligible signed artifact.
-The direct route does not provision a signing key, modify CI/publication policy or relax NVS,
-key/session preservation. See the [upload contract](API.md#direct-signed-firmware-upload).
+Saved `dev` permits a signed app upload without feed publication. Any LAN peer can set `dev`:
+it is an operator opt-in, not authentication. HTTP does not attest source SHA, review or PR
+gates. Select the exact authorized signed image and verify the target before uploading. An
+uncertain response never authorizes a retry.
+[Upload API](API.md#direct-signed-firmware-upload) · [Local OTA procedure](DEVELOPMENT.md#local-ota-test-before-merge)
 
-The maintainer's global `$ota` workflow uses `scripts/dev-ota-upload.py` for local, uncommitted
-source tests. Its private source inventory includes new non-ignored files. Executed test/build
-logs, a separate reviewer process with enforced read-only sandbox, signed-image SHA-256 and
-production RSA authority are bound through a private local journal. This detects accidental
-receipt edits and stale candidates; it is not external attestation against a malicious
-same-user operator. The journal, approved production inventory and signing configuration stay
-outside Git. No private key enters the helper. The helper requires an already saved `dev`
-channel and fixed IP/MAC/project/chip, consumes one attempt before POST even on timeout, and
-checks a distinct boot and full ELF identity plus passive runtime/retention evidence. It cannot
-prove vehicle behavior or all NVS contents, and does not authorize commands, retries or publication.
-
-The USB installer validates the schema-v2 source SHA's format and the four-target roles/offsets.
-It verifies byte lengths and SHA-256 hashes for the detected chip's four parts **before erasing/writing**;
-otadata activation is last. Downloads stream within each part's declared size, reject redirects and
-stop after 60 seconds. The manifest is unsigned: the browser does not authenticate its claimed
-source commit or inspect the other three chips' application bytes. These checks detect
-mixed/corrupt downloads, but USB still trusts the chosen Pages origin. Vendored hash-pinned
-`esptool-js@0.7.1` runs under `script-src 'self'`, with no CDN execution. Which installer action
-keeps NVS is owned by [NVS retention](#nvs-retention).
+The Web Serial installer checks the schema-v2 source SHA format and roles/offsets for four targets.
+It bounds the detected target's four downloads to declared sizes and 60 s, rejects redirects and
+checks lengths/hashes before any write. Otadata activation is last. The unsigned manifest does not
+prove source or authenticate the other chips' bodies. Trust the selected Pages origin.
+CSP `script-src 'self'` limits execution to the site and its
+[vendored bundle](THIRD_PARTY.md).
 
 ## Signed OTA images
 
@@ -247,119 +191,67 @@ agent tools, logs, repository files or tests. Tests use throwaway keys only.
 
 ### Release pipeline and trust boundaries
 
-Counts and file sets are enforced by validators: 53 allowlisted unsigned payloads, 12 root firmware
-files, 28 diagnostics, 40 stable Release assets and 16 manifest parts. Do not use globs to broaden them.
-The main DAG starts `prepare`, `logic-test` and `logic-harness` together. The producer matrix
-`build-target` and the matrix `independent-rebuild-target` each need only `prepare`, so producer
-and independent target compiles run concurrently before protected publication. The `build` join
-needs `prepare`, both host jobs and `build-target`; `independent-rebuild` needs `prepare` and every
-`independent-rebuild-target` leg, using the same prepared release version. The key-free independent
-join can finish before `build`; `publish` requires both successful joins, compares their complete
-inventories and bytes before key use, and then `deploy` follows. `build` is a required status
-check, and GitHub treats a check skipped because a need failed as passed, so `build` runs with
-`if: ${{ always() }}` and fails first unless every need succeeded. The independent join has no key.
+Enforced inventories include 53 unsigned payloads, 12 signed root firmware files, 28 diagnostics,
+40 stable Release assets and 16 manifest parts. Use the validator-owned file sets.
 
-`prepare` performs cumulative relevance classification once for scheduling. It does not grant
-publication authority; current-source and Pages/Release checks remain at every mutation boundary.
-Dev publication overlaps the same pinned image download with key-free input checks on the signing
-runner. A successful pull, exact-image availability and fresh source/version admission are required
-before provisioning the key. This warmup grants no signing authority and changes no signing inputs,
-container limits or post-signing acceptance. Stable creation and immutable reuse are unchanged.
-Signed previews similarly resolve a trusted version, rebuild four targets on separate read-only
-runners, then join their complete inventory before the protected compare/sign stage.
-Selected PR feedback cannot authorize signing: eligible previews require additional complete
-host/protocol acceptance before the protected job. Main and manual publication always run full
-checks. Local cached successes are never consumed as publication or independent review evidence.
-Only the protected publisher and key-free deploy checkouts use `filter: blob:none`: they retain
-complete history/tags and hydrate the entire exact-source tree, omitting unrelated historical blobs.
-Compiler and host checkouts remain self-contained for historical reads in read-only containers.
-No Git history access or lazy fetch occurs while the signing key is provisioned.
-
-| Phase | Required proof and authority |
+| Phase | Proof and authority |
 |---|---|
-| Unprivileged build | Exact source SHA/fingerprint, four target graphs, size/stack/layout/effective-build checks and unsigned inventory; no signing key or write token. PRs build exact head. |
-| Independent rebuild | Fresh cache-free exact-source target legs run concurrently with producer legs; the secret-free join assembles their inventory. The signer compares both complete inventories and payloads before key use. |
-| Protected publish | `firmware-signing` Environment; stage regular single-link files with O_NOFOLLOW, rehash, sign, remove key, verify RSA-PSS pin and minimal signed size. Emit only SHA/version-bound artifact. |
-| Deploy | No signing Environment/key/OIDC. Consume only named artifact, revalidate inventory/layout/site bytes and channel authority, then write branch-backed Pages and check live bytes. |
+| Unprivileged build | Exact source SHA/fingerprint, four locked targets, size/stack/layout/effective-build gates and key-free output |
+| Independent rebuild | Fresh exact-source target legs and their own complete cache-free inventory with no producer artifact access |
+| Protected publish | Both host jobs and both artifact joins complete. Compare inventories and bytes before `firmware-signing` key use. Stage regular single-link files with O_NOFOLLOW, rehash, sign, remove the key, then verify RSA-PSS pin and signed size. |
+| Deploy | Key-free consumer validates the named artifact, signature/layout/site bytes and live authority before Pages writes. [Served acceptance](DEVELOPMENT.md#served-pages-acceptance) |
 
-The unsigned inventory is a producer claim, not an attestation. Toolchain/build closure is in
-[Development](DEVELOPMENT.md#build-and-evidence-contracts); signing runs in the pinned image too.
-CI display-version intake requires a numeric `X.Y.Z` core without leading zeroes, an optional
-nonempty ASCII alphanumeric/dot/hyphen suffix, and at most 31 bytes. This is not a full SemVer
-identifier check. Stable selection requires exactly `X.Y.Z`; device channel/version admission has
-its own narrower rules described in [Architecture](ARCHITECTURE.md#ota-self-update).
+On main, producer and independent matrices assemble as soon as their own legs finish, alongside
+`logic-test` and `logic-harness`. The protected publisher and deploy alone use `filter: blob:none`.
+They retain full history/tags and hydrate the exact source tree before any key use. No lazy Git
+fetch or history reads while the key is provisioned. Dev signing overlaps a pinned-image prefetch
+with key-free admission. Require a successful pull and refreshed source/version before provisioning.
+[Build inputs and proof](DEVELOPMENT.md#build-and-evidence-contracts)
 
-Stable publication has two fail-closed modes:
+Relevance is a scheduling decision. Mutation boundaries recheck current authority. Top-level
+`docs/*.md` ships to Pages and selects normal four-target Dev publication. Never relabel older
+bytes with a newer source SHA. Root Markdown and nested ADRs do not independently select it.
+Ordinary PRs skip builds. `current-head-records` checks operator records for the exact head.
+Publication needs its own GitHub build and acceptance.
 
-- **Create:** bind the current main/tag candidate and prove the Release API returns 404 before
-  key use (an existing matching tag is allowed); upload exact assets to a draft; verify aliases,
-  ELF checksums and full merged layout, including erased gaps/NVS and exact EOF. Address drafts by
-  numeric Release ID. Recheck candidate immediately before making public; require a fresh immutable
-  response before accepting it as authority.
-- **Reuse:** same-SHA retry accepts only the exact current immutable Release. Read each asset once
-  through directory-relative no-follow descriptors, bind API digest/size to that snapshot and compare
-  diagnostics/apps/merged images to the independent build. Never sign, upload or mutate that Release.
-  Emit a new verified SHA-bound recovery artifact from the snapshot.
+Build display versions accept a numeric `X.Y.Z` core without leading zeroes and an optional
+nonempty ASCII alphanumeric/dot/hyphen suffix. The entire version is at most 31 bytes. Stable requires exact `X.Y.Z`.
+Main publishes to `dev/` without a GitHub Release. Stable is a manual `release: true` dispatch.
+Dispatch without it is test-only. Dev retries may sign fresh RSA-PSS bytes.
 
-Before any upload or mutation, bind all 16 local Pages parts to the four merged images. The artifact
-carries the exact 12 root files, 16 signer-owned layout inputs, `dist/` diagnostics/inventory and
-`_site/` Pages content. Stable deploy rechecks the root/site binding and Release assets, then
-revalidates authority before invoking the branch publisher. Dev deploy binds current main and the
-exact staged snapshot without Release metadata and rechecks Pages source before invoking its
-publisher. Each root or Dev push attempt and unchanged-byte build request rechecks staged
-SOURCE_SHA against fresh remote main. Root uses the same per-attempt staged-source/current-main
-admission; immutable Release authority is checked before the publisher.
-An explicit `root-recovery` mode is separate: current clean main helpers authenticate the original
-Actions ZIP by its GitHub artifact ID/digest, then verify its complete site and all 40 immutable
-latest Release assets, four production signatures, exact tag/source and main ancestry. Each push
-attempt and unchanged-byte build request repeats that authority check, including Pages source.
-No build, signing key, re-signing or Release mutation is available in this mode. An expired original
-artifact or changed authority stops recovery; [the runbook](DEVELOPMENT.md#recover-a-published-stable-site)
-owns its separately authorized invocation. First publication and Dev retain current-main equality.
-The shared publisher owns one empty, regular root `.nojekyll` marker so GitHub serves the assembled
-static site without rebuilding it through Jekyll. Every channel mutation validates it before and
-after staging; existing nonempty, linked or nonregular entries stop publication. Legacy recovery
-permits exactly this empty control file in addition to the complete original authenticated site.
-No original payload byte is excluded from comparison or regenerated. Build requests, readiness
-polling and complete public-byte acceptance remain required.
-Cumulative relevance reads the manifest and changelog from one exact branch commit. Stable
-acceptance binds firmware to an immutable Release/tag; Dev checks its declared sizes/hashes without
-requiring a Release. Both require exact served changelog bytes. Absent Dev authority falls back to
-the stable baseline; known metadata or served-byte mismatches keep reconciliation open.
+- **Stable creation.** Bind current main/tag and require Release API 404 before signing. An
+  existing matching tag is allowed. Upload exact assets to a numeric draft ID. Verify aliases,
+  ELF checksums, merged layout, erased gaps/NVS and EOF. Recheck authority before publishing and
+  confirm the fresh immutable Release.
+- **Stable reuse.** Only the exact current immutable Release for the same SHA qualifies. Read
+  each asset once through no-follow descriptors. Bind digest/size to the snapshot and compare
+  diagnostics/apps/merged images to the rebuild. Reuse is key-free and leaves the Release intact.
+- **Root recovery.** Authenticate the original unexpired Actions ZIP and all 40 current immutable
+  Release assets, signatures, tag/source and main ancestry. Preserve the complete original site.
+  Repeat authority checks for every push/build request. Expired, changed or unauthenticated input
+  stops recovery. [Recovery procedure](DEVELOPMENT.md#recover-a-published-stable-site)
 
-Publication acceptance requires a complete fresh manifest/part/changelog snapshot; incomplete
-attempts cannot be combined. [Development](DEVELOPMENT.md#served-pages-acceptance) owns the bounded
-readiness polling, byte checks and retry procedure.
+Bind all 16 Pages parts to the verified merged images. First stable publication and Dev recheck
+staged `SOURCE_SHA` against live main for each branch push or unchanged-byte build request.
+The publisher maintains one empty, regular single-link root `.nojekyll`. Reject a nonempty,
+linked or nonregular marker before and after staging. Legacy recovery permits exactly this extra control file. Relevance reads
+manifest and changelog from one exact branch commit. Stable binds to immutable Release/tag. Dev
+binds declared size/hash. Missing Dev authority falls back to stable. Known mismatches keep
+reconciliation open.
 
-A stale run must not replace unrepresented firmware. Top-level `docs/*.md` files are shipped Pages
-content, so their changes follow the normal four-target build, independent rebuild and protected
-Dev publication. Older firmware is never relabelled with a newer documentation source SHA. Unshipped
-root Markdown and nested ADR files do not independently select publication; stable Release remains manual.
+**Previews** require an open labelled same-repository PR, exact live head/label, complete host and
+protocol checks, independent byte equality and production signatures. Trusted code chooses the
+version from `releases/latest` (immutable canonical tag, four uniquely named merged assets with
+digest/size). It does not scan for a substitute or verify bytes merely to select the version.
+Recheck live default-branch head before key use, upload and Pages writes. Per-PR concurrency
+couples publication with cleanup on close, force-push or label removal. Daily reconciliation
+removes stale manifests. Cleanup runs current default-branch code.
+[Served preview acceptance](DEVELOPMENT.md#served-pr-preview-acceptance)
 
-`main` pushes publish signed **Dev** bytes to `dev/` without a GitHub Release; retries may sign fresh
-RSA-PSS bytes. Official stable releases use manual `workflow_dispatch` with `release: true`, publishing
-an immutable tagged Release and root Pages. Dispatch without that flag is test-only.
-
-Signed previews require an open labelled same-repository PR, exact live head/label after approval,
-byte-identical source/version-bound trusted rebuilds and production signature verification. Version
-uses GitHub's `releases/latest` entry, requiring a canonical immutable stable tag and the four
-uniquely named digest/size-bearing merged assets; it does not scan for a newer eligible Release or
-byte-validate that numeric base's assets. Refetch default-branch head before key,
-upload and Pages boundaries; main advancement retires stale runs. Per-PR concurrency couples publisher
-and trusted default-branch cleanup on close/force-push/unlabel; daily reconciliation removes stale manifests.
-Event cleanup checks out the repository's current default branch, as reconciliation does. A PR's
-historical base SHA can lack the validators required by the current workflow; neither that stale
-snapshot nor a PR-selected head/base ref supplies cleanup code.
-Key-free [served preview acceptance](DEVELOPMENT.md#served-pr-preview-acceptance) compares all 16
-published parts and checks bounded URL absence after removal; a branch write alone is not acceptance.
-
-The only serving authority is branch-backed `gh-pages:/`: root Release, `dev/`, `PR/<N>/`.
-Check API Pages mode/source/URL before signing, before invoking branch publication/deletion and
-at live acceptance. These workflow checks do not hold a lock on repository Pages settings and are
-not repeated inside every branch-push retry.
-Environment reviewer configuration and required PR-policy checks are repository settings; code cannot
-install them. Green provenance proves source-to-bytes relationships, not source safety, runner trust
-or physical operation. Independent review, Environment approval and bench acceptance remain separate.
+Serving authority is branch-backed `gh-pages:/` at root, `dev/` and `PR/<N>/`. Check Pages
+mode/source/URL before signing and branch mutation and at served acceptance. These checks do not
+lock repository settings or run inside every ordinary branch retry. Environment approval,
+required repository checks, source review and bench acceptance remain independent.
 
 ### Key rotation
 
@@ -401,10 +293,8 @@ Firmware builds and CI do not depend on Context7.
 
 ## Configuration-only physical maintenance
 
-The default-off [maintenance role](CONFIG_RECOVERY.md) can replace only the recognized corrupt
-`tesla_cfg/cfg` blob after independent full board/key/VIN authority, absent identity journals and
-internal non-cfg logical retention checks. It does not erase NVS, force legacy fallback or rotate
-identity. One uncertain set/commit parks without retry. Its separate non-OTA app/project/manifest
-requires independent source and signed-artifact admission; the ordinary protected publication and
-16-part channel paths do not publish maintenance artifacts. This source integration is unqualified
-until the owner document's build, signer and physical evidence are independently accepted.
+The [default-off maintenance role](CONFIG_RECOVERY.md) can write only the recognized corrupt
+`tesla_cfg/cfg` blob. It requires independent full board/key/VIN authority, absent identity
+journals and non-cfg logical retention. An uncertain commit parks without retry. Admit the
+exact signed maintenance artifact separately from the ordinary app and channel pipeline.
+[Qualification and physical limits](CONFIG_RECOVERY.md#qualification-and-physical-use-boundaries)

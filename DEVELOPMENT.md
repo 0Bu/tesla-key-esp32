@@ -41,184 +41,76 @@ as its image, resource limits and mount-policy label. An older, broader daemon i
 
 ## Exact dependency source admission
 
-[`scripts/nanopb-source.json`](../scripts/nanopb-source.json) owns the existing nanopb 0.4.9.1
-commit and seven runtime digests. Root CMake admits its complete owned Git tree before IDF
-component processing, declares that exact commit, and marks it globally populated without
-configuring nanopb. The unchanged component's later tag declaration cannot select another source.
-Unsupported FetchContent/provider overrides fail. Reconfiguration watches the admitted inputs;
-an always-run existing-only prerequisite also guards component and ELF targets when file size or
-mtime is preserved. A warm configure with missing admitted state fails instead of fetching again.
+Root CMake admits the exact Nanopb 0.4.9.1 commit and seven runtime digests from
+[`scripts/nanopb-source.json`](../scripts/nanopb-source.json) before IDF component processing.
+It declares the exact commit and marks that tree populated. Alternate provider overrides fail.
+An existing-only build prerequisite rechecks the inputs even when mtimes or sizes are preserved.
+A warm configure requires the admitted state.
 
-The host harness selects only its owned `nanopb-pristine`, `tesla-pristine` and `tesla-patched`
-caches. Tesla's source commit comes from all four validated locks. Raw Git objects establish the
-complete pristine path/body/mode inventory; VERSION text, a parent repository and a managed archive
-are insufficient. Only exact committed links to direct regular tracked files are allowed; all seven
-nanopb runtime inputs remain regular files. The separate Tesla work copy admits the complete
-pristine tree plus exactly the reviewed patch transformation, including untouched files.
-Patch application sets POSIX mode at process startup with zero fuzz so allowed offset hunks do not leave backup
-files; the complete inventory still refuses every extra file instead of deleting or ignoring it.
+The host harness uses its owned `nanopb-pristine`, `tesla-pristine` and `tesla-patched` trees.
+All four Tesla locks must agree. Raw Git objects bind paths, modes and bodies, including untouched
+files. Committed links may target only direct regular tracked files. The seven Nanopb inputs
+must be regular. The separate Tesla tree accepts only the reviewed patch transformation:
+POSIX patch mode, zero fuzz, and no extra files. Object namespaces include source/patch identity
+and compiler selectors. They do not authenticate compiler or object bytes.
 
-An existing foreign, modified, aliased, partial or failed cache is never adopted, repaired or silently
-retried. Failure leaves its owned state for inspection; select a new empty build/cache directory or
-remove that dedicated generated state deliberately after inspecting it. Only legitimate optional
-cold-network absence may skip the harness; strict mode, unknown commits and every provenance
-mismatch fail. Existing caches are checked before a different cold fetch can skip. Git selectors,
-configuration, hooks, filters and automatic maintenance cannot supply alternate source material.
-The existing harness Mbed TLS selection is unchanged.
+Foreign, modified or partial state fails closed. Preserve it for inspection and select an empty
+dedicated cache for a fresh attempt. Only optional cold-network absence can skip the harness.
+Strict mode, unknown commits and provenance mismatches fail. Existing caches are checked first.
+Git configuration, hooks, filters and maintenance cannot supply alternate inputs.
 
-Each Git query has bounded data pipes and a separate bounded leader-status channel. An owned
-guardian watches a liveness pipe whose writer belongs only to the admission process. If an outer
-timeout or SIGKILL kills admission, EOF makes the guardian terminate its own group, including Git
-and pipe-holding descendants after the Git leader exits. Normal cleanup kills that entire group
-atomically before closing the liveness writer, keeping ownership through parent cancellation.
-The guardian holds no data-output writer.
-Before side effects, admission records and checks its original process/parent identity. On Linux,
-it arms and verifies parent-death SIGKILL before the first query or cache write, then rechecks the
-owner. This covers CMake versions whose timeout leaves a helper alive after CMake exits; the
-consumer must still fail and exit on admission timeout. Later calls never adopt a new parent or
-reuse an inherited post-fork flag. Imports alone do not change kernel policy. The dedicated CLI
-rejects startup already adopted by init; an imported validator may legitimately have container
-init as its original parent. This cannot identify arbitrary subreaper adoption before import, and
-does not fire while the original parent remains alive. Non-Linux systems retain bounded parent
-identity checks and the consumer's own cancellation behavior, without a Linux kernel guarantee.
-Normal success and internal failure also confirm group cleanup; malformed or missing leader status
-refuses immediately. This does not authorize killing unrelated process groups.
-
-Source/patch identity and compiler-selector salts separate owned object namespaces even when
-source mtimes match. This does not authenticate compiler binaries or cached object contents.
-[`test_dependency_sources.py`](../test/test_dependency_sources.py) exercises local Git/cache
-admission; [`test_dependency_cmake.py`](../test/test_dependency_cmake.py) exercises real root CMake
-and passive consumer targets with Make and Ninja. These fixtures are distinct from the required
-pinned IDF builds and protocol vectors. This correction covers repository consumers; upstream's
-standalone tag-fetch CMake path remains unchanged.
+[`dependency_source.py`](../scripts/dependency_source.py) bounds Git data and status channels.
+Its liveness guardian owns group cleanup, including descendants retaining pipes after leader exit.
+Linux also verifies parent-death protection before side effects. Other hosts retain bounded parent
+checks and consumer cancellation. A missing leader status, changed owner or unconfirmed cleanup
+fails. The guardian only terminates its owned group. See [dependency tests](../test/README.md#gate-index).
 
 ## Embedded web assets
 
-`main/www/inline_assets.cmake` inserts the CSS and JavaScript into the HTML marker lines,
-then the build uses `gzip -9 -n`. Raw marker checks precede any transformation. The bounded,
-standard-library `prune_css_comments.py` helper blanks documentation text in whole-line CSS
-comments outside strings and parentheses, and ordinary whole-line JavaScript `//` comments.
-CSS byte offsets and whitespace are preserved. The JavaScript pass removes leading spaces and
-tabs from code lines and keeps the original line endings, including on blanked comment lines.
-Inline comments, legal/tooling directives and HTML-sensitive sequences are preserved. JavaScript
-block comments remain opaque. The supported JavaScript subset refuses code
-lines containing template backticks, inline block openers or a final backslash, code after a block
-closer, unfinished blocks and Unicode line separators. These restrictions exclude untracked
-multiline strings/templates without guessing regex syntax. Inputs are bounded UTF-8 without NUL.
-Markup and code tokens remain unchanged; source comments remain readable. This is conservative
-repository-specific pruning, not general minification or universal observable equivalence:
-source introspection such as `Function.prototype.toString()` can expose changed whitespace and comments.
-The application does not use source introspection.
-The helper is an explicit generator dependency. It rejects output/input aliases before cleanup,
-removes the validated old output before generation and publishes complete bytes atomically.
-CMake refuses helper startup, generation and timeout failures; retained files are never a success.
+`main/www/inline_assets.cmake` validates raw markers, inlines bounded UTF-8 CSS/JS, then runs
+`gzip -9 -n`. `prune_css_comments.py` blanks eligible whole-line comments and trims leading JS
+indentation. CSS offsets and JS line endings stay intact. Inline/legal/tooling and HTML-sensitive
+content is preserved. Unsupported multiline JS forms and NUL are rejected. Source introspection
+can observe the changed whitespace and comments.
 
-The effective-build gate compares the actual generated page and gzip with canonical inputs.
-Host tests execute the real CMake generator and its incremental helper dependency. Linux Chromium
-independently compares ordered raw CSS rules with the generated fixture's DOM stylesheet before
-layout and trusted-keyboard checks; this is modern-browser evidence, not every-browser equivalence.
+The helper is an explicit dependency. It rejects input/output aliases and atomically publishes
+complete output after removing the old output. Startup, generation and timeout failures fail the
+build. Effective-build checks compare emitted HTML and gzip. Tests cover incremental generation and
+[Linux browser CSS/layout](../test/README.md#browser-prerequisites).
 
 ## Validate a change
 
-Start with checks relevant to the diff. Host suite scope and prerequisites are in the
-[test guide](../test/README.md); no host result establishes hardware or vehicle behavior.
+```bash
+scripts/check-local.sh                # host, repository policy, BLE protocol and Linux sanitizers
+scripts/check-local.sh --firmware     # also build, sign with a disposable key and compare all four targets
+scripts/check-local.sh --firmware --candidate  # require a clean committed firmware candidate
+```
 
-Run the complete local handoff once with `scripts/check-local.sh`; add `--firmware` for the
-four-target build, disposable-key signing and reproducibility contract. The entry point runs host,
-protocol, repository/agent gates and Linux sanitizers, using the pinned Docker image for sanitizers
-on macOS. It performs no publication, real-key signing, device or vehicle operation. Standalone
-commands below remain available for focused iteration.
+Start with focused [host/runtime/browser checks](../test/README.md#run-it). The handoff runs strict
+host checks beside repository policy and the BLE harness, then serializes sanitizers and firmware.
+On macOS the sanitizer path uses pinned Docker. Run the applicable complete handoff before pushing
+and record the tested source and base SHAs. See [PR review policy](../AGENTS.md#pr-and-review) and
+[protected publication](SECURITY.md#release-pipeline-and-trust-boundaries).
 
-The host runner reports elapsed time for each gate. Contract parsers reuse bounded immutable
-results for identical complete source strings within one process; changed fixture text is parsed
-again, and returned inventories are independent copies. Every mutation and failure-propagation
-case still runs. Passive dependency-flow tools use shell stubs for inert compiler/archive/system
-effects. Deploy-policy fixtures copy their workflow/checker inputs without local build or cache trees.
-Shared dependency, otadata and Release-acceptance self-tests have one owner in
-`test-build-contracts.sh`; the full host wrapper does not repeat them. CI also leaves its shared
-version, size, Pages, changelog and build-gate self-tests with that mandatory full host gate.
-On main, full repository/agent preflight runs in `logic-harness` alongside the longer mock suite;
-both remain required by `build`. The independent artifact join uses `prepare`'s release version
-without waiting for `build`; protected publication still needs both successful joins and compares
-their full exact-source inventories and bytes before key use. Main and trusted preview
-acceptance still execute the complete remote contract before signing, without local receipts.
-
-For repeated local host checks, use:
+For repeated local host runs:
 
 ```bash
 scripts/with-host-python.sh python3 scripts/run-local-checks.py --require-all
 ```
 
-The Stop and strict pre-commit hooks share this coordinator. Successful runs can be reused for
-identical HEAD, tracked and non-ignored new file contents/modes, resolved tools, environment and
-host configuration. Deleted files invalidate the result. Concurrent callers share a worktree-local
-lock, inherited by bounded sub-gates. Failed and interrupted runs leave no success receipt.
-The 20-minute strict suite budget is enclosed by longer core, adapter and hook-registration
-deadlines, leaving time for cleanup before an outer timeout can interrupt it.
-`--force` always executes; CI never consumes or writes local receipts. These receipts provide local
-feedback, not review, remote CI, signed-artifact or hardware evidence.
-Pre-commit removes only the leading builtin helper path added by Git before starting tests.
-Custom Git exec paths and unrelated PATH entries remain unchanged and invalidate reuse normally.
+The worktree-local coordinator reuses only successful identical source and runtime inputs:
+HEAD, tracked and nonignored files (including mode/deletion), tools, environment and host setup.
+On macOS the Linux browser image is part of runtime identity. Indirect tool selectors disable
+reuse. Setup that changes runtime identity leaves no receipt. Concurrent callers share a lock.
+The strict suite has a 20-minute budget. Surviving owned workers retain the inherited lock while
+cleanup is pending. Failures/interruption clear reuse. `--force` reruns. CI ignores local receipts. Under `--staged`,
+different working-tree inputs trigger a fresh working-tree test, so partial staging still needs
+separate staged-snapshot evidence.
 
-Startup files, module search paths and nonliteral compiler overrides disable reuse. On macOS,
-changes to the browser runner's local image also invalidate it; unrelated Docker images do not.
-Initial browser/CMake setup can change runtime
-inputs during a successful run; that result is reported but not cached. Pre-commit uses `--staged`:
-when working-tree inputs differ from the index, it executes fresh checks without reuse. Those
-checks still exercise the working tree; partial staging needs separate staged-snapshot verification
-before claiming commit-byte coverage. Host runners remove signing-key environment variables.
-Per-call runner metadata (`CODEX_TOOL_CALL_ID`) is removed from Git and test subprocesses and
-omitted from the cache identity. Other unknown environment variables still invalidate reuse.
-
-```bash
-scripts/run-mock-tests.sh
-scripts/repo-lint.sh
-scripts/test-build-contracts.sh
-scripts/test-pr-gates.sh
-tools/agent-config/selftest.sh
-```
-
-Automatic browser tests are Linux-only. On macOS, use `scripts/run-browser-tests-linux.sh`
-(Docker and package access for the initial image build), or the Linux CI host job. The container
-runs the actual desktop/mobile DOM and accessibility checks without network or writable source
-access. Native macOS browser launches are refused; `--require-all` runs this Linux container
-on macOS and fails if Docker, the image build or the real browser check fails. Prepare a cold
-image with `scripts/run-browser-tests-linux.sh` first; the strict sub-gate keeps its 120-second
-outer deadline, including Docker startup. Controlled launch-policy tests are separate
-from real-browser evidence. For optional local visual review, use the provided in-app Browser
-with an offline fixture; do not launch native Chrome from shell tests.
-
-Before firmware handoff, use the complete four-target contract:
-
-```bash
-scripts/idf-docker.sh ./scripts/ci-build-verify.sh "$(cat version.txt)" "$(git rev-parse HEAD)"
-```
-
-This adds disposable-key signing, manifest/Pages byte checks and reproducibility to compilation.
-Never use the real offline OTA key in tests. Before a firmware push, `scripts/precheck-firmware.sh`
-checks all four size and stack baselines incrementally; `--target` narrows investigation and
-`--clean` removes its cache. Narrow checks do not replace the four-target handoff.
-
-The IDF wrapper applies the same CPU/memory ceiling to ordinary builds, daemon creation and
-Fast-Build volume setup. Volume setup uses the pinned IDF image and stops on failure.
-Daemon reuse additionally requires the init reaper. The offline self-test executes the shipped
-wrapper with a passive Docker CLI, including setup failures; it
-neither accesses a Docker daemon nor establishes actual container resource enforcement.
-
-CI computes cumulative firmware relevance once in `prepare`, conservatively building when the
-published baseline cannot be verified. Target jobs consume that scheduling decision; signing and
-publication revalidate current source and authority at their own boundaries. The primary matrix verifies all four supported targets. Independent main builds use the same target defaults.
-
-PR feedback is selected by `scripts/check-change-scope.py`: ordinary Markdown-only changes use repository
-lint without firmware compilation; browser changes use strict browser checks; firmware source uses
-runtime, protocol and sanitizer checks. The PR template, feature catalog and third-party notices
-are executable checker inputs and select full coverage. Protocol vectors and shared native/browser
-parity run in both profiles. The strict runtime gate includes the retained MQTT JSON/registry owner;
-Linux sanitizers execute that same owner with instrumentation. Unknown,
-combined runtime/browser code, test, policy, build and dependency changes use full coverage. `repo-lint.sh --quick` keeps
-actual validators while omitting their unrelated mutation self-tests. Local handoff and main/manual
-publication remain full. Main still reconciles shipped documentation through the existing signed
-site pipeline; PR selection does not change that publication/source contract.
+For firmware size/stack iteration, use `scripts/precheck-firmware.sh` (all four targets by default,
+`--target` narrows diagnosis, `--clean` clears its cache). The complete local build additionally
+runs signed-size, manifest/Pages byte and reproducibility gates. Use disposable test keys only.
+Keep host, build, signing, CI and physical evidence separate.
 
 ## Build and evidence contracts
 
@@ -269,11 +161,19 @@ uses the same modes (`check-stack-usage.py --observed-dir dist --write-baseline 
 raise|tighten`) and lists every changed entry; a PR lists each raised entry with its cause.
 Stack tighten forbids growth and newly reviewed frames or translation units; it permits removed
 units and removed or below-threshold frames, then lowers the remaining maxima to measurements.
-`check-firmware-size.sh` builds all four targets by default. The pre-push hook runs the
-incremental `precheck-firmware.sh` on all four (`PRE_PUSH_TARGETS` narrows it deliberately); it
-checks only the size and stack gates, not CI's dependency, partition, otadata, semantics,
-artifact-identity, reproducibility or signing gates. Stack reports inventory frames, reject unbounded dynamic frames
-and frames over 4096 B; they do not prove call depth or runtime stack margin.
+`check-firmware-size.sh` builds all four targets by default. After PR policy passes, the
+[Git pre-push hook](../.githooks/pre-push) runs the vehicle-command sync check and the
+incremental size and stack check concurrently when both apply. Any failure rejects the push.
+The incremental check builds the four targets one at a time in the pinned ESP-IDF container
+because they share a component workspace. `PRE_PUSH_TARGETS` can narrow the incremental check.
+The full build additionally checks dependencies, partitions, otadata, compiler semantics,
+artifact identity, reproducibility and signing. Stack reports reject unbounded dynamic frames and
+frames over 4096 B. Runtime margin also depends on call depth.
+
+From a feature branch, invoke `.githooks/pre-push origin < /dev/null` to run the hook manually
+against the current branch without pushing. The manual check compares the branch with
+`origin/main` when available. Run `scripts/install-git-hooks.sh` to configure Git to use the
+repository hooks from the active worktree on push.
 
 ### ESP-IDF migration inputs
 
@@ -297,31 +197,18 @@ an application build or treat its presence as a flashable or physically tested r
 
 ## Delivery
 
-Unsigned local images **cannot boot**. Use provenance-bound signed artifacts and the canonical
-`$flash-esp32`, `$deploy-bench`, `$ship` or `$usb-recovery` procedure, as appropriate. Every physical write
-requires explicit authorization for the board, target and scope. The user's `$deploy` invocation
-for firmware deployment and a direct `$deploy-bench` invocation both supply the standard USB
-preflight, flash and passive acceptance scope for the intended bench. Resolve its physical identity
-and verify the exact artifact before acting. Honor any narrower scope the user specified.
-Verify every image's signature;
-production and preview artifacts must match the production public-key pin. An authorized local
-development image must match the supplied development key. Size/chip/version checks alone do not
-authenticate an image.
+**Unsigned local images cannot boot.** Verify the approved signature authority and exact artifact
+before writing. Production and previews use the production RSA pin. An authorized development key
+establishes a different trust lineage. [Signing and rotation](SECURITY.md#signed-ota-images)
 
-App-only USB delivery writes the signed app at `0x20000`, then activates by erasing `otadata`
-last. NVS stays intact. Merged-image writes and full erases destroy configuration and keys;
-[retention and signing](SECURITY.md) explain recovery limits. Signing with a development key creates
-a separate trust lineage and needs an explicit key and scope.
+App-only USB writes the signed app at `0x20000` and erases otadata last. Preserve NVS and verify the
+[installed layout](#installed-layout-proof) and [retained bootloader](#retained-bootloader-references).
+Merged writes and full erases destroy NVS. [Retention](SECURITY.md#nvs-retention)
 
-`$deploy` handles commit, push, PR creation, current-head reviews/CI and canonical squash merge,
-then follows the protected Dev build. For firmware deployment it passes the resulting signed image
-and the existing approval to [`$deploy-bench`](../.agents/skills/deploy-bench/SKILL.md). A required
-pre-merge bench check uses the exact candidate while the PR is open. `$deploy-bench` binds the
-physical board across Tesla/Daikin firmware, verifies the artifact through `$flash-esp32` or the
-app-only steps of `$usb-recovery`, and accepts the implementation on that same board. Establish
-that the board lacks a configured vehicle VIN or is isolated from the vehicle before a USB reset.
-Ask only for missing bench details. Production delivery through `$ship`, OTA and live evcc or vehicle
-tests require their own authorization.
+Use the [authorized workflows](../AGENTS.md#authorization-and-ownership). For `$deploy-bench`,
+identify the intended physical board and confirm no configured VIN or isolation from the vehicle
+before a USB reset. Keep acceptance on that board.
+[Bench workflow](../.agents/skills/deploy-bench/SKILL.md)
 
 ### Installed-layout proof
 
@@ -394,40 +281,18 @@ See [API](API.md#direct-signed-firmware-upload) and [security](SECURITY.md#ota-s
 
 ### Served Pages acceptance
 
-The assembler emits an empty `.nojekyll`, and every shared branch-publisher mode maintains it at
-the branch root. Pages therefore serves the already-built static files without a Jekyll rebuild.
-The explicit build request is retained because a `GITHUB_TOKEN` branch push does not trigger Pages.
-This removes redundant site processing; GitHub's deployment queue and CDN propagation remain
-external waits and still require the same acceptance checks.
+Check the latest Pages build up to 32 times at fixed 10 s intervals (310 s of waiting). Treat
+queued/building, failed and inaccessible status separately. Readiness does not establish byte
+provenance. The explicit build request is required for a branch push using GitHub's workflow token.
 
-Stable and Dev acceptance first observe the latest Pages build with up to 32 status reads at fixed
-10-second intervals (the same 310-second waiting span). This avoids up to 60 seconds of readiness
-detection lag from exponential polling. Queued/building, failed
-builds and unavailable status have distinct diagnostics before byte acceptance starts. This latest
-build observation is a readiness hint, not provenance for a particular firmware snapshot.
-Post-publication byte acceptance then retries the complete manifest, all 16 Pages parts and changelog with
-exponential delays capped at 60 seconds (190 seconds of default waiting). Each attempt uses a fresh
-cache key and must independently pass all
-identity, size, hash and byte-binding checks. Results from incomplete attempts are never combined.
-Invalid staged Dev bytes, expected changelog or immutable Release metadata/assets fail before Pages polling. This
-handles delayed CDN propagation; it does not establish an atomic CDN snapshot.
-Pages acceptance requires a bounded, validated expected `changelog.json` and exact served bytes
-within the same complete attempt as the manifest and 16 firmware parts. The root checker takes
-`--expected-changelog-file`; staged Dev checks derive it from the candidate directory, while live
-Dev checks require that argument. Relevance baselines read both files from one exact branch commit.
-Changes to shipped top-level `docs/*.md` select the normal four-target build and Dev publication;
-they do not reuse older firmware under the newer source SHA. Stable publication remains manual.
-Before either Pages branch write, the downloaded candidate passes four key-free RSA-PSS checks
-against the production public pin. The offline deploy-consumer test executes this YAML step with
-disposable signed fixtures and confirms that each target failure stops before publication.
+Each byte attempt uses a fresh cache key and verifies one complete manifest, its 16 parts and the
+expected changelog. Attempts retry with exponential delays capped at 60 s (190 s default waiting).
+Never combine partial attempts. A bad staged Dev tree, changelog or immutable Release fails before
+polling. Cache busting does not establish an atomic CDN snapshot.
 
-Dev publication prefetches the unchanged digest-pinned IDF image on the signing runner while
-key-free artifact and provenance checks run. The pull must finish successfully and the exact image
-must exist before key provisioning; source/version authority is refreshed after the wait.
-`scripts/prefetch-idf-image.sh` exclusively creates private per-job state and rejects failed pulls,
-changed pins, stale state and timeouts. The signer still uses `scripts/idf-docker.sh` with its
-existing resource limits and all independent-byte, signature, size and layout checks. Stable
-creation and immutable reuse retain their existing paths. Prefetching is not signing authority.
+Root and live Dev checks take `--expected-changelog-file`. Staged Dev derives it from the candidate.
+Before a branch write, the key-free consumer verifies all four production signatures.
+[Publication authority and static marker](SECURITY.md#release-pipeline-and-trust-boundaries)
 
 ### Recover a published stable site
 
@@ -440,7 +305,7 @@ to recreate the existing tag.
 First verify the original stable build's numeric run ID without writing Pages:
 
 ```bash
-python3 scripts/recover-release-pages.py --run-id <original-run-id>
+python3 scripts/recover-release-pages.py --run-id '<original-run-id>'
 ```
 
 After the recovery is authorized, add `--publish` to the same invocation. The helper downloads
@@ -463,33 +328,17 @@ denied responses remain errors. Signed preview version selection still requires 
 
 ### Served PR preview acceptance
 
-The preview version is selected once from trusted default-branch code. Four separate, cache-free,
-read-only target jobs rebuild the exact PR head concurrently, without producer artifact access.
-A secret-free join requires every target and assembles the complete source/version-bound inventory.
-The protected signer compares producer and independent payloads, revalidates the live PR and stable
-version, and never checks out PR code.
-Eligible previews additionally require both complete host/protocol acceptance suites, parallel with
-the target legs. Selected PR feedback never suffices for signing. A source run without the unsigned
-firmware artifact is ineligible, so a documentation-only PR does not start preview rebuilds.
+`scripts/check-pr-preview-served.py` runs key-free trusted default-branch code. It validates the
+signed four-target site, source, PR version and production pin, then compares the manifest,
+16 parts and a final manifest against the API-confirmed `PR/<N>/` URL. Each retry checks a new
+complete snapshot. Redirects, mixed/incomplete bytes and expired deadlines fail. Limits are
+20 attempts, 180 s total network time and 10 s per request.
 
-After signed preview publication, `scripts/check-pr-preview-served.py` runs trusted default-branch
-code without keys or repository tokens. It validates the local signed four-target site against the
-source, canonical PR version and production public-key pin, then compares the served manifest,
-all 16 parts and a final manifest from the API-confirmed `PR/<N>/` authority. Each retry starts a
-complete fresh snapshot. Redirects, non-200 status, mixed or incomplete bytes and expired deadlines
-fail acceptance. At most 20 attempts share a 180-second network deadline and 10-second request caps.
-
-Event and scheduled cleanup select the repository default branch at checkout, keeping the decision
-producer and served checker together. A historical PR base can predate both their shared contract
-and the checker; it is not a cleanup-code source.
-
-Cleanup emits one JSON decision: `kept-eligible`, `already-absent` or `removed`. Eligible previews
-are retained without an absence claim. The other decisions require 404/410 for the manifest,
-installer entrypoint, all 16 canonical parts and every validated path collected before deletion.
-Both the ordinary URL and a fresh cache key must be absent. DNS/TLS errors and 5xx do not prove
-absence. This proves only the reported URL observations, not
-eviction of arbitrary historical CDN cache keys. Publication/removal and served acceptance remain
-separate results; a failed acceptance does not repeat signing or grant a recovery operation.
+Cleanup reports `kept-eligible`, `already-absent` or `removed`. The last two require 404/410
+for the manifest, installer entrypoint, 16 parts and validated paths collected before deletion.
+Check both normal and cache-busted URLs. DNS/TLS errors and 5xx do not prove absence.
+Only the queried URLs are covered. Failed acceptance does not repeat signing.
+[Preview authority and cleanup](SECURITY.md#release-pipeline-and-trust-boundaries)
 
 ### Retained-bootloader references
 
@@ -563,18 +412,10 @@ grant no device-read, publication or vehicle authority.
 
 ## Reviews and documentation
 
-Required independent checks and exact-head records are in [AGENTS.md](../AGENTS.md#pr-and-review).
-Skills specify how to perform them; a green build does not substitute for review.
-Bounded changes use focused reviews of changed contracts and affected consumers against an accepted
-baseline. Explicit whole-project reviews, cross-cutting migrations, target/dependency or trust-boundary
-changes, and unknown baselines use full audits. Reports state scope and exclusions; the existing
-head-bound records and independent privacy/English check remain required.
-Before PR creation or a new push, publication reviews can bind a clean local candidate with
-verified branch, base and ancestry. Recheck the exact GitHub head after push; these records do
-not establish remote CI or merge acceptance.
-Update the owning document with each changed contract. Keep [FEATURES](FEATURES.md) as an index,
-not a second narrative. `$project-review` always assesses documentation structure, clarity,
-concision and completeness; unresolved material documentation findings prevent a clean result.
+Follow the independent review, evidence and exact-head [PR policy](../AGENTS.md#pr-and-review).
+Update the document that owns the changed contract. Use [FEATURES](FEATURES.md) as an index.
+`$project-review` checks structure, clarity, concision and completeness. Material documentation
+findings in scope prevent a clean result.
 
 ### Static-analysis decision
 

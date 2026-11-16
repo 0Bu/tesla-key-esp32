@@ -1,10 +1,7 @@
 # HTTP and MQTT API
 
-Base `http://<ESP32-IP>`; no authentication or TLS. Use a trusted LAN. Browser mutations and
-diagnostic reads require a device-owned Host, with matching Origin for browser mutations; foreign
-origins receive `403`. Headerless POST clients remain compatible. Mutating GET clients need browser
-provenance or `X-Requested-With`; prefer the POST aliases. [Security](SECURITY.md#http-api-exposure)
-owns the accepted hosts, provenance and framing restrictions.
+Use `http://<ESP32-IP>` on a trusted LAN. The API accepts unauthenticated HTTP. Prefer POST for writes.
+[Host, Origin and framing checks](SECURITY.md#http-api-exposure)
 
 ## Commands
 
@@ -29,67 +26,35 @@ dispatch; the same rule applies to vehicle-data routes.
 | `auto_conditioning_start` / `auto_conditioning_stop` | — |
 | `set_scheduled_charging` | `{"enable": true, "start_minutes": 1380}` (0–1439 minutes after local midnight; 1380 = 23:00) |
 
-- **evcc boolean bodies:** `charge_start` and `wake_up` also accept the JSON scalar `true`, and
-  `charge_stop` accepts `false` (evcc's generic setter); mismatched booleans and all other
-  non-object bodies are `400`.
-- **Validation:** supplied integers must be integral and in range, else `400` — nothing is silently
-  clamped. Scheduled charging requires an explicit boolean `enable`; omitting it returns `400`
-  before dispatch. Other absent REST fields default to percent=80, start_minutes=0 and sentry on=false;
-  supplied fields are still validated. MCP has its own required-argument rules.
-  Numeric strings must use canonical decimal integer notation (`"16"`); whitespace, plus signs,
-  leading zeroes, negative zero, hexadecimal, exponent and fractional string forms are rejected.
-  Integral JSON numbers, including `1e1`, retain the same range checks.
-- **JSON request bounds:** commands and configuration accept at most 64 values (root, containers
-  and scalars; object names do not count), within the existing 2 KiB/depth-16 bounds. Excess values
-  return `400` before parser allocation. Duplicate decoded object keys at any depth also return
-  `400`; key comparison remains case-sensitive.
-- **`set_charging_amps` is verified:** `charging_amps` is required. Success means the firmware sent a
-  fresh, serialized `ChargeState` request and the car reported *exactly* the requested current.
-  Missing/malformed input is `400`; an unreachable car, rejected command or missing/mismatched
-  readback is `502`, so controllers such as evcc retry instead of accepting a false success.
-- **Outcome status:** in a complete reply, success, exact `already_set` and the contextual charging
-  no-ops below are HTTP `200` with `result:true`. Every other failed command (car refusal, authentication or role fault,
-  asleep or unreachable car, timeout, or a device-side refusal such as a full command queue) keeps
-  the Tesla-compatible JSON (`result:false` plus the reason) but uses HTTP `502`, not a misleading
-  `200`. Intake and out-of-memory failures before dispatch keep their own codes. If the reply
-  cannot be built after the attempt, the degraded reply keeps HTTP `200` for a confirmed success
-  and uses HTTP `502` with `result:false` and `outcome:"unknown"` for an unconfirmed command.
-  evcc's setters use the status code to decide whether the command succeeded. See
-  [Response classes](#response-classes).
-  vehicle-command's proxy maps these differently (200 for car refusals, otherwise 408/412/500/503
-  with an error-only body, or a Fleet server error's own status); see
-  [ADR-0005](adr/0005-tesla-ble-seam.md#2-platform-forced-departures-and-reference-deviations).
-
-- **Already satisfied charging requests:** after an authenticated current Infotainment rejection,
-  `charge_start` accepts exact reasons `is_charging` or `complete`; `charge_stop` accepts
-  `not_charging`. The response is successful without another send. Here `complete` means an
-  accepted already-finished no-op, not proof that charging started. Inverse pairs, `requested`,
-  unrelated commands and uncertain replies remain failures. This local compatibility policy
-  changes neither cached charge telemetry nor the existing exact `already_set` behavior.
-  Complete charge-start/stop replies carry `response.noop` (`complete`, `is_charging`,
-  `not_charging` or `already_set`) only for a successful no-op. The request-owned result also
-  supplies a specific human-readable reason. Ordinary success omits `noop`; a degraded reply may
-  omit this detail. No-op success does not assert a physical charging transition.
-
-- **Uncertain execution:** after possible payload submission, an unconfirmed failure reports
-  `command outcome unknown; command may have executed`. The firmware does not automatically send
-  another mutating command in that case. A caller issuing another request makes a new command;
-  check the vehicle state before repeating an uncertain action. Read-only status queries and
-  authenticated temporary rejections have bounded retries. Failure HTTP codes and JSON envelopes
-  are unchanged; MCP uses the same reason.
-- **Wake confirmation:** `wake_up` succeeds on fresh Infotainment evidence, including the already
-  awake case. A definite send failure returns its reason immediately. Possible submission keeps
-  waiting within the same deadline without resending; if no confirmation arrives, its original
-  uncertain reason is retained. Successful local transmission alone reports an uncertain
-  confirmation timeout when the deadline expires and does not prove BLE reachability.
-  The default firmware budget is 20 s. In evcc's [stock template](https://github.com/evcc-io/evcc/blob/bf5c276cdb395443fda4601b99151c0a962d0db4/templates/definition/vehicle/tesla-ble.yaml),
-  `timeout` applies only to reads; setters retain the [10 s client default](https://github.com/evcc-io/evcc/blob/bf5c276cdb395443fda4601b99151c0a962d0db4/util/request/helper.go#L16)
-  and can time out before wake confirmation. The [custom vehicle example](examples/evcc-custom-vehicle.yaml)
-  sets each HTTP plugin's timeout to 30 s, including charge enable, current and wake setters.
-  Its status expression maps `Starting` to connected/not charging (`B`), so evcc can still send
-  a stop while charging is starting; mapping it to disconnected (`A`) suppresses that setter.
-  Waiting at the [single HTTP worker](ARCHITECTURE.md#http-request-serialization) can still
-  exceed this timeout. Check state before repeating an uncertain action, as described above.
+- **Bodies.** Commands take JSON objects. For evcc, `charge_start`/`wake_up` also accept `true`
+  and `charge_stop` accepts `false`. Other scalars return `400`. Registry-defined no-argument or
+  legacy optional-body commands accept an empty body. `charging_amps` and scheduled-charging
+  `enable` are required. Other absent fields default to `percent:80`, `start_minutes:0` or `on:false`.
+- **Bounds.** JSON command/config intake caps the body at 2 KiB, depth at 16 and values at 64.
+  Count root, containers and scalars, excluding object names. Over-cap bodies return `413`.
+  Excess depth/values, decoded duplicate keys, malformed UTF-8 and escaped U+0000 return `400`.
+  Key matching is case-sensitive. Integers must be integral and in range. JSON numbers may use
+  exponent notation. Strings require canonical decimal integers, without whitespace, plus signs,
+  leading zeroes, negative zero, hex, exponents or fractions.
+- **Current.** Success for `set_charging_amps` requires a fresh ChargeState with an exact current
+  match. A missing/mismatched readback returns `502`. [Transaction](ARCHITECTURE.md#read-only-telemetry-and-command-correctness)
+- **No-ops.** Exact `already_set` is success. An authenticated current Infotainment rejection
+  with `is_charging` or `complete` satisfies `charge_start`. `not_charging` satisfies `charge_stop`.
+  Inverse pairs, `requested` and uncertain results remain failures. A complete successful no-op
+  for start/stop carries `response.noop` and a reason. It asserts neither a physical transition
+  nor new telemetry. [Status and degraded replies](#response-classes)
+- **Uncertain execution.** Possible payload submission without confirmation reports
+  `command outcome unknown; command may have executed`. Check state before another command.
+  Prerequisites can retry before possible payload transmission. After possible transmission,
+  only read-only requests and authenticated temporary rejections can retry within the budget.
+- **Wake.** Success requires fresh Infotainment evidence, including for an already awake car.
+  Definite send failures return immediately. Possible submission waits within the original
+  deadline without resending. Local send alone is uncertain.
+  The default firmware budget is 20 s and the shared HTTP worker can add queue time.
+  The [custom evcc example](examples/evcc-custom-vehicle.yaml) uses 30 s for reads and setters.
+  The pinned [stock template](https://github.com/evcc-io/evcc/blob/bf5c276cdb395443fda4601b99151c0a962d0db4/templates/definition/vehicle/tesla-ble.yaml)
+  applies its timeout to reads only, leaving [10 s setters](https://github.com/evcc-io/evcc/blob/bf5c276cdb395443fda4601b99151c0a962d0db4/util/request/helper.go#L16).
+  The custom example maps `Starting` to `B` so evcc can still issue a stop.
 
 > The **Charging-Manager** role permits vehicle-data reads and charging control. The firmware
 > selects charging and wake commands for MCP; REST also retains doors, lights, horn, sentry and
@@ -269,34 +234,24 @@ A deadline, memory failure or terminal network-cleanup
 failure withdraws the update offer. Optional release-note failure is best-effort only after clean
 connection closure; details and blocking-SDK limits belong to [Architecture](ARCHITECTURE.md#ota-self-update).
 
-An available offer is one coherent snapshot of source channel, optional PR, version, selected
-notes and image identity. Save its opaque 24-character lowercase hexadecimal `offer_id` from
-`/ota/status`, request notes with that ID and submit the same ID and PR when confirming.
-Changing channel, starting another check or accepting an install/upload invalidates an earlier
-offer; switching back does not restore it. Saving the same channel preserves the offer. Reboot
-discards all offers. Before the first record `channel` reads `release`; if the status lock is
-unavailable, an `error` with message `unavailable` carries the setting in both channel fields.
+A completed available offer binds source channel, PR, version, notes and image hash/size.
+Use its 24-character lowercase-hex `offer_id` for notes and install. Match the returned
+`channel` to both the setting at request start and current `configured_channel`. Match `pr` as
+well. `/ota/check` returns no check ID. The first status record defaults to `release`.
+If the status lock is unavailable, both channel fields report the setting with `error`/`unavailable`.
 
-A withdrawn completed offer, normally by a channel change, reads as `state:"idle"`,
-`update_available:false` and `offer_changed:true`. `available` and `offer_id` are empty, notes
-return `204` (`409` for the old ID), `message` is the offer-changed reason, and `channel` and `pr`
-keep the original source. Clients must not report it as up to date. A result checked under a
-channel changed during the check enters `error` instead.
+An actual channel change, another check, accepted install/upload or reboot retires the offer.
+Re-saving the same channel retains it. A withdrawn result reports `idle`, `update_available:false`,
+`offer_changed:true`, empty `available`/`offer_id`, and the original channel/PR. Notes return
+`204` (`409` for the old ID). Treat this as a changed offer. A channel change during a check
+instead finishes that check with `error`.
 
-`/ota/check` returns no check identity. A client must accept only a completed result whose
-`channel` equals both `configured_channel` and the setting it saw when starting the check, and
-whose `pr` equals the requested PR (absent for none).
-
-Missing/stale IDs or a mismatched PR return `409` with `{result:false,offer_changed:true,reason}`;
-malformed or duplicate offer parameters return `400`.
-These refusals perform no image download or flash operation and leave another client's valid
-offer intact. Run another check and confirm its result; never retry the old install automatically.
-After admission, the worker re-fetches and compares the complete manifest, selected notes,
-version and selected image hash/size before downloading. A changed candidate enters `error`
-and requires a fresh check. The received signed image must match its confirmed byte count and
-SHA-256 before SDK signature verification and boot selection. A manifest must contain the
-selected app part's path, offset, size and SHA-256; version-only legacy manifests are refused.
-This identity check does not authenticate the unsigned manifest or replace RSA verification.
+Missing/stale IDs or a PR mismatch return `409` and `{result:false,offer_changed:true,reason}`.
+Malformed or duplicate IDs return `400`. Invalid confirmation leaves another client's offer
+intact. Run a fresh check and confirm again. The worker rechecks the manifest and selected notes
+before download. It streams the image to the inactive slot, then checks the complete length and
+SHA-256 before SDK signature verification and boot selection.
+[Manifest and image validation](ARCHITECTURE.md#transport-manifest-and-version-validation)
 
 New MQTT and Syslog submissions accept at most 64 UTF-8 bytes; an unchanged stored value remains
 a no-write acknowledgement. Existing targets up to 120 bytes survive unrelated saves, including
@@ -321,16 +276,9 @@ the uncertainty contract below.
 
 ### Direct signed firmware upload
 
-`POST /ota/upload` accepts a raw **signed app-only `.bin`** for the selected board, without
-a published Dev feed, Release or prior merge. The board's saved OTA channel must already be `dev`;
-`release` returns `403`. This endpoint is for explicitly authorized board tests. It does not
-replace PR reviews/gates, grant signing authority or publish firmware.
-
-For a maintainer's local production-board test, use the global `$ota` workflow and
-[`scripts/dev-ota-upload.py`](../scripts/dev-ota-upload.py), which bind local source, executed
-checks/build, independent read-only review and the exact signed image to one approved board
-and one upload. The following curl example documents the low-level HTTP body contract;
-it is not a replacement for the [local test prerequisites](DEVELOPMENT.md#local-ota-test-before-merge).
+`POST /ota/upload` accepts one raw signed app-only `.bin`. The board must already have saved
+`dev` (`release` returns `403`). Use the [approved local OTA procedure](DEVELOPMENT.md#local-ota-test-before-merge)
+for a board test. Verify the target and signing authority. This operation reboots the board.
 
 ```bash
 curl --fail-with-body --max-time 180 "http://<ESP32-IP>/ota/upload" \
@@ -338,38 +286,24 @@ curl --fail-with-body --max-time 180 "http://<ESP32-IP>/ota/upload" \
   --data-binary @signed-app.bin
 ```
 
-Use a regular file so curl supplies `Content-Length`. Multipart forms, transfer encoding,
-query parameters, bodies below 512 bytes and images larger than the `0x1f0000` slot are
-refused (`400`, or `413` for oversize). The binary must be for the detected target and carry
-the existing trusted RSA signature. Canonical versions with an equal or newer version core
-are accepted, including repeated versions and PR/local suffixes; older cores are refused.
-Unsigned files, merged/installer images and foreign signatures cannot activate an update.
+Use a regular file so curl sends `Content-Length`. Query parameters, multipart, transfer encoding
+or images under 512 bytes return `400`. An image above `0x1f0000` bytes returns `413`.
+Accept only the target's trusted RSA signature and canonical equal/newer version core, including
+repeated or PR/local versions. Merged/installer images are refused.
 
-`GET /ota/status` identifies the running executable through its full app-descriptor ELF SHA-256,
-the chip target and project, and a fresh 16-hex-digit boot nonce. A changed nonce plus the exact
-expected ELF/version distinguishes a new boot even when versions repeat; `verification` remains
-the cached image state (`stable`, `pending_verify`, `unknown`). `busy` describes active/retained
-writer work; a network-cleanup quarantine can still refuse admission with `409` after it clears.
-`recovery_required_bytes` advertises the unchanged local operation-entry policy.
-These fields are passive diagnostics, not a fresh flash/health attestation by the status handler.
+The async worker keeps the connection open and permits status polling. Admission uses the same
+operation, memory and image probation rules as feed installs (`409`, `503`, or setup `500`).
+Configuration writes are excluded while active. After signature verification and boot selection,
+success returns `200 {"result":true,"reason":"installed; rebooting"}`, followed by normal
+health confirmation or rollback. Transfer/image failures return `400` and status details.
+An uncertain writer or boot effect reports `outcome:"unknown"` and retains ownership. Do not
+retry automatically after an uncertain reply or timeout.
 
-`upload:true` identifies a direct upload. Accepting one clears the previous feed offer, PR and
-release notes; `available` remains empty because no manifest supplies a target version. The UI
-shows generic upload progress and locks configuration controls during the active flow. After restart,
-a changed boot nonce alone reports a restart; the local test helper additionally checks the
-expected image identity and health. Feed operations use `upload:false`.
-
-The connection stays open during the upload. The existing OTA task streams bounded chunks;
-other HTTP requests and `GET /ota/status` remain available. Admission uses the same operation,
-memory and running-image probation gates as pull OTA (`409`, `503`, or startup failure `500`).
-Channel/config changes are refused while the upload is active. Success returns
-`200 {"result":true,"reason":"installed; rebooting"}` after verification and
-boot selection; the board then reboots with ordinary health confirmation/rollback. Upload,
-image or signature failures return `400 {"result":false,"reason":...}` and publish details
-through `/ota/status`. An uncertain writer/boot-selection effect reports `outcome:"unknown"`
-and keeps the operation blocked; do not retry it automatically. A lost HTTP response also
-does not establish whether boot selection succeeded. NVS, keys, sessions, partition layout
-and the existing publication/PR gates are preserved.
+Status reports `upload:true` and clears old offer/PR/notes. `available` stays empty. Check a
+distinct 16-hex-digit `boot_id` plus exact full `elf_sha256`, version, project and target to identify
+the next boot. Verification is cached: `stable`, `pending_verify` or `unknown`. `busy` covers active
+or retained writer work. Network cleanup may still refuse with `409` after it clears.
+[Runtime ownership](ARCHITECTURE.md#direct-signed-app-upload) · [Trust](SECURITY.md#ota-self-update)
 
 ### Response classes
 
@@ -445,7 +379,7 @@ Use the dump's matching ELF, identified by `last_crash.dump_elf_sha256` when kno
 build's hash is `elf_sha256`; foreign artifacts can require a different ELF.
 
 ```bash
-esp-coredump info_corefile -c coredump.bin <matching-build>.elf
+esp-coredump info_corefile -c coredump.bin '<matching-build>.elf'
 ```
 
 Only no query, `raw=1` or `clear=1` is accepted; conflicting/unknown modes return `400` before

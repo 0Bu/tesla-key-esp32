@@ -15,26 +15,21 @@ concurrency. [API](API.md) owns external fields; [Security](SECURITY.md) owns tr
 
 ## Repository agent architecture
 
-[AGENTS.md](../AGENTS.md) owns authorization, canonical skills/reviewers and generated runner
-adapters. [Development](DEVELOPMENT.md) owns setup and validation; [Security](SECURITY.md#development-tooling-trust-boundary)
-owns the trust boundary. The trusted-base `pr-policy` workflow evaluates current-head records
-without executing PR code; server-side blocking requires its check in repository rules.
+[AGENTS.md](../AGENTS.md) owns agent policy and exact-head review records.
+[Development tooling trust](SECURITY.md#development-tooling-trust-boundary)
 
 ## Web UI
 
-`main/www/` is inlined as one gzipped page. A vehicle hero and settings card show VIN, key,
-network/integrations and firmware. The hero becomes visible after the first status response.
-The Firmware version opens channel selection; the download icon checks for updates. Settings are
-disabled while OTA work runs; modal saves validate input and fail closed.
+`main/www/` is served as one gzipped page. The hero appears on the first status response.
+`app.js` polls `/status?ms=<now>` every 4 s with `no-store` and after actions. It diffs DOM updates
+to keep animations running. A failed poll retains the frame, clears `feedOk` and stops phase
+countdown claims. Post-update verification polls separately at 1 s. Polling avoids per-client
+broadcast queues and blocked sends.
 
-`app.js` polls `/status?ms=<now>` every 4 s with `no-store`, and after user actions. Rendering diffs
-before writing DOM so animations persist. A failed poll retains the last frame but clears `feedOk`
-and stops phase countdown claims. Post-update reboot detection uses a separate 1 s poll.
-Request/response polling avoids per-client queued status copies and blocked broadcast sends.
-
-Climate chips show the last reported overheat-protection setting and explicitly cached defrost
-state. `/status` has no climate-specific age; other telemetry cannot establish their current
-activity. Charger input fields do not establish climate power consumption or an AC phase multiplier.
+Climate chips show cached overheat protection and defrost. The status feed has no
+climate-specific age. Charger input and other telemetry cannot establish live climate activity,
+climate power or an AC phase multiplier.
+[User controls](USER_GUIDE.md) · [OTA polling](#browser-scheduling-and-metadata-capture)
 
 ## Read-only telemetry and command correctness
 
@@ -99,38 +94,18 @@ remain in [Security](SECURITY.md#signed-ota-images).
 
 ### Direct signed app upload
 
-`POST /ota/upload` streams an app-only binary while the configured OTA channel is `dev`.
-The wildcard handler applies its normal browser-origin checks, validates the bounded binary
-content type/length, reserves the same operation/probation/memory gate, and obtains an SDK
-async request copy. `HttpGuardContext.async_owned` transfers response and connection retirement
-to the existing `ota` coordinator task before it can run. The synchronous wildcard must not
-shut down RX after this transfer. Startup failure completes the owned request; the worker
-completes it on every other success/failure path. Shutdown occurs before async ownership is
-released so no later close can affect a reused socket.
+The wildcard applies the normal origin guard and reserves operation, probation and memory
+admission before receiving a binary. It obtains an SDK async request copy and transfers response
+and connection retirement via `HttpGuardContext.async_owned` before the coordinator can run.
+Startup failure completes the copy. Otherwise the worker owns completion on every exit.
+Shutdown precedes async ownership release so it cannot affect a reused socket.
 
-No network worker, TLS connection or manifest is started. The operation's existing 1024-byte
-mailbox buffer feeds `Coordinator::start_upload/upload/finish_upload`, which reuse the same
-prefix, inactive-slot writer, full SDK signature validation and boot-selection path. The
-nonrenewable operation budget starts at upload entry and tightens to Content-Length; every
-receive and flash boundary remains budgeted. Socket timeouts and heap-abort requests stop
-the transfer. Dev is checked at admission, in the receive loop and before final verification;
-normal configuration routes remain excluded while the operation is updating.
-
-Upload admission publishes `upload=true` and clears the old feed offer, PR and notes under the
-status mutex. Consumers can display progress without assigning a manifest target version.
-
-The upload-specific image policy accepts a canonical equal/newer version core without a feed
-version or suffix requirement, enabling repeat tests of signed local/PR builds. Ordinary feed
-eligibility is unchanged. The operation retains ownership after committed or uncertain boot
-selection, and aborts/reclaims only after actual writer quiescence on other failures. Success
-is returned after boot selection, followed by the usual restart and health/rollback policy.
-MCP `initialize.instructions` describes this HTTP workflow without adding a firmware-write
-tool or changing the vehicle tool set. [API usage and responses](API.md#direct-signed-firmware-upload)
-and [trust boundary](SECURITY.md#ota-self-update) own the external contract.
-`/ota/status` also publishes the running descriptor's complete ELF SHA-256, project/target,
-a once-per-boot random nonce, cached verification, actual busy flag and existing recovery
-threshold. No storage/vehicle query is added. These let a local caller distinguish a reboot
-into the selected image from an HTTP acknowledgement or a repeated version string.
+`Coordinator::start_upload/upload/finish_upload` use the existing 1024-byte buffer and inactive-slot
+writer without an outbound TLS job. The absolute budget starts at entry and tightens to
+Content-Length. Receives and writes remain bounded. Socket timeout or heap abort stops transfer.
+Dev selection is checked at entry, during reads and before verification. A committed or uncertain
+boot selection retains ownership. Other failures reclaim the operation after writer quiescence.
+[Upload API and status](API.md#direct-signed-firmware-upload) · [Authority](SECURITY.md#ota-self-update)
 
 ### Browser scheduling and metadata capture
 
@@ -182,70 +157,46 @@ its observed word, preserving phase and other flags. Already-set bits still perf
 
 ### Memory admission and target observations
 
-Confirmation and OTA entry share the selected INTERNAL-largest threshold **59392 B** from
-`logic/ota_recovery_memory.hpp`. Their allocator phases are not identical. OTA entry may reclaim a
-clean previous Operation before sampling, before new Operation, task-stack, body or TLS allocations.
-Confirmation's read-only reference query leaves clean retained Operation and RTOS task/TCB memory
-charged. Each compares a fresh real sample under its actual owner. Neither adds old bytes, a reserve
-or a heap delta to make a sample pass. This conservative operating-point policy is not a measured
-necessary minimum or universal TLS guarantee; final non-injected bench, build and delivery acceptance
-remain separate.
+OTA entry and health confirmation use the same **59392 B INTERNAL largest-free-block** threshold
+from `logic/ota_recovery_memory.hpp`. Entry can reclaim a clean prior Operation before sampling
+and before new allocations. Read-only confirmation leaves retained Operation/task memory charged.
+Each checks a fresh real sample under its owner. Never credit old bytes or an estimated heap delta.
 
-The ordinary S3 cold-workload series completed three manifest transfers with a naturally reached
-59392-B operation-entry sample after the same HTTP/UI setup that exposed the old 61440-B refusal.
-Their TLS pre-context samples were 32768 B and post-context samples were at least 31744 B, above
-the separate 18445-B record screen. The following 103-s quiet interval retained 59392 B at all
-sampled ordinary points with increasing uptime and no observed crash. This selects a demonstrated
-operating point instead of refusing that recovered state; it does not identify a universal minimum
-or prove a TLS allocation margin between samples. Image writing, OTA probation and the physical
-allocator histories of the other three targets remain separate, unexercised boundaries of this
-series. It does not replace their build or delivery checks.
+Historical observations explain the targets' RAM defaults. They do not establish current fleet
+margins, MQTTS margins or image acceptance.
 
-The recorded target observations below explain the target defaults. They are historical bench
-results with the stated workloads; they do not establish current fleet margins or delivery acceptance.
+| Target | Configuration and evidence |
+|---|---|
+| esp32 | Separate IRAM. One controller connection, smaller NimBLE and WiFi RX pools, smaller diagnostic ring. Unpaired MQTT-off bench rose from 51200 B to above threshold for a manifest check. |
+| esp32s3 | Shared IRAM/DRAM. C3-derived tuning moved 23856 B out of IRAM and freed 24064 B of reserved DRAM span. A paired Ethernet board previously stayed pending at 53248 B for 600 s. A signed tuned preview held 90112 B and confirmed after 90 s. WiFi-only S3 was unmeasured. |
+| esp32c3 | Shared IRAM/DRAM. WiFi hot paths in flash and smaller controller/NimBLE/WiFi pools. Unpaired MQTT-off bench moved from 38912 B and failed checks to successful manifest reads. A smaller ACL/HCI variant downloaded an image. Pairing, confirmation and MQTTS were unmeasured. |
+| esp32c6 | Same entry threshold. No target allocator history recorded here. |
 
-| Target | Memory configuration | Recorded evidence and limits |
-|---|---|---|
-| `esp32` | Separate IRAM: moving code does not free byte-addressable INTERNAL heap. One controller connection, halved large NimBLE buffers, static WiFi RX buffers at the RX block-ack window and a halved diagnostic ring. Classic-BT controller memory is already returned. | An unpaired, MQTT-off bench on the older layout without a core-dump partition rose from a 51200-B largest block to above the threshold before and after a manifest check. Its low point had the smallest observed target margin. Image download, confirmation, pairing, sessions and MQTTS were not measured. |
-| `esp32s3` | Shared IRAM/DRAM. The C3 settings move 23856 B of code out of IRAM, reduce the DRAM span reserved for IRAM by 24064 B and shrink controller/NimBLE pools. | A paired Ethernet S3 with a live vehicle link previously stayed pending for 600 s at 53248 B on v1.6.5's source; the earlier build had confirmed at 61440 B. Static RAM did not explain the runtime loss. A signed OTA preview with the new settings held 90112 B and confirmed after 90 s. Other S3 boards, including WiFi-only ones, were not measured. |
-| `esp32c3` | Shared IRAM/DRAM. WiFi hot paths run from flash; unused controller features are disabled; controller activities and large NimBLE pools serve one connection plus scanning; static WiFi RX buffers match the RX block-ack window. | An unpaired, MQTT-off bench previously held 38912 B and refused checks; an image without the settings remained pending for 600 s and rolled back on reboot. With the settings, a manifest check passed above the threshold. Image download passed on a variant with smaller inbound ACL/HCI event pools. Confirmation, pairing, sessions and MQTTS were not measured. |
-| `esp32c6` | Uses the same entry/confirmation threshold and its reviewed target defaults. | No physical allocator history is recorded here. Build success does not fill that gap. |
-
-The settings are owned by `sdkconfig.defaults.esp32`, `.esp32s3` and `.esp32c3`. A live link and
-MQTTS consume additional INTERNAL memory; neither manifest-only success nor static RAM size
-establishes their transient contiguous minimum.
+Three ordinary S3 cold-workload runs passed manifest intake at a naturally reached 59392 B
+entry point (previous gate 61440 B). Pre-/post-TLS-context largest blocks were 32768/≥31744 B.
+The 103 s quiet window stayed at 59392 B at sampled points. This is a manifest-only operating
+point. Image writing, probation and transient between-sample margins need separate evidence.
 
 ### TLS phases and diagnostic checkpoints
 
-Every TLS leg still samples real INTERNAL largest before context creation and after that allocation,
-before connect. These later phases use a separate conservative single-record capacity screen:
-max(16384+2048+13, 4096+2048+13) = 18445 B for the pinned fixed INTERNAL TLS1.2 profile. Target static
-assertions bind the actual content lengths and reject allocator/buffer/protocol-profile drift. This
-screen is not the ordinary-entry requirement, a complete handshake budget or a reservation; other
-allocations and fragmentation can still refuse the actual SDK attempt. MQTT retains its separate
-existing 48 KiB policy. Null TLS context, bounded body allocation refusal and explicit raw-OTA
-NoMemory results retain a memory outcome, including prefix/payload writes and final verification;
-each effect is invoked once. A write failure aborts its live handle, while final verification
-consumes the handle even on failure. Arbitrary TLS failures are not relabeled OOM. Optional
-changelog network/protocol failure is best-effort only after actual Closed. A terminal or uncertain
-cleanup failure, OOM or deadline withdraws the offer; failed cleanup keeps the slot quarantined. The sample reserves no memory and is not a measured safe
-allocation floor or a guarantee that the subsequent TLS handshake succeeds.
+Each TLS leg samples INTERNAL largest before TLS context creation and after it, before connect.
+The conservative pinned INTERNAL TLS1.2 record screen is
+`max(16384+2048+13, 4096+2048+13) = 18445 B`. Static checks bind content lengths, allocator and
+protocol profile. The screen does not reserve memory or cover a full handshake. MQTT keeps a
+separate 48 KiB admission policy.
 
-Fixed `ota_mem` INFO lines in the existing bounded diagnostic ring identify the operation by
-its start time and generation. They record INTERNAL free bytes and largest contiguous block before
-operation allocation, after operation/task/body setup, at both TLS guards, after connect, at
-`headers_observed`, after worker-owned destroy and after known cleanup/reclaim eligibility. TLS legs
-are sequential; `manifest_ready`, `notes_ready` and `image_ready` identify the requested resource,
-and each `tls_pre_init` begins the next leg, including redirects, within that resource. Missing or
-dropped lines make that series incomplete. Guard lines preserve
-the exact largest-block sample used by that guard; the separately sampled free value is not an
-atomic pair or a reservation. `headers_observed` follows the parser's actual completed-header status
-transition and can include the first body/write chunk processed in that same feed. Destroy lines
-precede the worker's final publication; no Job access is added after Ack. A stalled/failed cleanup
-has no invented post-cleanup reference. `reclaim_ready` precedes deletion of the old operation;
-it is not fully reclaimed idle and does not prove RTOS task reclamation.
-Sampling/log failures are contained. These finite checkpoints support a named bench TLS series;
-they do not measure a universal peak or establish a safe allocation floor.
+Null TLS context, bounded body allocation refusal and explicit raw OTA NoMemory preserve the
+memory outcome. A write, size or hash failure leaves a live handle to abort. `esp_ota_end`
+consumes the handle even on failure. Changelog network/protocol errors are optional only after confirmed close.
+OOM, deadline or uncertain cleanup withdraws the offer. Failed cleanup quarantines the slot.
+
+Fixed `ota_mem` INFO records identify start time/generation, resource (`manifest_ready`,
+`notes_ready`, `image_ready`) and each TLS leg, including redirects. They report the exact
+largest block used by each guard, with a separate free-heap sample, from pre-allocation through
+TLS guards, connect, headers, destroy and reclaim eligibility. `headers_observed` can include
+the first body chunk. Destroy precedes final worker acknowledgement. `reclaim_ready` precedes
+Operation deletion, so it does not prove idle heap or task reclamation. Dropped lines make the
+series incomplete. These checkpoints do not measure transient allocation peaks.
 
 ### Transport, manifest and version validation
 
@@ -352,26 +303,14 @@ Signed previews and the browser installer share the [publication trust boundary]
 
 ### Flashing & NVS safety
 
-Normal OTA writes the installed inactive slot and otadata; verified app-only USB writes the signed
-app at `0x20000`, then erases otadata last. Both preserve bootloader, partitions and secret NVS
-`0x9000/0x6000`; neither migrates the layout. The browser installer's **Flash** also keeps NVS but
-rewrites the bootloader, partition table, app and otadata; [NVS retention](SECURITY.md#nvs-retention)
-owns when it is offered.
+OTA writes the inactive slot and otadata. It leaves bootloader, partitions and NVS intact.
+USB delivery has a separate layout and retained-bootloader proof. **Clean flash** and merged
+writes destroy NVS. [Retention](SECURITY.md#nvs-retention) · [USB delivery](DEVELOPMENT.md#delivery)
 
-Whole-chip erase destroys all of them. Recovery needs an explicitly authorized complete verified
-write set, network setup and new key enrollment:
-
-| Part | Offset |
-|---|---|
-| Bootloader | `0x1000` esp32; `0x0` s3/c3/c6 |
-| Partition table | `0x8000` |
-| Erased initial otadata | `0xf000` |
-| Signed app | `0x20000` |
-
-The installer validates all four release-bound manifest parts before writing. Releases publish
-signed apps and merged images, not separate layout parts; manual full recovery must verify every
-part's source. Merged writes can overwrite NVS and require approval for that loss. App-only recovery
-or an unsigned build cannot replace a full write set. [Artifact trust](SECURITY.md#ota-self-update).
+A whole-chip recovery needs a complete signed write set: bootloader at `0x1000` on esp32 or
+`0x0` on s3/c3/c6, partition table `0x8000`, erased otadata `0xf000`, signed app `0x20000`.
+Releases provide signed apps and merged images. Verify each part's source for a manual recovery,
+obtain erase authorization and plan to provision and pair again.
 
 ## Pinned tesla-ble and native orchestration
 
@@ -411,27 +350,18 @@ VIN transitions use
 
 ## Home Assistant MQTT bridge
 
-`mqtt_ha.cpp` reads caches in its own task and subscribes to no command topics. Configuration is in
-[User guide](USER_GUIDE.md#home-assistant-mqtt); topics/fields are in [API](API.md#mqtt-topics).
-The lowercase VIN-derived node identity survives board replacement.
-Each discovery round snapshots the current active interface's IPv4 address once for its
-configuration link. A missing/zero address, failed query or different active interface at the
-recheck omits the link instead of reusing the boot address. Later rounds refresh it; identity and state
-topics stay unchanged. This snapshot does not promise that a lease survives the broker publish.
+`mqtt_ha.cpp` reads caches in its own task and subscribes to no command topics. Each discovery
+round snapshots the active IPv4 address for its configuration link. Missing/zero addresses or
+a changed interface omit the link. A later round can refresh it without changing identity or
+state topics. A snapshot cannot prove a lease will survive the publish.
 
-An explicit scheme is honored. Without one, credentials select `mqtts://`, otherwise `mqtt://`.
-TLS verifies bundled CA roots and never falls back to cleartext; status exposes credential-free
-broker/error/TLS state. The discovery registry is the sole owner of entity rows and metadata.
-Optional fields remain absent, units convert to metric, and presence-aware templates return literal
-`None` for unknown. Boot timestamps latch only after NTP establishes clock authority and remain stable
-for that boot. Browser and restored estimates do not establish this timestamp. Stack minima create
-no discovery entities.
-
-On reconnect: discovery → online availability → state; periodic snapshots follow. Invalid caches
-publish `{}` once per connection to remove retained stale readings, then stay quiet. Reconnect
-rearms invalid-domain clears on the publisher task: outbox admission is not a PUBACK. Sticky JSON ownership prevents
-partial retained documents; every build/print/publish failure rearms the entire sequence.
-The 60 s watchdog is fed at loop boundaries and each completed publish, never around a stuck call.
+The discovery registry owns rows and metadata. Presence-aware templates return `None` for unknown
+values. Boot timestamps latch only when NTP establishes authority. Stack minima add no entities.
+On reconnect, publish discovery → online availability → state. Invalid domains publish `{}`
+once per connection. Reconnect rearms that clear. Outbox admission is not PUBACK. Sticky JSON
+ownership prevents partial retained objects. Build/print/publish failures rearm the sequence.
+Feed the 60 s watchdog at loop boundaries and after each completed publish.
+[Topics](API.md#mqtt-topics) · [Setup](USER_GUIDE.md#home-assistant-mqtt) · [TLS](SECURITY.md#mqtt-transport)
 
 ## Crash diagnostics
 
@@ -896,16 +826,8 @@ captive preflight failures return ESP_FAIL to reject unread input.
 The dev-only binary `/ota/upload` has a separate streamed slot-size bound and async owner;
 it does not raise the JSON/MCP cap or use the shared allocating body reader.
 
-| Case | REST | MCP |
-|---|---|---|
-| Empty / receive failure / malformed | `400` (persisted-config routes require a body; REST commands accept empty only where the registry declares no argument or the legacy optional boolean) | HTTP 200, `-32700` |
-| Oversize (> 2 KiB) | `413` | HTTP `413`, `-32600` |
-| Allocation failure (incl. valid JSON whose cJSON tree is null) | `503` | HTTP `503`, `-32603` |
-| Nesting > 16 arrays/objects | `400` | HTTP 200, `-32600` (request-complexity limit, not a parse error) |
-| More than 64 request values | `400` | HTTP 200, `-32600`, `id:null` |
-| Duplicate decoded keys at any depth | `400` | HTTP 200, `-32600` |
-| Malformed raw UTF-8 in a string (bad/truncated/overlong, UTF-16 surrogate, > U+10FFFF) | `400` | `-32700` |
-| Escaped U+0000 (cJSON's NUL-terminated API cannot keep it for exact ID correlation) | `400` | `-32600` |
+See the [REST reply classes](API.md#response-classes) and [MCP errors](MCP.md#json-rpc-error-codes)
+for wire-level status and correlation.
 
 No rejected input dispatches or persists. `json_syntax.hpp` validates before cJSON; valid supported
 syntax followed by a null parse tree is OOM, not bad input. The three HTTP request materializers
@@ -949,17 +871,11 @@ External fields/errors are in [API](API.md).
 
 ## MCP endpoint (/mcp)
 
-[MCP](MCP.md) owns the wire contract. REST and MCP share `command_registry.hpp` bounds/names/kinds
-and `command_exec.cpp` dispatch. MCP requires arguments; REST retains only declared compatibility
-defaults. Both reject fractional/out-of-range integers before casts.
-
-Release input trees after fixed ID/argument capture, before blocking work or response construction.
-Static registry strings use cJSON references; sticky ownership prevents partial envelopes, and print
-OOM before a command attempt maps to 503; post-attempt reply degradation preserves the correlated
-outcome. The production tool/state builders are covered by pinned-cJSON allocation tests.
-Every handler enters through contained `handle_all` and `GuardedReq`. MCP cached charge reads
-use the same `get_charge_state` availability gate as REST and emit `charge_available`; unavailable
-telemetry is omitted. The shared admission/exception fallbacks are not JSON-RPC replies; see [MCP](MCP.md#json-rpc-error-codes).
+REST and MCP share `command_registry.hpp` bounds and `command_exec.cpp` dispatch. Captured
+arguments and IDs outlive the input tree, which is released before blocking work. Static registry
+strings use cJSON references. All handlers enter through contained `handle_all` and `GuardedReq`.
+Cached charge uses the same `get_charge_state` admission as REST.
+[Wire contract](MCP.md) · [Reply ownership](#http-request-body-and-allocator-failure-contract)
 
 ## Concurrency (normative contract)
 
