@@ -44,8 +44,10 @@ gh pr view "$PR" --json number,state,mergeable,headRefOid,body
 - The user explicitly authorized merging this exact numeric PR/head and, if firmware-relevant,
   acknowledged the protected signing/release side effect of the main build.
 - **Merge gate:** [`tools/agent-hooks/require-pr-gates.sh`](../../../tools/agent-hooks/require-pr-gates.sh)
-  requires the SHA-bound `$local-checks` record for the complete pre-push verification.
-  For ordinary changes it also requires the PR body's `- [x] $project-review clean — merge gate @ <sha>` and
+  exempts strict Renovate-only maintenance from manual records at merge/check, as defined in
+  [AGENTS.md](../../../AGENTS.md#pr-and-review). Ordinary changes require the SHA-bound
+  `$local-checks` record for the complete pre-push verification. They also require the PR body's
+  `- [x] $project-review clean — merge gate @ <sha>` and
   `- [x] $pr-hygiene clean — content gate @ <sha>` boxes are ticked and current. A
   feature-relevant diff also requires `- [x] $feature-docs synced — merge gate @ <sha>`, and a
   vehicle-command-relevant diff (`gate_vehicle_command_relevant` in
