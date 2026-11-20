@@ -311,10 +311,10 @@ var ICON={
 };
 function iconSVG(name){ return '<svg viewBox="0 0 24 24" aria-hidden="true">'+(ICON[name]||'')+'</svg>'; }
 
-/* ---------- battery gauge ----------
-   A fixed 240-unit box scaled by CSS (--gs). mode: soc | charging (flowing segment) | complete |
-   sleep (muted last-known arc) | waking | checking | empty | neutral. Pure markup, so setHTML()
-   keeps the live nodes and their running animation between polls. */
+// ---------- battery gauge ----------
+// A fixed 240-unit box scaled by CSS (--gs). mode: soc | charging (flowing segment) | complete |
+// sleep (muted last-known arc) | waking | checking | empty | neutral. Pure markup, so setHTML()
+// keeps the live nodes and their running animation between polls.
 function gaugeHTML(o){
   var S=240, sw=14, c=S/2, r=c-sw/2-3, C=2*Math.PI*r;
   var pct=(o.pct==null)?null:Math.max(0,Math.min(100,o.pct)), mode=o.mode;
