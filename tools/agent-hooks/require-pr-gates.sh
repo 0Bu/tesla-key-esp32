@@ -7,7 +7,7 @@
 #                                                    plus the conditional $feature-docs and
 #                                                    $vehicle-command-audit records
 #   * --check (the CI current-head-records job)  -> local verification and all applicable reviews
-#   Strict Renovate maintenance is exempt from manual review records.
+#   Strict Renovate maintenance is exempt from all manual records at merge/check only.
 # MCP merges, auto-merge/queue activation, direct REST/GraphQL merges, ambiguous payloads, and
 # unverifiable network state fail closed. This lexical hook is defense in depth; branch protection
 # and human review remain authoritative.
@@ -350,13 +350,11 @@ PY
       exit 2
     fi
     body="$(cat "$body_file")" || exit 2
-    record_ok "$body" local-checks "$head_sha" || {
-      echo "BLOCKED: merge/check requires one current top-level \$local-checks record for $head_sha." >&2
-      exit 2
-    }
-    if gate_is_renovate_maintenance "$files_file"; then
-      :
-    else
+    if ! gate_is_renovate_maintenance "$files_file"; then
+      record_ok "$body" local-checks "$head_sha" || {
+        echo "BLOCKED: merge/check requires one current top-level \$local-checks record for $head_sha." >&2
+        exit 2
+      }
       record_ok "$body" project-review "$head_sha" || {
         echo "BLOCKED: merge/check requires one current top-level \$project-review record for $head_sha." >&2
         exit 2

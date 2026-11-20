@@ -405,11 +405,10 @@ attestation_for() {
 # Returns 1 when the changed-file list cannot be established (never guess).
 required_gates_for_files() {
   local files_file="$1" rc=0
-  echo "local-checks"
   if gate_is_renovate_maintenance "$files_file"; then
     return 0
   fi
-  printf '%s\n' skill-audit project-review pr-hygiene
+  printf '%s\n' local-checks skill-audit project-review pr-hygiene
   gate_feature_docs_relevant < "$files_file" || rc=$?
   if [ "$rc" -eq 0 ]; then
     echo "feature-docs"
@@ -689,6 +688,11 @@ run_heal() {
     while IFS= read -r g; do
       [ -n "$g" ] && prepush_gates+=("$g")
     done <<< "$gates"
+    # The maintenance exception is merge/check-only. An operator-authored fix push still
+    # needs the two publication records enforced by require-pr-gates.sh's push hook.
+    if [ "${#prepush_gates[@]}" -eq 0 ]; then
+      prepush_gates=(skill-audit pr-hygiene)
+    fi
     rc=0
     require_attestations "pre-push gate records" "$local_sha" "${prepush_gates[@]}" || rc=$?
     if [ "$rc" -ne 0 ]; then
@@ -765,7 +769,7 @@ run_heal() {
   while IFS= read -r g; do
     [ -n "$g" ] && gate_list+=("$g")
   done <<< "$gates"
-  echo "ci-heal: gates required for $final_head: ${gate_list[*]}"
+  echo "ci-heal: gates required for $final_head: ${gate_list[*]:-none}"
 
   if [ "$dry_run" -eq 1 ]; then
     if [ "$records_pending" -eq 1 ]; then
@@ -828,13 +832,21 @@ run_heal() {
       echo "ci-heal: PR head moved while $RECORDS_CHECK ran; not ready. Re-run." >&2
       return 1
     fi
-    if ! ci_green_except_records "$target_pr" all; then
-      echo "ci-heal: not every check is green for $final_head after stamping (build missing or not" >&2
-      echo "ci-heal: successful, or a check pending, cancelled or failed); not ready." >&2
-      return 1
-    fi
   elif [ "$records_pending" -eq 1 ]; then
     echo "ci-heal: $RECORDS_CHECK failed although this PR needs no gate records; inspect it." >&2
+    return 1
+  fi
+
+  # Record-free maintenance must not bypass exact-head readiness. Relevance discovery and
+  # current-main checks can take time, even when no PR-body edit or check rerun is needed.
+  if ! ci_green_except_records "$target_pr" all; then
+    echo "ci-heal: not every check is green for $final_head before readiness (build missing or not" >&2
+    echo "ci-heal: successful, or a check pending, cancelled or failed); not ready." >&2
+    return 1
+  fi
+  if [ "$(get_pr_head_sha "$target_pr")" != "$final_head" ] \
+      || [ "$(git_local_head)" != "$final_head" ] || git_tree_dirty; then
+    echo "ci-heal: PR head or local candidate changed before readiness; not ready. Re-run." >&2
     return 1
   fi
 
@@ -842,7 +854,7 @@ run_heal() {
   canonical_cmd="$(format_canonical_merge_command "$target_pr" "$final_head")"
 
   echo "================================================================================"
-  echo "ci-heal: PR #$target_pr is READY FOR MERGE (CI green, mergeable, attested gates stamped)."
+  echo "ci-heal: PR #$target_pr is READY FOR MERGE (CI green, mergeable, applicable gate policy satisfied)."
   echo ""
   echo "Canonical squash merge command:"
   echo "  $canonical_cmd"
@@ -1443,13 +1455,81 @@ self_test() {
   expect_lines all_five "$LOG_STAMPS" 1
   grep -Fq -- "--gate vehicle-command-audit=vehicle-e" "$LOG_STAMPS" || { echo "self-test: all_five: vehicle gate not stamped" >&2; fail=1; }
 
-  sc_renovate() {
-    STUB_FILES=".github/renovate.json"
-    attest_names=(local-checks); attest_evidence=("check-a")
-  }
+  sc_renovate() { STUB_FILES=".github/renovate.json"; STUB_BUILD=SKIPPED; }
   run_case sc_renovate 0
-  expect_lines renovate "$LOG_STAMPS" 1; expect_out renovate "READY FOR MERGE"
-  grep -Fq -- "--gate local-checks=check-a" "$LOG_STAMPS" || { echo "self-test: Renovate local checks not stamped" >&2; fail=1; }
+  expect_lines renovate "$LOG_STAMPS" 0; expect_out renovate "READY FOR MERGE"
+  expect_lines renovate "$LOG_PUSH" 0; expect_lines renovate "$LOG_MERGE" 0
+
+  sc_renovate_action() { STUB_FILES=".github/workflows/renovate.yaml"; }
+  run_case sc_renovate_action 0
+  expect_lines renovate_action "$LOG_STAMPS" 0; expect_out renovate_action "READY FOR MERGE"
+
+  sc_renovate_mixed() { STUB_FILES=$'.github/workflows/renovate.yaml\nesp-idf-toolchain.txt'; }
+  run_case sc_renovate_mixed 3
+  expect_out renovate_mixed "no attestation for: local-checks skill-audit project-review pr-hygiene"
+  expect_lines renovate_mixed "$LOG_STAMPS" 0
+
+  sc_renovate_head_moved() { sc_renovate; auto_merge=1; STUB_HEAD_MOVE_AFTER=2; }
+  run_case sc_renovate_head_moved 1
+  expect_out renovate_head_moved "changed before readiness"
+  expect_no_out renovate_head_moved "READY FOR MERGE"; expect_lines renovate_head_moved "$LOG_MERGE" 0
+
+  sc_renovate_local_moved() {
+    sc_renovate
+    required_gates_for_candidate() { STUB_LOCAL="$SHA_B"; }
+  }
+  run_case sc_renovate_local_moved 1
+  expect_out renovate_local_moved "changed before readiness"; expect_no_out renovate_local_moved "READY FOR MERGE"
+
+  sc_renovate_local_dirtied() {
+    sc_renovate
+    required_gates_for_candidate() { STUB_DIRTY=1; }
+  }
+  run_case sc_renovate_local_dirtied 1
+  expect_out renovate_local_dirtied "changed before readiness"; expect_no_out renovate_local_dirtied "READY FOR MERGE"
+
+  sc_renovate_checks_regressed() {
+    sc_renovate; auto_merge=1
+    required_gates_for_candidate() { STUB_ROLLUP_EXTRA="CodeQL|COMPLETED|FAILURE"; }
+  }
+  run_case sc_renovate_checks_regressed 1
+  expect_out renovate_checks_regressed "not every check is green"
+  expect_no_out renovate_checks_regressed "READY FOR MERGE"; expect_lines renovate_checks_regressed "$LOG_MERGE" 0
+
+  sc_renovate_records_failed() { sc_renovate; STUB_SEQ=red; STUB_FAILED="$RECORDS_CHECK | COMPLETED | FAILURE | u"; }
+  run_case sc_renovate_records_failed 1
+  expect_out renovate_records_failed "needs no gate records"
+  expect_no_out renovate_records_failed "READY FOR MERGE"; expect_lines renovate_records_failed "$LOG_STAMPS" 0
+
+  sc_renovate_records_missing() {
+    sc_renovate
+    check_rollup() { printf 'build|COMPLETED|SKIPPED\n'; }
+  }
+  run_case sc_renovate_records_missing 1
+  expect_no_out renovate_records_missing "READY FOR MERGE"; expect_lines renovate_records_missing "$LOG_STAMPS" 0
+
+  sc_renovate_other_pending() { sc_renovate; STUB_ROLLUP_EXTRA="CodeQL|IN_PROGRESS|"; }
+  run_case sc_renovate_other_pending 1
+  expect_no_out renovate_other_pending "READY FOR MERGE"; expect_lines renovate_other_pending "$LOG_STAMPS" 0
+
+  sc_renovate_push_unattested() {
+    sc_renovate_action; STUB_SEQ="red green"; STUB_FAILED="repo-lint | COMPLETED | FAILURE | u"
+    STUB_LOCAL="$SHA_B"; STUB_ANCESTOR=1
+  }
+  run_case sc_renovate_push_unattested 3
+  expect_out renovate_push_unattested "no attestation for: skill-audit pr-hygiene"
+  expect_lines renovate_push_unattested "$LOG_STAMPS" 0; expect_lines renovate_push_unattested "$LOG_PUSH" 0
+
+  sc_renovate_push_attested() {
+    sc_renovate_push_unattested
+    attest_names=(skill-audit pr-hygiene); attest_evidence=("audit-a" "hygiene-c")
+  }
+  run_case sc_renovate_push_attested 0
+  expect_lines renovate_push_attested "$LOG_STAMPS" 1; expect_lines renovate_push_attested "$LOG_PUSH" 1
+  expect_out renovate_push_attested "READY FOR MERGE"
+  for record in skill-audit=audit-a pr-hygiene=hygiene-c; do
+    grep -Fq -- "--gate $record" "$LOG_STAMPS" || { echo "self-test: Renovate push record missing: $record" >&2; fail=1; }
+  done
 
   rm -rf "$T"
   trap - EXIT

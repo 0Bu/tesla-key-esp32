@@ -92,6 +92,13 @@ On macOS the sanitizer path uses pinned Docker. Run the applicable complete hand
 and record the tested source and base SHAs. See [PR review policy](../AGENTS.md#pr-and-review) and
 [protected publication](SECURITY.md#release-pipeline-and-trust-boundaries).
 
+PRs changing only `.github/workflows/renovate.yaml` and/or `.github/renovate.json` need no manual
+check or review records at merge/check. This lets Renovate maintain its own action pin without a
+firmware handoff. The complete changed-file list determines the exception, including both sides
+of renames; any other path restores the normal gates. Human PR creation/push gates and explicit
+merge authorization still apply. Skipped build jobs are not required test runs; GitHub's separately
+configured CodeQL default setup may still add scan results.
+
 For repeated local host runs:
 
 ```bash
