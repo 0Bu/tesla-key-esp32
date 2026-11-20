@@ -368,9 +368,9 @@ function chargeStats(v,charging){
   return (v.power>0?chargeValue('Charging power',v.power,'kW'):'')+
          (v.amps>0?chargeValue('Charging current',v.amps,'A'):'');
 }
-/* Climate has no per-domain age in /status. Show explicitly cached settings/states, never
-   infer current activity from another domain's last_seen_s or attribute charger input to a
-   climate function. Raw charger_phases also does not establish the AC topology multiplier. */
+// Climate has no per-domain age in /status. Show explicitly cached settings/states, never
+// infer current activity from another domain's last_seen_s or attribute charger input to a
+// climate function. Raw charger_phases also does not establish the AC topology multiplier.
 function climateStatus(c){
   if(!c) return null;
   var states=[], defrost=[];
