@@ -26,9 +26,9 @@ to keep animations running. A failed poll retains the frame, clears `feedOk` and
 countdown claims. Post-update verification polls separately at 1 s. Polling avoids per-client
 broadcast queues and blocked sends.
 
-Climate chips show cached overheat protection and defrost. The status feed has no
-climate-specific age. Charger input and other telemetry cannot establish live climate activity,
-climate power or an AC phase multiplier.
+The climate icon opens details for the last reported climate control, preconditioning, cabin
+overheat protection and defrost. The status feed has no climate-specific age. Charger input
+and other telemetry cannot establish live climate activity, climate power or an AC phase multiplier.
 [User controls](USER_GUIDE.md) · [OTA polling](#browser-scheduling-and-metadata-capture)
 
 ## Read-only telemetry and command correctness

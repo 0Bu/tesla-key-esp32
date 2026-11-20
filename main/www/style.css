@@ -29,7 +29,7 @@ body.modal-open{overflow:hidden}
 button{font:inherit; color:inherit; cursor:pointer}
 button:disabled{cursor:default}
 :focus-visible{outline:2px solid var(--focus); outline-offset:2px}
-button:focus:not(:focus-visible),.btn:focus:not(:focus-visible),.pill:focus:not(:focus-visible),.ib:focus:not(:focus-visible),.ver-btn:focus:not(:focus-visible){outline:none}
+button:focus:not(:focus-visible),summary:focus:not(:focus-visible),.btn:focus:not(:focus-visible),.pill:focus:not(:focus-visible),.ib:focus:not(:focus-visible),.ver-btn:focus:not(:focus-visible){outline:none}
 svg{display:block}
 .mono{font-family:var(--mono)}
 .hide{display:none!important}
@@ -93,8 +93,8 @@ svg{display:block}
 .hero{flex-direction:column; align-items:center; justify-content:center; gap:12px; padding:20px 16px;
   text-align:center; min-width:0; background:var(--card); border:1px solid var(--border);
   border-radius:var(--r-card); box-shadow:var(--shadow); transition:transform .12s ease}
-.hbody{display:contents}
-.gauge{position:relative; width:var(--gs); height:var(--gs); flex:none; overflow:visible}
+.hprimary{display:grid; grid-template-columns:minmax(58px,1fr) var(--gs) minmax(58px,1fr); align-items:center; width:100%}
+.gauge{position:relative; grid-column:2; grid-row:1; width:var(--gs); height:var(--gs); overflow:visible}
 .gauge>svg,.gauge .gbtn>svg{position:absolute; inset:0; width:100%; height:100%}
 .gauge .gbtn{position:absolute; inset:0; padding:0; border:0; border-radius:50%; background:none; -webkit-tap-highlight-color:transparent;
   transition:transform .12s ease}
@@ -104,10 +104,8 @@ svg{display:block}
 .gauge .gbtn:disabled{cursor:default}
 .garc{transition:stroke-dashoffset .6s ease,stroke .6s ease}
 .gcenter{position:absolute; inset:0; display:grid; place-items:center; pointer-events:none}
-.gnum{display:flex; flex-direction:column; align-items:center; line-height:1}
-.gnum b{display:flex; align-items:baseline; gap:2px; font-size:calc(var(--gs)*.25); font-weight:650; letter-spacing:-1px; font-variant-numeric:tabular-nums}
-.gnum b small{font-size:.42em; font-weight:600; color:var(--muted); letter-spacing:0}
-.gnum i{margin-top:6px; font-style:normal; font-size:11px; font-weight:600; letter-spacing:.5px; text-transform:uppercase; color:var(--muted)}
+.gnum{display:flex; align-items:baseline; gap:2px; font-size:calc(var(--gs)*.34); line-height:1; font-weight:650; letter-spacing:-.035em; font-variant-numeric:tabular-nums}
+.gnum small{font-size:.42em; font-weight:600; color:var(--muted); letter-spacing:0}
 .gglyph{width:calc(var(--gs)*.3); height:calc(var(--gs)*.3); color:var(--muted)}
 .gglyph svg{width:100%; height:100%; fill:none; stroke:currentColor; stroke-width:1.75; stroke-linecap:round; stroke-linejoin:round}
 .gglyph.shake{animation:tremble .6s ease-in-out infinite}
@@ -120,6 +118,26 @@ svg{display:block}
 .htext{display:flex; flex-direction:column; gap:4px; align-items:center; margin:0}
 .hlabel{margin:0; font-size:20px; font-weight:650; letter-spacing:-.5px; line-height:1.2; text-align:center}
 .hsub{margin:0; font-size:13px; font-weight:550; color:var(--muted); max-width:32ch; text-align:center; white-space:normal; overflow-wrap:break-word}
+.hsub:empty{display:none}
+.hreadings{grid-column:3; grid-row:1; justify-self:end; align-self:start}
+.status-value{display:flex; align-items:center; justify-content:flex-end; width:58px; height:44px; border-radius:8px}
+.charge-value{color:var(--ok-text); font-size:17px; line-height:1.2; font-weight:600; font-variant-numeric:tabular-nums; white-space:nowrap}
+.charge-value small{font-size:12px}
+.sr-only{position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap}
+.climate-info{position:relative}
+.climate-info summary{list-style:none; cursor:pointer; color:var(--muted)}
+.climate-info summary::-webkit-details-marker{display:none}
+.climate-info summary:hover,.climate-info[open] summary{background:var(--soft)}
+.climate-info svg{width:28px; height:28px; fill:none; stroke:currentColor; stroke-width:1.75; stroke-linecap:round; stroke-linejoin:round}
+.climate-tip{display:block; position:absolute; z-index:1; inset-inline-end:0; inset-block-start:100%; width:min(236px,calc(100vw - 70px));
+  padding:8px 10px; border:1px solid var(--border); border-radius:8px; background:var(--card); box-shadow:var(--shadow);
+  font-size:13px; text-align:start; white-space:pre-line; overflow-wrap:anywhere}
+/* A closed disclosure keeps its text available for the hover preview. */
+.climate-info::details-content{content-visibility:visible}
+.climate-info:not([open]) .climate-tip{visibility:hidden}
+@media (hover:hover){
+  .climate-info:not(.dismissed):hover .climate-tip{visibility:visible}
+}
 .hstats{display:flex; flex-wrap:wrap; gap:8px 12px; width:100%; max-width:340px; margin-top:4px}
 .hstats:empty{display:none}
 .stat{flex:1 0 auto; min-width:0; max-width:100%; padding:2px 0;
@@ -128,11 +146,6 @@ svg{display:block}
 .stat .k:before{content:""; width:6px; height:6px; border-radius:50%; background:var(--muted); flex:none}
 .stat .v{font-size:17px; font-weight:650; letter-spacing:-.3px; font-variant-numeric:tabular-nums; white-space:nowrap}
 .stat .v small{font-size:11px; margin-left:2px}
-.stat.cached .k span{min-width:0; overflow-wrap:anywhere}
-.stat.cached .v{white-space:normal; overflow-wrap:anywhere}
-.stat.ok .v{color:var(--ok-text)} .stat.ok .k:before{background:var(--ok)}
-.stat.warn .v{color:var(--warn-text)} .stat.warn .k:before{background:var(--warn)}
-.stat.info .v{color:var(--info-text)} .stat.info .k:before{background:var(--info)}
 
 /* Settings rows */
 .rows{padding:0; gap:0; overflow:hidden; width:100%}
@@ -291,7 +304,6 @@ svg{display:block}
   }
   .hstats{
     max-width:100%;
-    margin-top:auto;
   }
   #paneSettings{
     grid-column:2;
