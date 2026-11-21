@@ -702,7 +702,16 @@ def validate(root: Path) -> None:
         } and all("shell" not in step for step in host_model[name]["steps"]),
             f"build.yml:{name} must watch every Dev host command")
     full_steps = [step for step in host_model["logic-test"]["steps"] if step.get("name") == "Run host-side logic tests"]
-    require(len(full_steps) == 1 and full_steps[0].get("run") == "./scripts/run-mock-tests.sh --require-all",
+    require(host_model["logic-test"].get("strategy") == {
+        "fail-fast": "false",
+        "matrix": {"shard": "${{ fromJSON(needs.prepare.outputs.mode == 'dev' "
+                             "&& '[\"runtime-browser\",\"policy\"]' || '[\"full\"]') }}"},
+    } and "continue-on-error" not in host_model["logic-test"],
+        "build.yml:logic-test must require both Dev host shards and the full manual suite")
+    require(full_steps == [{
+        "name": "Run host-side logic tests", "env": {"HOST_SHARD": "${{ matrix.shard }}"},
+        "run": './scripts/run-mock-tests.sh --require-all --shard "$HOST_SHARD"',
+    }],
             "build.yml:logic-test must run the fail-closed host gate")
     require("./scripts/run-mock-tests.sh --require-all" in build["logic-test"],
             "build.yml:logic-test must run the fail-closed host gate")
@@ -1656,6 +1665,8 @@ def self_test(root: Path) -> None:
         ("main-host-coverage", "build.yml", "        run: ./scripts/run-mock-tests.sh --require-all",
          "        if: false\n        run: ./scripts/run-mock-tests.sh --require-all",
          "all publication host steps must run"),
+        ("missing-dev-host-shard", "build.yml", '["runtime-browser","policy"]', '["runtime-browser"]',
+         "must require both Dev host shards and the full manual suite"),
         ("prepared-relevance-missing", "build.yml", "firmware: ${{ steps.changes.outputs.firmware }}", "firmware: no", "cumulative fail-closed firmware decision"),
         ("prepared-relevance-stale", "build.yml", "FIRMWARE_RELEVANT: ${{ needs.prepare.outputs.firmware }}", "FIRMWARE_RELEVANT: no", "consume the prepared firmware decision"),
         ("preview-target-omission", "signed-pr-preview.yml", "target: [esp32, esp32s3, esp32c3, esp32c6]", "target: [esp32, esp32s3, esp32c3]", "exact four-target matrix"),

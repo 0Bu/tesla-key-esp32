@@ -4,7 +4,7 @@
 # seconds, in any environment (local terminal, CI, remote coding session). This is the
 # real "run it and see" loop a cloud session has (it cannot build firmware or USB-flash).
 #
-# Usage: scripts/run-mock-tests.sh [--require-all]
+# Usage: scripts/run-mock-tests.sh [--require-all] [--profile full|runtime|browser | --shard full|runtime-browser|policy]
 # Requires CMake and C/C++ host compilers for the complete suite. Portable focused native checks
 # live in scripts/run-fast-tests.sh. See test/README.md.
 set -euo pipefail
@@ -18,18 +18,25 @@ cd "$(dirname "$0")/.."
 BUILD_DIR=build_mock   # matches .gitignore (/build_mock/)
 REQUIRE_ALL=0
 PROFILE=full
+SHARD=full
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --require-all) REQUIRE_ALL=1; shift ;;
         --profile)
             [ "$#" -ge 2 ] || exit 2
             PROFILE="$2"; shift 2 ;;
-        *) echo "usage: run-mock-tests.sh [--require-all] [--profile full|runtime|browser]" >&2; exit 2 ;;
+        --shard)
+            [ "$#" -ge 2 ] || exit 2
+            SHARD="$2"; shift 2 ;;
+        *) echo "usage: run-mock-tests.sh [--require-all] [--profile full|runtime|browser | --shard full|runtime-browser|policy]" >&2; exit 2 ;;
     esac
 done
 case "$PROFILE" in full|runtime|browser) ;; *) exit 2 ;; esac
+case "$SHARD" in full|runtime-browser|policy) ;; *) exit 2 ;; esac
 [ "$PROFILE" = full ] || [ "$REQUIRE_ALL" = 1 ] || exit 2
+[ "$SHARD" = full ] || { [ "$REQUIRE_ALL" = 1 ] && [ "$PROFILE" = full ]; } || exit 2
 printf 'run-mock-tests: selected %s profile\n' "$PROFILE"
+[ "$SHARD" = full ] || printf 'run-mock-tests: selected %s shard\n' "$SHARD"
 gate_group=runtime
 
 TIMEOUT_RUNNER=tools/agent-hooks/run_with_timeout.py
@@ -53,6 +60,11 @@ run_gate() {
     local label="$1" seconds="$2"
     shift 2
     if [ "$PROFILE" != full ] && [ "$gate_group" != shared ] && [ "$PROFILE" != "$gate_group" ]; then
+        return 0
+    fi
+    if [ "$SHARD" = policy ] && [ "$gate_group" != policy ]; then
+        return 0
+    elif [ "$SHARD" = runtime-browser ] && [ "$gate_group" = policy ]; then
         return 0
     fi
     local started=$SECONDS

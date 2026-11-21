@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 from functools import lru_cache
 from pathlib import Path
 import shutil
@@ -423,6 +424,23 @@ def probe_browser_invocations(source: str) -> None:
                     require(result.returncode == 0 and all(calls.count(call) == 1 for call in expected)
                             and calls.index(relevance_call) < calls.index(build_call),
                             "strict browser invocation flow must execute policy, pipe and real-browser gates once")
+                    sharded_calls = Counter()
+                    for shard in ("runtime-browser", "policy"):
+                        trace.unlink(missing_ok=True)
+                        result = subprocess.run(
+                            ["/bin/bash", str(script), "--require-all", "--shard", shard],
+                            cwd=work, env=env, capture_output=True, timeout=10,
+                        )
+                        require(result.returncode == 0 and trace.is_file(), f"strict host shard {shard} did not run")
+                        shard_calls = Counter(
+                            tuple(os.fsdecode(arg) for arg in row.split(b"\0"))
+                            for row in trace.read_bytes().split(b"\0\0") if row
+                        )
+                        require((tuple(build_call) in shard_calls) == (shard == "policy"),
+                                "build and manifest contract must run in the policy shard")
+                        sharded_calls.update(shard_calls)
+                    require(sharded_calls == Counter(tuple(call) for call in calls),
+                            "strict host shards must run the full suite's exact commands once")
                 else:
                     require(result.returncode == 1 and calls.count(failure) == 1,
                             "strict browser invocation flow must propagate each gate failure")
@@ -438,11 +456,12 @@ def probe_stack_hook_invocations(source: str) -> None:
     mode = re.findall(r"(?m)^set -euo pipefail$", source)
     timeout = re.findall(r"(?m)^TIMEOUT_RUNNER=tools/agent-hooks/run_with_timeout.py$", source)
     profile = re.findall(r"(?m)^PROFILE=full$", source)
+    shard = re.findall(r"(?m)^SHARD=full$", source)
     group = re.findall(r"(?m)^gate_group=runtime$", source)
     require(len(mode) == len(timeout) == 1, label + ": actual shell mode/timeout runner changed")
-    require(len(profile) == len(group) == 1, label + ": local default must retain full coverage")
+    require(len(profile) == len(shard) == len(group) == 1, label + ": local default must retain full coverage")
     branch = source[source.index(begin):source.index(end)]
-    program = (mode[0] + "\n" + timeout[0] + "\n" + profile[0] + "\n" + group[0] + "\n" + gate[0] + "\n" + branch +
+    program = ("\n".join([mode[0], timeout[0], profile[0], shard[0], group[0], gate[0], branch]) +
                "    python3 __stack_hook_flow_after__\nfi\n")
     probe_stack_hook_program(program)
     probe_stack_hook_program(program, "test/test_evcc_vehicle.rb", "ruby", (), "evcc YAML invocation flow")

@@ -146,7 +146,7 @@ jobs:
           echo "firmware-relevant: $changed"
 
 
-  # Keep a bounded envelope for the full strict host suite and cold browser fixtures.
+  # Dev splits the strict host suite across runners. Publication still needs the entire matrix.
   logic-test:
     needs: prepare
     if: github.event_name != 'pull_request' && needs.prepare.outputs.firmware == 'yes'
@@ -154,6 +154,10 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.prepare.outputs.mode == 'dev' && '["runtime-browser","policy"]' || '["full"]') }}
     defaults:
       run:
         shell: python3 scripts/run-current-dev.py bash -e {0}
@@ -164,7 +168,9 @@ jobs:
       - name: Verify vendored installer source and notices
         run: ./scripts/verify-vendored-esptool-js.sh --source
       - name: Run host-side logic tests
-        run: ./scripts/run-mock-tests.sh --require-all
+        env:
+          HOST_SHARD: ${{ matrix.shard }}
+        run: ./scripts/run-mock-tests.sh --require-all --shard "$HOST_SHARD"
 
   logic-harness:
     # For publishing candidates and manual tests, run the repository/agent preflight
