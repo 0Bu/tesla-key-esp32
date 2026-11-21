@@ -168,7 +168,7 @@ margins, MQTTS margins or image acceptance.
 | Target | Configuration and evidence |
 |---|---|
 | esp32 | Separate IRAM. One controller connection, smaller NimBLE and WiFi RX pools, smaller diagnostic ring. Unpaired MQTT-off bench rose from 51200 B to above threshold for a manifest check. |
-| esp32s3 | Shared IRAM/DRAM. C3-derived tuning moved 23856 B out of IRAM and freed 24064 B of reserved DRAM span. A paired Ethernet board previously stayed pending at 53248 B for 600 s. A signed tuned preview held 90112 B and confirmed after 90 s. The diagnostic ring reserves 8 KiB less DRAM than the generic default. WiFi-only S3 was unmeasured. |
+| esp32s3 | Shared IRAM/DRAM. C3-derived tuning moved 23856 B out of IRAM and freed 24064 B of reserved DRAM span. A paired Ethernet board previously stayed pending at 53248 B for 600 s. A signed tuned preview held 90112 B and confirmed after 90 s. The default diagnostic ring uses 7680 B of RTC slow memory. |
 | esp32c3 | Shared IRAM/DRAM. WiFi hot paths in flash and smaller controller/NimBLE/WiFi pools. Unpaired MQTT-off bench moved from 38912 B and failed checks to successful manifest reads. A smaller ACL/HCI variant downloaded an image. Pairing, confirmation and MQTTS were unmeasured. |
 | esp32c6 | Same entry threshold. No target allocator history recorded here. |
 
@@ -180,9 +180,17 @@ point. Image writing, probation and transient between-sample margins need separa
 On a paired Ethernet S3 running v1.6.9, a warm metadata check started at 90112 B.
 After TLS closure and Operation reclamation, the next entry sample measured 57344 B
 despite 139920 B of free INTERNAL memory. The install and later checks were refused
-before starting a worker. The 8 KiB reduction in static diagnostic storage gives
-the heap more room. Its effect on the largest block after a warm check must be
-measured on hardware. The local `/diag` buffer retains fewer lines.
+before starting a worker. With the first 8 KiB diagnostic ring, the same board confirmed
+an Ethernet OTA at 100352 B. On WiFi the warm idle block was 60416 B before and after
+a direct upload attempt. It measured 54272 B in the upload handler, after reclaiming the
+previous metadata operation. The HTTP parser and any queued TCP data are still live at
+this point. The samples do not identify the individual allocations in the 6144 B drop.
+
+The S3 default now places the diagnostic ring in RTC slow memory, releasing its previous
+8192 B DRAM reservation. It clears the ring before enabling capture on each boot. Larger
+custom rings and configurations that reserve RTC storage for the ULP or redirect RTC data
+to fast memory use DRAM. A warm WiFi upload still needs hardware acceptance because the
+allocator may distribute the recovered memory among several blocks.
 
 ### TLS phases and diagnostic checkpoints
 
