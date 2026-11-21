@@ -47,8 +47,9 @@ with tempfile.TemporaryDirectory(prefix='codex-source-canary-', dir=ROOT) as dir
     nested = fixture / 'independent-repo'
     nested.mkdir()
     subprocess.run(['git', 'init', '-q', str(nested)], check=True, capture_output=True)
+    # This synthetic commit must also work when the operator signs their own commits by default.
     subprocess.run(['git', '-C', str(nested), '-c', 'user.name=Fixture', '-c',
-                    'user.email=fixture@example.invalid', 'commit', '--quiet', '--allow-empty',
+                    'user.email=fixture@example.invalid', 'commit', '--no-gpg-sign', '--quiet', '--allow-empty',
                     '-m', 'Independent nested repository fixture'], check=True, capture_output=True)
     subprocess.run(['git', '-C', str(nested), 'remote', 'add', 'origin',
                     'https://github.com/example/unreviewed.git'], check=True, capture_output=True)

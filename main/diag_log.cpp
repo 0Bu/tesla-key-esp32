@@ -36,8 +36,8 @@ static_assert(CONFIG_LOG_TIMESTAMP_SOURCE_RTOS, "diagnostic credential guard req
 // Sized at 16 KB by default, not 48 KB: this is a STATIC .bss buffer, so its size comes
 // straight off the DRAM heap budget. At 48 KB it was the single largest static
 // consumer in our code and pushed the heap start up, leaving the largest free block
-// at only ~31 KB — too small for e.g. the OTA TLS record buffers. The classic esp32
-// uses 8 KB (sdkconfig.defaults.esp32) so its runtime block clears the OTA threshold.
+// at only ~31 KB — too small for e.g. the OTA TLS record buffers. The esp32 and
+// esp32s3 target defaults use 8 KiB to leave more headroom for OTA.
 static constexpr size_t DIAG_CAP = CONFIG_TESLA_DIAG_LOG_BYTES;
 static_assert(DIAG_CAP >= 4096 && DIAG_CAP <= 49152, "diag ring size outside its Kconfig range");
 static char              s_buf[DIAG_CAP];
