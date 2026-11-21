@@ -101,6 +101,10 @@ An ordinary PR skips the `build` job. That job and any CodeQL results are option
 On release-relevant merges, the protected `main` workflow still builds and signs the Dev
 firmware before publishing it to Pages.
 
+Dev runs the strict host suite in two parallel jobs. One runs runtime and browser checks.
+The other runs policy and build-contract checks. Both must pass before publication. Local
+checks and manual builds keep the full suite together.
+
 On pushes to the canonical `main`, the unprivileged preparation, host checks, and ESP-IDF
 build commands compare their source SHA with the public Git ref. Long commands recheck after
 20 seconds of work and stop when GitHub reports a different head. If the ref cannot be read,
