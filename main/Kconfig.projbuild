@@ -211,7 +211,7 @@ menu "Tesla Key Configuration"
         help
             Size of the wrapping console ring behind GET /diag. It is a static .bss buffer, so
             every byte comes off the INTERNAL heap that OTA admission and confirmation need
-            (docs/ARCHITECTURE.md#ota-self-update). sdkconfig.defaults.esp32 lowers it for
-            the classic esp32; Syslog keeps the longer history.
+            (docs/ARCHITECTURE.md#ota-self-update). The esp32 and esp32s3 defaults lower
+            it to 8192 bytes. An external Syslog receiver can retain a longer history.
 
 endmenu
