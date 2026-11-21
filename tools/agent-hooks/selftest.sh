@@ -862,6 +862,8 @@ expect_rc 2 'invalid timeout rejected' python3 "$runner" invalid true
 
 if python3 "$root/tools/agent-config/check_hooks.py" >/dev/null
 then pass_case 'agent hook schemas plus validation'; else fail_case 'Hook schemas'; fi
+
+if python3 - "$root" <<'PY'
 import pathlib,re,sys
 root=pathlib.Path(sys.argv[1])
 fragments=[("dai","kin"),("x10","a"),("heat.?","pump"),("hp_","modbus"),
