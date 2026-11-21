@@ -209,9 +209,9 @@ menu "Tesla Key Configuration"
         default 16384
         range 4096 49152
         help
-            Size of the wrapping console ring behind GET /diag. It is a static .bss buffer, so
-            every byte comes off the INTERNAL heap that OTA admission and confirmation need
-            (docs/ARCHITECTURE.md#ota-self-update). The esp32 and esp32s3 defaults lower
-            it to 8192 bytes. An external Syslog receiver can retain a longer history.
+            Size of the wrapping console ring behind GET /diag. The ESP32-S3 default uses
+            7680 bytes of RTC slow memory. Larger S3 rings and builds using the RTC region
+            for the ULP or redirecting RTC data to fast memory use DRAM. The classic ESP32
+            defaults to 8192 bytes of DRAM. An external Syslog receiver can retain a longer history.
 
 endmenu

@@ -4,6 +4,7 @@
 #include "logic/redact.hpp"
 
 #ifdef ESP_PLATFORM
+#include <esp_attr.h>
 #include <sdkconfig.h>
 static_assert(CONFIG_LOG_VERSION == 1, "diagnostic capture requires combined V1 log callbacks");
 static_assert(CONFIG_LOG_TIMESTAMP_SOURCE_RTOS, "diagnostic credential guard requires RTOS log timestamps");
@@ -33,13 +34,14 @@ static_assert(CONFIG_LOG_TIMESTAMP_SOURCE_RTOS, "diagnostic credential guard req
 // so a long-running device showed stale output and missed the event of interest.
 // reboot or /diag?clear=1 to reset.
 //
-// Sized at 16 KB by default, not 48 KB: this is a STATIC .bss buffer, so its size comes
-// straight off the DRAM heap budget. At 48 KB it was the single largest static
-// consumer in our code and pushed the heap start up, leaving the largest free block
-// at only ~31 KB — too small for e.g. the OTA TLS record buffers. The esp32 and
-// esp32s3 target defaults use 8 KiB to leave more headroom for OTA.
+// The generic static ring reserves 16 KiB of DRAM. The S3 default uses RTC slow memory
+// to leave more contiguous DRAM for an OTA request with TCP data already queued.
 static constexpr size_t DIAG_CAP = CONFIG_TESLA_DIAG_LOG_BYTES;
 static_assert(DIAG_CAP >= 4096 && DIAG_CAP <= 49152, "diag ring size outside its Kconfig range");
+#if defined(CONFIG_IDF_TARGET_ESP32S3) && !defined(CONFIG_ESP32S3_RTCDATA_IN_FAST_MEM) && \
+    !defined(CONFIG_ULP_COPROC_ENABLED) && CONFIG_TESLA_DIAG_LOG_BYTES <= 7680
+RTC_NOINIT_ATTR
+#endif
 static char              s_buf[DIAG_CAP];
 static size_t            s_head    = 0;      // next write position
 static bool              s_wrapped = false;  // buffer has wrapped at least once
@@ -149,6 +151,8 @@ void diag_log_init() {
         ESP_LOGE(TAG, "failed to allocate diagnostic-log mutex; capture disabled");
         return;
     }
+    // RTC storage can retain bytes across reset. Clear it before making capture and dumps visible.
+    std::memset(s_buf, 0, sizeof(s_buf));
     s_mtx.store(mtx, std::memory_order_release);
 }
 
