@@ -101,6 +101,18 @@ An ordinary PR skips the `build` job. That job and any CodeQL results are option
 On release-relevant merges, the protected `main` workflow still builds and signs the Dev
 firmware before publishing it to Pages.
 
+On pushes to the canonical `main`, the unprivileged preparation, host checks, and ESP-IDF
+build commands compare their source SHA with the public Git ref. Long commands recheck after
+20 seconds of work and stop when GitHub reports a different head. If the ref cannot be read,
+the work continues and the existing publication checks still verify the current head.
+The workflow remains serialized through signing and Pages publication. Manual releases and
+PR builds use their usual checks.
+
+To measure overlapping Dev runs, compare the newer merge time with the older run's completion.
+The `Superseded Dev work` notice in a job log identifies the head change that stopped its work.
+Check the newer run's `publish` and `deploy` results, then verify the served Dev manifest and
+artifact bytes against that run's source SHA.
+
 PRs changing only `.github/workflows/renovate.yaml` and/or `.github/renovate.json` need no manual
 check or review records at merge/check. This lets Renovate maintain its own action pin without a
 firmware handoff. The complete changed-file list determines the exception, including both sides
