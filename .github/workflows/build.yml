@@ -59,6 +59,9 @@ jobs:
         with:
           # select-release-version.sh reads tag ancestry, so it needs the full history.
           fetch-depth: 0
+      - name: Stop superseded Dev preparation
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        run: python3 scripts/run-current-dev.py true
       - name: Decide the run mode
         id: mode
         env:
@@ -151,6 +154,9 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
+    defaults:
+      run:
+        shell: python3 scripts/run-current-dev.py bash -e {0}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -172,6 +178,9 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+    defaults:
+      run:
+        shell: python3 scripts/run-current-dev.py bash -e {0}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -262,7 +271,9 @@ jobs:
         with:
           esp_idf_version: ${{ steps.toolchain.outputs.image-version }}
           target: esp32
+          extra_docker_args: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && '-e GITHUB_EVENT_NAME -e GITHUB_REF -e GITHUB_REPOSITORY -e GITHUB_SHA' || '' }}
           command: >-
+            ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'python3 ./scripts/run-current-dev.py' || '' }}
             ./scripts/ci-build-verify.sh
             --target "${{ matrix.target }}"
             --skip-repro
@@ -402,7 +413,9 @@ jobs:
         with:
           esp_idf_version: ${{ steps.toolchain.outputs.image-version }}
           target: esp32
+          extra_docker_args: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && '-e GITHUB_EVENT_NAME -e GITHUB_REF -e GITHUB_REPOSITORY -e GITHUB_SHA' || '' }}
           command: >-
+            ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'python3 ./scripts/run-current-dev.py' || '' }}
             ./scripts/ci-build-verify.sh
             --verify-only
             "${{ steps.stamp.outputs.disp }}"
@@ -477,7 +490,9 @@ jobs:
         with:
           esp_idf_version: ${{ steps.toolchain.outputs.image-version }}
           target: esp32
+          extra_docker_args: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && '-e GITHUB_EVENT_NAME -e GITHUB_REF -e GITHUB_REPOSITORY -e GITHUB_SHA' || '' }}
           command: >-
+            ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'python3 ./scripts/run-current-dev.py' || '' }}
             ./scripts/ci-build-all.sh
             --target "${{ matrix.target }}"
             "${{ needs.prepare.outputs.release-version }}"
