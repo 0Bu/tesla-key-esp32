@@ -1397,7 +1397,7 @@ def validate(root: Path) -> None:
     policy_steps = workflow_model(root / ".github/workflows/pr-policy.yml", policy_text)["jobs"]["current-head-records"]["steps"]
     require(len(policy_steps) == 2 and
             policy_steps[0].get("with", {}).get("ref") == "${{ github.event.pull_request.base.sha }}",
-            "pr-policy.yml must never reference a PR checkout")
+            "pr-policy.yml must use only the trusted base SHA for checkout")
     policy_env = policy_steps[1].get("env", {})
     policy_run = policy_steps[1].get("run", "")
     require(policy_env.get("PR_EVENT_HEAD") == "${{ github.event.pull_request.head.sha }}" and
