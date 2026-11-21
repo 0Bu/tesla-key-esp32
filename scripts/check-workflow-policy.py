@@ -708,6 +708,9 @@ def validate(root: Path) -> None:
                              "&& '[\"runtime-browser\",\"policy\"]' || '[\"full\"]') }}"},
     } and "continue-on-error" not in host_model["logic-test"],
         "build.yml:logic-test must require both Dev host shards and the full manual suite")
+    require(host_model["logic-test"].get("name") ==
+            "${{ matrix.shard == 'full' && 'logic-test' || format('logic-test ({0})', matrix.shard) }}",
+            "build.yml:logic-test must preserve the manual host evidence name")
     require(full_steps == [{
         "name": "Run host-side logic tests", "env": {"HOST_SHARD": "${{ matrix.shard }}"},
         "run": './scripts/run-mock-tests.sh --require-all --shard "$HOST_SHARD"',
@@ -1667,6 +1670,9 @@ def self_test(root: Path) -> None:
          "all publication host steps must run"),
         ("missing-dev-host-shard", "build.yml", '["runtime-browser","policy"]', '["runtime-browser"]',
          "must require both Dev host shards and the full manual suite"),
+        ("manual-host-evidence-name", "build.yml",
+         "name: ${{ matrix.shard == 'full' && 'logic-test' || format('logic-test ({0})', matrix.shard) }}",
+         "name: logic-test (full)", "must preserve the manual host evidence name"),
         ("prepared-relevance-missing", "build.yml", "firmware: ${{ steps.changes.outputs.firmware }}", "firmware: no", "cumulative fail-closed firmware decision"),
         ("prepared-relevance-stale", "build.yml", "FIRMWARE_RELEVANT: ${{ needs.prepare.outputs.firmware }}", "FIRMWARE_RELEVANT: no", "consume the prepared firmware decision"),
         ("preview-target-omission", "signed-pr-preview.yml", "target: [esp32, esp32s3, esp32c3, esp32c6]", "target: [esp32, esp32s3, esp32c3]", "exact four-target matrix"),

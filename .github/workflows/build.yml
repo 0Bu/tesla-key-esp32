@@ -150,6 +150,7 @@ jobs:
   logic-test:
     needs: prepare
     if: github.event_name != 'pull_request' && needs.prepare.outputs.firmware == 'yes'
+    name: ${{ matrix.shard == 'full' && 'logic-test' || format('logic-test ({0})', matrix.shard) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
