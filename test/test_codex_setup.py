@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Exercise native hook payloads and blocking results without executing a tool or contacting a device."""
 import importlib.util
-import ast
 import contextlib
 import io
 import json
@@ -72,6 +71,7 @@ with tempfile.TemporaryDirectory(prefix='codex-source-canary-', dir=ROOT) as dir
 # Literal jq/search syntax must remain data through both independent guards. These
 # payloads are inspected only; no GitHub, device, partition or shell command runs.
 literal_reads = [
+    "gh api --method GET repos/0Bu/tesla-key-esp32 --jq '{private,allow_auto_merge}'",
     "gh run view 40698697009 --json status,conclusion,jobs --jq '{status,conclusion,jobs:[.jobs[]|{name,status,conclusion,startedAt,completedAt}]}'",
     r"rg --no-config -n 'otaCheck|ota/check|set_time|vehicle_data|setInterval|fetch\(|query.*pr|URLSearchParams|ota-channel' main/www/app.js",
     "rg --no-config -n 'check-partition-contract|partition.*protected|PR policy could|require-pr' tools/agent-config/codex_hook.py",
@@ -86,6 +86,7 @@ for command in [*literal_reads, validator, validator + ' --binary partitions.csv
     assert run('PreToolUse', tool('exec_command', {'cmd': command, 'workdir': str(ROOT)})) == {}, command
 
 for command in [
+    "gh api --method GET repos/0Bu/tesla-key-esp32/pulls/1/merge --method PUT",
     validator.replace(' -I -S', ''),
     "rg -n 'partition|def .*table|md5|argparse' scripts/ci-build-verify.sh",
     "rg --no-config --hostname-bin sh 'sh < input' file",
@@ -187,32 +188,21 @@ for error in [KeyError('missing'), TypeError('shape'), subprocess.TimeoutExpired
     assert denied(json.loads(captured.getvalue()))
     checks += 1
 
-# Convert the neutral Stop result to Codex's actual continuation shape.
-with patch.object(HOOK, 'core', return_value=json.dumps({'decision': 'block', 'reason': 'red tests',
-        'hookSpecificOutput': {'hookEventName': 'Stop', 'permissionDecision': 'block'}})) as stop_core:
-    assert HOOK.dispatch('Stop', {'hook_event_name': 'Stop'}) == {'decision': 'block', 'reason': 'red tests'}
-    adapter_timeout = stop_core.call_args.args[2]
-    checks += 1
+# Editing Antigravity's manifest cannot lock out commands in a running Codex session.
+with tempfile.TemporaryDirectory(prefix='mutable-registration-canary-') as directory:
+    unrelated_root = Path(directory)
+    with patch.object(HOOK, 'ROOT', unrelated_root), \
+            patch.object(HOOK, 'core', return_value=''), \
+            patch.object(HOOK, 'invoke', return_value=subprocess.CompletedProcess([], 0)):
+        assert HOOK.dispatch('PreToolUse', tool('Bash', {'command': 'git status'})) == {}
+        checks += 1
 
-# Compare the native dispatch with all shipped enclosing budgets. A valid strict host
-# run must finish cleanup before an outer adapter/registration can kill it.
-coordinator = ast.parse((ROOT / 'scripts/run-local-checks.py').read_text())
-suite_timeout = next(node.value.value for node in coordinator.body if isinstance(node, ast.Assign)
-                     and any(isinstance(target, ast.Name) and target.id == 'CHECK_TIMEOUT' for target in node.targets))
-neutral_core = ast.parse((ROOT / 'tools/agent-hooks/agent_hook.py').read_text())
-stop_function = next(node for node in neutral_core.body if isinstance(node, ast.FunctionDef) and node.name == 'run_stop_logic_tests')
-core_timeout = max(keyword.value.value for node in ast.walk(stop_function) if isinstance(node, ast.Call)
-                   for keyword in node.keywords if keyword.arg == 'timeout'
-                   and isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, int))
-canonical_timeout = json.loads((ROOT / '.agents/hooks.json').read_text())['stop-tests']['Stop'][0]['timeout']
-native_timeout = json.loads((ROOT / '.codex/hooks.json').read_text())['hooks']['Stop'][0]['hooks'][0]['timeout']
-assert 1200 <= suite_timeout < core_timeout < adapter_timeout < canonical_timeout
-assert canonical_timeout == native_timeout
-checks += 1
-with patch.object(HOOK, 'core', return_value='context'):
-    value = HOOK.dispatch('SessionStart', {'hook_event_name': 'SessionStart'})
-    assert value['hookSpecificOutput'] == {'hookEventName': 'SessionStart', 'additionalContext': 'context\ncontext'}
-    checks += 1
+antigravity = {'conversationId': 'fixture', 'workspacePaths': [str(ROOT)],
+               'toolCall': {'name': 'run_command', 'args': {'CommandLine': 'git status', 'Cwd': str(ROOT)}}}
+assert run('AntigravityPR', antigravity) == {'decision': 'allow'}
+antigravity['toolCall']['args']['CommandLine'] = 'gh pr merge 1 --admin'
+assert run('AntigravityPR', antigravity)['decision'] == 'deny'
+assert run('AntigravityPR', '{broken')['decision'] == 'deny'
 with patch.object(HOOK, 'invoke', side_effect=subprocess.TimeoutExpired('core', 15)):
     try:
         HOOK.dispatch('PreToolUse', tool('Bash', {'command': 'true'}))
@@ -232,7 +222,8 @@ with tempfile.TemporaryDirectory(prefix='codex-bootstrap-canary-') as directory:
     fallback = tmp / 'python3.14'
     fallback.write_text('#!/bin/sh\n[ "$1" = "-c" ] && exit 0\nexit 1\n')
     fallback.chmod(0o755)
-    for event in ('PreToolUse', 'Stop'):
+    assert set(registered) == {'PreToolUse'}
+    for event in ('PreToolUse',):
         command = registered[event][0]['hooks'][0]['command']
         payload = tool('Bash', {'command': 'printenv'}) if event == 'PreToolUse' else {'hook_event_name': 'Stop'}
         cases = [

@@ -510,6 +510,8 @@ grep -v pr-hygiene "$tmp/all.md" >"$tmp/no-hygiene.md"
 expect_rc 2 'aggregate check requires pr-hygiene unconditionally' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/no-hygiene.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/docs.files" "$gate" --check --project-dir "$root"
 grep -v local-checks "$tmp/all.md" >"$tmp/no-local-checks.md"
 expect_rc 2 'completed reviews do not substitute for local verification' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/no-local-checks.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/docs.files" "$gate" --check --project-dir "$root"
+expect_rc 0 'PR event head equals the reviewed head' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/all.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/docs.files" "$gate" --check --project-dir "$root" --expected-head "$sha"
+expect_rc 2 'PR event head cannot attest a newer head' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/all.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/docs.files" "$gate" --check --project-dir "$root" --expected-head 1111111111111111111111111111111111111111
 sed 's/@ [0-9a-f]*/@ deadbee/' "$tmp/all.md" >"$tmp/stale.md"
 expect_rc 2 'stale record SHA rejected' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/stale.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/feature.files" "$gate" --check --project-dir "$root"
 sed "s/$sha/$short_sha/g" "$tmp/all.md" >"$tmp/prefix.md"
@@ -744,157 +746,39 @@ expect_rc 0 'git push delete of qualified feature branch accepted' env PATH="$tm
 payload Bash command "git push origin --delete never-created" "$root" >"$tmp/push-del-never-created.json"
 expect_rc 2 'git push delete of nonexistent branch blocked even with inherited TEST_BRANCH' env PATH="$tmp/bin:$PATH" TEST_ROOT="$root" TEST_BRANCH="never-created" TEST_REAL_GIT="$real_git" TEST_HEAD="$sha" "$gate" --project-dir "$root" --payload-file "$tmp/push-del-never-created.json"
 
-out_dest_main="$(printf 'refs/heads/feature %s refs/heads/main 0000000000000000000000000000000000000000\n' "$sha" | "$root/.githooks/pre-push" origin 2>&1 || true)"
-if printf '%s\n' "$out_dest_main" | grep -q 'BLOCKED by pre-push: direct push to destination main branch is prohibited'; then
-  pass_case 'pre-push hook blocks push to destination main'
-else
-  fail_case 'pre-push hook blocks push to destination main'
-fi
-
-out_dest_head="$(printf 'refs/heads/feature %s refs/heads/HEAD 0000000000000000000000000000000000000000\n' "$sha" | "$root/.githooks/pre-push" origin 2>&1 || true)"
-if printf '%s\n' "$out_dest_head" | grep -q 'BLOCKED by pre-push: direct push to destination protected branch'; then
-  pass_case 'pre-push hook blocks push to destination HEAD'
-else
-  fail_case 'pre-push hook blocks push to destination HEAD'
-fi
-
-out_dest_pages="$(printf 'refs/heads/feature %s refs/heads/gh-pages 0000000000000000000000000000000000000000\n' "$sha" | "$root/.githooks/pre-push" origin 2>&1 || true)"
-if printf '%s\n' "$out_dest_pages" | grep -q 'BLOCKED by pre-push: direct push to destination protected branch'; then
-  pass_case 'pre-push hook blocks push to destination gh-pages'
-else
-  fail_case 'pre-push hook blocks push to destination gh-pages'
-fi
-
-out_del_main="$(printf 'refs/heads/feature 0000000000000000000000000000000000000000 refs/heads/main 0000000000000000000000000000000000000000\n' | "$root/.githooks/pre-push" origin 2>&1 || true)"
-if printf '%s\n' "$out_del_main" | grep -q 'BLOCKED by pre-push:'; then
-  pass_case 'pre-push hook blocks deletion of main branch'
-else
-  fail_case 'pre-push hook blocks deletion of main branch'
-fi
-
-out_del_head="$(printf 'refs/heads/feature 0000000000000000000000000000000000000000 refs/heads/HEAD 0000000000000000000000000000000000000000\n' | "$root/.githooks/pre-push" origin 2>&1 || true)"
-if printf '%s\n' "$out_del_head" | grep -q 'BLOCKED by pre-push: deletion of protected branch'; then
-  pass_case 'pre-push hook blocks deletion of HEAD branch'
-else
-  fail_case 'pre-push hook blocks deletion of HEAD branch'
-fi
-
-out_del_pages="$(printf 'refs/heads/feature 0000000000000000000000000000000000000000 refs/heads/gh-pages 0000000000000000000000000000000000000000\n' | "$root/.githooks/pre-push" origin 2>&1 || true)"
-if printf '%s\n' "$out_del_pages" | grep -q 'BLOCKED by pre-push: deletion of protected branch'; then
-  pass_case 'pre-push hook blocks deletion of gh-pages branch'
-else
-  fail_case 'pre-push hook blocks deletion of gh-pages branch'
-fi
-
-out_del_tag="$(printf 'refs/heads/feature 0000000000000000000000000000000000000000 refs/tags/v1.5.0 0000000000000000000000000000000000000000\n' | "$root/.githooks/pre-push" origin 2>&1 || true)"
-if printf '%s\n' "$out_del_tag" | grep -q 'BLOCKED by pre-push: deletion of non-branch ref'; then
-  pass_case 'pre-push hook blocks deletion of tags'
-else
-  fail_case 'pre-push hook blocks deletion of tags'
-fi
-
-out_foreign="$(printf 'refs/heads/feature %s refs/heads/feature 0000000000000000000000000000000000000000\n' "$sha" | "$root/.githooks/pre-push" foreign 2>&1 || true)"
-if printf '%s\n' "$out_foreign" | grep -q 'BLOCKED by pre-push:'; then
-  pass_case 'pre-push hook blocks push to foreign remote'
-else
-  fail_case 'pre-push hook blocks push to foreign remote'
-fi
-
-out_diff="$(printf 'refs/heads/feature %s refs/heads/feature 1111111111111111111111111111111111111111\n' "$sha" | "$root/.githooks/pre-push" origin 2>&1 || true)"
-if printf '%s\n' "$out_diff" | grep -q 'BLOCKED by pre-push: unable to determine diff'; then
-  pass_case 'pre-push hook fails closed on unresolvable diff range'
-else
-  fail_case 'pre-push hook fails closed on unresolvable diff range'
-fi
-
-cur_checkout="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
-out_detached="$("$root/.githooks/pre-push" origin </dev/null 2>&1 || true)"
-if [ "$cur_checkout" = "HEAD" ] || [ -z "$cur_checkout" ]; then
-  if printf '%s\n' "$out_detached" | grep -q 'BLOCKED by pre-push: cannot determine branch to verify from detached HEAD'; then
-    pass_case 'pre-push hook blocks detached HEAD without stdin'
-  else
-    fail_case 'pre-push hook blocks detached HEAD without stdin'
-  fi
-else
-  if printf '%s\n' "$out_detached" | grep -q "commit () does not match local HEAD"; then
-    fail_case 'pre-push hook on named branch without stdin parses HEAD and evaluates PR gates'
-  elif printf '%s\n' "$out_detached" | grep -Eq 'BLOCKED by pre-push: (PR policy gates not satisfied|direct push to)'; then
-    pass_case 'pre-push hook on named branch without stdin parses HEAD and evaluates PR gates'
-  else
-    fail_case 'pre-push hook on named branch without stdin parses HEAD and evaluates PR gates'
-  fi
-fi
-
-if printf 'refs/heads/%s %s refs/heads/%s %s\n' "$push_branch" "$sha" "$push_branch" "$sha" | \
-  env PATH="$tmp/bin:$PATH" TEST_ROOT="$root" TEST_BRANCH="$push_branch" TEST_REAL_GIT="$real_git" TEST_HEAD="$sha" TEST_BODY="$push_body" \
-  "$root/.githooks/pre-push" origin >"$tmp/pre_push_accept.log" 2>&1; then
-  pass_case 'pre-push hook accepts valid push with verified gates and clean diff'
-else
-  printf 'pre-push accept output: %s\n' "$(cat "$tmp/pre_push_accept.log" 2>/dev/null || true)"
-  fail_case 'pre-push hook accepts valid push with verified gates and clean diff'
-fi
-
-# Run the shipped hook with inert local checks. The protocol worker cannot pass until
-# the firmware worker starts, and completion of both workers is required on failure too.
-parallel_repo="$tmp/parallel-pre-push"
-mkdir -p "$parallel_repo/.githooks" "$parallel_repo/scripts" "$parallel_repo/tools/agent-hooks"
-cp "$root/.githooks/pre-push" "$parallel_repo/.githooks/"
-cp "$root/tools/agent-hooks/parallel-checks.sh" "$parallel_repo/tools/agent-hooks/"
-cp "$root/tools/agent-hooks/pr-gate-lib.sh" "$parallel_repo/tools/agent-hooks/"
-cat > "$parallel_repo/tools/agent-hooks/require-pr-gates.sh" <<'SH'
-cat >/dev/null
-exit "${TEST_POLICY_EXIT:-0}"
-SH
-cat > "$parallel_repo/scripts/check-vehicle-command-sync.py" <<'PY'
-import os
-from pathlib import Path
-import sys
-import time
-
-assert sys.argv[1:] == ["--check"]
-Path("protocol-started").touch()
-deadline = time.monotonic() + 5
-while not Path("firmware-started").is_file() and time.monotonic() < deadline:
-    time.sleep(0.05)
-assert Path("firmware-started").is_file(), "checks did not overlap"
-Path("protocol-finished").touch()
-sys.exit(int(os.environ.get("TEST_PROTOCOL_EXIT", "0")))
-PY
-cat > "$parallel_repo/scripts/precheck-firmware.sh" <<'SH'
+# Exercise Git's real pre-push admission in a disposable repository. The candidate
+# verifier is stubbed here to prove the hook never starts compilation or accesses GitHub.
+push_repo="$tmp/receipt-pre-push"
+mkdir -p "$push_repo/.githooks" "$push_repo/scripts" "$push_repo/tools/agent-hooks"
+cp "$root/.githooks/pre-push" "$push_repo/.githooks/"
+cp "$root/tools/agent-hooks/pr-gate-lib.sh" "$push_repo/tools/agent-hooks/"
+cat > "$push_repo/scripts/check-local.sh" <<'SH'
 #!/usr/bin/env bash
-set -eu
-[ "$#" -eq 0 ]
-touch firmware-started
-sleep 0.2
-touch firmware-finished
-exit "${TEST_FIRMWARE_EXIT:-0}"
+[ "$#" = 1 ] && [ "$1" = --verify-receipt ] && [ -f candidate-passed ]
 SH
-chmod +x "$parallel_repo/scripts/precheck-firmware.sh"
-git -C "$parallel_repo" init -q
-git -C "$parallel_repo" -c user.name=Fixture -c user.email=fixture@example.invalid commit -qm base --allow-empty
-parallel_base="$(git -C "$parallel_repo" rev-parse HEAD)"
-mkdir "$parallel_repo/main"
-touch "$parallel_repo/main/vehicle_commands.cpp"
-git -C "$parallel_repo" add main/vehicle_commands.cpp
-git -C "$parallel_repo" -c user.name=Fixture -c user.email=fixture@example.invalid commit -qm feature
-parallel_head="$(git -C "$parallel_repo" rev-parse HEAD)"
-
-run_parallel_hook() (
-  cd "$parallel_repo" || exit 2
-  unset PRE_PUSH_TARGETS AGENT_PR_GATES_SKIP
-  rm -f protocol-started firmware-started protocol-finished firmware-finished
-  printf 'refs/heads/feature %s refs/heads/feature %s\n' "$parallel_head" "$parallel_base" \
-    | env "$@" .githooks/pre-push origin
+chmod +x "$push_repo/scripts/check-local.sh"
+git -C "$push_repo" init -q -b feature
+git -C "$push_repo" remote add origin https://github.com/0Bu/tesla-key-esp32.git
+git -C "$push_repo" -c user.name=Fixture -c user.email=fixture@example.invalid \
+  -c commit.gpgsign=false commit -qm base --allow-empty
+push_fixture_sha="$(git -C "$push_repo" rev-parse HEAD)"
+zero=0000000000000000000000000000000000000000
+hook_update() (
+  cd "$push_repo" || exit 2
+  printf 'refs/heads/feature %s %s %s\n' "$1" "$2" "$zero" |
+    .githooks/pre-push "${3:-origin}"
 )
-
-expect_rc 0 'pre-push overlaps the two local checks and waits for both' run_parallel_hook
-expect_rc 1 'pre-push rejects a failed protocol worker' run_parallel_hook TEST_PROTOCOL_EXIT=5
-[ -f "$parallel_repo/firmware-finished" ] || fail_case 'protocol failure left the firmware worker running'
-expect_rc 1 'pre-push rejects a failed firmware worker' run_parallel_hook TEST_FIRMWARE_EXIT=6
-[ -f "$parallel_repo/protocol-finished" ] || fail_case 'firmware failure left the protocol worker running'
-expect_rc 1 'pre-push checks PR policy before starting local workers' run_parallel_hook TEST_POLICY_EXIT=2
-[ ! -e "$parallel_repo/protocol-started" ] && [ ! -e "$parallel_repo/firmware-started" ] \
-  || fail_case 'local worker started after PR policy failed'
+expect_rc 1 'pre-push rejects missing candidate receipt' hook_update "$push_fixture_sha" refs/heads/feature
+touch "$push_repo/candidate-passed"
+expect_rc 0 'pre-push accepts verified candidate' hook_update "$push_fixture_sha" refs/heads/feature
+expect_rc 1 'pre-push rejects wrong candidate SHA' hook_update "$sha" refs/heads/feature
+expect_rc 1 'pre-push rejects foreign remote' hook_update "$push_fixture_sha" refs/heads/feature foreign
+for ref in refs/heads/main refs/heads/HEAD refs/heads/gh-pages refs/tags/v1; do
+  expect_rc 1 "pre-push rejects protected destination $ref" hook_update "$push_fixture_sha" "$ref"
+  expect_rc 1 "pre-push rejects protected deletion $ref" hook_update "$zero" "$ref"
+done
+rm "$push_repo/candidate-passed"
+expect_rc 0 'pre-push accepts feature deletion without a candidate' hook_update "$zero" refs/heads/feature
 
 size_relevant_samples=(
   "main/main.cpp"
@@ -968,29 +852,8 @@ sleep 1.2
 [ "$timeout_rc" = 124 ] && [ ! -e "$timeout_marker" ] && pass_case 'inner timeout kills SIGTERM-ignoring descendants' || fail_case 'timeout descendant escaped'
 expect_rc 2 'invalid timeout rejected' python3 "$runner" invalid true
 
-if python3 - "$root/.agents/hooks.json" <<'PY'
-import json,sys
-ag=json.load(open(sys.argv[1]))
-assert "description" not in ag
-assert set(ag)=={"capabilities","pre-tool-guards","post-tool-formatter","stop-tests"}
-for g in ag["pre-tool-guards"]["PreToolUse"]:
-  m=g.get("matcher")
-  assert m and m.startswith("^") and m.endswith("$")
-  for h in g["hooks"]:
-    assert h["type"]=="command" and h.get("async") is not True and h["timeout"]>0
-for g in ag["post-tool-formatter"]["PostToolUse"]:
-  m=g.get("matcher")
-  assert m and m.startswith("^") and m.endswith("$")
-  for h in g["hooks"]:
-    assert h["type"]=="command" and h.get("async") is not True and h["timeout"]>0
-for h in ag["capabilities"]["PreInvocation"]:
-  assert h["type"]=="command" and h.get("async") is not True and h["timeout"]>0
-for h in ag["stop-tests"]["Stop"]:
-  assert h["type"]=="command" and h.get("async") is not True and h["timeout"]>0
-PY
+if python3 "$root/tools/agent-config/check_hooks.py" >/dev/null
 then pass_case 'agent hook schemas plus validation'; else fail_case 'Hook schemas'; fi
-
-if python3 - "$root" <<'PY'
 import pathlib,re,sys
 root=pathlib.Path(sys.argv[1])
 fragments=[("dai","kin"),("x10","a"),("heat.?","pump"),("hp_","modbus"),

@@ -116,19 +116,19 @@ const usbNoApprovalNeeded = /(?:live verification|HTTP requests?|(?:GET|POST|HTT
 const usbOtaNotStateChanging = /(?:GET|POST) \/ota\/check[^.!?]*(?:is not|isn't|not) state-changing/i;
 const usbAbsentApprovalProceeds = /(?:(?:approval|authorization)[^.!?]*(?:absent|missing|not obtained)|without (?:separate )?(?:approval|authorization))[^.!?]*(?:continue|proceed|run|contact|send|request)/i;
 const reviewedSkillSha256 = new Map([
-  ["add-logic-test", "160508734a23ba67e53ad4b3c2d661010d097a848718e72dedb51a60be9bedc3"],
-  ["ci-heal", "3af1b057cdce836e065ad3ec164990c18cad6ac3d84c0b454c787ad8a0564f28"],
+  ["add-logic-test", "eda9aa64b5015f0b84ce83c01b7438e751c6e6bb95727334ddf6308934ac57ef"],
+  ["ci-heal", "05ad6b2a8407402ae27786d6e69e92728d584d7f2b236af1cad07c252d9f11a6"],
   ["deploy", "d8a9796e3551bdd97dfe4bcff1e5b3f48c4ffbed503bfb0f216c8a26d8f3d4e8"],
   ["deploy-bench", "e3b3a781063b09598c04751e3fa2a29efc9a47b63a2838526a509d97ae4029e8"],
   ["device-diag", "d08f2540c21aa540a2d287d9139fdcce34abcd2214aa816684507b1747aa5fa7"],
   ["feature-docs", "fed1863c2a2e3b24598f2b9d41219d09aaecd67da7aa32c628f090cabec76e90"],
   ["flash-esp32", "fea18a035d952fa3fa4c8247d978f03fb33fb9d350245366ebbec820c62ae81c"],
-  ["mock-test", "dedc93432b89185b81f2f146cbbc51cb51dcaf17135b47f4f8e3e0c41e5d18c3"],
+  ["mock-test", "946c0f9516c642f14f4672e9370bbc385b1b41031916e0c60cfa5620a2e8f412"],
   ["ota-release-verify", "52a09232386f75c8382abbab08243b9a2b292e6b42a4f146c994343a22e4f433"],
   ["pr-hygiene", "f909e722af8071d690751953a58abda475f3f409ad6f83158426b7ace17056b1"],
   ["project-review", "39f7a9754d1c360b375467f64f2c6b4cfadb974a34b1dfd62f8a85b19037c680"],
   ["ship", "25af15bd3656b731f897e53f7b4825bd9d58d2d9f6f7dd3e0f7d49d7ce503330"],
-  ["skill-audit", "2f103e658ab3022eb45182cd2aa35a6747fa2e45954cc156ba11e11f94ff0ebe"],
+  ["skill-audit", "f63c8d664f1152eeb8c4ef39bf086b32498106b26bc4ca0c027a95c12c7d5452"],
   ["usb-recovery", "6ede9f07c6781dad4e9669918fc0805d7dcad8c085e801545ec0e07b3915d6ee"],
   ["vehicle-command-audit", "d250496f5bc17a765d831aa54ab5771269418e482c08cfc37dfa5006b190d80c"],
 ]);
@@ -403,7 +403,7 @@ for (const subagent of subagentsDoc.subagents) {
 const multiTargetReviewerObj = subagentsDoc.subagents.find((s) => s.TypeName === "multi_target_build_reviewer");
 const multiTargetReviewer = normalizeProse(multiTargetReviewerObj?.Prompt || "");
 const multiTargetPublicationContracts = [
-  "prepare, logic-test and logic-harness start concurrently",
+  "prepare classifies publication relevance",
   "build-target and independent-rebuild-target each need only prepare",
   "The key-free deploy job follows publish",
   "build joins prepare and the producer matrix",

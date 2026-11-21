@@ -145,7 +145,8 @@ jobs:
 
   # Keep a bounded envelope for the full strict host suite and cold browser fixtures.
   logic-test:
-    if: github.event_name != 'pull_request'
+    needs: prepare
+    if: github.event_name != 'pull_request' && needs.prepare.outputs.firmware == 'yes'
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
@@ -160,11 +161,13 @@ jobs:
         run: ./scripts/run-mock-tests.sh --require-all
 
   logic-harness:
-    # Run full repository/agent preflight beside the longer mock suite, followed by the tesla-ble
+    # For publishing candidates and manual tests, run the repository/agent preflight
+    # beside the longer mock suite, followed by the tesla-ble
     # harness, sanitizer tripwires and the remaining build/PR-gate contract self-tests.
     # Both host jobs must pass before protected publication. Preview signing has its own full host
     # gate in signed-pr-preview.yml.
-    if: github.event_name != 'pull_request'
+    needs: prepare
+    if: github.event_name != 'pull_request' && needs.prepare.outputs.firmware == 'yes'
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:

@@ -70,8 +70,8 @@ to linearize RX arrival and empty-queue expiry.
 Background status and telemetry consume caches and preserve sleep debounce, retry/backoff and
 foreground-command arbitration. Reboot loops are safety failures.
 
-Pure decisions belong in `main/logic/`, with host tests and registered ownership. New untracked logic
-or tests must not evade the Stop-hook test decision. Firmware integration also requires pinned IDF
+Pure decisions belong in `main/logic/`, with host tests and registered ownership. Include new files
+in the committed candidate before the local push check. Firmware integration also requires pinned IDF
 compilation; host tests do not compile the ESP/NimBLE/NVS/FreeRTOS shells.
 
 Use the narrowest relevant checks, then the full contract before handoff:
@@ -128,11 +128,12 @@ Update the owner with the changed code/configuration. Do not duplicate technical
 
 Skills use `$skill-name` and `.agents/skills/`; legacy `/skill-name` is historical only.
 Hook policy lives in `tools/agent-hooks/`, configuration in `.agents/` and `tools/agent-config/`.
-Native `.codex/` registrations are generated adapters, not a second policy. Check/regenerate with
+Native Codex and Antigravity registrations share reviewer prompts and checks. Check/regenerate with
 `node tools/agent-config/sync-codex.mjs --check` / `--write`. Codex hooks require project and current
 hook trust through `/hooks`; linked worktrees load declarations from the primary checkout. Keep its
-reviewed setup in sync or run gates explicitly. Reviewer read-only/no-escalation defaults do not
-replace inspection of parent runtime permission overrides. `scripts/with-host-python.sh` selects a
+reviewed setup in sync or run gates explicitly. Codex reviewers inherit effective parent permissions.
+Antigravity reviewers use an explicit read-tool list. For both clients, read the linked scoped
+instructions before editing those directories. `scripts/with-host-python.sh` selects a
 capable host Python for gates. Hooks are lexical defense in depth, not authorization or sandboxing.
 
 ## PR and review

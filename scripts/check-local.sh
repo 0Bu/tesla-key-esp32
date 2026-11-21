@@ -6,11 +6,13 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "$root"
 firmware=0
 candidate=0
-usage='usage: scripts/check-local.sh [--candidate] [--firmware]'
+verify_receipt=0
+usage='usage: scripts/check-local.sh [--candidate [--firmware] | --verify-receipt]'
 for option in "$@"; do
   case "$option" in
     --candidate) candidate=1 ;;
     --firmware) firmware=1 ;;
+    --verify-receipt) verify_receipt=1; candidate=1 ;;
     --help) echo "$usage"; exit 0 ;;
     *) echo "$usage" >&2; exit 2 ;;
   esac
@@ -19,9 +21,50 @@ if ! python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 11))' >/dev
   exec scripts/with-host-python.sh bash "$0" "$@"
 fi
 head="$(git rev-parse HEAD)"
+base=
+profile=full
+receipt="$root/.tmp/local-checks/candidate"
+candidate_identity() {
+  local candidate_head="$1" candidate_base="$2" candidate_profile="$3"
+  printf '%s %s %s %s' "$candidate_head" "$candidate_base" "$candidate_profile" \
+    "$(git rev-parse "$candidate_head:esp-idf-toolchain.txt")"
+}
+
+# Only a clean, committed integration candidate can earn or reuse the push receipt.
 if [ "$candidate" = 1 ]; then
   state="$(git -c core.fsmonitor=false status --porcelain)"
   [ -z "$state" ] || { echo 'local-handoff: candidate requires a clean committed tree' >&2; exit 1; }
+  base="$(git rev-parse --verify refs/remotes/origin/main)"
+  git merge-base --is-ancestor "$base" "$head" || {
+    echo 'local-handoff: integrate the current origin/main before verification' >&2
+    exit 1
+  }
+  scope="$(python3 scripts/check-change-scope.py --base "$base" --head "$head")"
+  if [ "$scope" = docs ] && [ "$firmware" = 0 ]; then
+    profile=docs
+  elif [ "$firmware" = 1 ] || [ "$(scripts/release-relevance.sh --changed-pr "$base" "$head")" != no ]; then
+    profile=firmware
+    firmware=1
+  fi
+  if [ -L "$root/.tmp" ] || [ -L "$root/.tmp/local-checks" ] || [ -L "$receipt" ]; then
+    echo 'local-handoff: unsafe receipt path' >&2
+    exit 1
+  fi
+  identity="$(candidate_identity "$head" "$base" "$profile")"
+  if [ "$verify_receipt" = 1 ]; then
+    if [ -f "$receipt" ]; then
+      existing="$(cat "$receipt")"
+      if [ "$existing" = "$identity" ] ||
+         { [ "$profile" != firmware ] && [ "$existing" = "$(candidate_identity "$head" "$base" firmware)" ]; }; then
+        echo "local-handoff: verified receipt for $head"
+        exit 0
+      fi
+    fi
+    echo 'local-handoff: run scripts/check-local.sh --candidate before pushing' >&2
+    exit 1
+  fi
+  # A failed new attempt must not leave an earlier result reusable.
+  rm -f "$receipt"
 fi
 
 check_strict_host() {
@@ -42,14 +85,18 @@ check_protocol_and_policy() {
 
 # shellcheck source=/dev/null
 . tools/agent-hooks/parallel-checks.sh
-run_parallel_checks check_strict_host check_protocol_and_policy
-
-# Run compiler-heavy sanitizer and firmware work after the timed host gates.
-if [ "$(uname -s)" = Linux ]; then
-  scripts/run-sanitizer-tests.sh --self-test
-  scripts/run-sanitizer-tests.sh
+if [ "$profile" = docs ]; then
+  python3 scripts/check-markdown-links.py
 else
-  scripts/idf-docker.sh bash -c './scripts/run-sanitizer-tests.sh --self-test && ./scripts/run-sanitizer-tests.sh'
+  run_parallel_checks check_strict_host check_protocol_and_policy
+
+  # Run compiler-heavy sanitizer and firmware work after the timed host gates.
+  if [ "$(uname -s)" = Linux ]; then
+    scripts/run-sanitizer-tests.sh --self-test
+    scripts/run-sanitizer-tests.sh
+  else
+    scripts/idf-docker.sh bash -c './scripts/run-sanitizer-tests.sh --self-test && ./scripts/run-sanitizer-tests.sh'
+  fi
 fi
 if [ "$firmware" = 1 ]; then
   scripts/idf-docker.sh ./scripts/ci-build-verify.sh "$(cat version.txt)" "$head"
@@ -57,10 +104,16 @@ fi
 git diff --check
 if [ "$candidate" = 1 ]; then
   state="$(git -c core.fsmonitor=false status --porcelain)"
-  [ -z "$state" ] && [ "$(git rev-parse HEAD)" = "$head" ] || {
+  [ -z "$state" ] && [ "$(git rev-parse HEAD)" = "$head" ] &&
+    [ "$(git rev-parse refs/remotes/origin/main)" = "$base" ] || {
     echo 'local-handoff: candidate changed during verification' >&2
     exit 1
   }
-  echo "local-handoff: verified candidate $head (firmware=$firmware)"
+  mkdir -p "$(dirname "$receipt")"
+  tmp_receipt="$(mktemp "$receipt.XXXXXX")"
+  trap 'rm -f "$tmp_receipt"' EXIT
+  printf '%s\n' "$identity" > "$tmp_receipt"
+  mv -f "$tmp_receipt" "$receipt"
+  printf 'local-handoff: verified candidate %s against %s (%s)\n' "$head" "$base" "$profile"
 fi
 echo 'local-handoff: PASS (local checks only; no remote CI, publication or device acceptance)'

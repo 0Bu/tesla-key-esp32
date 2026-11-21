@@ -29,6 +29,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_EVENT_HEAD: ${{ github.event.pull_request.head.sha }}
         run: >-
           ./tools/agent-hooks/require-pr-gates.sh
           --check --pr "$PR_NUMBER" --project-dir "$GITHUB_WORKSPACE"
+          --expected-head "$PR_EVENT_HEAD"

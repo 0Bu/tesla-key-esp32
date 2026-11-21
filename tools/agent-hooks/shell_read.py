@@ -88,6 +88,15 @@ def is_literal_read(source: str) -> bool:
         if index + 1 == len(args):
             return False
         index += 2
+    if args[index:index + 3] == ["api", "--method", "GET"]:
+        endpoint = args[index + 3:index + 4]
+        if not endpoint or not re.fullmatch(r"repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*", endpoint[0]):
+            return False
+        options = args[index + 4:]
+        return not options or (
+            len(options) == 2 and options[0] in {"--jq", "-q", "--template", "-t"}
+            and not options[1].startswith("-")
+        )
     if tuple(args[index:index + 2]) not in {
         ("pr", "list"), ("pr", "view"), ("pr", "checks"), ("run", "list"), ("run", "view"),
     }:

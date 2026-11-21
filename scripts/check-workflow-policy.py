@@ -226,12 +226,13 @@ EXPECTED_TRIGGER_SHA256 = {
     "build.yml": "0f085b92b085011b04de27225740efb938d10400a9e5f2a0b436a451cde1a59f",
     "pr-policy.yml": "96df64da9e79c5202cd8ca4113d400f3a79e1789691b33972709a6eed455ff85",
     "pr-preview-cleanup.yml": "a9b49e11119a21964df1ff72c05fc732af13b5f1ad81eb1b1bb821281f29efad",
-    "renovate.yaml": "5bb540b32577ab414b7ef7b7133d0e289ba1d984e09867ec059e6f6cbd92a817",
+    "renovate.yaml": "9ec819f2f3c2857af4713e29129f1f6bd35f563d6b746f77165766857aa1e944",
     "signed-pr-preview.yml": "d59c7040b41032896c1dfcdc96a10f1248e8fae579607c0e2b52da06c59fa60d",
 }
 EXPECTED_BUILD_MATRICES = {'build-target': {'target': ['esp32', 'esp32s3', 'esp32c3', 'esp32c6'], 'leg': '${{ fromJSON(github.ref == \'refs/heads/main\' && \'["primary"]\' || \'["primary","reproduction"]\') }}'}, 'independent-rebuild-target': {'target': ['esp32', 'esp32s3', 'esp32c3', 'esp32c6']}}
 YAML_MODELS = {}
 NON_PR = "github.event_name != 'pull_request'"
+PUBLICATION_HOST_IF = NON_PR + " && needs.prepare.outputs.firmware == 'yes'"
 PREVIEW_OR_NON_PR = (NON_PR + " || (github.event.pull_request.head.repo.full_name == github.repository "
                      "&& contains(github.event.pull_request.labels.*.name, 'signed-preview'))")
 BUILD_JOIN_IF = "${{ always() && (" + NON_PR + " || needs.prepare.result != 'skipped') }}"
@@ -528,8 +529,10 @@ def validate(root: Path) -> None:
                         require(not re.search(r"--(?:jq|template)(?:[=\s]|$)|(?:^|\s)-[qt]", gh_part),
                                 f"{name}:{job_name}: gh api --slurp cannot use --jq or --template")
             if key in {("build.yml", "logic-test"), ("build.yml", "logic-harness")}:
-                require(structured_job.get("if") == NON_PR and "continue-on-error" not in structured_job,
-                        f"{name}:{job_name}: host gate must run outside PRs and reject job failure")
+                require(structured_job.get("if") == PUBLICATION_HOST_IF
+                        and structured_job.get("needs") == "prepare"
+                        and "continue-on-error" not in structured_job,
+                        f"{name}:{job_name}: host gate must follow publication relevance and reject job failure")
             if key == ("build.yml", "build"):
                 require("continue-on-error" not in structured_job,
                         "build.yml:build must not be continue-on-error")
@@ -1391,8 +1394,13 @@ def validate(root: Path) -> None:
             "pr-policy.yml must use pull_request_target trusted-base execution")
     require("github.event.pull_request.base.sha" in policy_text,
             "pr-policy.yml must check out the exact trusted base SHA")
-    require("github.event.pull_request.head" not in policy_text and "github.head_ref" not in policy_text,
-            "pr-policy.yml must never reference a PR checkout")
+    policy_steps = workflow_model(root / ".github/workflows/pr-policy.yml", policy_text)["jobs"]["current-head-records"]["steps"]
+    require(len(policy_steps) == 2 and
+            policy_steps[0].get("with", {}).get("ref") == "${{ github.event.pull_request.base.sha }}",
+            "pr-policy.yml must never check out PR content")
+    require(policy_steps[1].get("env", {}).get("PR_EVENT_HEAD") == "${{ github.event.pull_request.head.sha }}" and
+            '--expected-head "$PR_EVENT_HEAD"' in policy_steps[1].get("run", ""),
+            "pr-policy.yml must bind the metadata result to the event head")
     require("persist-credentials: false" in policy_text,
             "pr-policy.yml checkout credentials must not persist")
     require("require-pr-gates.sh" in policy["current-head-records"] and "--check --pr" in policy["current-head-records"],
@@ -1650,7 +1658,7 @@ def self_test(root: Path) -> None:
         ("top-level-write", "build.yml", "permissions:\n  contents: read\n",
          "permissions:\n  contents: read\n  issues: write\n",
          "top-level permissions must be exact"),
-        ("build-dag", "build.yml", "    needs: prepare\n", "", "must need prepare"),
+        ("build-dag", "build.yml", "  build-target:\n    needs: prepare\n", "  build-target:\n", "must need prepare"),
         ("build-host-gate", "build.yml",
          "    needs: [logic-test, logic-harness, build, independent-rebuild]\n",
          "    needs: [logic-harness, build, independent-rebuild]\n", "both host gates and both build inventories"),
@@ -1749,15 +1757,19 @@ def self_test(root: Path) -> None:
          "      - name: Verify vendored installer source and notices\n        if: false\n", "vendored source gate"),
         ("vendor-source-ignored", "build.yml", "      - name: Verify vendored installer source and notices\n",
          "      - name: Verify vendored installer source and notices\n        continue-on-error: true\n", "vendored source gate"),
-        ("host-job-skipped", "build.yml", "  logic-test:\n    if: " + NON_PR,
-         "  logic-test:\n    if: false", "host gate must run outside PRs and reject job failure"),
+        ("host-job-skipped", "build.yml", "  logic-test:\n    needs: prepare\n    if: " + PUBLICATION_HOST_IF,
+         "  logic-test:\n    needs: prepare\n    if: false", "host gate must follow publication relevance"),
+        ("host-job-ignores-relevance", "build.yml",
+         "  logic-test:\n    needs: prepare\n    if: " + PUBLICATION_HOST_IF,
+         "  logic-test:\n    needs: prepare\n    if: " + NON_PR,
+         "host gate must follow publication relevance"),
         ("host-job-failure-ignored", "build.yml", "  logic-test:\n", "  logic-test:\n    continue-on-error: true\n",
-         "host gate must run outside PRs and reject job failure"),
-        ("harness-job-skipped", "build.yml", "    if: " + NON_PR + "\n    runs-on: ubuntu-26.04\n    timeout-minutes: 10\n",
+         "host gate must follow publication relevance"),
+        ("harness-job-skipped", "build.yml", "    if: " + PUBLICATION_HOST_IF + "\n    runs-on: ubuntu-26.04\n    timeout-minutes: 10\n",
          "    if: false\n    runs-on: ubuntu-26.04\n    timeout-minutes: 10\n",
-         "host gate must run outside PRs and reject job failure"),
+         "host gate must follow publication relevance"),
         ("harness-job-failure-ignored", "build.yml", "  logic-harness:\n", "  logic-harness:\n    continue-on-error: true\n",
-         "host gate must run outside PRs and reject job failure"),
+         "host gate must follow publication relevance"),
         ("logic-merge-history", "build.yml",
          "          fetch-depth: 0\n      - name: Verify vendored installer source and notices",
          "          fetch-depth: 1\n      - name: Verify vendored installer source and notices",
@@ -1780,8 +1792,8 @@ def self_test(root: Path) -> None:
          "      contents: read\n    environment: firmware-signing\n    steps:\n",
          "protected Environment inventory drift"),
         ("unprivileged-write", "build.yml",
-         "  logic-test:\n    if: " + NON_PR + "\n    runs-on: ubuntu-26.04\n    timeout-minutes: 20\n    permissions:\n      contents: read",
-         "  logic-test:\n    if: " + NON_PR + "\n    runs-on: ubuntu-26.04\n    timeout-minutes: 20\n    permissions:\n      contents: write",
+         "  logic-test:\n    needs: prepare\n    if: " + PUBLICATION_HOST_IF + "\n    runs-on: ubuntu-26.04\n    timeout-minutes: 20\n    permissions:\n      contents: read",
+         "  logic-test:\n    needs: prepare\n    if: " + PUBLICATION_HOST_IF + "\n    runs-on: ubuntu-26.04\n    timeout-minutes: 20\n    permissions:\n      contents: write",
          "permissions must match the exact reviewed inventory"),
         ("unprivileged-arbitrary-write", "build.yml",
          "      contents: read\n    steps:\n",

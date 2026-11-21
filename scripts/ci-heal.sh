@@ -161,7 +161,7 @@ get_pr_body() {
 watch_pr_checks() {
   local pr="$1"
   echo "ci-heal: watching CI checks for PR #$pr..."
-  if gh pr checks "$pr" --watch >/dev/null 2>&1; then
+  if gh pr checks "$pr" --required --watch >/dev/null 2>&1; then
     return 0
   else
     return 1
@@ -511,16 +511,16 @@ only_records_check_failing() {
   [ "$seen" -eq 1 ]
 }
 
-# Succeeds only when the rollup is readable, `build` completed or skipped and no other check is
-# anything but SUCCESS, NEUTRAL or SKIPPED (queued, running, cancelled, failed and commit-status
-# entries all count as not green). Mode `records` allows the records check alone to be not green;
+# Succeeds only when the required checks are readable and the `build` check completed or
+# skipped. Optional CodeQL and post-merge cleanup checks are outside this merge decision.
+# Mode `records` allows the records check alone to be not green;
 # mode `all` requires the records check to have succeeded. A missing `build` remains pending.
 ci_green_except_records() {
   local mode="$2" rows name status conclusion nongreen=""
   rows="$(check_rollup "$1")" || return 1
   printf '%s\n' "$rows" | grep -Eq '^build\|COMPLETED\|(SUCCESS|SKIPPED)$' || return 1
   while IFS='|' read -r name status conclusion; do
-    [ -n "$name" ] || continue
+    case "$name" in build|"$RECORDS_CHECK") ;; *) continue ;; esac
     case "$conclusion" in SUCCESS|NEUTRAL|SKIPPED) continue ;; esac
     nongreen+="$name | $status | $conclusion"$'\n'
   done <<< "$rows"
@@ -604,7 +604,7 @@ run_heal() {
 
     # A green watch also needs the complete rollup, including the current records check.
     if watch_pr_checks "$target_pr" && ci_green_except_records "$target_pr" all; then
-      echo "ci-heal: all CI checks on PR #$target_pr are GREEN for $head_sha."
+      echo "ci-heal: required checks on PR #$target_pr are GREEN for $head_sha."
       green=1
       break
     fi
@@ -973,6 +973,12 @@ self_test() {
   fi
   ( gh() { rollup_gh "$@"; }; ci_green_except_records 42 records ) \
     || { echo "self-test: a newest-failing records run was not treated as records pending" >&2; exit 1; }
+  rollup_fixture FAILURE SUCCESS
+  jq '.statusCheckRollup += [{"name":"CodeQL","workflowName":"CodeQL","status":"QUEUED"}]' \
+    "$T/rollup.json" > "$T/optional-rollup.json"
+  mv "$T/optional-rollup.json" "$T/rollup.json"
+  ( gh() { rollup_gh "$@"; }; ci_green_except_records 42 all ) \
+    || { echo "self-test: an optional queued check blocked a verified head" >&2; exit 1; }
   # A queued newer run (no start time yet) must not be hidden behind an older completed one
   printf '{"statusCheckRollup":[%s]}\n' \
     "{\"name\":\"build\",\"workflowName\":\"build\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\",\"startedAt\":\"2026-10-22T10:05:00Z\"},

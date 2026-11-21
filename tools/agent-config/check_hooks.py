@@ -72,24 +72,9 @@ git_root = "$(git rev-parse --show-toplevel)"
 py = f'python3 "{git_root}/tools/agent-hooks/agent_hook.py"'
 
 agents = load_json(".agents/hooks.json")
-expected_agent_sections = {"capabilities", "pre-tool-guards", "post-tool-formatter", "stop-tests"}
-if (
-    not isinstance(agents, dict)
-    or set(agents) != expected_agent_sections
-    or any(not isinstance(v, dict) for v in agents.values())
-):
-    fail(".agents/hooks.json must contain only capabilities, pre-tool-guards, post-tool-formatter, and stop-tests objects")
+if set(agents) != {"pre-tool-guards"} or not isinstance(agents["pre-tool-guards"], dict):
+    fail(".agents/hooks.json must contain only the pre-tool-guards object")
 
-check_handler_list(
-    agents["capabilities"].get("PreInvocation"),
-    [(f"{py} antigravity-pre-invocation", 15)],
-    label="Antigravity PreInvocation",
-)
-check_handler_list(
-    agents["stop-tests"].get("Stop"),
-    [(f"{py} stop-logic-tests", 1300)],
-    label="Antigravity Stop",
-)
 pre_tools = agents["pre-tool-guards"].get("PreToolUse")
 if not isinstance(pre_tools, list) or len(pre_tools) != 2:
     fail("Antigravity PreToolUse group count drifted")
@@ -99,20 +84,13 @@ command_hook(
     commands=[(f"{py} pre-tool-guards", 15)],
     label="Antigravity guard",
 )
+dispatch = f'bash "{git_root}/scripts/with-host-python.sh" python3 "{git_root}/tools/agent-config/codex_hook.py"'
+fallback = """printf '%s\\n' '{"decision":"deny","reason":"Project hook bootstrap failed"}'"""
 command_hook(
     pre_tools[1],
     matcher="^(?:run_command|Bash|exec_command|shell|shell_command|mcp__.*(?:github|GitHub).*)$",
-    commands=[(f'bash "{git_root}/tools/agent-hooks/require-pr-gates.sh"', 180)],
+    commands=[(f"{dispatch} AntigravityPR || {fallback}", 200)],
     label="Antigravity PR policy",
-)
-post_tools = agents["post-tool-formatter"].get("PostToolUse")
-if not isinstance(post_tools, list) or len(post_tools) != 1:
-    fail("Antigravity PostToolUse group count drifted")
-command_hook(
-    post_tools[0],
-    matcher="^(?:replace_file_content|write_to_file|apply_patch|Edit|MultiEdit|Write)$",
-    commands=[(f"{py} format", 30)],
-    label="Antigravity formatter",
 )
 
 core_files = {

@@ -1,14 +1,4 @@
 {
-  "capabilities": {
-    "PreInvocation": [
-      {
-        "type": "command",
-        "command": "python3 \"$(git rev-parse --show-toplevel)/tools/agent-hooks/agent_hook.py\" antigravity-pre-invocation",
-        "statusMessage": "Detecting repository capabilities",
-        "timeout": 15
-      }
-    ]
-  },
   "pre-tool-guards": {
     "PreToolUse": [
       {
@@ -27,36 +17,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"$(git rev-parse --show-toplevel)/tools/agent-hooks/require-pr-gates.sh\"",
+            "command": "bash \"$(git rev-parse --show-toplevel)/scripts/with-host-python.sh\" python3 \"$(git rev-parse --show-toplevel)/tools/agent-config/codex_hook.py\" AntigravityPR || printf '%s\\n' '{\"decision\":\"deny\",\"reason\":\"Project hook bootstrap failed\"}'",
             "statusMessage": "Checking current PR policy evidence",
-            "timeout": 180
+            "timeout": 200
           }
         ]
-      }
-    ]
-  },
-  "post-tool-formatter": {
-    "PostToolUse": [
-      {
-        "matcher": "^(?:replace_file_content|write_to_file|apply_patch|Edit|MultiEdit|Write)$",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 \"$(git rev-parse --show-toplevel)/tools/agent-hooks/agent_hook.py\" format",
-            "statusMessage": "Formatting edited first-party C and C++",
-            "timeout": 30
-          }
-        ]
-      }
-    ]
-  },
-  "stop-tests": {
-    "Stop": [
-      {
-        "type": "command",
-        "command": "python3 \"$(git rev-parse --show-toplevel)/tools/agent-hooks/agent_hook.py\" stop-logic-tests",
-        "statusMessage": "Running changed host logic tests",
-        "timeout": 1300
       }
     ]
   }

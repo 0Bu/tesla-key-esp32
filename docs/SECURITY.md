@@ -201,8 +201,10 @@ Enforced inventories include 53 unsigned payloads, 12 signed root firmware files
 | Protected publish | Both host jobs and both artifact joins complete. Compare inventories and bytes before `firmware-signing` key use. Stage regular single-link files with O_NOFOLLOW, rehash, sign, remove the key, then verify RSA-PSS pin and signed size. |
 | Deploy | Key-free consumer validates the named artifact, signature/layout/site bytes and live authority before Pages writes. [Served acceptance](DEVELOPMENT.md#served-pages-acceptance) |
 
-On main, producer and independent matrices assemble as soon as their own legs finish, alongside
-`logic-test` and `logic-harness`. The protected publisher and deploy alone use `filter: blob:none`.
+On main, the cumulative relevance decision admits the host suites for publication work.
+For publishing candidates, the producer and independent matrices run alongside both host jobs.
+Their artifact joins finish as soon as their respective legs pass. The protected publisher and
+deploy alone use `filter: blob:none`.
 They retain full history/tags and hydrate the exact source tree before any key use. No lazy Git
 fetch or history reads while the key is provisioned. Dev signing overlaps a pinned-image prefetch
 with key-free admission. Require a successful pull and refreshed source/version before provisioning.

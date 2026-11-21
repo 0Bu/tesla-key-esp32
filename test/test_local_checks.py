@@ -89,58 +89,47 @@ class LocalChecks(unittest.TestCase):
             self.run_checks()
         self.assertEqual(self.count(), 2)
 
-    def exercise_real_precommit(self, custom_exec=False):
-        self.runtime.stop()
-        hook_dir = self.root / ".git/hooks"
-        hook_dir.mkdir(exist_ok=True)
-        hook = hook_dir / "pre-commit"
-        shutil.copyfile(ROOT / ".githooks/pre-commit", hook)
-        hook.chmod(0o755)
-        wrapper = self.root / "scripts/with-host-python.sh"
-        shutil.copyfile(ROOT / "scripts/with-host-python.sh", wrapper)
-        wrapper.chmod(0o755)
-        coordinator = self.root / "scripts/run-local-checks.py"
-        coordinator.write_text("import importlib.util,os,pathlib,sys\n"
-            f"s=importlib.util.spec_from_file_location('checks',{str(SCRIPT)!r})\n"
-            "m=importlib.util.module_from_spec(s);s.loader.exec_module(m)\n"
-            "m.platform.system=lambda:'Linux'\n"
-            "assert sys.argv[1:]==['--require-all','--staged']\n"
-            "custom=os.environ.get('TEST_CUSTOM_GIT_EXEC_PATH')\n"
-            "if custom: assert os.environ['PATH'].split(os.pathsep)[0]==custom\n"
-            "else: assert os.environ['PATH']==os.environ['TEST_EXPECTED_PATH']\n"
-            "raise SystemExit(m.run(pathlib.Path.cwd(),staged=True))\n")
+    def test_real_precommit_checks_staged_paths_without_running_host_tests(self):
+        hook = ROOT / ".githooks/pre-commit"
         (self.root / "test").mkdir()
         (self.root / "test/probe.cpp").write_text("// Staged hook input.\n")
-        extra_tools = self.root / ".tmp/extra-tools"
-        extra_tools.mkdir(parents=True)
-        cmake = extra_tools / "cmake"
-        cmake.write_text("#!/bin/sh\nexit 0\n")
-        cmake.chmod(0o755)
-        test_path = str(extra_tools) + os.pathsep + os.environ["PATH"]
-        environment = {"PATH": test_path, "TEST_EXPECTED_PATH": test_path}
-        if custom_exec:
-            custom = self.root / ".tmp/custom-git-tools"
-            custom.mkdir()
-            environment.update(PATH=str(custom) + os.pathsep + test_path,
-                               GIT_EXEC_PATH=str(custom), TEST_CUSTOM_GIT_EXEC_PATH=str(custom))
-        self.git("add", ".")
-        with patch.dict(os.environ, environment), patch.object(checks.platform, "system", return_value="Linux"):
-            before = checks.runtime_identity(self.root)
-            with patch.dict(os.environ, {"PATH": os.environ["PATH"] + os.pathsep + str(self.root / ".tmp/other-tools")}):
-                self.assertNotEqual(checks.runtime_identity(self.root), before)
-            # Use the real shell/wrapper on both sides: it removes signing variables, and
-            # macOS shell startup removes DYLD variables even when the fixture set them empty.
-            subprocess.run([str(wrapper), "python3", str(coordinator), "--require-all", "--staged"],
-                           cwd=self.root, check=True, capture_output=True)
-            self.git("-c", f"core.hooksPath={hook_dir}", "-c", "commit.gpgsign=false", "-c", "user.name=Fixture",
-                     "-c", "user.email=fixture@example.invalid", "commit", "-qm", "Exercise the real pre-commit hook")
-        self.assertEqual(self.count(), 2 if custom_exec else 1)
+        self.git("add", "test/probe.cpp")
+        result = subprocess.run(["bash", str(hook)], cwd=self.root, capture_output=True,
+                                text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.count(), 0)
 
-    def test_real_precommit_reuses_normalized_git_path(self):
-        self.exercise_real_precommit()
+    def test_candidate_receipt_tracks_the_committed_docs_and_base(self):
+        for name in ("check-local.sh", "check-change-scope.py", "check-markdown-links.py"):
+            shutil.copy(ROOT / "scripts" / name, self.root / "scripts" / name)
+        (self.root / "esp-idf-toolchain.txt").write_text("fixture toolchain pin\n")
+        helpers = self.root / "tools/agent-hooks"
+        helpers.mkdir(parents=True)
+        shutil.copy(ROOT / "tools/agent-hooks/parallel-checks.sh", helpers / "parallel-checks.sh")
 
-    def test_real_precommit_preserves_custom_git_exec_path(self):
-        self.exercise_real_precommit(custom_exec=True)
+        def commit(subject):
+            self.git("add", ".")
+            self.git("-c", "core.hooksPath=/dev/null", "-c", "user.name=Fixture",
+                     "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false",
+                     "commit", "-qm", subject)
+
+        def handoff(option):
+            return subprocess.run(["bash", "scripts/check-local.sh", option], cwd=self.root,
+                                  capture_output=True, text=True, timeout=15)
+
+        commit("Add fixture tooling")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        (self.root / "README.md").write_text("# Docs candidate\n")
+        commit("Add fixture docs")
+        self.assertNotEqual(handoff("--verify-receipt").returncode, 0)
+        run = handoff("--candidate")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertIn("(docs)", run.stdout)
+        self.assertEqual(handoff("--verify-receipt").returncode, 0)
+        self.assertEqual(self.count(), 0)
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        self.assertNotEqual(handoff("--verify-receipt").returncode, 0)
+
 
     def test_real_precommit_nested_secret_names(self):
         # Run the shipped hook in a disposable Git index, with synthetic contents only.

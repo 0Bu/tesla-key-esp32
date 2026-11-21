@@ -10,6 +10,11 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 CORE = ROOT / "tools/agent-hooks/agent_hook.py"
+SAFETY_TOOLS = {
+    "run_command", "view_file", "replace_file_content", "write_to_file", "apply_patch",
+    "read", "edit", "multiedit", "write", "bash", "exec_command", "shell", "shell_command",
+}
+SHELL_TOOLS = {"run_command", "bash", "exec_command", "shell", "shell_command"}
 
 
 def invoke(command: list[str], payload: dict, timeout: int) -> subprocess.CompletedProcess:
@@ -24,23 +29,33 @@ def core(action: str, payload: dict, timeout: int = 15) -> str:
     return result.stdout
 
 
-def deny(reason: str) -> dict:
+def deny(reason: str, antigravity: bool = False) -> dict:
+    if antigravity:
+        return {"decision": "deny", "reason": reason}
     return {"hookSpecificOutput": {"hookEventName": "PreToolUse",
             "permissionDecision": "deny", "permissionDecisionReason": reason}}
 
 
 def dispatch(event: str, payload: dict) -> dict:
+    if event == "AntigravityPR":
+        call = payload.get("toolCall")
+        if not isinstance(call, dict) or not isinstance(call.get("name"), str) or not isinstance(call.get("args"), dict):
+            return deny("Malformed Antigravity PR hook payload.", antigravity=True)
+        result = invoke(["bash", str(ROOT / "tools/agent-hooks/require-pr-gates.sh")], payload, 180)
+        if result.returncode:
+            return deny("Project PR policy refused the requested action.", antigravity=True)
+        return {"decision": "allow"}
     if payload.get("hook_event_name") != event:
         raise ValueError("hook event does not match registration")
     if event == "PreToolUse":
         tool = payload.get("tool_name")
         if not isinstance(tool, str) or not tool or "tool_input" not in payload:
             return deny("Malformed Codex tool payload; project safety cannot be verified.")
-        neutral = json.loads((ROOT / ".agents/hooks.json").read_text())
-        groups = neutral["pre-tool-guards"]["PreToolUse"]
-        if not any(re.fullmatch(group["matcher"], tool) for group in groups):
+        name = tool.lower()
+        github_tool = re.fullmatch(r"mcp__.*github.*", name)
+        if name not in SAFETY_TOOLS and not github_tool:
             return deny("Unsupported Codex tool payload for the registered project safety hook.")
-        if re.fullmatch(groups[0]["matcher"], tool):
+        if name in SAFETY_TOOLS:
             output = core("pre-tool-guards", payload)
             verdict = json.loads(output) if output.strip() else {}
             specific = verdict.get("hookSpecificOutput", {})
@@ -48,7 +63,7 @@ def dispatch(event: str, payload: dict) -> dict:
                 return {"hookSpecificOutput": specific}
             if verdict:
                 raise ValueError("unexpected guard verdict")
-        if re.fullmatch(groups[1]["matcher"], tool):
+        if name in SHELL_TOOLS or github_tool:
             result = invoke(["bash", str(ROOT / "tools/agent-hooks/require-pr-gates.sh")], payload, 180)
             if result.returncode:
                 # The core emits redacted policy diagnostics, never the tool arguments.
@@ -85,7 +100,9 @@ def main() -> int:
     except Exception:
         # Codex continues on an ordinary hook crash. Convert every adapter failure to the
         # event's explicit blocking shape, without reflecting sensitive arguments or logs.
-        if event == "PreToolUse":
+        if event == "AntigravityPR":
+            output = deny("Project PR hook failed.", antigravity=True)
+        elif event == "PreToolUse":
             output = deny("Project safety hook failed; tool execution is blocked.")
         elif event == "Stop":
             output = {"decision": "block", "reason": "Project Stop hook failed; host checks remain unverified."}

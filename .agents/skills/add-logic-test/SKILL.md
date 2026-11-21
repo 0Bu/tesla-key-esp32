@@ -12,10 +12,7 @@ This project's local verification loop lives in [`test/`](../../../test/): IDF-f
 conversion cores live in [`main/logic/`](../../../main/logic/), the firmware **delegates** to them,
 and [`test/test_logic.cpp`](../../../test/test_logic.cpp) exercises them with a plain host compiler.
 Strict macOS browser coverage uses Linux Docker. The local handoff and protected publication
-require the strict host suite. The `Stop` handler in
-[`tools/agent-hooks/agent_hook.py`](../../../tools/agent-hooks/agent_hook.py)
-also checks local logic changes. This skill walks the exact
-steps to add a new unit without breaking those invariants.
+require the strict host suite. Complete it once on the committed integration candidate before push.
 
 **Single source of truth is the whole point:** the *one* implementation the test pins must be the
 one that runs. Never copy logic into a header and leave the original behind.
@@ -136,7 +133,7 @@ build_mock && ctest --test-dir build_mock --output-on-failure`. CMake is require
 suite; `scripts/run-fast-tests.sh --logic` remains the portable direct-compiler iteration loop.
 Compilation uses `-Wall -Wextra -Werror`, so warnings fail too.
 These commands alone do not replace the runner's additional contract, parity and browser checks.
-A red result blocks the Stop hook — fix it before claiming done.
+Fix any failures before recording a successful candidate check.
 
 ### 5. (If the value mirrors a compile-time constant) lock it with a `static_assert`
 
