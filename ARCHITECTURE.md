@@ -26,9 +26,9 @@ to keep animations running. A failed poll retains the frame, clears `feedOk` and
 countdown claims. Post-update verification polls separately at 1 s. Polling avoids per-client
 broadcast queues and blocked sends.
 
-Climate chips show cached overheat protection and defrost. The status feed has no
-climate-specific age. Charger input and other telemetry cannot establish live climate activity,
-climate power or an AC phase multiplier.
+The climate icon opens details for the last reported climate control, preconditioning, cabin
+overheat protection and defrost. The status feed has no climate-specific age. Charger input
+and other telemetry cannot establish live climate activity, climate power or an AC phase multiplier.
 [User controls](USER_GUIDE.md) · [OTA polling](#browser-scheduling-and-metadata-capture)
 
 ## Read-only telemetry and command correctness
@@ -168,7 +168,7 @@ margins, MQTTS margins or image acceptance.
 | Target | Configuration and evidence |
 |---|---|
 | esp32 | Separate IRAM. One controller connection, smaller NimBLE and WiFi RX pools, smaller diagnostic ring. Unpaired MQTT-off bench rose from 51200 B to above threshold for a manifest check. |
-| esp32s3 | Shared IRAM/DRAM. C3-derived tuning moved 23856 B out of IRAM and freed 24064 B of reserved DRAM span. A paired Ethernet board previously stayed pending at 53248 B for 600 s. A signed tuned preview held 90112 B and confirmed after 90 s. WiFi-only S3 was unmeasured. |
+| esp32s3 | Shared IRAM/DRAM. C3-derived tuning moved 23856 B out of IRAM and freed 24064 B of reserved DRAM span. A paired Ethernet board previously stayed pending at 53248 B for 600 s. A signed tuned preview held 90112 B and confirmed after 90 s. The diagnostic ring reserves 8 KiB less DRAM than the generic default. WiFi-only S3 was unmeasured. |
 | esp32c3 | Shared IRAM/DRAM. WiFi hot paths in flash and smaller controller/NimBLE/WiFi pools. Unpaired MQTT-off bench moved from 38912 B and failed checks to successful manifest reads. A smaller ACL/HCI variant downloaded an image. Pairing, confirmation and MQTTS were unmeasured. |
 | esp32c6 | Same entry threshold. No target allocator history recorded here. |
 
@@ -176,6 +176,13 @@ Three ordinary S3 cold-workload runs passed manifest intake at a naturally reach
 entry point (previous gate 61440 B). Pre-/post-TLS-context largest blocks were 32768/≥31744 B.
 The 103 s quiet window stayed at 59392 B at sampled points. This is a manifest-only operating
 point. Image writing, probation and transient between-sample margins need separate evidence.
+
+On a paired Ethernet S3 running v1.6.9, a warm metadata check started at 90112 B.
+After TLS closure and Operation reclamation, the next entry sample measured 57344 B
+despite 139920 B of free INTERNAL memory. The install and later checks were refused
+before starting a worker. The 8 KiB reduction in static diagnostic storage gives
+the heap more room. Its effect on the largest block after a warm check must be
+measured on hardware. The local `/diag` buffer retains fewer lines.
 
 ### TLS phases and diagnostic checkpoints
 
