@@ -38,7 +38,7 @@ class LocalChecks(unittest.TestCase):
         self.runner.chmod(0o755)
         subprocess.run(["git", "init", "-q", str(self.root)], check=True)
         self.git("add", ".")
-        self.git("-c", "core.hooksPath=/dev/null", "-c", "user.name=Fixture",
+        self.git("-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "-c", "user.name=Fixture",
                  "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture")
         self.runtime = patch.object(checks, "runtime_identity", return_value="fixed-runtime")
         self.runtime.start()
@@ -130,6 +130,23 @@ class LocalChecks(unittest.TestCase):
         self.git("update-ref", "refs/remotes/origin/main", "HEAD")
         self.assertNotEqual(handoff("--verify-receipt").returncode, 0)
 
+    def test_guardian_requires_definite_group_absence_after_a_permission_error(self):
+        class ReapedProcess:
+            pid = 42
+
+            def wait(self, timeout):
+                return 0
+
+        for name in ("f137_process", "identity_recovery_process"):
+            spec = importlib.util.spec_from_file_location(name, ROOT / "test" / (name + ".py"))
+            guardian = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(guardian)
+            with self.subTest(guardian=name), patch.object(
+                guardian.os, "killpg", side_effect=[None, PermissionError, ProcessLookupError]
+            ) as signal_group:
+                result = guardian._cleanup(ReapedProcess())
+                self.assertTrue(result["groupAbsent"])
+                self.assertEqual(signal_group.call_count, 3)
 
     def test_real_precommit_nested_secret_names(self):
         # Run the shipped hook in a disposable Git index, with synthetic contents only.
