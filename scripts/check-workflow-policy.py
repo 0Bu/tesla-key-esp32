@@ -611,7 +611,38 @@ def validate(root: Path) -> None:
                 and 'case "$FIRMWARE_RELEVANT" in yes|no) ;; *) exit 1 ;; esac' in build[name]
                 and "./scripts/release-relevance.sh" not in build[name],
                 f"build.yml:{name} must consume the prepared firmware decision")
-    host_model = workflow_model(root / ".github/workflows/build.yml", contents["build.yml"])["jobs"]
+    main_workflow = workflow_model(root / ".github/workflows/build.yml", contents["build.yml"])
+    host_model = main_workflow["jobs"]
+    require(main_workflow.get("concurrency") == {
+        "group": "build-${{ github.ref }}",
+        "cancel-in-progress": "${{ github.ref != 'refs/heads/main' }}",
+    }, "build.yml: main publication must remain serialized without cancellation in progress")
+    dev_push = "github.event_name == 'push' && github.ref == 'refs/heads/main'"
+    initial_watch = [
+        step for step in host_model["prepare"]["steps"]
+        if step.get("name") == "Stop superseded Dev preparation"
+    ]
+    require(initial_watch == [{
+        "name": "Stop superseded Dev preparation", "if": "${{ " + dev_push + " }}",
+        "run": "python3 scripts/run-current-dev.py true",
+    }] and host_model["prepare"]["steps"][1] == initial_watch[0],
+        "build.yml: Dev preparation must check main before version selection")
+    watched_builds = {
+        "build-target": "Build target",
+        "build": "Build all targets and exercise reproducibility plus disposable-key release contracts",
+        "independent-rebuild-target": "Independently rebuild the target",
+    }
+    watch_args = "-e GITHUB_EVENT_NAME -e GITHUB_REF -e GITHUB_REPOSITORY -e GITHUB_SHA"
+    watch_prefix = "${{ " + dev_push + " && 'python3 ./scripts/run-current-dev.py' || '' }} "
+    for job, label in watched_builds.items():
+        watched_steps = [step for step in host_model[job]["steps"] if step.get("name") == label]
+        require(
+            len(watched_steps) == 1
+            and watched_steps[0].get("with", {}).get("extra_docker_args") ==
+            "${{ " + dev_push + " && '" + watch_args + "' || '' }}"
+            and watched_steps[0]["with"].get("command", "").startswith(watch_prefix),
+            f"build.yml:{job} must watch Dev builds using only GitHub event and source metadata",
+        )
     require(" ".join(host_model["prepare"].get("if", "").split()) == PREVIEW_OR_NON_PR,
             "build.yml:prepare must run on PRs only for a same-repository signed preview")
     require(job_has_need(build["build-target"], "prepare"),
@@ -666,6 +697,10 @@ def validate(root: Path) -> None:
     for name in ("logic-test", "logic-harness"):
         require(all(not ({"if", "continue-on-error"} & set(step)) for step in host_model[name]["steps"]),
                 f"build.yml:{name}: all publication host steps must run and propagate failure")
+        require(host_model[name].get("defaults") == {
+            "run": {"shell": "python3 scripts/run-current-dev.py bash -e {0}"},
+        } and all("shell" not in step for step in host_model[name]["steps"]),
+            f"build.yml:{name} must watch every Dev host command")
     full_steps = [step for step in host_model["logic-test"]["steps"] if step.get("name") == "Run host-side logic tests"]
     require(len(full_steps) == 1 and full_steps[0].get("run") == "./scripts/run-mock-tests.sh --require-all",
             "build.yml:logic-test must run the fail-closed host gate")
@@ -746,11 +781,17 @@ def validate(root: Path) -> None:
     join = build["independent-rebuild"]
     for label, job in (("independent-rebuild-target", leg), ("independent-rebuild", join)):
         job_refs = re.findall(r"^\s+ref:\s*([^\n#]+?)\s*$", job, re.MULTILINE)
+        job_condition = (
+            "github.ref == 'refs/heads/main' "
+            "&& (github.event_name == 'push' || github.event_name == 'workflow_dispatch') "
+            "&& needs.prepare.outputs.mode != 'test'"
+        )
+        if label == "independent-rebuild":
+            job_condition += " && needs.prepare.outputs.firmware == 'yes'"
         require(
             job_refs == ["${{ github.sha }}"]
             and "persist-credentials: false" in job
-            and "(github.event_name == 'push' || github.event_name == 'workflow_dispatch')" in job
-            and "github.ref == 'refs/heads/main'" in job
+            and " ".join(host_model[label].get("if", "").split()) == job_condition
             and "environment:" not in job
             and "contents: write" not in job
             and "actions/cache@" not in job,
@@ -1591,6 +1632,15 @@ def self_test(root: Path) -> None:
     )
     current_renovate_action = renovate_actions[0]
     mutations = [
+        ("cancel-protected-main", "build.yml", "  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}",
+         "  cancel-in-progress: true", "main publication must remain serialized"),
+        ("disabled-dev-host-watch", "build.yml", "shell: python3 scripts/run-current-dev.py bash -e {0}",
+         "shell: bash", "must watch every Dev host command"),
+        ("dev-watch-extra-container-env", "build.yml", "'-e GITHUB_EVENT_NAME",
+         "'-e OTHER_VALUE -e GITHUB_EVENT_NAME", "must watch Dev builds using only GitHub"),
+        ("watcher-required-on-old-pr", "build.yml",
+         "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'python3 ./scripts/run-current-dev.py' || '' }}",
+         "python3 ./scripts/run-current-dev.py", "must watch Dev builds using only GitHub"),
         ("publication-filter-missing", "build.yml", "          filter: blob:none\n", "", "publication checkout must retain exact source/full history"),
         ("publication-filter-changed", "build.yml", "          filter: blob:none\n", "          filter: tree:0\n", "publication checkout must retain exact source/full history"),
         ("publication-history-shallow", "build.yml", "          fetch-depth: 0\n          filter: blob:none", "          fetch-depth: 1\n          filter: blob:none", "publication checkout must retain exact source/full history"),
