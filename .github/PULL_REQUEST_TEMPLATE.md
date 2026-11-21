@@ -18,8 +18,8 @@ record the checks completed locally before the push and note inapplicable or une
 <!-- Name the reviewed baseline, focused/full scope and affected consumers; full audits apply to migrations, target/dependency/trust changes and unknown baselines. -->
 
 <!-- Include the full candidate and base SHAs, the command and result, and any applicable per-target evidence. -->
-- [ ] `scripts/check-local.sh --candidate` passed before push (repository, strict host/browser, protocol and Linux sanitizer checks)
-- [ ] Added `--firmware` for firmware-relevant changes (pinned four-target build, size/stack, reproducibility and disposable-key signing)
+- [ ] `scripts/check-local.sh --candidate` passed before push. Record the chosen profile and the checks actually completed.
+- [ ] For the firmware profile, record the pinned four-target build, size/stack, reproducibility and disposable-key signing results.
 - [ ] Every raised size or stack baseline entry is listed here with its measured delta and cause (copy the update tool's change lines) — N/A when no maximum was raised
 
 ## Checklist

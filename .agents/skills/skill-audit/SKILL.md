@@ -35,7 +35,7 @@ CI, hardware evidence or publication authorization.
    synchronization limits rather than certifying stale content.
    **State reviewed SHA in report, together with baseline evidence.**
 1. Discover every canonical `.agents/skills/*/SKILL.md` and reviewer; do not hardcode the inventory.
-   Check native `.codex/` generated registrations with `sync-codex.mjs --check`, effective
+   Check generated registrations for Codex and Antigravity with `sync-codex.mjs --check`, effective
    primary-checkout hook trust and parent runtime overrides. Global host/cluster skills are outside this project audit.
 2. Extract claims about paths, numbers, targets, pins, hooks, commands, permissions and evidence.
    Verify against source/config/scripts and owning docs with `rg` and safe host checks. The library
@@ -77,17 +77,17 @@ workflow scripts and [deep document owners](../../../docs/README.md), not histor
   evidence; separate vehicle/cluster scope.
 - **`$ci-heal`**: the user's own invocation authorizes only attested stamping and fix pushes (the
   AGENTS.md exception); script never authors commits/reviews; explicit gate attestations, green current-head
-  CI (`build` successful or skipped on an ordinary PR, no other check queued, cancelled or failed; a lone failing
+  CI (`build` successful or skipped on an ordinary PR; a lone failing
   `current-head-records` counts as records pending), local HEAD equality, mergeability/relevance
   and unchanged-head check before merge-readiness stamping, then a passing new
   `current-head-records` run (or, when the stamp leaves the PR body unchanged and so starts no run,
-  a passing latest run) and all checks green before readiness or merge; Phase 3 pre-push records attest the
+  a passing latest run) and required checks green before readiness or merge; Phase 3 pre-push records attest the
   locally checked and independently reviewed fix commit; iteration cap, actual red/green selftests and separate
   merge authority.
 - **`$vehicle-command-audit`**: upstream/local/pinned-library feasibility, lexical full patch chain,
   resolved upstream paths, role restrictions, replay/authentication/request binding and clock domains.
 - **`$add-logic-test`**: firmware delegation or shipped-code parity with negative control, real owner
-  function definition/invocation, repeated-cycle boundary tests, Stop-hook/CI wiring and static asserts.
+  function definition/invocation, repeated-cycle boundary tests, candidate/CI wiring and static asserts.
 - **`$mock-test`**: current fast/mock/sanitizer entry points, strict mode and host-only evidence.
 - **`$pr-hygiene`**: independent privacy/English gate on title/body/all commits/touched docs/comments;
   create/push/merge requirement, redacted findings and current-head invalidation.

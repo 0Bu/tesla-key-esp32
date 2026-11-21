@@ -83,13 +83,17 @@ build. Effective-build checks compare emitted HTML and gzip. Tests cover increme
 ```bash
 scripts/check-local.sh                # host, repository policy, BLE protocol and Linux sanitizers
 scripts/check-local.sh --firmware     # also build, sign with a disposable key and compare all four targets
-scripts/check-local.sh --firmware --candidate  # require a clean committed firmware candidate
+scripts/check-local.sh --candidate    # select checks for the clean committed push candidate
+scripts/check-local.sh --verify-receipt # confirm the push receipt without retesting
 ```
 
 Start with focused [host/runtime/browser checks](../test/README.md#run-it). The handoff runs strict
 host checks beside repository policy and the BLE harness, then serializes sanitizers and firmware.
 On macOS the sanitizer path uses pinned Docker. Run the applicable complete handoff before pushing
-and record the tested source and base SHAs. See [PR review policy](../AGENTS.md#pr-and-review) and
+and record the tested source and base SHAs. The candidate command requires current `origin/main`
+to be an ancestor. Refresh it before running checks. It selects link checks for prose-only
+changes and four-target verification for publication inputs. The push receipt binds commit, base,
+profile, and the pinned toolchain file. See [PR review policy](../AGENTS.md#pr-and-review) and
 [protected publication](SECURITY.md#release-pipeline-and-trust-boundaries).
 
 PRs changing only `.github/workflows/renovate.yaml` and/or `.github/renovate.json` need no manual
@@ -168,18 +172,15 @@ uses the same modes (`check-stack-usage.py --observed-dir dist --write-baseline 
 raise|tighten`) and lists every changed entry; a PR lists each raised entry with its cause.
 Stack tighten forbids growth and newly reviewed frames or translation units; it permits removed
 units and removed or below-threshold frames, then lowers the remaining maxima to measurements.
-`check-firmware-size.sh` builds all four targets by default. After PR policy passes, the
-[Git pre-push hook](../.githooks/pre-push) runs the vehicle-command sync check and the
-incremental size and stack check concurrently when both apply. Any failure rejects the push.
-The incremental check builds the four targets one at a time in the pinned ESP-IDF container
-because they share a component workspace. `PRE_PUSH_TARGETS` can narrow the incremental check.
+`check-firmware-size.sh` builds all four targets by default. The
+[Git pre-push hook](../.githooks/pre-push) admits only the current feature branch and verifies the
+local receipt. The pinned local candidate build owns the full size, stack and protocol checks.
 The full build additionally checks dependencies, partitions, otadata, compiler semantics,
 artifact identity, reproducibility and signing. Stack reports reject unbounded dynamic frames and
 frames over 4096 B. Runtime margin also depends on call depth.
 
-From a feature branch, invoke `.githooks/pre-push origin < /dev/null` to run the hook manually
-against the current branch without pushing. The manual check compares the branch with
-`origin/main` when available. Run `scripts/install-git-hooks.sh` to configure Git to use the
+From a feature branch, run `scripts/check-local.sh --verify-receipt` to verify the local evidence
+without pushing. Run `scripts/install-git-hooks.sh` to configure Git to use the
 repository hooks from the active worktree on push.
 
 ### ESP-IDF migration inputs
@@ -403,7 +404,8 @@ The publication classifier recognizes bounded literal reads so quoted search/que
 publication commands without being treated as commands themselves. Use `rg --no-config` with
 literal arguments and the supported ordinary search options; preprocessors, hostname commands,
 unquoted globs, expansions, wrappers and pipelines retain conservative classification. GitHub CLI
-exceptions require a supported `pr`/`run` read command with active `--json` and `--jq`/`-q` options.
+exceptions cover a supported `pr`/`run` read command with active `--json` and `--jq`/`-q` options,
+or a standalone `gh api --method GET repos/OWNER/REPO/RESOURCE` with an optional literal formatter.
 For example, run `rg --no-config -n 'git push|gh pr merge' AGENTS.md` as a separate shell call.
 The credential guard uses the same literal-read classification only for its stdin-shell check;
 all secret-path, credential-output and partition checks still apply.

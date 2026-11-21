@@ -10,5 +10,5 @@ git config core.hooksPath .githooks
 
 echo "Git hooks configured successfully: core.hooksPath set to .githooks"
 echo "Active hooks:"
-echo "  - pre-commit: secrets, partitions.csv, -Os flag, pure-logic includes, web security, host tests"
-echo "  - pre-push:   main branch protection, PR policy gates, vehicle-command sync, incremental firmware size/stack baseline check (all targets)"
+echo "  - pre-commit: staged secrets, partition, compiler, logic and web safeguards"
+echo "  - pre-push:   protected refs and local candidate receipt"

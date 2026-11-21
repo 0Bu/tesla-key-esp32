@@ -81,6 +81,7 @@ def _cleanup(process):
         details['reaped'] = True
     except BaseException as error:
         details['errors'].append('reap:' + type(error).__name__)
+    absence_permission_error = False
     while time.monotonic() < deadline:
         try:
             os.killpg(process.pid, 0)
@@ -88,13 +89,16 @@ def _cleanup(process):
             details['groupAbsent'] = True
             break
         except PermissionError:
-            details['errors'].append('group-absence:PermissionError')
-            break
+            # Darwin can briefly deny a zero-signal probe while killed descendants
+            # are still being reaped. Only an observed ESRCH proves quiescence.
+            absence_permission_error = True
         except BaseException as error:
             details['errors'].append('group-absence:' + type(error).__name__)
             break
         time.sleep(0.01)
     if not details['groupAbsent']:
+        if absence_permission_error:
+            details['errors'].append('group-absence:PermissionError')
         details['errors'].append('owned-group-absence-unconfirmed')
     return details
 

@@ -53,9 +53,9 @@ host, protocol, Linux sanitizers and the pinned four-target disposable-signing/r
 Omit `--firmware` only when firmware compilation is not applicable.
 
 Use `scripts/with-host-python.sh python3 scripts/run-local-checks.py --require-all` to share one
-successful full local host run between iteration, Stop and strict pre-commit checks. `--force`
+successful full local host run between iteration and the candidate handoff. `--force`
 reruns it. The coordinator binds actual working-tree inputs and runtime and never certifies CI,
-review, signing or hardware. Pre-commit disables reuse for a working tree differing from the index.
+review, signing or hardware.
 See [Development](../../../docs/DEVELOPMENT.md#validate-a-change) for limits and cancellation.
 
 For focused local iteration, use `run-mock-tests.sh --require-all --profile runtime` or

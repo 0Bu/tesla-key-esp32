@@ -1,207 +1,66 @@
 #!/usr/bin/env bash
-# Git pre-push hook for tesla-key-esp32.
-# Enforces PR branch policy, checklist evidence, and the firmware size and stack-usage baselines
-# (all four targets) before pushing to remote. CI re-runs the same gates, but only after several
-# minutes of compilation, so anything caught here saves a whole push/wait/fix cycle.
+# Admission only. Build and test the committed integration candidate before invoking Git.
 set -euo pipefail
 
 root="$(git rev-parse --show-toplevel)"
 cd "$root"
 
-lib="$root/tools/agent-hooks/pr-gate-lib.sh"
-# shellcheck source=/dev/null
-if [ ! -f "$lib" ] || ! . "$lib" 2>/dev/null; then
-    echo "BLOCKED by pre-push: runner-neutral PR gate library could not be loaded: $lib" >&2
-    exit 1
-fi
+block() { echo "BLOCKED by pre-push: $*" >&2; exit 1; }
 
-# Allow emergency bypass if explicitly requested
-if [ "${AGENT_PR_GATES_SKIP:-0}" = "1" ]; then
-    echo "WARNING: AGENT_PR_GATES_SKIP=1 set; bypassing pre-push PR policy checks." >&2
-    exit 0
-fi
-
-remote_name="${1:-origin}"
+branch="$(git symbolic-ref --quiet --short HEAD)" ||
+    block 'cannot determine branch from detached HEAD'
+head="$(git rev-parse HEAD)"
+remote="${1:-origin}"
 remote_url="${2:-}"
+zero_sha=0000000000000000000000000000000000000000
 
-# Read standard pre-push stdin: <local_ref> <local_sha> <remote_ref> <remote_sha>
-has_firmware_changes=0
-has_vehicle_changes=0
-zero_sha="0000000000000000000000000000000000000000"
-
-updates=()
-if [ ! -t 0 ]; then
-  while read -r local_ref local_sha remote_ref remote_sha; do
-    updates+=("$local_ref $local_sha $remote_ref $remote_sha")
-  done
-fi
-
-current_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
-
-# If invoked without stdin lines (e.g. manual verification)
-if [ "${#updates[@]}" -eq 0 ]; then
-  if [ -z "$current_branch" ] || [ "$current_branch" = "HEAD" ]; then
-    echo "BLOCKED by pre-push: cannot determine branch to verify from detached HEAD." >&2
-    exit 1
-  fi
-  if [ "$current_branch" = "main" ]; then
-    echo "BLOCKED by pre-push: direct push to main branch is prohibited; open a pull request instead." >&2
-    exit 1
-  fi
-  head_sha="$(git rev-parse HEAD 2>/dev/null || echo "")"
-  updates+=("refs/heads/$current_branch $head_sha refs/heads/$current_branch $zero_sha")
-fi
-
-head_sha="$(git rev-parse HEAD 2>/dev/null || echo "")"
-
-if [ "${#updates[@]}" -gt 0 ]; then
-for update in "${updates[@]}"; do
-  read -r local_ref local_sha remote_ref remote_sha <<< "$update"
-
-  # Skip non-protected branch deletions for PR policy and firmware diff
-  if [[ "$local_sha" == "$zero_sha" ]]; then
-    if [[ "$remote_ref" != refs/heads/* ]]; then
-      echo "BLOCKED by pre-push: deletion of non-branch ref '$remote_ref' is prohibited." >&2
-      exit 1
-    fi
+updates=0
+verify=0
+while read -r local_ref local_sha remote_ref _remote_sha extra; do
+    updates=$((updates + 1))
+    [ "$updates" = 1 ] && [ -z "$extra" ] ||
+        block 'push exactly one branch at a time'
     case "$remote_ref" in
-      refs/heads/main|refs/heads/master|refs/heads/gh-pages|refs/heads/HEAD)
-        echo "BLOCKED by pre-push: deletion of protected branch '$remote_ref' is prohibited." >&2
-        exit 1
-        ;;
+        refs/heads/main|refs/heads/master|refs/heads/gh-pages|refs/heads/HEAD)
+            block "destination $remote_ref is protected"
+            ;;
+        refs/heads/*) ;;
+        *) block 'only branch pushes and branch deletions are supported' ;;
     esac
-    continue
-  fi
-
-  # Block any attempt to update destination main or protected branches
-  if [[ "$remote_ref" == "refs/heads/main" || "$remote_ref" == "main" ]]; then
-    echo "BLOCKED by pre-push: direct push to destination main branch is prohibited; open a pull request instead." >&2
-    exit 1
-  fi
-  case "$remote_ref" in
-    refs/heads/master|master|refs/heads/gh-pages|gh-pages|refs/heads/HEAD|HEAD)
-      echo "BLOCKED by pre-push: direct push to destination protected branch '$remote_ref' is prohibited; open a pull request instead." >&2
-      exit 1
-      ;;
-  esac
-
-  # Block any attempt to push from local main branch
-  if [[ "$local_ref" == "refs/heads/main" || "$local_ref" == "main" || "$local_ref" == "refs/heads/HEAD" || "$local_ref" == "HEAD" ]]; then
-    echo "BLOCKED by pre-push: direct push to main branch is prohibited; open a pull request instead." >&2
-    exit 1
-  fi
-
-  # Require pushed local commit to match current local HEAD
-  if [ -n "$head_sha" ] && [ "$local_sha" != "$head_sha" ]; then
-    echo "BLOCKED by pre-push: pushed ref '$local_ref' commit ($local_sha) does not match local HEAD ($head_sha)." >&2
-    exit 1
-  fi
-
-  # Determine diff base for firmware checks
-  if [[ "$remote_sha" == "$zero_sha" ]]; then
-    # New remote branch: compare against origin/main or HEAD~1
-    if git rev-parse --verify origin/main >/dev/null 2>&1; then
-      diff_range="origin/main...$local_sha"
-    elif git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
-      diff_range="HEAD~1...$local_sha"
-    else
-      echo "BLOCKED by pre-push: unable to determine diff base for new branch." >&2
-      exit 1
+    if [ "$local_sha" != "$zero_sha" ]; then
+        [ "$branch" != main ] && [ "$branch" != master ] &&
+            [ "$local_sha" = "$head" ] &&
+            [ "$remote_ref" = "refs/heads/$branch" ] &&
+            { [ "$local_ref" = "refs/heads/$branch" ] || [ "$local_ref" = HEAD ]; } ||
+            block 'push only the verified HEAD to the current feature branch'
+        verify=1
     fi
-  else
-    diff_range="$remote_sha...$local_sha"
-  fi
+done
+[ "$updates" -gt 0 ] || exit 0
 
-  if ! changed_files="$(git diff --name-only "$diff_range" 2>/dev/null)"; then
-    echo "BLOCKED by pre-push: unable to determine diff for range '$diff_range'." >&2
-    exit 1
-  fi
-  if printf '%s\n' "$changed_files" | gate_firmware_size_relevant; then
-    has_firmware_changes=1
-  fi
-  if printf '%s\n' "$changed_files" | gate_vehicle_command_relevant; then
-    has_vehicle_changes=1
-  fi
+[ "$remote" = origin ] || block 'push only to origin'
+# shellcheck source=/dev/null
+. "$root/tools/agent-hooks/pr-gate-lib.sh"
+GATE_PROJ="$root"
+gate_origin_is_github && [ "$(gate_repo_slug)" = '0Bu/tesla-key-esp32' ] ||
+    block 'origin must be github.com/0Bu/tesla-key-esp32'
+if [ -n "$remote_url" ]; then
+    [ "$remote_url" = "$(git remote get-url --push origin)" ] ||
+        block 'Git push destination differs from the configured origin'
+fi
 
+if [ "$verify" = 1 ]; then
+    scripts/check-local.sh --verify-receipt
+    # Keep publication hygiene before changing the head of an existing public PR.
+    python3 - "$root" "$branch" <<'PY' | bash tools/agent-hooks/require-pr-gates.sh
+import json
+import shlex
+import sys
 
-  # 2. Check PR policy gates using require-pr-gates.sh
-  local_branch="${local_ref#refs/heads/}"
-  remote_branch="${remote_ref#refs/heads/}"
-  if [ "$local_branch" = "$remote_branch" ]; then
-    push_cmd="git push $remote_name $remote_branch"
-  else
-    push_cmd="git push $remote_name $local_branch:$remote_branch"
-  fi
-
-  push_payload="$(python3 - "$root" "$push_cmd" <<'PY'
-import json, sys
-root, cmd = sys.argv[1], sys.argv[2]
 print(json.dumps({
-    "conversationId": "git-cli",
-    "workspacePaths": [root],
-    "toolCall": {
-        "name": "run_command",
-        "args": {
-            "CommandLine": cmd,
-            "Cwd": root
-        }
-    }
+    "tool_name": "exec_command",
+    "cwd": sys.argv[1],
+    "tool_input": {"cmd": "git push origin " + shlex.quote(sys.argv[2])},
 }))
 PY
-)"
-
-  if ! printf '%s' "$push_payload" | bash "$root/tools/agent-hooks/require-pr-gates.sh"; then
-      echo "BLOCKED by pre-push: PR policy gates not satisfied for '$push_cmd' (target '$remote_ref' @ $local_sha)." >&2
-      echo "Ensure checklist gates (\$skill-audit, \$pr-hygiene) are checked in your PR body before pushing." >&2
-      echo "To bypass in an emergency: AGENT_PR_GATES_SKIP=1 git push ..." >&2
-      exit 1
-  fi
-done
 fi
-
-# 3. After PR policy passes, run the applicable local checks. The protocol check only reads
-#    repository sources, so it can overlap the one incremental firmware build.
-check_vehicle_protocol() {
-  echo "🔍 Vehicle-command protocol changes detected in push."
-  echo "   Running pre-push vehicle command sync validation..."
-  if ! python3 "$root/scripts/check-vehicle-command-sync.py" --check; then
-    echo "" >&2
-    echo "❌ Push rejected: vehicle-command protocol invariants violated!" >&2
-    echo "   Run 'python3 scripts/check-vehicle-command-sync.py --check' to inspect." >&2
-    return 1
-  fi
-  echo "✅ Pre-push vehicle command sync check passed."
-}
-
-# The incremental build uses the shared ESP-IDF source tree, building one target at a time.
-check_firmware_baselines() {
-  echo "🔍 Firmware-relevant changes detected in push."
-  echo "   Running incremental firmware size/stack baseline pre-check (${PRE_PUSH_TARGETS:-all targets})..."
-
-  local target_args=() pre_push_target
-  for pre_push_target in ${PRE_PUSH_TARGETS:-}; do
-    target_args+=(--target "$pre_push_target")
-  done
-
-  if ! "$root/scripts/precheck-firmware.sh" ${target_args[@]+"${target_args[@]}"}; then
-    echo "" >&2
-    echo "❌ Push rejected: firmware size or stack usage exceeds the reviewed baseline!" >&2
-    echo "   Run './scripts/precheck-firmware.sh' to reproduce (CI's size and stack gates only)." >&2
-    echo "   If this growth was intentional and reviewed, follow the baseline-regeneration steps the" >&2
-    echo "   precheck printed above (stack baseline first, then size) and commit the result." >&2
-    return 1
-  fi
-  echo "✅ Pre-push firmware size/stack check passed."
-}
-
-if [[ "$has_vehicle_changes" -eq 1 && "$has_firmware_changes" -eq 1 ]]; then
-  # shellcheck source=/dev/null
-  . "$root/tools/agent-hooks/parallel-checks.sh"
-  run_parallel_checks check_vehicle_protocol check_firmware_baselines
-elif [[ "$has_vehicle_changes" -eq 1 ]]; then
-  check_vehicle_protocol
-elif [[ "$has_firmware_changes" -eq 1 ]]; then
-  check_firmware_baselines
-fi
-
-exit 0

@@ -41,19 +41,21 @@ where the evidence names the local check or independent review completed for the
   check such as `node tools/agent-config/check.mjs` is **not** a `$skill-audit`, and a green CI
   run is **not** a `$project-review`. Without an attestation the run ends with exit code 3 and the
   exact `--attest` flags that are missing.
+- Use this diagnostic workflow for a failed PR. For an ordinary verified contribution use
+  [`$deploy`](../deploy/SKILL.md#record-local-results-and-push).
 - **Readiness is about one commit.** Merge-readiness stamping, `READY FOR MERGE` and `--auto-merge` all require
   green CI on the PR head, local `HEAD` equal to that head, a clean working tree, the PR reporting
   `MERGEABLE`, and an unchanged head immediately before the body edit. Green CI means, for the
-  latest run of every check at that head (earlier runs, such as the records failure before
-  stamping, are superseded), `build` completed successfully or skipped, and no other check queued,
-  running, cancelled or failed. Ordinary PRs skip the remote build and require the records check.
+  latest required checks at that head, `build` completed successfully or skipped and the records
+  check passed. CodeQL and preview cleanup are reported separately. Ordinary PRs skip the remote
+  build and require the records check.
   Any mismatch stops the run before any merge-readiness record is stamped. `pr-policy /
   current-head-records` validates the records this workflow stamps, so a failure of that check
   alone counts as "records pending", not as red CI. If local `HEAD` then carries a committed review
   fix that descends from the PR head, ci-heal pushes it through Phase 3 and stops with exit code 3:
   start a new run against the confirmed remote head using that commit's existing attestations.
   After stamping, `READY FOR MERGE` and
-  `--auto-merge` also require a new run of that check to pass and every check to be green on the
+  `--auto-merge` also require a new run of that check to pass and the required checks to be green on the
   unchanged head. A stamp that leaves the body unchanged (the records were already current)
   starts no new run of that check, so the latest existing run of it must have passed instead.
   A failed stamp, push or merge stops the run. Phase 3 pre-push records instead
@@ -103,7 +105,7 @@ flowchart TD
    script refuses otherwise.
 2. **Watch CI Workflow Status**:
    ```bash
-   gh pr checks <numeric-pr> --watch
+   gh pr checks <numeric-pr> --required --watch
    ```
 
 ---
@@ -186,9 +188,9 @@ scripts/ci-heal.sh --pr <numeric-pr> \
   --attest pr-hygiene="<evidence>"    # plus feature-docs / vehicle-command-audit when relevant
 ```
 
-With every other check green, `MERGEABLE`, local `HEAD` equal to the PR head and every needed gate
+With the other required check green, `MERGEABLE`, local `HEAD` equal to the PR head and every needed gate
 attested, ci-heal stamps the records, waits until a new `current-head-records` run passes (or,
-when the body did not change, checks that the latest run passed) and every check is green on the
+when the body did not change, checks that the latest run passed) and the required checks are green on the
 same head, and only then prints the exact, single canonical squash merge command:
 
 ```bash

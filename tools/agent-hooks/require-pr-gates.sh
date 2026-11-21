@@ -37,6 +37,9 @@ files_file="${AGENT_CHANGED_FILES_FILE:-}"
 selector="${AGENT_PR_SELECTOR:-}"
 requested_root="${AGENT_PROJECT_DIR:-${PROJECT_DIR:-$canonical_root}}"
 payload_file=""
+event_head=""
+event_base=""
+pr=""
 force_check="${AGENT_POLICY_CI:-0}"
 allow_discovery=1
 [ "${AGENT_POLICY_CI:-0}" = 1 ] && allow_discovery=0
@@ -49,6 +52,16 @@ while [ "$#" -gt 0 ]; do
     --pr) [ "$#" -ge 2 ] || exit 2; selector="$2"; force_check=1; shift 2 ;;
     --project-dir) [ "$#" -ge 2 ] || exit 2; requested_root="$2"; shift 2 ;;
     --payload-file) [ "$#" -ge 2 ] || exit 2; payload_file="$2"; shift 2 ;;
+    --expected-head)
+      [ "$#" -ge 2 ] && printf '%s' "$2" | grep -Eq '^[a-f0-9]{40}$' || exit 2
+      event_head="$2"
+      shift 2
+      ;;
+    --expected-base)
+      [ "$#" -ge 2 ] && printf '%s' "$2" | grep -Eq '^[a-f0-9]{40}$' || exit 2
+      event_base="$2"
+      shift 2
+      ;;
     --check) force_check=1; shift ;;
     --no-discovery) allow_discovery=0; shift ;;
     *) echo "BLOCKED: unknown PR-gate argument: $1" >&2; exit 2 ;;
@@ -243,6 +256,13 @@ if [ "$force_check" = 1 ] && [ -z "$kind" ]; then
 fi
 [ -n "$kind" ] || exit 0
 
+if [ -n "$event_base" ]; then
+  [ "$kind" = check ] && [ -n "$selector" ] && [ -n "$event_head" ] &&
+    [ "$(gate_full_head_sha)" = "$event_base" ] || {
+    echo "BLOCKED: event base must match the trusted policy checkout." >&2; exit 2
+  }
+fi
+
 if ! gate_origin_is_github || [ "$(gate_repo_slug)" != "0Bu/tesla-key-esp32" ]; then
   echo "BLOCKED: protected PR actions require the exact github.com/0Bu/tesla-key-esp32 origin." >&2
   exit 2
@@ -315,7 +335,7 @@ case "$kind" in
       [ "$allow_discovery" = 1 ] || {
         echo "BLOCKED: PR inputs are absent and network discovery is disabled." >&2; exit 2;
       }
-      pr="$(gate_fetch_pr "$selector")"; rc=$?
+      pr="$(gate_fetch_pr "$selector" "$event_base")"; rc=$?
       [ "$rc" = 0 ] || { echo "BLOCKED: PR body/head discovery failed closed." >&2; exit 2; }
       head_sha="$(printf '%s' "$pr" | head -n 1)"
       body="$(printf '%s' "$pr" | tail -n +2)"
@@ -329,6 +349,10 @@ case "$kind" in
     printf '%s' "$head_sha" | grep -Eq '^[0-9a-fA-F]{40}$' || {
       echo "BLOCKED: discovered PR head is not a full commit SHA." >&2; exit 2;
     }
+    if [ -n "$event_head" ] && [ "$head_sha" != "$event_head" ]; then
+      echo "BLOCKED: the PR head changed after this check was requested." >&2
+      exit 2
+    fi
     if [ "$kind" = merge ]; then
       local_head="$(gate_full_head_sha)"
       [ "$local_head" = "$head_sha" ] && [ "$expected_head" = "$(printf '%s' "$head_sha" | tr 'A-F' 'a-f')" ] || {
@@ -390,6 +414,14 @@ PY
     ;;
   *) echo "BLOCKED: internal PR-gate action classification failed." >&2; exit 2 ;;
 esac
+
+if [ -n "$event_head" ] && [ -n "$selector" ] && [ -n "$pr" ]; then
+  latest_pr="$(gate_fetch_pr "$selector" "$event_base")" || exit 2
+  if [ "$latest_pr" != "$pr" ]; then
+    echo "BLOCKED: PR head or body changed during this check." >&2
+    exit 2
+  fi
+fi
 
 if printf '%s' "$payload" | grep -Eq '("conversationId"|"workspacePaths"|"toolCall")'; then
   echo '{"decision":"allow"}'

@@ -25,6 +25,7 @@ make_fixture() {
   cp "$ROOT/.github/PULL_REQUEST_TEMPLATE.md" "$dest/.github/PULL_REQUEST_TEMPLATE.md"
   cp "$ROOT/.agents/hooks.json" "$dest/.agents/hooks.json"
   cp "$ROOT/.agents/subagents.json" "$dest/.agents/subagents.json"
+  cp -R "$ROOT/.agents/agents" "$dest/.agents/agents"
   cp -R "$ROOT/.agents/skills" "$dest/.agents/skills"
   cp -R "$ROOT/.codex" "$dest/.codex"
   cp "$ROOT/docs/FEATURES.md" "$dest/docs/FEATURES.md"
@@ -356,7 +357,7 @@ expect_failure "multi-target fail-closed build join" "$fixture" \
   "multi-target reviewer is missing the independent-rebuild/publication DAG contract"
 
 fixture="$WORK/multi-target-host-gate-concurrency"; make_fixture "$fixture"
-perl -0pi -e 's/prepare, logic-test and logic-harness start concurrently/prepare -> logic-test + logic-harness/' \
+perl -0pi -e 's/prepare classifies publication relevance/prepare does nothing/' \
   "$fixture/.agents/subagents.json"
 expect_failure "multi-target host-gate concurrency" "$fixture" \
   "multi-target reviewer is missing the independent-rebuild/publication DAG contract"
