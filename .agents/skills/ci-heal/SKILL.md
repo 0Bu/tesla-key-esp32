@@ -105,7 +105,7 @@ flowchart TD
    script refuses otherwise.
 2. **Watch CI Workflow Status**:
    ```bash
-   gh pr checks <numeric-pr> --watch
+   gh pr checks <numeric-pr> --required --watch
    ```
 
 ---

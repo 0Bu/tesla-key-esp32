@@ -281,12 +281,12 @@ sandboxing, protected environments or human approval. Actions are full-SHA pinne
 permissions/timeouts; GitHub's runner OS and orchestration remain trusted infrastructure.
 Bench ingest hashes the report, not proof of physical firmware/signature/NVS observations.
 
-Generated `.codex/` adapters must match canonical reviewer/hook sources. The native PreToolUse
-adapter runs the safety core before the PR core synchronously; malformed or oversized payloads and
-bootstrap failures deny execution. Correct configuration alone does not grant hook trust: approve
-project hooks through the runner UI and verify their effective state. Linked worktrees load native
-declarations from the primary checkout. Read-only reviewer defaults can inherit parent runtime
-permission overrides; confirm the effective sandbox before treating a reviewer as independent.
+Generated Codex and Antigravity adapters must match the canonical reviewer and hook sources.
+The synchronous PreToolUse hooks guard secrets, partitions and protected GitHub actions.
+Trust the hook definitions through the runner UI. Codex worktrees can load declarations from
+the primary checkout. Codex reviewers inherit parent permissions. Antigravity reviewer
+registrations declare read tools only and disable shell and MCP inheritance. Verify these
+permissions in the running client before relying on a reviewer.
 
 The pinned Context7 package avoids floating updates but is neither an npm integrity lock nor privacy
 sandbox. First use executes downloaded code; service inputs leave the local boundary. Never send

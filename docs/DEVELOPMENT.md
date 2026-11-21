@@ -404,7 +404,8 @@ The publication classifier recognizes bounded literal reads so quoted search/que
 publication commands without being treated as commands themselves. Use `rg --no-config` with
 literal arguments and the supported ordinary search options; preprocessors, hostname commands,
 unquoted globs, expansions, wrappers and pipelines retain conservative classification. GitHub CLI
-exceptions require a supported `pr`/`run` read command with active `--json` and `--jq`/`-q` options.
+exceptions cover a supported `pr`/`run` read command with active `--json` and `--jq`/`-q` options,
+or a standalone `gh api --method GET repos/OWNER/REPO/RESOURCE` with an optional literal formatter.
 For example, run `rg --no-config -n 'git push|gh pr merge' AGENTS.md` as a separate shell call.
 The credential guard uses the same literal-read classification only for its stdin-shell check;
 all secret-path, credential-output and partition checks still apply.

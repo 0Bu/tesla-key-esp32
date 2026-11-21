@@ -11,9 +11,9 @@ Apply [AGENTS.md](../../AGENTS.md) and [build contracts](../../docs/DEVELOPMENT.
   separate IRAM region). memoryModel/staticCapacity/iramCapacity are exact
   identities, not maxima; changing either direction fails. `report-firmware-size.py --enforce-budget` fails
   closed. Stack frames have their separate reviewed baseline; neither substitutes for runtime margin.
-- Before committing/pushing main/CMake/sdkconfig/partition changes, measure with the pinned Docker
-  `scripts/check-firmware-size.sh` (all four targets by default); pre-push runs the incremental
-  `scripts/precheck-firmware.sh` on all four, narrowed only by an explicit `PRE_PUSH_TARGETS`.
+- Use `scripts/precheck-firmware.sh` for size and stack iteration. Before push, verify the committed
+  integration candidate with `scripts/check-local.sh --candidate --firmware` on all four targets.
+  The push hook checks that receipt.
 - Intentional growth needs measured safe headroom and a reviewed baseline update in the same change
   (`check-firmware-size.sh --update-baseline`, raises maxima only). Reviewed reductions use
   `--tighten-baseline`: the old baseline must pass, no metric may grow, then maxima become measured

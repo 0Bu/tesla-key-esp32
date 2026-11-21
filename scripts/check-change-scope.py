@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Select PR feedback scope conservatively; publication and local handoff remain full."""
+"""Classify local candidate and PR feedback scope conservatively."""
 from __future__ import annotations
 
 import argparse

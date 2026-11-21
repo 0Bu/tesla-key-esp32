@@ -50,5 +50,17 @@ if [ -n "$remote_url" ]; then
 fi
 
 if [ "$verify" = 1 ]; then
-    exec scripts/check-local.sh --verify-receipt
+    scripts/check-local.sh --verify-receipt
+    # Keep publication hygiene before changing the head of an existing public PR.
+    python3 - "$root" "$branch" <<'PY' | bash tools/agent-hooks/require-pr-gates.sh
+import json
+import shlex
+import sys
+
+print(json.dumps({
+    "tool_name": "exec_command",
+    "cwd": sys.argv[1],
+    "tool_input": {"cmd": "git push origin " + shlex.quote(sys.argv[2])},
+}))
+PY
 fi

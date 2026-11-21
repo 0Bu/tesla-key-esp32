@@ -1451,7 +1451,7 @@ gate_mcp_create_head() {
   printf '%s\n' "$head"
 }
 
-# gate_fetch_pr <selector>
+# gate_fetch_pr <selector> [expected-base]
 #   Reads an EXISTING PR (selector: a PR number/URL, or empty for the current branch). On success
 #   prints the head sha on line 1, then the PR body.
 #   THREE-STATE exit — callers MUST tell these apart:
@@ -1462,13 +1462,14 @@ gate_mcp_create_head() {
 #   slip through unaudited whenever GitHub is momentarily unreadable. The merge gate blocks on both;
 #   the push gate allows only on 1 (positively no PR) and fails CLOSED on 2.
 gate_fetch_pr() {
-  local sel="$1" json tok slug branch list count
+  local sel="$1" expected_base="${2:-}" json tok slug branch list count fields=body,headRefOid
+  [ -z "$expected_base" ] || fields=body,headRefOid,baseRefOid
   slug="$(gate_repo_slug)" || return 2
   [ -n "$slug" ] || return 2
   if command -v gh >/dev/null 2>&1; then
     if [ -n "$sel" ]; then
       printf '%s' "$sel" | grep -Eq '^[0-9]+$' || return 2
-      json="$(agent_gate_run_bounded 30 env GH_HOST=github.com GH_REPO="github.com/$slug" gh pr view "$sel" --json body,headRefOid 2>/dev/null)" || return 2
+      json="$(agent_gate_run_bounded 30 env GH_HOST=github.com GH_REPO="github.com/$slug" gh pr view "$sel" --json "$fields" 2>/dev/null)" || return 2
     else
       branch="$(gate_branch)"; [ -n "$branch" ] && [ "$branch" != HEAD ] || return 2
       list="$(agent_gate_run_bounded 30 env GH_HOST=github.com GH_REPO="github.com/$slug" gh pr list --head "$branch" --state open --json number,body,headRefOid 2>/dev/null)" || return 2
@@ -1507,13 +1508,16 @@ print(len(v))
 import json,re,sys
 v=json.load(sys.stdin)
 head=v.get("headRefOid") or (v.get("head") or {}).get("sha") or ""
+expected_base=sys.argv[1]
+base=v.get("baseRefOid") or (v.get("base") or {}).get("sha") or ""
+if expected_base and base != expected_base: raise SystemExit(1)
 body=v.get("body")
 if not isinstance(head,str) or not re.fullmatch(r"[0-9a-fA-F]{40}",head): raise SystemExit(1)
 if body is None: body=""
 if not isinstance(body,str) or "\x00" in body: raise SystemExit(1)
 print(head)
 sys.stdout.write(body)
-' || return 2
+' "$expected_base" || return 2
 }
 
 gate_extract_changed_pages() {

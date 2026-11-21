@@ -3,7 +3,8 @@ name: "heap_safety_reviewer"
 description: "Reviews tesla-key-esp32 contiguous-allocation, exception-containment, and reboot-loop risks without editing."
 mainAgent: false
 subagent: true
-commandExecutionPolicy: off
+commandExecutionPolicy: "off"
+inheritMcp: false
 tools: [view_file, grep_search, list_dir, find_by_name]
 ---
 

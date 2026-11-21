@@ -35,7 +35,7 @@ CI, hardware evidence or publication authorization.
    synchronization limits rather than certifying stale content.
    **State reviewed SHA in report, together with baseline evidence.**
 1. Discover every canonical `.agents/skills/*/SKILL.md` and reviewer; do not hardcode the inventory.
-   Check native `.codex/` generated registrations with `sync-codex.mjs --check`, effective
+   Check generated registrations for Codex and Antigravity with `sync-codex.mjs --check`, effective
    primary-checkout hook trust and parent runtime overrides. Global host/cluster skills are outside this project audit.
 2. Extract claims about paths, numbers, targets, pins, hooks, commands, permissions and evidence.
    Verify against source/config/scripts and owning docs with `rg` and safe host checks. The library

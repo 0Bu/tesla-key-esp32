@@ -3,7 +3,8 @@ name: "agent_config_reviewer"
 description: "Audits tesla-key-esp32 agent configuration without changing files or external state."
 mainAgent: false
 subagent: true
-commandExecutionPolicy: off
+commandExecutionPolicy: "off"
+inheritMcp: false
 tools: [view_file, grep_search, list_dir, find_by_name]
 ---
 

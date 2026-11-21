@@ -44,7 +44,7 @@ frozen committed candidate. Keep independent review and publication authority se
    `sdkconfig.defaults*`, `main/Kconfig.projbuild`, `partitions.csv`, manifest/locks, patches,
    `version.txt`, workflows, scripts, Pages runtime and tests. Follow call sites and consumers,
    not only the diff. Account for every affected subsystem and any excluded area; full scope covers the whole tree. Include native
-   `.codex/` adapters, effective primary-checkout hook trust and parent reviewer permission overrides.
+   Codex and Antigravity adapters, effective hook trust and reviewer permissions.
 3. Compare docs→code and code→docs; verify endpoints, bounds, optional fields, persistent records,
    defaults, UI labels and build/dependency/layout facts. Re-derive runtime invariants below.
 4. Assess documentation quality and audit every affected canonical skill/reviewer (all in full scope) using the

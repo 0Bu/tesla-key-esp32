@@ -592,7 +592,7 @@ set -u
 args="$*"
 case "$args" in
   *"--json body,headRefOid"*)
-    python3 -c 'import json,os; print(json.dumps({"headRefOid":os.environ["TEST_HEAD"],"body":os.environ.get("TEST_BODY","")}))' ;;
+    python3 -c 'import json,os; print(json.dumps({"headRefOid":os.environ["TEST_HEAD"],"baseRefOid":os.environ.get("TEST_BASE",""),"body":os.environ.get("TEST_BODY","")}))' ;;
   *"--json number,body,headRefOid"*)
     if [ "${TEST_NO_PR:-0}" = 1 ]; then printf '[]\n'; else python3 -c 'import json,os; print(json.dumps([{"number":123,"headRefOid":os.environ["TEST_HEAD"],"body":os.environ.get("TEST_BODY","")}]))'; fi ;;
   *"--json number,changedFiles"*)
@@ -613,6 +613,8 @@ merge_body="$(printf '%s\n' "$local_checks_record" '- [x] $project-review clean 
 printf '%s' "$canonical_payload" >"$tmp/payload.json"
 expect_rc 0 'canonical merge passes exact current-head evidence' env PATH="$tmp/bin:$PATH" TEST_HEAD="$sha" TEST_BODY="$merge_body" TEST_CHANGED=1 TEST_FILES_MODE=normal "$gate" --project-dir "$root" --payload-file "$tmp/payload.json"
 expect_rc 0 'Renovate canonical merge needs no manual records' env PATH="$tmp/bin:$PATH" TEST_HEAD="$sha" TEST_BODY='' TEST_CHANGED=1 TEST_FILES_MODE=renovate "$gate" --project-dir "$root" --payload-file "$tmp/payload.json"
+expect_rc 0 'PR policy accepts matching event head and trusted live base' env PATH="$tmp/bin:$PATH" TEST_HEAD="$sha" TEST_BASE="$sha" TEST_FILES_MODE=renovate "$gate" --pr 123 --expected-head "$sha" --expected-base "$sha"
+expect_rc 2 'PR policy refuses a changed live base with the same head' env PATH="$tmp/bin:$PATH" TEST_HEAD="$sha" TEST_BASE=1111111111111111111111111111111111111111 TEST_FILES_MODE=renovate "$gate" --pr 123 --expected-head "$sha" --expected-base "$sha"
 expect_rc 2 'rename into Renovate workflow does not hide original path' env PATH="$tmp/bin:$PATH" TEST_HEAD="$sha" TEST_BODY='' TEST_CHANGED=1 TEST_FILES_MODE=renovate-rename "$gate" --project-dir "$root" --payload-file "$tmp/payload.json"
 expect_rc 2 'Renovate changed-file count mismatch fails closed' env PATH="$tmp/bin:$PATH" TEST_HEAD="$sha" TEST_BODY='' TEST_CHANGED=2 TEST_FILES_MODE=renovate "$gate" --project-dir "$root" --payload-file "$tmp/payload.json"
 expect_rc 2 'Renovate merge still binds local HEAD to PR head' env PATH="$tmp/bin:$PATH" TEST_HEAD=0000000000000000000000000000000000000000 TEST_BODY='' TEST_CHANGED=1 TEST_FILES_MODE=renovate "$gate" --project-dir "$root" --payload-file "$tmp/payload.json"
@@ -752,6 +754,11 @@ push_repo="$tmp/receipt-pre-push"
 mkdir -p "$push_repo/.githooks" "$push_repo/scripts" "$push_repo/tools/agent-hooks"
 cp "$root/.githooks/pre-push" "$push_repo/.githooks/"
 cp "$root/tools/agent-hooks/pr-gate-lib.sh" "$push_repo/tools/agent-hooks/"
+cat > "$push_repo/tools/agent-hooks/require-pr-gates.sh" <<'SH'
+#!/usr/bin/env bash
+grep -Fq '"cmd": "git push origin feature"'
+[ "${TEST_PUSH_POLICY_FAIL:-0}" = 0 ]
+SH
 cat > "$push_repo/scripts/check-local.sh" <<'SH'
 #!/usr/bin/env bash
 [ "$#" = 1 ] && [ "$1" = --verify-receipt ] && [ -f candidate-passed ]
@@ -771,6 +778,7 @@ hook_update() (
 expect_rc 1 'pre-push rejects missing candidate receipt' hook_update "$push_fixture_sha" refs/heads/feature
 touch "$push_repo/candidate-passed"
 expect_rc 0 'pre-push accepts verified candidate' hook_update "$push_fixture_sha" refs/heads/feature
+TEST_PUSH_POLICY_FAIL=1 expect_rc 1 'pre-push rejects unreviewed PR updates' hook_update "$push_fixture_sha" refs/heads/feature
 expect_rc 1 'pre-push rejects wrong candidate SHA' hook_update "$sha" refs/heads/feature
 expect_rc 1 'pre-push rejects foreign remote' hook_update "$push_fixture_sha" refs/heads/feature foreign
 for ref in refs/heads/main refs/heads/HEAD refs/heads/gh-pages refs/tags/v1; do

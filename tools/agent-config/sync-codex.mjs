@@ -50,7 +50,8 @@ export function registrations(rootDir) {
     files.set(`.agents/agents/${reviewer.TypeName}.md`,
       "---\n" +
       `name: ${quote(reviewer.TypeName)}\ndescription: ${quote(reviewer.Description)}\n` +
-      "mainAgent: false\nsubagent: true\ncommandExecutionPolicy: off\n" +
+      'mainAgent: false\nsubagent: true\ncommandExecutionPolicy: "off"\n' +
+      "inheritMcp: false\n" +
       "tools: [view_file, grep_search, list_dir, find_by_name]\n---\n\n" +
       reviewer.Prompt.trimEnd() + "\n");
   }

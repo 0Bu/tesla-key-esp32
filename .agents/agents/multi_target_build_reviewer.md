@@ -3,7 +3,8 @@ name: "multi_target_build_reviewer"
 description: "Reviews tesla-key-esp32 four-target build, partition, signing, provenance, and release contracts without editing."
 mainAgent: false
 subagent: true
-commandExecutionPolicy: off
+commandExecutionPolicy: "off"
+inheritMcp: false
 tools: [view_file, grep_search, list_dir, find_by_name]
 ---
 

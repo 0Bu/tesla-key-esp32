@@ -107,6 +107,7 @@ git_current_branch()  { git rev-parse --abbrev-ref HEAD; }
 git_tree_dirty()      { [ -n "$(git status --porcelain)" ]; }
 git_is_ancestor()     { git merge-base --is-ancestor "$1" "$2" 2>/dev/null; }
 git_push_branch()     { git push origin "$1"; }
+verify_candidate_receipt() { "$root/scripts/check-local.sh" --verify-receipt; }
 sleep_seconds()       { sleep "$1"; }
 stamp_gates()         { "$root/scripts/stamp-pr-gates.sh" "$@"; }
 
@@ -167,6 +168,8 @@ watch_pr_checks() {
     return 1
   fi
 }
+
+required_checks_pass() { gh pr checks "$1" --required >/dev/null 2>&1; }
 
 fetch_failed_runs() {
   local pr="$1"
@@ -520,7 +523,9 @@ ci_green_except_records() {
   rows="$(check_rollup "$1")" || return 1
   printf '%s\n' "$rows" | grep -Eq '^build\|COMPLETED\|(SUCCESS|SKIPPED)$' || return 1
   while IFS='|' read -r name status conclusion; do
-    case "$name" in build|"$RECORDS_CHECK") ;; *) continue ;; esac
+    case "$name" in
+      ""|CodeQL|Analyze\ \(*|cleanup-event|discover-stale|reconcile-stale) continue ;;
+    esac
     case "$conclusion" in SUCCESS|NEUTRAL|SKIPPED) continue ;; esac
     nongreen+="$name | $status | $conclusion"$'\n'
   done <<< "$rows"
@@ -707,6 +712,10 @@ run_heal() {
       echo "ci-heal: the checked local candidate changed before push." >&2
       return 1
     fi
+    if ! verify_candidate_receipt; then
+      echo "ci-heal: candidate receipt missing or stale; PR records were not changed." >&2
+      return 1
+    fi
     if ! stamp_attested_gates "$target_pr" "$local_sha" "${prepush_gates[@]}"; then
       echo "ci-heal: stamping the pre-push records failed; nothing was pushed." >&2
       return 1
@@ -839,7 +848,7 @@ run_heal() {
 
   # Record-free maintenance must not bypass exact-head readiness. Relevance discovery and
   # current-main checks can take time, even when no PR-body edit or check rerun is needed.
-  if ! ci_green_except_records "$target_pr" all; then
+  if ! ci_green_except_records "$target_pr" all || ! required_checks_pass "$target_pr"; then
     echo "ci-heal: not every check is green for $final_head before readiness (build missing or not" >&2
     echo "ci-heal: successful, or a check pending, cancelled or failed); not ready." >&2
     return 1
@@ -1038,6 +1047,8 @@ self_test() {
     git_current_branch() { printf '%s' "$STUB_BRANCH"; }
     git_tree_dirty()     { [ "$STUB_DIRTY" = 1 ]; }
     git_is_ancestor()    { [ "$STUB_ANCESTOR" = 1 ]; }
+    verify_candidate_receipt() { return 0; }
+    required_checks_pass() { return 0; }
     git_push_branch()    {
       [ "$STUB_PUSH_FAIL" != 1 ] || return 1
       echo "push $1" >> "$LOG_PUSH"; STUB_HEAD="$STUB_LOCAL"
@@ -1496,7 +1507,7 @@ self_test() {
 
   sc_renovate_checks_regressed() {
     sc_renovate; auto_merge=1
-    required_gates_for_candidate() { STUB_ROLLUP_EXTRA="CodeQL|COMPLETED|FAILURE"; }
+    required_checks_pass() { return 1; }
   }
   run_case sc_renovate_checks_regressed 1
   expect_out renovate_checks_regressed "not every check is green"
@@ -1514,7 +1525,7 @@ self_test() {
   run_case sc_renovate_records_missing 1
   expect_no_out renovate_records_missing "READY FOR MERGE"; expect_lines renovate_records_missing "$LOG_STAMPS" 0
 
-  sc_renovate_other_pending() { sc_renovate; STUB_ROLLUP_EXTRA="CodeQL|IN_PROGRESS|"; }
+  sc_renovate_other_pending() { sc_renovate; STUB_ROLLUP_EXTRA="release-contract|IN_PROGRESS|"; }
   run_case sc_renovate_other_pending 1
   expect_no_out renovate_other_pending "READY FOR MERGE"; expect_lines renovate_other_pending "$LOG_STAMPS" 0
 

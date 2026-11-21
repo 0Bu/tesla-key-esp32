@@ -1398,9 +1398,12 @@ def validate(root: Path) -> None:
     require(len(policy_steps) == 2 and
             policy_steps[0].get("with", {}).get("ref") == "${{ github.event.pull_request.base.sha }}",
             "pr-policy.yml must never check out PR content")
-    require(policy_steps[1].get("env", {}).get("PR_EVENT_HEAD") == "${{ github.event.pull_request.head.sha }}" and
-            '--expected-head "$PR_EVENT_HEAD"' in policy_steps[1].get("run", ""),
-            "pr-policy.yml must bind the metadata result to the event head")
+    policy_env = policy_steps[1].get("env", {})
+    policy_run = policy_steps[1].get("run", "")
+    require(policy_env.get("PR_EVENT_HEAD") == "${{ github.event.pull_request.head.sha }}" and
+            policy_env.get("PR_EVENT_BASE") == "${{ github.event.pull_request.base.sha }}" and
+            '--expected-head "$PR_EVENT_HEAD"' in policy_run and '--expected-base "$PR_EVENT_BASE"' in policy_run,
+            "pr-policy.yml must bind metadata to the event head and trusted base")
     require("persist-credentials: false" in policy_text,
             "pr-policy.yml checkout credentials must not persist")
     require("require-pr-gates.sh" in policy["current-head-records"] and "--check --pr" in policy["current-head-records"],

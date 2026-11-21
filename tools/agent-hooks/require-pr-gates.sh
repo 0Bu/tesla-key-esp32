@@ -38,6 +38,7 @@ selector="${AGENT_PR_SELECTOR:-}"
 requested_root="${AGENT_PROJECT_DIR:-${PROJECT_DIR:-$canonical_root}}"
 payload_file=""
 event_head=""
+event_base=""
 pr=""
 force_check="${AGENT_POLICY_CI:-0}"
 allow_discovery=1
@@ -54,6 +55,11 @@ while [ "$#" -gt 0 ]; do
     --expected-head)
       [ "$#" -ge 2 ] && printf '%s' "$2" | grep -Eq '^[a-f0-9]{40}$' || exit 2
       event_head="$2"
+      shift 2
+      ;;
+    --expected-base)
+      [ "$#" -ge 2 ] && printf '%s' "$2" | grep -Eq '^[a-f0-9]{40}$' || exit 2
+      event_base="$2"
       shift 2
       ;;
     --check) force_check=1; shift ;;
@@ -250,6 +256,13 @@ if [ "$force_check" = 1 ] && [ -z "$kind" ]; then
 fi
 [ -n "$kind" ] || exit 0
 
+if [ -n "$event_base" ]; then
+  [ "$kind" = check ] && [ -n "$selector" ] && [ -n "$event_head" ] &&
+    [ "$(gate_full_head_sha)" = "$event_base" ] || {
+    echo "BLOCKED: event base must match the trusted policy checkout." >&2; exit 2
+  }
+fi
+
 if ! gate_origin_is_github || [ "$(gate_repo_slug)" != "0Bu/tesla-key-esp32" ]; then
   echo "BLOCKED: protected PR actions require the exact github.com/0Bu/tesla-key-esp32 origin." >&2
   exit 2
@@ -322,7 +335,7 @@ case "$kind" in
       [ "$allow_discovery" = 1 ] || {
         echo "BLOCKED: PR inputs are absent and network discovery is disabled." >&2; exit 2;
       }
-      pr="$(gate_fetch_pr "$selector")"; rc=$?
+      pr="$(gate_fetch_pr "$selector" "$event_base")"; rc=$?
       [ "$rc" = 0 ] || { echo "BLOCKED: PR body/head discovery failed closed." >&2; exit 2; }
       head_sha="$(printf '%s' "$pr" | head -n 1)"
       body="$(printf '%s' "$pr" | tail -n +2)"
@@ -403,7 +416,7 @@ PY
 esac
 
 if [ -n "$event_head" ] && [ -n "$selector" ] && [ -n "$pr" ]; then
-  latest_pr="$(gate_fetch_pr "$selector")" || exit 2
+  latest_pr="$(gate_fetch_pr "$selector" "$event_base")" || exit 2
   if [ "$latest_pr" != "$pr" ]; then
     echo "BLOCKED: PR head or body changed during this check." >&2
     exit 2

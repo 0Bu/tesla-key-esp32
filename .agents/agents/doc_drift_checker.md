@@ -3,7 +3,8 @@ name: "doc_drift_checker"
 description: "Checks tesla-key-esp32 code, docs, UI, tests, and agent guidance for contract drift without editing."
 mainAgent: false
 subagent: true
-commandExecutionPolicy: off
+commandExecutionPolicy: "off"
+inheritMcp: false
 tools: [view_file, grep_search, list_dir, find_by_name]
 ---
 
