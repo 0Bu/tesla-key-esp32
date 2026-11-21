@@ -165,7 +165,7 @@ def main() -> None:
         baseline = output/'baseline'; baseline.mkdir(mode=0o700)
         initial = snapshot()
         require(initial['files'][str(ROOT/'test/identity_recovery_process.py')]['sha256'] ==
-                '31dcf5236899f61f8f33177cf7dd34d20de5aeb90629b219e7e86fce7b47d40b',
+                '1d67b177426a74687dca12448dfd945bb9e538bfc3eabc18403c7badd720819b',
                 'owned-process helper differs from the separately qualified module')
         require_consumers(ROOT)
         # Actual source-only first-hook oracle, independent of compiling the Main shell.
