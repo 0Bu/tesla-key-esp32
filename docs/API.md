@@ -115,6 +115,11 @@ telemetry, restarted at climate on window entry. Missing/stale climate is retrie
 slot, with at most two consecutive attempts before another domain. After reboot it stays unavailable
 until a poll obtains a sample; the boot window is not seeded after a heap-watchdog restart.
 Drive refreshes through the rotation and a best-effort `NO_WAKE_SKIP` wake/bootstrap one-shot.
+After fresh `Charging` or `Starting` changes to `Stopped`, a separate ChargeState probe can
+detect a short charging pause outside the active window. It runs at most once per 30 s for
+five minutes from that transition, with BLE connected and VCSEC reporting `AWAKE`. A probe
+reporting `Charging` or `Starting` resumes normal polling. The cache freshness rules above
+also apply during the pause.
 
 ### evcc integration
 
@@ -531,7 +536,8 @@ metric (km, km/h). An invalid or initially empty cache publishes retained `{}` o
 to clear stale readings; reconnecting rearms that clear. It then stays quiet until valid data returns.
 While a parked car sleeps, ordinary source polls pause and MQTT keeps serving
 last-known values until the next successful relevant poll. Charge and drive can also refresh on
-the wake/bootstrap one-shot outside an active window. These topics carry no per-domain age;
+the wake/bootstrap one-shot outside an active window. Charge can also refresh through the
+short charging-pause probe described above. These topics carry no per-domain age;
 broker publication or link state alone does not establish each retained field's freshness.
 The device payload's `paired` and `session_available` retain their status-field meanings above;
 the broker connection's `availability` topic is independent of either session fact. Its recovery fields use the same cached state names as `/status`; `fatal_component` is absent outside Fatal. They describe device recovery, not fresh vehicle authentication. They add no command topic or discovery entity.

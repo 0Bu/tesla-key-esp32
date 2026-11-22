@@ -1951,7 +1951,16 @@ def require_wake_companion_drive_poll(loop_source: str, rotation_source: str) ->
     block_end = balanced_end(layout, open_brace, "{", "}", "charge poll block")
     block = loop_source[open_brace:block_end + 1]
     code = layout[open_brace:block_end + 1]
-    guard = "if (tk::wake_poll_refreshes_drive(poll_cadence)) {"
+    guard = "if (tk::wake_poll_refreshes_drive(poll_cadence, wake_pending)) {"
+    pause_due = "const bool pause_probe_due = !window && charge_pause.due(sample, now_s);"
+    require_before("charge pause observation before it can schedule a probe", loop_source,
+                   "charge_pause.observe(", pause_due)
+    require_before("charge pause due before dispatch", loop_source, pause_due,
+                   "now_s, pause_probe_due}, wake_poll)")
+    require_before("charge pause attempt budget before enqueue", code,
+                   "if (pause_probe_due) charge_pause.begin_attempt(now_s);", "enqueue_background_poll_(")
+    require_before("wake pending snapshot before dispatch consumes it", loop_source,
+                   "const bool wake_pending = wake_poll.pending;", "tk::charge_poll_should_fire(")
     if guard not in code:
         raise AssertionError("drive companion poll is not gated by tk::wake_poll_refreshes_drive")
     inner_open = code.index("{", code.index(guard))
@@ -6346,8 +6355,9 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
         )
 
     wake_loop = function_body_in(climate_telemetry, "loop_task_fn_")
-    wake_guard = "if (tk::wake_poll_refreshes_drive(poll_cadence)) {"
+    wake_guard = "if (tk::wake_poll_refreshes_drive(poll_cadence, wake_pending)) {"
     ungated_drive = wake_loop.replace(wake_guard, "if (true) {", 1)
+    ungated_pause = wake_loop.replace("!window && charge_pause.due", "charge_pause.due", 1)
     no_drive_enqueue = wake_loop.replace(
         '"Drive State Poll", tk::BleDomain::Infotainment, build_drive_state_poll);\n            }\n        }\n\n        // Background telemetry',
         '"Charge State Poll", tk::BleDomain::Infotainment, build_drive_state_poll);\n            }\n        }\n\n        // Background telemetry', 1)
@@ -6362,6 +6372,7 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
         '"Drive State Poll", tk::BleDomain::Infotainment, [](TeslaBLE::Client*, uint8_t*, size_t*) { return 0; })', 1)
     for label, mutated, rotated in (
         ("wake gate removed", ungated_drive, rotation),
+        ("pause probes admitted in the active window", ungated_pause, rotation),
         ("drive enqueue replaced", no_drive_enqueue, rotation),
         ("drive enqueue outside the gate", drive_outside_gate, rotation),
         ("rising-edge telemetry reset removed", no_edge_reset, rotation),

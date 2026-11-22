@@ -4507,6 +4507,92 @@ static void test_telemetry_poll() {
     CHECK(st.next(false) == Domain::Climate);
 }
 
+static void test_charge_pause_poll() {
+    using namespace tk;
+
+    // #485: ChargeState reports Stopped, the link drops and reconnects with a fresh cache,
+    // and no foreground command is recent. The pause probe can discover the EVSE restart.
+    ChargePausePollState pause{};
+    WakePollState wake{};
+    const uint32_t stopped_at = 1000;
+    pause.observe(true, false, false, stopped_at - 10);
+    pause.observe(false, true, false, stopped_at);
+    wake_poll_update(wake, {WakeSample::Unknown, false, false, true, 1, stopped_at + 1});
+    wake_poll_update(wake, {WakeSample::Awake, false, true, true, 15, stopped_at + 15});
+    CHECK(wake.episode_fresh);
+    CHECK(!wake.pending);
+
+    const auto fire = [&](uint32_t elapsed, WakeSample sleep, bool connected = true,
+                         bool busy = false, bool paired = true) {
+        const uint32_t now = stopped_at + elapsed;
+        const bool window = active_window_open({false, false, true, elapsed});
+        const bool pause_due = !window && pause.due(sleep, now);
+        const bool refresh_drive = wake_poll_refreshes_drive(window, wake.pending);
+        const bool dispatched = charge_poll_should_fire({paired, window, connected, busy, now, pause_due}, wake);
+        if (dispatched && pause_due) pause.begin_attempt(now);
+        CHECK(!refresh_drive);
+        return dispatched;
+    };
+    CHECK(!fire(29, WakeSample::Awake));
+    CHECK(!fire(30, WakeSample::Unknown));
+    CHECK(!fire(30, WakeSample::Asleep));
+    CHECK(!fire(30, WakeSample::Awake, false));
+    CHECK(!fire(30, WakeSample::Awake, true, true));
+    CHECK(!fire(30, WakeSample::Awake, true, false, false));
+    CHECK(fire(30, WakeSample::Awake));
+    CHECK(!fire(59, WakeSample::Awake));
+    wake_poll_update(wake, {WakeSample::Awake, false, true, true, 60, stopped_at + 60});
+    CHECK(!wake.pending);
+    CHECK(fire(60, WakeSample::Awake));
+    CHECK(fire(90, WakeSample::Awake));
+    CHECK(fire(120, WakeSample::Awake));
+
+    // The next report is Charging. The normal cadence can carry on without a pause probe.
+    pause.observe(true, false, false, stopped_at + 121);
+    CHECK(!pause.due(WakeSample::Awake, stopped_at + 150));
+    CHECK(active_window_open({false, true, true, 0}));
+
+    // A subsequent real pause re-arms once. Repeated Stopped responses never extend its budget.
+    const uint32_t second_stop = stopped_at + 180;
+    pause.observe(false, true, false, second_stop);
+    for (uint32_t offset = 30; offset < 300; offset += 30) {
+        pause.observe(false, true, false, second_stop + offset);
+        CHECK(pause.due(WakeSample::Awake, second_stop + offset));
+        pause.begin_attempt(second_stop + offset);
+    }
+    CHECK(!pause.due(WakeSample::Awake, second_stop + 300));
+    pause.observe(false, true, false, second_stop + 300);
+    CHECK(!pause.due(WakeSample::Awake, second_stop + 900));
+
+    // A cold or stale Stopped cache has no preceding fresh charging observation.
+    ChargePausePollState idle{};
+    idle.observe(false, true, false, 100);
+    CHECK(!idle.due(WakeSample::Awake, 130));
+    idle.observe(true, false, false, 200);
+    idle.observe(false, false, false, 260);
+    idle.observe(false, true, false, 270);
+    CHECK(!idle.due(WakeSample::Awake, 300));
+
+    // Stable sleep or an intervening non-Stopped state cancels the pause as well.
+    pause.observe(true, false, false, 2000);
+    pause.observe(false, true, false, 2001);
+    pause.observe(false, true, true, 2030);
+    pause.observe(false, true, false, 2031);
+    CHECK(!pause.due(WakeSample::Awake, 2040));
+    pause.observe(true, false, false, 2100);
+    pause.observe(false, true, false, 2101);
+    pause.observe(false, false, false, 2102);
+    pause.observe(false, true, false, 2103);
+    CHECK(!pause.due(WakeSample::Awake, 2140));
+
+    const uint32_t wrapped_stop = UINT32_MAX - 15;
+    pause.observe(true, false, false, wrapped_stop - 1);
+    pause.observe(false, true, false, wrapped_stop);
+    CHECK(!pause.due(WakeSample::Awake, wrapped_stop + 29));
+    CHECK(pause.due(WakeSample::Awake, wrapped_stop + 30));
+    CHECK(!pause.due(WakeSample::Awake, wrapped_stop + 300));
+}
+
 // ── Wake-edge one-shot charge poll (logic/wake_poll.hpp) — the stale-SOC-after-plug-in fix ──
 static void test_wake_poll() {
     using namespace tk;
@@ -4623,14 +4709,15 @@ static void test_wake_poll() {
     }
 
     // Drive-cache refresh rides only on the wake/bootstrap one-shot, never on the in-window cadence.
-    CHECK(wake_poll_refreshes_drive(false) == true);
-    CHECK(wake_poll_refreshes_drive(true) == false);
+    CHECK(wake_poll_refreshes_drive(false, true) == true);
+    CHECK(wake_poll_refreshes_drive(true, true) == false);
+    CHECK(wake_poll_refreshes_drive(false, false) == false);
     {
         WakePollState st{};
         st.pending = true;
         const ChargePollGateInputs one_shot{true, false /* poll_cadence */, true, false};
+        CHECK(wake_poll_refreshes_drive(one_shot.poll_cadence, st.pending) == true);
         CHECK(charge_poll_should_fire(one_shot, st) == true);
-        CHECK(wake_poll_refreshes_drive(one_shot.poll_cadence) == true);
     }
 
     // Unpaired device: gate prevents firing.
@@ -11325,6 +11412,7 @@ int main() {
     test_vcsec_sleep_three_valued();
     test_vcsec_sleep_clock();
     test_wake_poll();
+    test_charge_pause_poll();
     test_telemetry_poll();
     test_ble_readiness();
     test_ble_phase();

@@ -1605,6 +1605,7 @@ void VehicleController::loop_task_fn_(void* arg) {
     bool     prev_window        = false;  // edge-detect the active window
     auto     prev_sleep         = tk::SleepState::Unknown;  // edge-detect VCSEC sleep flag
     tk::WakePollState wake_poll{};         // one-shot charge poll on the VCSEC wake edge (#264)
+    tk::ChargePausePollState charge_pause{};
     tk::IterationFaultLog fault_log{};
     while (true) {
         tk::StackWatchScope f135_iteration_exit(tk::StackWatch::Vehicle);
@@ -1691,11 +1692,22 @@ void VehicleController::loop_task_fn_(void* arg) {
         uint32_t now_ticks = xTaskGetTickCount();
         const uint32_t now_s = tk::uptime_seconds(static_cast<uint64_t>(esp_timer_get_time()));
         bool charging_state = false;
+        tk::WakeSample sample = tk::WakeSample::Unknown;
         if (paired) {
             const bool conn = self->ble_connected();
-            ChargeStateResult cs = self->copy_locked_(self->last_known_charge_);
-            charging_state = cs.valid && (cs.charging_state == "Charging" ||
-                                          cs.charging_state == "Starting");
+            bool stopped = false;
+            uint32_t charge_ticks = 0;
+            {
+                // Classify and timestamp the same sample without copying its strings.
+                tk::MutexGuard g(self->cache_mutex_);
+                if (g) {
+                    const auto& cs = self->last_known_charge_;
+                    charging_state = cs.valid && (cs.charging_state == "Charging" ||
+                                                  cs.charging_state == "Starting");
+                    stopped = cs.valid && cs.charging_state == "Stopped";
+                    charge_ticks = self->last_charge_ticks_.load();
+                }
+            }
 
             tk::SleepState st = static_cast<tk::SleepState>(
                 self->vcsec_sleep_state_.load());
@@ -1705,7 +1717,6 @@ void VehicleController::loop_task_fn_(void* arg) {
             }
 
             self->note_vcsec_sleep_(st);
-            tk::WakeSample sample = tk::WakeSample::Unknown;
             if (st == tk::SleepState::Asleep) sample = tk::WakeSample::Asleep;
             else if (st == tk::SleepState::Awake) sample = tk::WakeSample::Awake;
 
@@ -1718,15 +1729,18 @@ void VehicleController::loop_task_fn_(void* arg) {
             //      SOC on the wire indefinitely. Use the ChargeState-specific clock —
             //      seconds_since_contact also advances for climate/drive/tyres/closures and so
             //      cannot prove the SOC itself is current.
-            uint32_t   charge_age  = 0;
-            const bool have_charge = self->seconds_since_charge(charge_age);
+            const bool have_charge = charge_ticks != 0;
+            const uint32_t charge_age = have_charge ? (xTaskGetTickCount() - charge_ticks) / configTICK_RATE_HZ : 0;
+            const bool stably_asleep = self->vcsec_stably_asleep_(tk::kAsleepDebounceS);
             tk::wake_poll_update(wake_poll,
-                                 {sample, self->vcsec_stably_asleep_(tk::kAsleepDebounceS), conn,
-                                  have_charge, charge_age, now_s});
+                                 {sample, stably_asleep, conn, have_charge, charge_age, now_s});
+            charge_pause.observe(charging_state && have_charge && charge_age < tk::kChargeCacheFreshS,
+                                 stopped, stably_asleep, now_s);
         } else {
             // Unpaired: the sampler above does not run, so retire any armed edge and pending
             // request rather than carry them across a pairing reset.
             wake_poll = {};
+            charge_pause = {};
         }
 
         // ── Active-window gate ──────────────────────────────────────────────────────────
@@ -1785,7 +1799,7 @@ void VehicleController::loop_task_fn_(void* arg) {
             self->ble_->connect("");
         }
 
-        // Background charge-state refresh (paired + connected). Two triggers share ONE poll:
+        // Background charge-state refresh (paired + connected). Triggers share one poll:
         //   • the 10 s in-window cadence (recent command or charging) — this infotainment poll
         //     may surface a volatile recovery hint if the vehicle reports an authorization fault; and
         //   • a one-shot on the VCSEC wake edge (issue #264) or cache-invalid bootstrap, fired ONCE
@@ -1794,14 +1808,19 @@ void VehicleController::loop_task_fn_(void* arg) {
         //     failing on HTTP 503s. While the window is open the 10 s cadence mostly covers it,
         //     but a pending one-shot can still fire between two cadence ticks; the drive
         //     companion poll is then enqueued too (a harmless duplicate of the rotation's
-        //     drive slot: NO_WAKE_SKIP, and background items expire after 10 s).
-        // Both use NO_WAKE_SKIP: a car reported ASLEEP is skipped and no explicit wake command is
+        //     drive slot: NO_WAKE_SKIP, and background items expire after 10 s);
+        //   • a short ChargeState-only follow-up after a charging stop (#485).
+        // All use NO_WAKE_SKIP: a car reported ASLEEP is skipped and no explicit wake command is
         // requested. UNKNOWN/AWAKE can still permit Infotainment/SessionInfo traffic; its physical
         // wake effect requires measurement. The one-shot also refreshes the drive cache so evcc's
         // odometer is current after a drive; it uses the same NO_WAKE_SKIP policy.
         const bool poll_cadence = window && (now_ticks - last_poll_ticks > pdMS_TO_TICKS(10000));
-        if (tk::charge_poll_should_fire({paired, poll_cadence, self->ble_connected(), self->cmd_in_flight_.load(), now_s}, wake_poll)) {
+        const bool pause_probe_due = !window && charge_pause.due(sample, now_s);
+        const bool wake_pending = wake_poll.pending;
+        if (tk::charge_poll_should_fire({paired, poll_cadence, self->ble_connected(),
+                                        self->cmd_in_flight_.load(), now_s, pause_probe_due}, wake_poll)) {
             if (poll_cadence) last_poll_ticks = now_ticks;
+            if (pause_probe_due) charge_pause.begin_attempt(now_s);
             ESP_LOGD(TAG, "background charge-state refresh…");
             tk::SemGuard g(self->vehicle_mutex_);
             self->enqueue_background_poll_(
@@ -1810,7 +1829,7 @@ void VehicleController::loop_task_fn_(void* arg) {
                     return client->build_car_server_get_vehicle_data_message(
                         buff, len, CarServer_GetVehicleData_getChargeState_tag);
                 });
-            if (tk::wake_poll_refreshes_drive(poll_cadence)) {
+            if (tk::wake_poll_refreshes_drive(poll_cadence, wake_pending)) {
                 self->enqueue_background_poll_(
                     "Drive State Poll", tk::BleDomain::Infotainment, build_drive_state_poll);
             }

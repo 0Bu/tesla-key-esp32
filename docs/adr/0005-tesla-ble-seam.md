@@ -81,6 +81,10 @@ The reference is written in Go, relying on goroutines, runtime-managed channels,
 - **Request-counter rollover**: The reference signer refuses `0xffffffff` before incrementing. Pinned `Peer::increment_counter()` has no equivalent guard. Monotonic session updates do not establish rollover protection; changing the library behavior requires its own reviewed migration.
 - **VCSEC UUID strictness**: The reference exempts VCSEC response UUIDs. This adapter permits an empty UUID only for the current request-scoped address/phase; a nonempty UUID must match the captured request. This is deliberately stricter attribution.
 - **Implicit foreground wake**: `WakeIfNeeded` can insert a VCSEC wake before an Infotainment command. This local prerequisite policy is distinct from the reference's explicit wake call; background `NoWakeSkip`/`NoWakeFail` paths do not gain that permission.
+- **Charging-pause polling**: After a fresh charging state changes to `Stopped`, the firmware can
+  schedule a bounded series of the existing `GetVehicleData` ChargeState request on an already
+  connected link reporting VCSEC `AWAKE`. It uses `NoWakeSkip`. See the
+  [telemetry schedule](../ARCHITECTURE.md#read-only-telemetry-and-command-correctness).
 
 The entries above were checked against [vehicle-command `83baa078`](https://github.com/teslamotors/vehicle-command/tree/83baa078e81d08982dd997b8c8e4644e33a046a8), pinned tesla-ble v6.3.0 and the native adapter. They document current departures, not hardware acceptance or fixes to them.
 

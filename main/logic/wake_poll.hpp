@@ -70,6 +70,39 @@ inline constexpr uint32_t kBootstrapMaxBackoffS = 300;
 // The three things the VCSEC sleep flag can report to the sampler each cycle.
 enum class WakeSample : uint8_t { Unknown, Asleep, Awake };
 
+// A short EVSE pause can leave a fresh Stopped cache and an awake car with no command to
+// reopen the normal poll window. Keep this budget across a BLE reconnect (#485).
+inline constexpr uint32_t kChargePauseWindowS = 300;
+inline constexpr uint32_t kChargePauseIntervalS = 30;
+
+struct ChargePausePollState {
+    void observe(bool fresh_charging, bool stopped, bool stably_asleep, uint32_t now_s) {
+        if (!stopped || stably_asleep) {
+            tracking_ = false;
+        } else if (was_charging_) {
+            tracking_ = true;
+            stopped_at_s_ = last_attempt_s_ = now_s;
+        } else if (tracking_ && now_s - stopped_at_s_ >= kChargePauseWindowS) {
+            tracking_ = false;
+        }
+        was_charging_ = fresh_charging && !stably_asleep;
+    }
+
+    bool due(WakeSample sleep, uint32_t now_s) const {
+        return tracking_ && sleep == WakeSample::Awake &&
+               now_s - stopped_at_s_ < kChargePauseWindowS &&
+               now_s - last_attempt_s_ >= kChargePauseIntervalS;
+    }
+
+    void begin_attempt(uint32_t now_s) { last_attempt_s_ = now_s; }
+
+private:
+    uint32_t stopped_at_s_ = 0;
+    uint32_t last_attempt_s_ = 0;
+    bool was_charging_ = false;
+    bool tracking_ = false;
+};
+
 // State the vehicle loop carries across iterations. Zero-initialized is the correct
 // "just booted, nothing observed yet, not armed" starting point.
 struct WakePollState {
@@ -198,12 +231,14 @@ struct ChargePollGateInputs {
     bool ble_connected = false;
     bool cmd_in_flight = false;
     uint32_t now_s = 0;
+    bool pause_probe_due = false;
 };
 
 // Decide whether the vehicle loop should fire a background charge-state poll this iteration.
 // The poll fires if the device is paired, connected, queue-idle (!cmd_in_flight), and EITHER:
 //   • poll_cadence is true (10 s periodic refresh within the active window), OR
-//   • a wake-edge or bootstrap poll request is latched in st.pending (issue #264).
+//   • a wake-edge or bootstrap poll request is latched in st.pending (issue #264), OR
+//   • a bounded charge-pause probe is due (issue #485).
 //
 // Crucially, st.take_pending() is ONLY called when the command channel is actually ready to
 // dispatch (ble_connected && !cmd_in_flight). If the channel is blocked — which is always the case
@@ -211,20 +246,18 @@ struct ChargePollGateInputs {
 // cmd_in_flight_ — st.pending remains latched so the poll fires on the subsequent iteration once
 // the probe completes and cmd_in_flight_ drops.
 inline bool charge_poll_should_fire(const ChargePollGateInputs& in, WakePollState& st) {
-    if (in.paired && (in.poll_cadence || st.pending) && in.ble_connected && !in.cmd_in_flight) {
+    if (in.paired && (in.poll_cadence || st.pending || in.pause_probe_due) &&
+        in.ble_connected && !in.cmd_in_flight) {
         st.take_pending(in.now_s);
         return true;
     }
     return false;
 }
 
-// Called only after charge_poll_should_fire() returned true. A fire that is not the in-window
-// 10 s cadence is the wake/bootstrap one-shot, which also refreshes the drive cache once
-// (NO_WAKE_SKIP) so evcc's odometer is current after a drive. Inside the window the telemetry
-// rotation covers drive_state on its own cadence; a pending fire between two cadence ticks
-// also refreshes drive, a benign duplicate of the rotation's drive slot.
-inline bool wake_poll_refreshes_drive(bool poll_cadence) noexcept {
-    return !poll_cadence;
+// Snapshot wake_pending before the dispatch gate consumes it. A pause probe on its own only
+// needs ChargeState; the wake/bootstrap path still refreshes the odometer once after a drive.
+inline bool wake_poll_refreshes_drive(bool poll_cadence, bool wake_pending) noexcept {
+    return !poll_cadence && wake_pending;
 }
 
 // Advance the one-shot state machine by one sample; return true iff a charge poll should fire
