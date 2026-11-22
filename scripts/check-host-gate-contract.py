@@ -20,12 +20,15 @@ import runpy
 F137_WIRING_MODULES: dict[str, dict] = {}
 
 DEPLOY_FLOW_VALIDATED: set[str] = set()
-SHARED_BUILD_SELFTESTS = (
+SHARED_BUILD_CONTRACTS_SELFTESTS = (
     "check-dependency-contract.py", "check-otadata-contract.py", "check-release-assets.py",
-    "prepare-reused-release.py", "check-published-release.py",
-    "select-release-version.sh", "report-firmware-size.py", "check-dev-pages.py",
-    "wait-pages-build.py", "generate-ota-changelog.py", "check-build-gate-contract.py",
+    "select-release-version.sh", "report-firmware-size.py", "check-build-gate-contract.py",
 )
+SHARED_MANIFEST_CONTRACTS_SELFTESTS = (
+    "prepare-reused-release.py", "check-published-release.py",
+    "check-dev-pages.py", "wait-pages-build.py", "generate-ota-changelog.py",
+)
+SHARED_BUILD_SELFTESTS = SHARED_BUILD_CONTRACTS_SELFTESTS + SHARED_MANIFEST_CONTRACTS_SELFTESTS
 
 
 class ContractError(RuntimeError):
@@ -40,7 +43,7 @@ def require(condition: bool, message: str) -> None:
 @lru_cache(maxsize=8)
 def probe_build_contract_modes(source: str) -> None:
     """Exercise the actual CLI/relevance prefix; no build or publication occurs."""
-    boundary = '"$repo_root/scripts/select-release-version.sh" --self-test'
+    boundary = 'if [[ "$run_build_contracts" -eq 1 ]]; then'
     require(source.count(boundary) == 1, "build-contract profile invocation flow boundary is missing")
     prefix = source.split(boundary, 1)[0]
     with tempfile.TemporaryDirectory(prefix="build-contract-modes-") as temporary:
@@ -51,22 +54,33 @@ def probe_build_contract_modes(source: str) -> None:
         relevance.write_text("#!/bin/sh\nprintf '%s\\000' release-relevance \"$@\" '' >> \"$CONTRACT_MODE_TRACE\"\n[ \"$CONTRACT_MODE_FAIL\" != 1 ] || exit 37\n")
         relevance.chmod(0o700)
         script = scripts / "test-build-contracts.sh"
-        script.write_text(prefix + 'printf \'%s\\000\' after \'\' >> "$CONTRACT_MODE_TRACE"\n')
+        suffix = (
+            'if [[ "$run_build_contracts" -eq 1 ]]; then printf \'%s\\000\' build \'\' >> "$CONTRACT_MODE_TRACE"; fi\n'
+            'if [[ "$run_manifest_contracts" -eq 1 ]]; then printf \'%s\\000\' manifest \'\' >> "$CONTRACT_MODE_TRACE"; fi\n'
+        )
+        script.write_text(prefix + suffix)
         env = {k: v for k, v in os.environ.items() if k not in
                ("ENV", "BASH_ENV", "OTA_SIGNING_KEY", "OTA_SIGNING_KEY_FILE", "GH_TOKEN", "GITHUB_TOKEN")
                and not k.startswith(("BASH_FUNC_", "PYTHON", "LD_", "DYLD_"))}
         env["CONTRACT_MODE_TRACE"] = str(trace)
         call = ["release-relevance", "--self-test"]
         for arguments, fail, exit_code, expected in (
-            ([], False, 0, [call, ["after"]]),
+            ([], False, 0, [call, ["build"], ["manifest"]]),
             ([], True, 37, [call]),
-            (["--build-and-manifest"], False, 0, [["after"]]),
-            (["--build-and-manifest"], True, 0, [["after"]]),
+            (["--build-and-manifest"], False, 0, [["build"], ["manifest"]]),
+            (["--build-and-manifest"], True, 0, [["build"], ["manifest"]]),
+            (["--build-contracts"], False, 0, [["build"]]),
+            (["--build-contracts"], True, 0, [["build"]]),
+            (["--manifest-contracts"], False, 0, [["manifest"]]),
+            (["--manifest-contracts"], True, 0, [["manifest"]]),
             (["--unknown"], False, 2, []),
             ([""], False, 2, []),
             (["positional"], False, 2, []),
             (["--build-and-manifest", "extra"], False, 2, []),
             (["--build-and-manifest", "--build-and-manifest"], False, 2, []),
+            (["--build-contracts", "extra"], False, 2, []),
+            (["--manifest-contracts", "extra"], False, 2, []),
+            (["--build-contracts", "--manifest-contracts"], False, 2, []),
         ):
             trace.unlink(missing_ok=True)
             try:
@@ -82,14 +96,17 @@ def probe_build_contract_modes(source: str) -> None:
 
 
 def probe_deploy_consumer_invocations(source: str) -> None:
-    probe_publication_selftest(source, "test/test_deploy_candidate.py", ())
-    for name in SHARED_BUILD_SELFTESTS:
-        probe_publication_selftest(source, "scripts/" + name, ("--self-test",))
+    probe_publication_selftest(source, "test/test_deploy_candidate.py", (), "--manifest-contracts")
+    for name in SHARED_BUILD_CONTRACTS_SELFTESTS:
+        probe_publication_selftest(source, "scripts/" + name, ("--self-test",), "--build-contracts")
+    for name in SHARED_MANIFEST_CONTRACTS_SELFTESTS:
+        probe_publication_selftest(source, "scripts/" + name, ("--self-test",), "--manifest-contracts")
 
 
-def probe_publication_selftest(source: str, relative: str, expected_arguments: tuple[str, ...]) -> None:
+def probe_publication_selftest(source: str, relative: str, expected_arguments: tuple[str, ...],
+                               mode_flag: str) -> None:
     """Exercise the shipped shell prefix with inert tools and a failing consumer."""
-    boundary = 'temp="$(mktemp -d)"'
+    boundary = '  temp="$(mktemp -d)"'
     require(source.count(boundary) == 1, "signed deploy consumer flow boundary is missing")
     prefix = source.split(boundary, 1)[0]
     with tempfile.TemporaryDirectory(prefix="deploy-consumer-flow-") as temporary:
@@ -124,14 +141,22 @@ return 0
 }
 '''
         script = scripts / "test-build-contracts.sh"
-        script.write_text(recorder + "".join(shell_recorders) + prefix + 'python3 __deploy_flow_after__\n')
+        script.write_text(recorder + "".join(shell_recorders) + prefix + '  :\nfi\npython3 __deploy_flow_after__\n')
         env = {k: v for k, v in os.environ.items() if k not in
                ("ENV", "BASH_ENV", "OTA_SIGNING_KEY", "OTA_SIGNING_KEY_FILE", "GH_TOKEN", "GITHUB_TOKEN")
                and not k.startswith(("BASH_FUNC_", "PYTHON", "LD_", "DYLD_"))}
         env.update(PATH=str(tools) + os.pathsep + env.get("PATH", os.defpath),
                    DEPLOY_FLOW_TRACE=str(trace), DEPLOY_FLOW_WATCHED=str(work / relative))
-        for arguments, fail in (([], False), ([], True),
-                                (["--build-and-manifest"], False), (["--build-and-manifest"], True)):
+        other_flag = "--manifest-contracts" if mode_flag == "--build-contracts" else "--build-contracts"
+        for arguments, fail, should_run in (
+            ([], False, True),
+            ([], True, True),
+            (["--build-and-manifest"], False, True),
+            (["--build-and-manifest"], True, True),
+            ([mode_flag], False, True),
+            ([mode_flag], True, True),
+            ([other_flag], True, False),
+        ):
             if trace.exists(): trace.unlink()
             try:
                 result = subprocess.run(["bash", str(script), *arguments], cwd=work,
@@ -143,8 +168,13 @@ return 0
                      for block in trace.read_bytes().split(b'\0\0') if block] if trace.exists() else []
             target = [str(work / relative), *expected_arguments]
             relevant = [args for args in calls if args and args[0] in (target[0], "__deploy_flow_after__")]
-            require(result.returncode == (37 if fail else 0) and
-                    relevant == ([target] if fail else [target, ["__deploy_flow_after__"]]),
+            if should_run:
+                expected_exit = 37 if fail else 0
+                expected_calls = [target] if fail else [target, ["__deploy_flow_after__"]]
+            else:
+                expected_exit = 0
+                expected_calls = [["__deploy_flow_after__"]]
+            require(result.returncode == expected_exit and relevant == expected_calls,
                     ("actual signed deploy consumer" if relative.startswith("test/") else
                      "shared publication self-test invocation flow") +
                     " must run once in order and propagate failure")
@@ -383,7 +413,8 @@ def probe_browser_invocations(source: str) -> None:
                         prefix + ["ruby", "test/test_evcc_vehicle.rb"],
                         prefix + ["python3", "test/test_eth_startup_cleanup.py"],
                         prefix + ["scripts/release-relevance.sh", "--self-test"],
-                        prefix + ["scripts/test-build-contracts.sh", "--build-and-manifest"],
+                        prefix + ["scripts/test-build-contracts.sh", "--build-contracts"],
+                        prefix + ["scripts/test-build-contracts.sh", "--manifest-contracts"],
                         prefix + ["python3", "test/test_ci_checkout.py"],
                         prefix + ["python3", "test/test_pages_publish_control.py"],
                         prefix + ["python3", "test/test_release_pages_recovery.py"],
@@ -420,9 +451,10 @@ def probe_browser_invocations(source: str) -> None:
                          for row in trace.read_bytes().split(b'\0\0') if row] if trace.exists() else []
                 if failure is None:
                     relevance_call = prefix + ["scripts/release-relevance.sh", "--self-test"]
-                    build_call = prefix + ["scripts/test-build-contracts.sh", "--build-and-manifest"]
+                    build_call = prefix + ["scripts/test-build-contracts.sh", "--build-contracts"]
+                    manifest_call = prefix + ["scripts/test-build-contracts.sh", "--manifest-contracts"]
                     require(result.returncode == 0 and all(calls.count(call) == 1 for call in expected)
-                            and calls.index(relevance_call) < calls.index(build_call),
+                            and calls.index(relevance_call) < calls.index(build_call) < calls.index(manifest_call),
                             "strict browser invocation flow must execute policy, pipe and real-browser gates once")
                     sharded_calls = Counter()
                     for shard in ("runtime-browser", "policy"):
@@ -436,7 +468,8 @@ def probe_browser_invocations(source: str) -> None:
                             tuple(os.fsdecode(arg) for arg in row.split(b"\0"))
                             for row in trace.read_bytes().split(b"\0\0") if row
                         )
-                        require((tuple(build_call) in shard_calls) == (shard == "policy"),
+                        require((tuple(build_call) in shard_calls) == (shard == "policy")
+                                and (tuple(manifest_call) in shard_calls) == (shard == "policy"),
                                 "build and manifest contract must run in the policy shard")
                         sharded_calls.update(shard_calls)
                     require(sharded_calls == Counter(tuple(call) for call in calls),
@@ -610,8 +643,11 @@ def validate(root: Path) -> None:
         require(f"scripts/{name} --self-test" not in run_mock,
                 label + ": full host wrapper must not duplicate its build-contract owner")
     relevance_gate = 'run_gate "release relevance and publication selectors" 120 scripts/release-relevance.sh --self-test'
-    build_gate = 'run_gate "build and manifest contract tests" 120 scripts/test-build-contracts.sh --build-and-manifest'
-    require(run_mock.count(relevance_gate) == 1 and run_mock.count(build_gate) == 1,
+    build_gate = 'run_gate "build and artifact contract tests" 120 scripts/test-build-contracts.sh --build-contracts'
+    manifest_gate = 'run_gate "publication and manifest contract tests" 120 scripts/test-build-contracts.sh --manifest-contracts'
+    require(run_mock.count(relevance_gate) == 1
+            and run_mock.count(build_gate) == 1
+            and run_mock.count(manifest_gate) == 1,
             "strict browser invocation flow: release/build profile gates or exact arguments are missing")
     for command in (
         'run_gate "exact-source filtered publication checkout" 120 python3 test/test_ci_checkout.py',
@@ -625,10 +661,10 @@ def validate(root: Path) -> None:
             "actual signed deploy consumer tests are missing from the mandatory host gate")
     # Other mutation cases retain this exact shell body. Cache only an already executed
     # complete input, never a path/name; every changed shell must exercise the real flow.
+    probe_build_contract_modes(publication_gate)
     if publication_gate not in DEPLOY_FLOW_VALIDATED:
         probe_deploy_consumer_invocations(publication_gate)
         DEPLOY_FLOW_VALIDATED.add(publication_gate)
-    probe_build_contract_modes(publication_gate)
     for validator in ("check-pages-manifest.py", "check-release-pages-bytes.py"):
         require(f'python3 "$repo_root/scripts/{validator}" --self-test' in publication_gate,
                 f"publication validator self-test is not executed: {validator}")
@@ -1469,8 +1505,9 @@ def self_test(root: Path) -> None:
         ("test/CMakeLists.txt", f137_group, '#[[\n' + f137_group + ']]\n', "F137 host wiring"),
     ])
     relevance_gate = '    run_gate "release relevance and publication selectors" 120 scripts/release-relevance.sh --self-test'
-    build_gate = '    run_gate "build and manifest contract tests" 120 scripts/test-build-contracts.sh --build-and-manifest'
-    for command in (relevance_gate, build_gate):
+    build_gate = '    run_gate "build and artifact contract tests" 120 scripts/test-build-contracts.sh --build-contracts'
+    manifest_gate = '    run_gate "publication and manifest contract tests" 120 scripts/test-build-contracts.sh --manifest-contracts'
+    for command in (relevance_gate, build_gate, manifest_gate):
         for changed in ('# ' + command, '    if false; then\n' + command + '\n    fi',
                         '    exit 0\n' + command, '    (' + command.strip() + ') || true', command + ' &'):
             mutations.append(("scripts/run-mock-tests.sh", command, changed, "strict browser invocation flow"))
@@ -1488,24 +1525,48 @@ def self_test(root: Path) -> None:
     mutations.extend([
         ("scripts/run-mock-tests.sh", relevance_gate + '\n' + build_gate,
          build_gate + '\n' + relevance_gate, "strict browser invocation flow"),
-        ("scripts/run-mock-tests.sh", build_gate, build_gate.replace(' --build-and-manifest', ''),
+        ("scripts/run-mock-tests.sh", build_gate + '\n' + manifest_gate,
+         manifest_gate + '\n' + build_gate, "strict browser invocation flow"),
+        ("scripts/run-mock-tests.sh", build_gate, build_gate.replace(' --build-contracts', ''),
          "strict browser invocation flow"),
-        ("scripts/run-mock-tests.sh", build_gate, build_gate.replace('--build-and-manifest', '--unknown'),
+        ("scripts/run-mock-tests.sh", build_gate, build_gate.replace('--build-contracts', '--unknown'),
+         "strict browser invocation flow"),
+        ("scripts/run-mock-tests.sh", build_gate, build_gate.replace('--build-contracts', '--manifest-contracts'),
+         "strict browser invocation flow"),
+        ("scripts/run-mock-tests.sh", manifest_gate, manifest_gate.replace(' --manifest-contracts', ''),
+         "strict browser invocation flow"),
+        ("scripts/run-mock-tests.sh", manifest_gate, manifest_gate.replace('--manifest-contracts', '--unknown'),
+         "strict browser invocation flow"),
+        ("scripts/run-mock-tests.sh", manifest_gate, manifest_gate.replace('--manifest-contracts', '--build-contracts'),
          "strict browser invocation flow"),
         ("scripts/run-mock-tests.sh", '        scripts/release-relevance.sh ' + chr(92) + '\n', '',
          "run-mock-tests.sh strict inventory omits scripts/release-relevance.sh"),
-        ("scripts/test-build-contracts.sh", 'build_and_manifest_only=0', 'build_and_manifest_only=1',
+        ("scripts/test-build-contracts.sh", 'run_relevance=1', 'run_relevance=0',
+         "build-contract profile invocation flow"),
+        ("scripts/test-build-contracts.sh", 'run_build_contracts=1', 'run_build_contracts=0',
+         "build-contract profile invocation flow"),
+        ("scripts/test-build-contracts.sh", 'run_manifest_contracts=1', 'run_manifest_contracts=0',
          "build-contract profile invocation flow"),
         ("scripts/test-build-contracts.sh", '  "$repo_root/scripts/release-relevance.sh" --self-test',
          '  : # omitted default relevance', "build-contract profile invocation flow"),
         ("scripts/test-build-contracts.sh", '  "$repo_root/scripts/release-relevance.sh" --self-test',
          '  "$repo_root/scripts/release-relevance.sh" --self-test || true', "build-contract profile invocation flow"),
-        ("scripts/test-build-contracts.sh", 'if [[ "$build_and_manifest_only" -eq 0 ]]; then', 'if true; then',
+        ("scripts/test-build-contracts.sh", 'if [[ "$run_relevance" -eq 1 ]]; then', 'if true; then',
          "build-contract profile invocation flow"),
-        ("scripts/test-build-contracts.sh", '[[ "$1" == --build-and-manifest ]] || {', 'true || {',
+        ("scripts/test-build-contracts.sh", 'if [[ "$run_build_contracts" -eq 1 ]]; then', 'if true; then',
          "build-contract profile invocation flow"),
-        ("scripts/test-build-contracts.sh", '  *) echo "usage: test-build-contracts.sh [--build-and-manifest]" >&2; exit 2 ;;',
-         '  *) build_and_manifest_only=1 ;;', "build-contract profile invocation flow"),
+        ("scripts/test-build-contracts.sh", 'if [[ "$run_manifest_contracts" -eq 1 ]]; then', 'if true; then',
+         "actual signed deploy consumer must run once"),
+        ("scripts/test-build-contracts.sh", '--build-contracts) run_relevance=0; run_manifest_contracts=0 ;;',
+         '--build-contracts) run_relevance=0 ;;', "build-contract profile invocation flow"),
+        ("scripts/test-build-contracts.sh", '--manifest-contracts) run_relevance=0; run_build_contracts=0 ;;',
+         '--manifest-contracts) run_relevance=0 ;;', "build-contract profile invocation flow"),
+        ("scripts/test-build-contracts.sh",
+         '      *) echo "usage: test-build-contracts.sh [--build-and-manifest|--build-contracts|--manifest-contracts]" >&2; exit 2 ;;',
+         '      *) run_relevance=0 ;;', "build-contract profile invocation flow"),
+        ("scripts/test-build-contracts.sh",
+         '  *) echo "usage: test-build-contracts.sh [--build-and-manifest|--build-contracts|--manifest-contracts]" >&2; exit 2 ;;',
+         '  *) run_relevance=0 ;;', "build-contract profile invocation flow"),
     ])
     for name in SHARED_BUILD_SELFTESTS:
         interpreter = "" if name.endswith(".sh") else "python3 "

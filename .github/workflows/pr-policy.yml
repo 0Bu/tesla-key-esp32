@@ -1,8 +1,9 @@
 name: pr-policy
 
-# This workflow evaluates PR metadata with trusted base-branch code. It never checks out, imports,
-# sources, or executes the pull request. The job must be configured as a required status check in
-# the repository ruleset for this executable policy to block a merge server-side.
+# This workflow evaluates PR metadata with current trusted default-branch code, never a historical
+# base SHA or pull request code. It never checks out, imports, sources, or executes the pull request.
+# The job must be configured as a required status check in the repository ruleset for this executable
+# policy to block a merge server-side.
 on:
   pull_request_target:
     branches: [main]
@@ -20,10 +21,11 @@ jobs:
       contents: read
       pull-requests: read
     steps:
-      - name: Check out trusted base policy only
+      - name: Check out trusted default-branch policy only
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
           persist-credentials: false
       - name: Validate SHA-bound PR policy records
         env:

@@ -121,16 +121,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+          GITHUB_REF: ${{ github.ref }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          if [ "${{ github.event_name }}" = pull_request ]; then
-            feedback="$(python3 scripts/check-change-scope.py --base "${{ github.event.pull_request.base.sha }}" --head "${{ github.event.pull_request.head.sha }}")" || feedback=full
-            if [ "$feedback" = docs ]; then
-              changed=no
-            elif ! changed="$(./scripts/release-relevance.sh --changed-pr "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}")"; then
+          if [ "$EVENT_NAME" = pull_request ]; then
+            if ! changed="$(./scripts/release-relevance.sh --changed-pr "$PR_BASE_SHA" "$PR_HEAD_SHA")"; then
               echo "release relevance check failed; building target" >&2
               changed=yes
             fi
-          elif [ "${{ github.event_name }}" = push ] && [ "${{ github.ref }}" = refs/heads/main ]; then
+          elif [ "$EVENT_NAME" = push ] && [ "$GITHUB_REF" = refs/heads/main ]; then
             if ! changed="$(./scripts/release-relevance.sh --changed-dev "$SOURCE_SHA")"; then
               echo "release relevance check failed; scheduling publication reconciliation" >&2
               changed=yes

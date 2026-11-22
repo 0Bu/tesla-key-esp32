@@ -210,6 +210,52 @@ PY
 expect_guard deny "$xss_payload" 'eval in main/www/app.js denied'
 expect_ag_guard deny "$ag_xss_payload" 'Antigravity top-level decision deny for eval in web UI'
 
+ag_args_payload(){ python3 - "$@" <<'PY'
+import json,sys
+print(json.dumps({"conversationId":"ag-test","workspacePaths":[sys.argv[3]],"toolCall":{"name":sys.argv[1],"args":json.loads(sys.argv[2])}}))
+PY
+}
+tool_args_payload(){ python3 - "$@" <<'PY'
+import json,sys
+print(json.dumps({"tool_name":sys.argv[1],"cwd":sys.argv[3],"tool_input":json.loads(sys.argv[2])}))
+PY
+}
+
+# Antigravity read_file, edit_file, and write_file coverage (F-02 / F-15).
+expect_ag_guard deny "$(ag_payload read_file Path /tmp/offline.pem "$root")" 'Antigravity read_file PEM read denied'
+expect_ag_guard allow "$(ag_payload read_file Path docs/SECURITY.md "$root")" 'Antigravity read_file permits normal file'
+
+expect_ag_guard deny "$(ag_args_payload edit_file '{"Path":"partitions.csv","Target":"old","Replacement":"new"}' "$root")" 'Antigravity edit_file partitions.csv denied'
+expect_ag_guard deny "$(ag_args_payload write_file '{"Path":"partitions.csv","Content":"nvs,data,nvs,0x9000,0x6000,"}' "$root")" 'Antigravity write_file partitions.csv denied'
+expect_ag_guard deny "$(ag_args_payload edit_file '{"Path":"managed_components/yoziru__tesla-ble/src/ble.c","Target":"a","Replacement":"b"}' "$root")" 'Antigravity edit_file managed_components denied'
+expect_ag_guard deny "$(ag_args_payload write_file '{"Path":"managed_components/yoziru__tesla-ble/src/ble.c","Content":"void f(){}"}' "$root")" 'Antigravity write_file managed_components denied'
+expect_ag_guard deny "$(ag_args_payload edit_file '{"Path":"sdkconfig.defaults","Target":"x","Replacement":"-Os"}' "$root")" 'Antigravity edit_file -Os denied'
+expect_ag_guard deny "$(ag_args_payload edit_file '{"Path":"sdkconfig.defaults","Target":"x","Replacement":"CONFIG_COMPILER_OPTIMIZATION_SIZE=y"}' "$root")" 'Antigravity edit_file CONFIG_COMPILER_OPTIMIZATION_SIZE=y denied'
+expect_ag_guard deny "$(ag_args_payload write_file '{"Path":"sdkconfig.defaults","Content":"-Os"}' "$root")" 'Antigravity write_file -Os denied'
+expect_ag_guard deny "$(ag_args_payload write_file '{"Path":"sdkconfig.defaults","Content":"CONFIG_COMPILER_OPTIMIZATION_SIZE=y"}' "$root")" 'Antigravity write_file CONFIG_COMPILER_OPTIMIZATION_SIZE=y denied'
+expect_ag_guard deny "$(ag_args_payload edit_file '{"Path":"main/logic/units.hpp","Target":"//","Replacement":"#include <esp_log.h>"}' "$root")" 'Antigravity edit_file main/logic IDF include denied'
+expect_ag_guard deny "$(ag_args_payload write_file '{"Path":"main/logic/units.hpp","Content":"#include <esp_log.h>"}' "$root")" 'Antigravity write_file main/logic IDF include denied'
+expect_ag_guard deny "$(ag_args_payload edit_file '{"Path":"main/www/app.js","Target":"a","Replacement":"eval(x)"}' "$root")" 'Antigravity edit_file eval denied'
+expect_ag_guard deny "$(ag_args_payload edit_file '{"Path":"main/www/app.js","Target":"a","Replacement":"document.write(x)"}' "$root")" 'Antigravity edit_file document.write denied'
+expect_ag_guard deny "$(ag_args_payload write_file '{"Path":"main/www/app.js","Content":"eval(x)"}' "$root")" 'Antigravity write_file eval denied'
+expect_ag_guard deny "$(ag_args_payload write_file '{"Path":"main/www/app.js","Content":"document.write(x)"}' "$root")" 'Antigravity write_file document.write denied'
+expect_ag_guard allow "$(ag_args_payload edit_file '{"Path":"sdkconfig.defaults","Target":"a","Replacement":"# safe"}' "$root")" 'Antigravity edit_file benign sdkconfig allowed'
+expect_ag_guard allow "$(ag_args_payload edit_file '{"Path":"main/logic/units.hpp","Target":"a","Replacement":"#include <cstdint>"}' "$root")" 'Antigravity edit_file benign main/logic allowed'
+expect_ag_guard allow "$(ag_args_payload edit_file '{"Path":"main/www/app.js","Target":"a","Replacement":"revalidate(x)"}' "$root")" 'Antigravity edit_file benign main/www allowed'
+expect_ag_guard allow "$(ag_args_payload write_file '{"Path":"main/www/app.js","Content":"revalidate(x)"}' "$root")" 'Antigravity write_file benign main/www allowed'
+
+# Claude/Codex Edit (new_string) and MultiEdit (edits[]) invariant coverage (F-15).
+expect_guard deny "$(tool_args_payload Edit '{"file_path":"sdkconfig.defaults","old_string":"x","new_string":"-Os"}' "$root")" 'Edit new_string -Os denied'
+expect_guard deny "$(tool_args_payload Edit '{"file_path":"sdkconfig.defaults","old_string":"x","new_string":"CONFIG_COMPILER_OPTIMIZATION_SIZE=y"}' "$root")" 'Edit new_string CONFIG_COMPILER_OPTIMIZATION_SIZE=y denied'
+expect_guard deny "$(tool_args_payload Edit '{"file_path":"main/logic/units.hpp","old_string":"//","new_string":"#include <esp_log.h>"}' "$root")" 'Edit new_string main/logic IDF include denied'
+expect_guard deny "$(tool_args_payload Edit '{"file_path":"main/www/app.js","old_string":"a","new_string":"eval(x)"}' "$root")" 'Edit new_string eval denied'
+expect_guard deny "$(tool_args_payload Edit '{"file_path":"main/www/app.js","old_string":"a","new_string":"document.write(x)"}' "$root")" 'Edit new_string document.write denied'
+expect_guard deny "$(tool_args_payload MultiEdit '{"file_path":"docs/README.md","edits":[{"file_path":"sdkconfig.defaults","old_string":"x","new_string":"-Os"}]}' "$root")" 'MultiEdit per-item sdkconfig -Os denied'
+expect_guard deny "$(tool_args_payload MultiEdit '{"file_path":"docs/README.md","edits":[{"file_path":"main/logic/units.hpp","old_string":"//","new_string":"#include <freertos/FreeRTOS.h>"}]}' "$root")" 'MultiEdit per-item main/logic FreeRTOS include denied'
+expect_guard deny "$(tool_args_payload MultiEdit '{"file_path":"docs/README.md","edits":[{"file_path":"main/www/app.js","old_string":"a","new_string":"eval(x)"}]}' "$root")" 'MultiEdit per-item main/www eval denied'
+expect_guard deny "$(tool_args_payload MultiEdit '{"file_path":"main/www/app.js","edits":[{"old_string":"a","new_string":"document.write(x)"}]}' "$root")" 'MultiEdit fallback target document.write denied'
+expect_guard allow "$(tool_args_payload MultiEdit '{"file_path":"sdkconfig.defaults","edits":[{"file_path":"docs/README.md","old_string":"a","new_string":"-Os"}]}' "$root")" 'MultiEdit per-item target does not apply sdkconfig ban to docs'
+
 if python3 - "$root" "$hook" <<'PY'
 import importlib.util,pathlib,sys
 sys.path.insert(0,str(pathlib.Path(sys.argv[2]).parent))
@@ -615,6 +661,31 @@ expect_rc 0 'canonical merge passes exact current-head evidence' env PATH="$tmp/
 expect_rc 0 'Renovate canonical merge needs no manual records' env PATH="$tmp/bin:$PATH" TEST_HEAD="$sha" TEST_BODY='' TEST_CHANGED=1 TEST_FILES_MODE=renovate "$gate" --project-dir "$root" --payload-file "$tmp/payload.json"
 expect_rc 0 'PR policy accepts matching event head and trusted live base' env PATH="$tmp/bin:$PATH" TEST_HEAD="$sha" TEST_BASE="$sha" TEST_FILES_MODE=renovate "$gate" --pr 123 --expected-head "$sha" --expected-base "$sha"
 expect_rc 2 'PR policy refuses a changed live base with the same head' env PATH="$tmp/bin:$PATH" TEST_HEAD="$sha" TEST_BASE=1111111111111111111111111111111111111111 TEST_FILES_MODE=renovate "$gate" --pr 123 --expected-head "$sha" --expected-base "$sha"
+
+# Verify --expected-base uses ancestry against HEAD even when main advances past PR base (F-12).
+base_repo="$tmp/base-ancestry-repo"
+mkdir -p "$base_repo/tools/agent-hooks"
+cp "$gate" "$root/tools/agent-hooks/pr-gate-lib.sh" "$parser" "$runner" "$base_repo/tools/agent-hooks/"
+git -C "$base_repo" init -q -b main
+git -C "$base_repo" remote add origin https://github.com/0Bu/tesla-key-esp32.git
+git -C "$base_repo" -c user.name=Fixture -c user.email=fixture@example.invalid \
+  -c commit.gpgsign=false -c core.hooksPath=/dev/null commit -qm 'Base ancestor' --allow-empty
+base_ancestor="$(git -C "$base_repo" rev-parse HEAD)"
+git -C "$base_repo" -c user.name=Fixture -c user.email=fixture@example.invalid \
+  -c commit.gpgsign=false -c core.hooksPath=/dev/null commit -qm 'Trusted main head' --allow-empty
+base_head="$(git -C "$base_repo" rev-parse HEAD)"
+git -C "$base_repo" checkout -q --orphan side
+git -C "$base_repo" -c user.name=Fixture -c user.email=fixture@example.invalid \
+  -c commit.gpgsign=false -c core.hooksPath=/dev/null commit -qm 'Unrelated base' --allow-empty
+unrelated_base="$(git -C "$base_repo" rev-parse HEAD)"
+git -C "$base_repo" checkout -q main
+expect_rc 0 'PR policy accepts ancestor event base on trusted checkout' env PATH="$tmp/bin:$PATH" TEST_HEAD="$base_head" TEST_BASE="$base_ancestor" TEST_FILES_MODE=renovate "$base_repo/tools/agent-hooks/require-pr-gates.sh" --pr 123 --expected-head "$base_head" --expected-base "$base_ancestor"
+expect_rc 2 'PR policy rejects non-ancestor event base on trusted checkout' env PATH="$tmp/bin:$PATH" TEST_HEAD="$base_head" TEST_BASE="$unrelated_base" TEST_FILES_MODE=renovate "$base_repo/tools/agent-hooks/require-pr-gates.sh" --pr 123 --expected-head "$base_head" --expected-base "$unrelated_base"
+if grep -qF 'is not an ancestor' "$tmp/out"; then
+  pass_case 'non-ancestor event base emits ancestry diagnostic'
+else
+  fail_case "non-ancestor event base diagnostic missing ($(cat "$tmp/out"))"
+fi
 expect_rc 2 'rename into Renovate workflow does not hide original path' env PATH="$tmp/bin:$PATH" TEST_HEAD="$sha" TEST_BODY='' TEST_CHANGED=1 TEST_FILES_MODE=renovate-rename "$gate" --project-dir "$root" --payload-file "$tmp/payload.json"
 expect_rc 2 'Renovate changed-file count mismatch fails closed' env PATH="$tmp/bin:$PATH" TEST_HEAD="$sha" TEST_BODY='' TEST_CHANGED=2 TEST_FILES_MODE=renovate "$gate" --project-dir "$root" --payload-file "$tmp/payload.json"
 expect_rc 2 'Renovate merge still binds local HEAD to PR head' env PATH="$tmp/bin:$PATH" TEST_HEAD=0000000000000000000000000000000000000000 TEST_BODY='' TEST_CHANGED=1 TEST_FILES_MODE=renovate "$gate" --project-dir "$root" --payload-file "$tmp/payload.json"
@@ -689,6 +760,7 @@ nested_repo="$worktree_tmp/independent-repo"
 mkdir -p "$nested_repo"
 git -C "$nested_repo" init -q
 git -C "$nested_repo" -c user.name=Fixture -c user.email=fixture@example.invalid \
+  -c commit.gpgsign=false -c core.hooksPath=/dev/null \
   commit --quiet --allow-empty -m 'Independent nested repository fixture'
 git -C "$nested_repo" remote add origin https://github.com/example/unreviewed.git
 [ "$(git -C "$nested_repo" rev-parse HEAD)" != "$sha" ] || fail_case 'nested repository fixture must have a different HEAD'
@@ -767,7 +839,7 @@ chmod +x "$push_repo/scripts/check-local.sh"
 git -C "$push_repo" init -q -b feature
 git -C "$push_repo" remote add origin https://github.com/0Bu/tesla-key-esp32.git
 git -C "$push_repo" -c user.name=Fixture -c user.email=fixture@example.invalid \
-  -c commit.gpgsign=false commit -qm base --allow-empty
+  -c commit.gpgsign=false -c core.hooksPath=/dev/null commit -qm base --allow-empty
 push_fixture_sha="$(git -C "$push_repo" rev-parse HEAD)"
 zero=0000000000000000000000000000000000000000
 hook_update() (
@@ -988,6 +1060,28 @@ for context_command in 'GH_REPO=a/b gh pr create' 'gh -R a/b pr create' \
 done
 expect_unsafe_action 'git status && git push' push 'compound push classified unsafe'
 
+# [F-16] Non-env flags (-i, -C, -0, -P, -u) stay harmless; env wrapper options still fail closed.
+for readonly_cmd in 'git grep -i pattern' 'git -C . status' 'git config --list | grep -i origin' \
+    'git status -0' 'git log -P' 'sort -u' 'gh pr list | grep -i audit'; do
+  expect_rc 1 "env context remains safe for $readonly_cmd" gate_action_env_context_is_unsafe "$readonly_cmd"
+  expect_alias_actions "$readonly_cmd" '' "read-only non-env command stays unguarded: $readonly_cmd"
+  payload Bash command "$readonly_cmd" "$root" >"$tmp/f16-ro.json"
+  expect_rc 0 "require-pr-gates allows read-only non-env command: $readonly_cmd" \
+    env PATH="$alias_none_bin:$PATH" bash "$gate" --project-dir "$root" --payload-file "$tmp/f16-ro.json"
+done
+expect_rc 1 'env -u on benign var does not mark env context unsafe' gate_action_env_context_is_unsafe 'env -u FOO git push'
+for env_unsafe_cmd in 'env -i git push' 'env -C /tmp git status' 'env --chdir=/tmp git push' \
+    'env -u GIT_DIR git push' 'env -iu GIT_DIR git push' 'env --unset=GIT_DIR git push' \
+    'env - git push' 'env -P /tmp git push' 'env -0 git status' \
+    'echo ok && env -i git push' 'FOO=1 env -i git status'; do
+  expect_rc 0 "env context detects unsafe wrapper: $env_unsafe_cmd" gate_action_env_context_is_unsafe "$env_unsafe_cmd"
+  expect_unsafe_action "$env_unsafe_cmd" push "env wrapper classified unsafe: $env_unsafe_cmd"
+  payload Bash command "$env_unsafe_cmd" "$root" >"$tmp/f16-unsafe.json"
+  expect_rc 2 "require-pr-gates blocks unsafe env wrapper: $env_unsafe_cmd" \
+    env PATH="$alias_none_bin:$PATH" bash "$gate" --project-dir "$root" --payload-file "$tmp/f16-unsafe.json"
+done
+expect_rc 0 'malformed env command fails closed in env context check' gate_action_env_context_is_unsafe 'env -i "unclosed'
+
 # Known lexer limits are data, not commands to run. Keep the documented examples honest.
 for unclassified in 'nohup gh pr new --body-file body.md' 'nohup gh -R a/b pr create' \
     'git {push,origin}' 'gh {pr,create}' '$X merge 1' '$GIT pp' 'xargs git < args' 'eval "$(cat x)"'; do
@@ -997,7 +1091,8 @@ done
 # Exercise source and remote admission with an offline repository, including a positive control.
 push_scope_repo="$tmp/push-scope-repo"
 git init -q "$push_scope_repo"
-git -C "$push_scope_repo" -c user.name=Test -c user.email=test@example.invalid commit -qm fixture --allow-empty
+git -C "$push_scope_repo" -c user.name=Test -c user.email=test@example.invalid \
+  -c commit.gpgsign=false -c core.hooksPath=/dev/null commit -qm fixture --allow-empty
 git -C "$push_scope_repo" remote add origin https://github.com/0Bu/tesla-key-esp32.git
 push_scope_branch="$(git -C "$push_scope_repo" rev-parse --abbrev-ref HEAD)"
 expect_rc 0 'current HEAD push scope positive control' env GATE_PROJ="$push_scope_repo" bash -c \

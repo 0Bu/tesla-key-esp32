@@ -3,7 +3,7 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "^(?:(?:run_command|view_file|replace_file_content|write_to_file|apply_patch|Read|Edit|MultiEdit|Write|Bash|exec_command|shell|shell_command)|(?:run_command|Bash|exec_command|shell|shell_command|mcp__.*(?:github|GitHub).*))$",
+        "matcher": "^(?:(?:run_command|view_file|replace_file_content|write_to_file|read_file|edit_file|write_file|apply_patch|Read|Edit|MultiEdit|Write|Bash|exec_command|shell|shell_command)|(?:run_command|Bash|exec_command|shell|shell_command|mcp__.*(?:github|GitHub).*))$",
         "hooks": [
           {
             "type": "command",

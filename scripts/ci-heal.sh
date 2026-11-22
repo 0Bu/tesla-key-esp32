@@ -39,6 +39,7 @@ for gate_fn in gate_feature_docs_relevant gate_vehicle_command_relevant \
 done
 
 REPO_SLUG="0Bu/tesla-key-esp32"
+REPO_TARGET="github.com/0Bu/tesla-key-esp32"
 RECORDS_CHECK="current-head-records"
 ALL_GATES="local-checks skill-audit project-review pr-hygiene feature-docs vehicle-command-audit"
 
@@ -123,6 +124,14 @@ merge_pr() {
 }
 
 check_gh_cli() {
+  case "${GH_HOST:-}" in
+    ""|github.com) ;;
+    *) echo "ci-heal: error: inherited GH_HOST targets a foreign GitHub host." >&2; exit 2 ;;
+  esac
+  case "${GH_REPO:-}" in
+    ""|0Bu/tesla-key-esp32|github.com/0Bu/tesla-key-esp32) ;;
+    *) echo "ci-heal: error: inherited GH_REPO targets a foreign repository." >&2; exit 2 ;;
+  esac
   command -v gh >/dev/null 2>&1 || {
     echo "ci-heal: error: 'gh' CLI is required but not installed in PATH." >&2
     exit 2
@@ -135,8 +144,13 @@ detect_pr() {
     printf '%s' "$pr_input"
     return 0
   fi
-  local detected
-  detected="$(gh pr view --json number -q .number 2>/dev/null || true)"
+  local branch detected
+  branch="$(git_current_branch 2>/dev/null || true)"
+  if [ -z "$branch" ] || [ "$branch" = "HEAD" ]; then
+    echo "ci-heal: error: could not detect current branch (detached HEAD). Use --pr <number>." >&2
+    exit 1
+  fi
+  detected="$(gh pr view --repo "$REPO_TARGET" "$branch" --json number -q .number 2>/dev/null || true)"
   if [ -z "$detected" ]; then
     echo "ci-heal: error: could not detect open PR for current branch. Use --pr <number>." >&2
     exit 1
@@ -146,34 +160,34 @@ detect_pr() {
 
 get_pr_head_sha() {
   local pr="$1"
-  gh pr view "$pr" --json headRefOid -q .headRefOid
+  gh pr view --repo "$REPO_TARGET" "$pr" --json headRefOid -q .headRefOid
 }
 
 get_pr_head_ref() {
   local pr="$1"
-  gh pr view "$pr" --json headRefName -q .headRefName
+  gh pr view --repo "$REPO_TARGET" "$pr" --json headRefName -q .headRefName
 }
 
 get_pr_body() {
   local pr="$1"
-  gh pr view "$pr" --json body -q .body
+  gh pr view --repo "$REPO_TARGET" "$pr" --json body -q .body
 }
 
 watch_pr_checks() {
   local pr="$1"
   echo "ci-heal: watching CI checks for PR #$pr..."
-  if gh pr checks "$pr" --required --watch >/dev/null 2>&1; then
+  if gh pr checks --repo "$REPO_TARGET" "$pr" --required --watch >/dev/null 2>&1; then
     return 0
   else
     return 1
   fi
 }
 
-required_checks_pass() { gh pr checks "$1" --required >/dev/null 2>&1; }
+required_checks_pass() { gh pr checks --repo "$REPO_TARGET" "$1" --required >/dev/null 2>&1; }
 
 fetch_failed_runs() {
   local pr="$1"
-  gh pr view "$pr" --json statusCheckRollup -q '
+  gh pr view --repo "$REPO_TARGET" "$pr" --json statusCheckRollup -q '
     .statusCheckRollup[]?
     | select(.conclusion == "FAILURE" or .conclusion == "TIMED_OUT" or .conclusion == "STARTUP_FAILURE")
     | "\(.name) | \(.status) | \(.conclusion) | \(.detailsUrl // "")"
@@ -187,7 +201,7 @@ fetch_failed_runs() {
 # the latest completed run counts.
 check_rollup() {
   local pr="$1"
-  gh pr view "$pr" --json statusCheckRollup -q '
+  gh pr view --repo "$REPO_TARGET" "$pr" --json statusCheckRollup -q '
     [.statusCheckRollup[]?]
     | group_by([(.workflowName // ""), (.name // .context // "")])
     | map((map(select((.status // "COMPLETED") != "COMPLETED")) | first)
@@ -200,7 +214,7 @@ check_rollup() {
 # Prints one `<detailsUrl>|<status>|<conclusion>` line per run of the pr-policy records check.
 records_check_runs() {
   local pr="$1"
-  gh pr view "$pr" --json statusCheckRollup -q '
+  gh pr view --repo "$REPO_TARGET" "$pr" --json statusCheckRollup -q '
     .statusCheckRollup[]?
     | select(.name == "current-head-records")
     | "\(.detailsUrl // "")|\(.status // "")|\(.conclusion // "")"
@@ -214,21 +228,21 @@ print_failed_job_logs() {
   head_sha="$(get_pr_head_sha "$pr")"
 
   local failed_runs
-  failed_runs="$(gh run list --commit "$head_sha" --status failure --json databaseId,name,workflowName -q '.[] | "\(.databaseId) \(.name)"' 2>/dev/null || true)"
+  failed_runs="$(gh run list --repo "$REPO_TARGET" --commit "$head_sha" --status failure --json databaseId,name,workflowName -q '.[] | "\(.databaseId) \(.name)"' 2>/dev/null || true)"
   if [ -z "$failed_runs" ]; then
-    failed_runs="$(gh run list --limit 5 --json databaseId,conclusion,name -q '.[] | select(.conclusion == "failure") | "\(.databaseId) \(.name)"' 2>/dev/null || true)"
+    failed_runs="$(gh run list --repo "$REPO_TARGET" --limit 5 --json databaseId,conclusion,name -q '.[] | select(.conclusion == "failure") | "\(.databaseId) \(.name)"' 2>/dev/null || true)"
   fi
 
   if [ -n "$failed_runs" ]; then
     while read -r run_id run_name; do
       echo "--------------------------------------------------------------------------------"
       echo "ci-heal: failed run $run_id ($run_name):"
-      gh run view "$run_id" --log-failed 2>/dev/null | tail -40 || true
+      gh run view --repo "$REPO_TARGET" "$run_id" --log-failed 2>/dev/null | tail -40 || true
       echo "--------------------------------------------------------------------------------"
     done <<< "$failed_runs"
   else
     echo "ci-heal: check failed on PR:"
-    gh pr checks "$pr" || true
+    gh pr checks --repo "$REPO_TARGET" "$pr" || true
   fi
 }
 
@@ -258,7 +272,6 @@ CACHE_FILE="$root/.tmp/ci-heal-cache.json"
 
 evaluate_and_optimize() {
   local pr="$1" status="$2" iters="$3" max_iters="$4" duration_secs="$5" root_cause="$6" files_changed="$7" lines_changed="$8"
-  mkdir -p "$root/.tmp"
 
   local score=100
   if [ "$status" != "SUCCESS" ]; then
@@ -280,6 +293,14 @@ evaluate_and_optimize() {
   echo "  Fix Footprint:       not measured (placeholder counters: $files_changed files, $lines_changed lines)"
   echo "  Efficiency Score:    $score / 100"
   echo "--------------------------------------------------------------------------------"
+
+  if [ "${dry_run:-0}" -eq 1 ]; then
+    echo "ci-heal: [dry-run] skipping cache update (.tmp/ci-heal-cache.json)"
+    echo "================================================================================"
+    return 0
+  fi
+
+  mkdir -p "$root/.tmp"
 
   python3 - "$CACHE_FILE" "$pr" "$status" "$iters" "$duration_secs" "${root_cause:-None}" "$score" <<'PY'
 import json, os, sys, time
@@ -480,7 +501,7 @@ stamp_attested_gates() {
 check_pr_mergeability() {
   local pr="$1" mergeable_status attempt
   for attempt in 1 2 3; do
-    mergeable_status="$(gh pr view "$pr" --json mergeable -q .mergeable 2>/dev/null || true)"
+    mergeable_status="$(gh pr view --repo "$REPO_TARGET" "$pr" --json mergeable -q .mergeable 2>/dev/null || true)"
     [ "$mergeable_status" = "MERGEABLE" ] && return 0
     [ "$mergeable_status" = "UNKNOWN" ] || [ -z "$mergeable_status" ] || break
     sleep_seconds 5
@@ -953,6 +974,27 @@ self_test() {
   [ "$lib_rc" = 2 ] && grep -Fq "PR number must be numeric" "$T/pr.out" && ! grep -Fq "unexpected gh" "$T/pr.out" \
     || { echo "self-test: a non-numeric PR number was not refused (exit $lib_rc)" >&2; exit 1; }
 
+  # Test 7b: foreign GH_HOST or GH_REPO is refused before any gh command runs
+  local env_rc
+  env_rc=0
+  ( unset GH_REPO; export GH_HOST=ghe.invalid; gh() { echo "unexpected gh $*"; }; main --pr 42 ) >"$T/env.out" 2>&1 || env_rc=$?
+  [ "$env_rc" = 2 ] && grep -Fq "foreign GitHub host" "$T/env.out" && ! grep -Fq "unexpected gh" "$T/env.out" \
+    || { echo "self-test: foreign GH_HOST was not refused in main (exit $env_rc)" >&2; exit 1; }
+  env_rc=0
+  ( unset GH_HOST; export GH_REPO=owner/foreign; gh() { echo "unexpected gh $*"; }; main --pr 42 ) >"$T/env.out" 2>&1 || env_rc=$?
+  [ "$env_rc" = 2 ] && grep -Fq "foreign repository" "$T/env.out" && ! grep -Fq "unexpected gh" "$T/env.out" \
+    || { echo "self-test: foreign GH_REPO was not refused in main (exit $env_rc)" >&2; exit 1; }
+  env_rc=0
+  ( unset GH_REPO; export GH_HOST=ghe.invalid; gh() { :; }; check_gh_cli ) >"$T/env.out" 2>&1 || env_rc=$?
+  [ "$env_rc" = 2 ] || { echo "self-test: foreign GH_HOST was not refused in check_gh_cli (exit $env_rc)" >&2; exit 1; }
+  env_rc=0
+  ( unset GH_HOST; export GH_REPO=owner/foreign; gh() { :; }; check_gh_cli ) >"$T/env.out" 2>&1 || env_rc=$?
+  [ "$env_rc" = 2 ] || { echo "self-test: foreign GH_REPO was not refused in check_gh_cli (exit $env_rc)" >&2; exit 1; }
+  ( export GH_HOST=github.com GH_REPO=0Bu/tesla-key-esp32; gh() { :; }; check_gh_cli ) \
+    || { echo "self-test: canonical GH_HOST/GH_REPO rejected by check_gh_cli" >&2; exit 1; }
+  ( export GH_HOST=github.com GH_REPO=github.com/0Bu/tesla-key-esp32; gh() { :; }; check_gh_cli ) \
+    || { echo "self-test: canonical host-qualified GH_REPO rejected by check_gh_cli" >&2; exit 1; }
+
   # Test 8: the real check_rollup counts only the latest run per check; the rollup keeps old runs.
   # The fixture replays gh's -q filter with jq, which the PR-gate library already requires.
   command -v jq >/dev/null 2>&1 \
@@ -998,6 +1040,95 @@ self_test() {
     echo "self-test: a queued newer run was hidden behind an older completed one" >&2; exit 1
   fi
 
+  # Test 8b: real gh wrapper functions pin --repo github.com/0Bu/tesla-key-esp32 and detect_pr passes current branch
+  local gh_calls="$T/gh-calls.log" gh_missing="$T/gh-missing-repo.log" gh_call_count
+  : > "$gh_calls"; : > "$gh_missing"
+  (
+    unset GH_HOST GH_REPO
+    git_current_branch() { printf '%s' "${STUB_CUR_BRANCH-feature-xyz}"; }
+    sleep_seconds() { :; }
+    gh() {
+      local cmd="${1:-} ${2:-}" all_args="$*" has_repo=0 prev="" arg q=""
+      printf '%s\n' "${all_args//$'\n'/ }" >> "$gh_calls"
+      for arg in "$@"; do
+        if [ "$prev" = "--repo" ] && [ "$arg" = "github.com/0Bu/tesla-key-esp32" ]; then
+          has_repo=1
+        fi
+        prev="$arg"
+      done
+      [ "$has_repo" -eq 1 ] || printf '%s\n' "${all_args//$'\n'/ }" >> "$gh_missing"
+      case "$cmd" in
+        "pr view")
+          while [ "$#" -gt 0 ]; do
+            if [ "$1" = -q ]; then q="$2"; shift 2; else shift; fi
+          done
+          case "$all_args" in
+            *statusCheckRollup*) jq -r "$q" "$T/rollup.json" ;;
+            *)
+              case "$q" in
+                .number) printf '42\n' ;;
+                .headRefOid) printf '%s\n' "$SHA_A" ;;
+                .headRefName) printf 'feature-xyz\n' ;;
+                .body) printf 'pr-body\n' ;;
+                .mergeable) printf 'MERGEABLE\n' ;;
+                *) return 1 ;;
+              esac
+              ;;
+          esac
+          ;;
+        "pr checks")
+          printf 'checks output\n'
+          ;;
+        "run list")
+          if [ "${STUB_EMPTY_RUN_LIST:-0}" -eq 1 ]; then
+            return 0
+          fi
+          printf '901 lint-job\n'
+          ;;
+        "run view")
+          printf 'job log line\n'
+          ;;
+        *) return 1 ;;
+      esac
+    }
+
+    local out rc=0 det_out
+    out="$(detect_pr "")"
+    [ "$out" = "42" ] || { echo "self-test: detect_pr returned '$out' instead of 42" >&2; exit 1; }
+    grep -Fxq "pr view --repo github.com/0Bu/tesla-key-esp32 feature-xyz --json number -q .number" "$gh_calls" \
+      || { echo "self-test: detect_pr did not pass --repo and branch selector" >&2; exit 1; }
+
+    det_out="$( ( STUB_CUR_BRANCH=HEAD; detect_pr "" ) 2>&1 )" || rc=$?
+    [ "$rc" = 1 ] && printf '%s' "$det_out" | grep -Fq "Use --pr <number>" \
+      || { echo "self-test: detect_pr accepted or misreported detached HEAD (rc=$rc)" >&2; exit 1; }
+    rc=0
+    det_out="$( ( STUB_CUR_BRANCH=""; detect_pr "" ) 2>&1 )" || rc=$?
+    [ "$rc" = 1 ] && printf '%s' "$det_out" | grep -Fq "Use --pr <number>" \
+      || { echo "self-test: detect_pr accepted or misreported empty branch (rc=$rc)" >&2; exit 1; }
+
+    [ "$(get_pr_head_sha 42)" = "$SHA_A" ] || exit 1
+    [ "$(get_pr_head_ref 42)" = "feature-xyz" ] || exit 1
+    [ "$(get_pr_body 42)" = "pr-body" ] || exit 1
+    watch_pr_checks 42 >/dev/null
+    required_checks_pass 42
+    fetch_failed_runs 42 >/dev/null
+    check_rollup 42 >/dev/null
+    records_check_runs 42 >/dev/null
+    check_pr_mergeability 42
+    print_failed_job_logs 42 >/dev/null
+    STUB_EMPTY_RUN_LIST=1 print_failed_job_logs 42 >/dev/null
+  ) || { echo "self-test: real gh wrapper verification failed" >&2; exit 1; }
+  [ ! -s "$gh_missing" ] \
+    || { echo "self-test: gh invoked without --repo github.com/0Bu/tesla-key-esp32: $(cat "$gh_missing")" >&2; exit 1; }
+  gh_call_count="$(wc -l < "$gh_calls" | tr -d ' ')"
+  [ "$gh_call_count" -eq 17 ] \
+    || { echo "self-test: expected 17 gh wrapper calls, got $gh_call_count" >&2; exit 1; }
+  grep -Fq "run list --repo github.com/0Bu/tesla-key-esp32 --commit" "$gh_calls" \
+    && grep -Fq "run list --repo github.com/0Bu/tesla-key-esp32 --limit 5" "$gh_calls" \
+    && grep -Fq "run view --repo github.com/0Bu/tesla-key-esp32 901 --log-failed" "$gh_calls" \
+    && grep -Fq "pr checks --repo github.com/0Bu/tesla-key-esp32 42" "$gh_calls" \
+    || { echo "self-test: print_failed_job_logs did not pin --repo across all subcommands" >&2; exit 1; }
+
   # Exercise the real preflight function under its production conditional context. Each stub
   # appends its name; a failure must stop immediately, including in the prioritized pass.
   local preflight_root="$T/preflights" preflight_name priority fail_name
@@ -1030,7 +1161,7 @@ self_test() {
   local last_out last_rc
 
   scenario_defaults() {
-    CACHE_FILE="$T/cache.json"
+    [[ "${CACHE_FILE:-}" == "$T/"* ]] || CACHE_FILE="$T/cache.json"
     target_pr=42; max_retries=2; auto_merge=0; dry_run=0
     attest_names=(); attest_evidence=()
     STUB_HEAD="$SHA_A"; STUB_LOCAL="$SHA_A"; STUB_BRANCH=feature; STUB_REF=feature
@@ -1175,9 +1306,14 @@ self_test() {
   run_case sc_red_diverged 1
   expect_out red_diverged "diverged or behind"; expect_lines red_diverged "$LOG_PUSH" 0
 
-  sc_red_dry_run() { STUB_SEQ="red"; STUB_FAILED="build | COMPLETED | FAILURE | u"; dry_run=1; }
+  CACHE_FILE="$T/dry-run-red-cache.json"
+  sc_red_dry_run() { STUB_SEQ="red"; STUB_FAILED="build | COMPLETED | FAILURE | u"; dry_run=1; root="$T/dry-run-red-root"; }
   run_case sc_red_dry_run 1
   expect_lines red_dry_run "$LOG_VERIFY" 0; expect_lines red_dry_run "$LOG_PUSH" 0
+  expect_out red_dry_run "skipping cache update (.tmp/ci-heal-cache.json)"
+  [ ! -e "$CACHE_FILE" ] && [ ! -e "$T/dry-run-red-root/.tmp" ] \
+    || { echo "self-test: red_dry_run wrote cache or .tmp directory" >&2; fail=1; }
+  CACHE_FILE="$orig_cache"
 
   sc_wrong_branch() { STUB_REF=other; }
   run_case sc_wrong_branch 1
@@ -1450,9 +1586,19 @@ self_test() {
   run_case sc_green_files_unreadable 1
   expect_out green_files_unreadable "could not establish which gates"; expect_lines green_files_unreadable "$LOG_STAMPS" 0
 
-  sc_green_dry_run() { dry_run=1; }
+  CACHE_FILE="$T/dry-run-cache.json"
+  sc_green_dry_run() { dry_run=1; root="$T/dry-run-root"; }
   run_case sc_green_dry_run 0
   expect_no_out green_dry_run "READY FOR MERGE"; expect_lines green_dry_run "$LOG_STAMPS" 0
+  expect_out green_dry_run "skipping cache update (.tmp/ci-heal-cache.json)"
+  [ ! -e "$CACHE_FILE" ] && [ ! -e "$T/dry-run-root/.tmp" ] \
+    || { echo "self-test: green_dry_run wrote cache or .tmp directory" >&2; fail=1; }
+  sc_unidentified_dry_run() { STUB_SEQ="red"; STUB_FAILED=""; STUB_ROLLUP_EXTRA="logic-harness|IN_PROGRESS|"; dry_run=1; root="$T/dry-run-root"; }
+  run_case sc_unidentified_dry_run 1
+  expect_out unidentified_dry_run "skipping cache update (.tmp/ci-heal-cache.json)"
+  [ ! -e "$CACHE_FILE" ] && [ ! -e "$T/dry-run-root/.tmp" ] \
+    || { echo "self-test: unidentified_dry_run wrote cache or .tmp directory" >&2; fail=1; }
+  CACHE_FILE="$orig_cache"
 
   # Conditional gates follow the same predicates as the merge hook (stdin, GitHub file list)
   sc_feature_relevant() { base_attest; STUB_FILES="main/foo.cpp"; }

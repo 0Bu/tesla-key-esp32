@@ -11,7 +11,8 @@ import sys
 ROOT = Path(__file__).resolve().parents[2]
 CORE = ROOT / "tools/agent-hooks/agent_hook.py"
 SAFETY_TOOLS = {
-    "run_command", "view_file", "replace_file_content", "write_to_file", "apply_patch",
+    "run_command", "view_file", "replace_file_content", "write_to_file",
+    "read_file", "edit_file", "write_file", "apply_patch",
     "read", "edit", "multiedit", "write", "bash", "exec_command", "shell", "shell_command",
 }
 SHELL_TOOLS = {"run_command", "bash", "exec_command", "shell", "shell_command"}

@@ -80,7 +80,7 @@ if not isinstance(pre_tools, list) or len(pre_tools) != 2:
     fail("Antigravity PreToolUse group count drifted")
 command_hook(
     pre_tools[0],
-    matcher="^(?:run_command|view_file|replace_file_content|write_to_file|apply_patch|Read|Edit|MultiEdit|Write|Bash|exec_command|shell|shell_command)$",
+    matcher="^(?:run_command|view_file|replace_file_content|write_to_file|read_file|edit_file|write_file|apply_patch|Read|Edit|MultiEdit|Write|Bash|exec_command|shell|shell_command)$",
     commands=[(f"{py} pre-tool-guards", 15)],
     label="Antigravity guard",
 )

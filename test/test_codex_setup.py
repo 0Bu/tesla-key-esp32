@@ -48,7 +48,8 @@ with tempfile.TemporaryDirectory(prefix='codex-source-canary-', dir=ROOT) as dir
     subprocess.run(['git', 'init', '-q', str(nested)], check=True, capture_output=True)
     # This synthetic commit must also work when the operator signs their own commits by default.
     subprocess.run(['git', '-C', str(nested), '-c', 'user.name=Fixture', '-c',
-                    'user.email=fixture@example.invalid', 'commit', '--no-gpg-sign', '--quiet', '--allow-empty',
+                    'user.email=fixture@example.invalid', '-c', 'core.hooksPath=/dev/null',
+                    '-c', 'commit.gpgsign=false', 'commit', '--no-gpg-sign', '--quiet', '--allow-empty',
                     '-m', 'Independent nested repository fixture'], check=True, capture_output=True)
     subprocess.run(['git', '-C', str(nested), 'remote', 'add', 'origin',
                     'https://github.com/example/unreviewed.git'], check=True, capture_output=True)
@@ -169,6 +170,15 @@ assert run('Stop', '{bad')['decision'] == 'block'
 sentinel = 'UNTRUSTED_VALUE_MUST_NOT_BE_LOGGED'
 value = run('PreToolUse', tool('Read', {'file_path': f'/tmp/{sentinel}/ota_signing_key.pem'}))
 assert denied(value) and sentinel not in json.dumps(value)
+read_file_secret = run('PreToolUse', tool('read_file', {'Path': f'/tmp/{sentinel}/ota_signing_key.pem'}))
+assert denied(read_file_secret) and sentinel not in json.dumps(read_file_secret)
+assert run('PreToolUse', tool('read_file', {'Path': 'docs/SECURITY.md'})) == {}
+assert denied(run('PreToolUse', tool('edit_file', {'Path': 'partitions.csv', 'Target': 'old', 'Replacement': 'new'})))
+assert denied(run('PreToolUse', tool('edit_file', {'Path': 'sdkconfig.defaults', 'Target': 'CONFIG_X=y', 'Replacement': '-Os'})))
+assert run('PreToolUse', tool('edit_file', {'Path': 'docs/README.md', 'Target': 'a', 'Replacement': 'b'})) == {}
+assert denied(run('PreToolUse', tool('write_file', {'Path': 'partitions.csv', 'Content': 'nvs,data,nvs,0x9000,0x6000,'})))
+assert denied(run('PreToolUse', tool('write_file', {'Path': 'main/www/app.js', 'Content': 'eval(x)'})))
+assert run('PreToolUse', tool('write_file', {'Path': 'main/www/app.js', 'Content': 'revalidate(x)'})) == {}
 
 # A denied secret/partition call must never start the independent PR gate.
 with patch.object(HOOK, 'invoke', side_effect=AssertionError('PR gate started after safety denial')):

@@ -24,13 +24,15 @@ from typing import Any
 from shell_read import is_literal_read
 
 
-FILE_READ_TOOLS = {"read", "view_file"}
+FILE_READ_TOOLS = {"read", "view_file", "read_file"}
 FILE_MUTATING_TOOLS = {
     "edit",
     "multiedit",
     "write",
     "replace_file_content",
     "write_to_file",
+    "edit_file",
+    "write_file",
 }
 FILE_TOOLS = FILE_READ_TOOLS | FILE_MUTATING_TOOLS
 PATCH_TOOLS = {"apply_patch"}
@@ -125,37 +127,42 @@ def project_root(payload: dict[str, Any]) -> Path:
     return probe
 
 
+def _collect_str_keys(mapping: dict[str, Any], keys: tuple[str, ...], out: list[str]) -> None:
+    """Append non-empty string values for matching keys from mapping into out."""
+    for key in keys:
+        value = mapping.get(key)
+        if isinstance(value, str) and value:
+            out.append(value)
+
+
 def path_targets(payload: dict[str, Any]) -> list[str]:
     ti = tool_input(payload)
     values: list[str] = []
-    for key in (
-        "file_path",
-        "path",
-        "TargetFile",
-        "targetfile",
-        "AbsolutePath",
-        "absolutepath",
-    ):
-        value = ti.get(key)
-        if isinstance(value, str) and value:
-            values.append(value)
+    _collect_str_keys(
+        ti,
+        (
+            "file_path",
+            "path",
+            "Path",
+            "TargetFile",
+            "targetfile",
+            "AbsolutePath",
+            "absolutepath",
+        ),
+        values,
+    )
     files = ti.get("files")
     if isinstance(files, list):
         for item in files:
             if isinstance(item, str) and item:
                 values.append(item)
             elif isinstance(item, dict):
-                for key in ("file_path", "path"):
-                    value = item.get(key)
-                    if isinstance(value, str) and value:
-                        values.append(value)
+                _collect_str_keys(item, ("file_path", "path", "Path"), values)
     edits = ti.get("edits")
     if isinstance(edits, list):
         for item in edits:
             if isinstance(item, dict):
-                value = item.get("file_path") or item.get("path")
-                if isinstance(value, str) and value:
-                    values.append(value)
+                _collect_str_keys(item, ("file_path", "path", "Path"), values)
     return values
 
 
@@ -953,13 +960,7 @@ def partition_violation(payload: dict[str, Any], *, shell_only: bool = False) ->
     if shell_only:
         return False
     if tool in FILE_TOOLS:
-        return tool in {
-            "edit",
-            "multiedit",
-            "write",
-            "replace_file_content",
-            "write_to_file",
-        } and any(
+        return tool in FILE_MUTATING_TOOLS and any(
             is_partitions_path(path) for path in path_targets(payload)
         )
     if tool in PATCH_TOOLS:
@@ -1022,6 +1023,26 @@ def guard_partitions(payload: dict[str, Any], *, shell_only: bool = False) -> bo
     return True
 
 
+def _check_invariant_pair(targets: list[str], content: str) -> str | None:
+    """Enforce sdkconfig -Os, main/logic IDF include, and main/www JS XSS invariants."""
+    normalized_targets = [target.replace("\\", "/") for target in targets]
+    if any(
+        target.endswith(("sdkconfig", "sdkconfig.defaults")) or "sdkconfig.defaults." in target
+        for target in normalized_targets
+    ):
+        if re.search(r"CONFIG_COMPILER_OPTIMIZATION_SIZE\s*=\s*y", content) or re.search(
+            r"(?:^|\s)-Os(?:\s|$)", content
+        ):
+            return "CONFIG_COMPILER_OPTIMIZATION_SIZE (-Os) is banned; it hard-freezes the device under BLE load"
+    if any("main/logic/" in target for target in normalized_targets):
+        if re.search(r'#include\s*[<"](?:esp_|freertos/|nvs)', content):
+            return "main/logic/ must remain completely free of ESP-IDF, FreeRTOS, and NVS headers for host testability (see main/logic/AGENTS.md)"
+    if any("main/www/" in target and target.endswith(".js") for target in normalized_targets):
+        if re.search(r"\b(?:eval|document\.write)\s*\(", content):
+            return "eval() and document.write() are strictly banned in main/www/ (see docs/SECURITY.md)"
+    return None
+
+
 def invariant_violation(payload: dict[str, Any]) -> str | None:
     tool = normalized_tool(extract_raw_tool(payload))
     targets = path_targets(payload)
@@ -1031,22 +1052,38 @@ def invariant_violation(payload: dict[str, Any]) -> str | None:
         normalized = target.strip().strip("'\"").replace("\\", "/").lower()
         if "managed_components/" in normalized and tool in FILE_MUTATING_TOOLS | PATCH_TOOLS:
             return "managed_components/ is upstream and auto-generated; edits must be made upstream or via patches"
-    content_candidates: list[str] = []
     ti = tool_input(payload)
-    for key in ("ReplacementContent", "CodeContent", "content", "patch", "command", "cmd", "CommandLine"):
+    for key in (
+        "ReplacementContent",
+        "CodeContent",
+        "content",
+        "new_string",
+        "Replacement",
+        "Content",
+        "patch",
+        "command",
+        "cmd",
+        "CommandLine",
+    ):
         val = ti.get(key)
         if isinstance(val, str) and val:
-            content_candidates.append(val)
-    for content in content_candidates:
-        if any(target.endswith(("sdkconfig", "sdkconfig.defaults")) or "sdkconfig.defaults." in target for target in targets):
-            if re.search(r"CONFIG_COMPILER_OPTIMIZATION_SIZE\s*=\s*y", content) or re.search(r"(?:^|\s)-Os(?:\s|$)", content):
-                return "CONFIG_COMPILER_OPTIMIZATION_SIZE (-Os) is banned; it hard-freezes the device under BLE load"
-        if any("main/logic/" in target.replace("\\", "/") for target in targets):
-            if re.search(r'#include\s*[<"](?:esp_|freertos/|nvs)', content):
-                return "main/logic/ must remain completely free of ESP-IDF, FreeRTOS, and NVS headers for host testability (see main/logic/AGENTS.md)"
-        if any("main/www/" in target.replace("\\", "/") and target.endswith(".js") for target in targets):
-            if re.search(r"\b(?:eval|document\.write)\s*\(", content):
-                return "eval() and document.write() are strictly banned in main/www/ (see docs/SECURITY.md)"
+            reason = _check_invariant_pair(targets, val)
+            if reason:
+                return reason
+    edits = ti.get("edits")
+    if isinstance(edits, list):
+        for item in edits:
+            if not isinstance(item, dict):
+                continue
+            item_targets: list[str] = []
+            _collect_str_keys(item, ("file_path", "path", "Path"), item_targets)
+            effective_targets = item_targets or targets
+            for key in ("new_string", "Replacement", "ReplacementContent", "content", "Content"):
+                val = item.get(key)
+                if isinstance(val, str) and val:
+                    reason = _check_invariant_pair(effective_targets, val)
+                    if reason:
+                        return reason
     if tool in SHELL_TOOLS:
         cmd = command_from(payload)
         if re.search(r"CONFIG_COMPILER_OPTIMIZATION_SIZE\s*=\s*y", cmd) and "sdkconfig" in cmd:
