@@ -84,6 +84,11 @@ The reference is written in Go, relying on goroutines, runtime-managed channels,
 
 The entries above were checked against [vehicle-command `83baa078`](https://github.com/teslamotors/vehicle-command/tree/83baa078e81d08982dd997b8c8e4644e33a046a8), pinned tesla-ble v6.3.0 and the native adapter. They document current departures, not hardware acceptance or fixes to them.
 
+- **Charging-pause polling**: After a fresh charging state changes to `Stopped`, the firmware can
+  schedule a bounded series of the existing `GetVehicleData` ChargeState request. Scheduling
+  requires an existing BLE connection and a VCSEC `AWAKE` sample. The runner uses `NoWakeSkip`. See the
+  [telemetry schedule](../ARCHITECTURE.md#read-only-telemetry-and-command-correctness).
+
 #### Native execution, framing and session reuse
 
 - **Connection ownership**: Failed GAP connection attempts do not publish LinkDown or erase

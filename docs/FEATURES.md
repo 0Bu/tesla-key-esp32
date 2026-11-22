@@ -114,6 +114,7 @@ The device HTTP API has no authentication or TLS; use it only on a trusted LAN
 | mDNS + DHCP hostname, privacy-bounded TXT | `main.cpp` | Manual discovery or broadcasting the VIN |
 | Firmware-started ATT MTU exchange, bounded writes | `logic/ble_chunk.hpp`, `main/ble_client.{cpp,hpp}`, `sdkconfig.defaults` (`BT_NIMBLE_ATT_PREFERRED_MTU`); [ADR-0005 §2](adr/0005-tesla-ble-seam.md#2-platform-forced-departures-and-reference-deviations) | Oversize ATT writes and truncated response fragments |
 | Bounded climate refresh priority | `logic/telemetry_poll.hpp`, `main/vehicle_telemetry.cpp`; [scheduling](ARCHITECTURE.md#read-only-telemetry-and-command-correctness) | Missed climate refresh or starvation of other domains |
+| Bounded ChargeState probes after a charging pause | `logic/wake_poll.hpp`, `main/vehicle_telemetry.cpp`; [scheduling](ARCHITECTURE.md#read-only-telemetry-and-command-correctness) | A frozen SoC after charging resumes through the EVSE |
 | NTP authority, bounded checkpoints and temporary browser-clock fallback | `main/main.cpp`, `logic/clock_policy.hpp`, `time_sync.hpp`, `POST /set_time`, `mqtt_ha.cpp` | Untrusted time becoming durable or breaking TLS |
 | UDP Syslog (RFC 5424) | `main/syslog.cpp`, `logic/syslog_policy.hpp` | Loss of reboot diagnostics |
 | Commit-gated Syslog queue lifetime | `logic/syslog_start_gate.hpp`, `main/syslog.cpp` | Consumers touching uncommitted or freed queue state |
