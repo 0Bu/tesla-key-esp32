@@ -74,9 +74,12 @@ strings are never copied. All selected domains must be usable for success.
 debounced ASLEEP→AWAKE, or paired+connected with a stale/empty cache. Failed polls retry with
 30–300 s exponential backoff. Once fresh, the episode latch prevents repeated idle polls as the
 cache ages. Stable sleep/disconnect resets it; awake alone never opens the active window.
-A wake/bootstrap fire also enqueues one Drive State Poll; background entries expire after 10 s,
-so a slow charge round trip may leave the odometer last-known. The 10 s in-window charge cadence
-adds no drive poll. `logic/telemetry_poll.hpp` schedules one in-window telemetry attempt per 30 s,
+A wake/bootstrap charge poll adds one Drive State Poll when it fires between cadence ticks.
+Background entries expire after 10 s, so a slow charge round trip may leave the odometer last-known.
+Outside the active window, a fresh charging-to-`Stopped` transition can schedule a ChargeState-only
+probe at most every 30 s for five minutes, with BLE connected and VCSEC reporting `AWAKE` at
+scheduling time. The budget survives short BLE reconnects. Stable sleep or leaving `Stopped` ends it.
+`logic/telemetry_poll.hpp` schedules one in-window telemetry attempt per 30 s,
 normally rotating climate → drive → tires → closures and restarting at climate on window entry.
 Missing/stale climate gets at most two consecutive attempts before the next other domain; priority
 retries preserve the normal rotation's place. Queue refusal retains the pending domain and cadence.
