@@ -819,7 +819,7 @@ test("parked and asleep retain the grey gauge and wake action with an empty foot
     context.render({ link, paired: true, last: { usable_soc: 75 }, last_seen_s: 120, charge_age_s: 60,
       tele: { climate: { on: true } } });
     assert.ok(element("hlabel").innerHTML.includes(heading));
-    assert.match(element("hicon").innerHTML, /Wake the car · battery 75 %/);
+    assert.match(element("hicon").innerHTML, /Wake the car · last reported battery 75 %/);
     assert.match(element("hicon").innerHTML, /class="garc pulse slow"/);
     assert.equal(element("hfooter").innerHTML, "");
   }

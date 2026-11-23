@@ -551,7 +551,8 @@ function render(s){
   // Safe Mode stops Bluetooth and commands, so it never offers a vehicle action.
   if(safe){ act=null; busyText=null; }
   // The gauge button's label replaces its content for screen readers, so it carries the level.
-  var gm=gaugeHTML(g), lvl=(g.pct!=null)?' · battery '+Math.round(g.pct)+' %':'';
+  var gm=gaugeHTML(g), levelLabel=(g.mode==='sleep'||g.mode==='waking')?' · last reported battery ':' · battery ';
+  var lvl=g.pct==null?'':levelLabel+Math.round(g.pct)+' %';
   setHTML(hic, act ? '<button type="button" class="gbtn" onclick="heroTap()" aria-label="'+esc(actLabel+lvl)+'" title="'+esc(actLabel)+'">'+gm+'</button>'
                    : (busyText ? '<button type="button" class="gbtn" disabled aria-label="'+esc(busyText+lvl)+'">'+gm+'</button>' : gm));
   setHTML(hl,'<span>'+esc(head)+'</span>');
