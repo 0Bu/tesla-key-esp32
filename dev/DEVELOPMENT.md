@@ -68,8 +68,8 @@ fails. The guardian only terminates its owned group. See [dependency tests](../t
 ## Embedded web assets
 
 `main/www/inline_assets.cmake` validates raw markers, inlines bounded UTF-8 CSS/JS, then runs
-`gzip -9 -n`. `prune_css_comments.py` blanks eligible whole-line comments and trims leading JS
-indentation. CSS offsets and JS line endings stay intact. Inline/legal/tooling and HTML-sensitive
+`gzip -9 -n`. `prune_css_comments.py` blanks eligible whole-line CSS/JS comments and trims leading
+CSS/JS indentation while keeping line endings intact. Inline, legal/tooling and HTML-sensitive
 content is preserved. Unsupported multiline JS forms and NUL are rejected. Source introspection
 can observe the changed whitespace and comments.
 
