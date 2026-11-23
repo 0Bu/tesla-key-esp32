@@ -37,24 +37,28 @@
     </header>
 
     <main class="grid">
-      <!-- Device recovery notice; normal automatic pairing stays in the hero. -->
       <div class="banner" id="safeModeBanner" role="status" aria-live="polite">
         <span class="bi" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#ic-warn"/></svg></span>
         <span class="bt"></span>
         <button type="button" class="pill sm" onclick="otaCheck()">Check for update</button>
       </div>
 
-      <!-- vehicle hero. Starts hidden: the first /status frame reveals it, so the empty
-           skeleton never flashes on load. -->
       <section class="pane pane-car hero hide" id="hero" aria-label="Vehicle status">
         <div class="hprimary">
           <div class="gauge" id="hicon"></div>
           <div class="hreadings">
-            <div id="hcharge"></div>
-            <details class="climate-info hide" id="hclimate">
-              <summary class="status-value" id="hclimateIcon" aria-label="Climate details" aria-describedby="hclimateTip"></summary>
-              <span class="climate-tip" id="hclimateTip"></span>
-            </details>
+            <div class="hcharge" id="hcharge"></div>
+            <div class="hclimate-list hide" id="hclimateList">
+              <details class="rail-info hide" id="hclFan"><summary class="rail-icon" id="hclFanIcon" aria-label="Climate control" aria-describedby="hclFanTip"></summary><span class="rail-tip" id="hclFanTip"></span></details>
+              <details class="rail-info hide" id="hclPrecond"><summary class="rail-icon" id="hclPrecondIcon" aria-label="Preconditioning" aria-describedby="hclPrecondTip"></summary><span class="rail-tip" id="hclPrecondTip"></span></details>
+              <details class="rail-info hide" id="hclOverheat"><summary class="rail-icon" id="hclOverheatIcon" aria-label="Cabin overheat protection" aria-describedby="hclOverheatTip"></summary><span class="rail-tip" id="hclOverheatTip"></span></details>
+              <details class="rail-info hide" id="hclDefrost"><summary class="rail-icon" id="hclDefrostIcon" aria-label="Defrost" aria-describedby="hclDefrostTip"></summary><span class="rail-tip" id="hclDefrostTip"></span></details>
+            </div>
+            <div class="hretained hide" id="hretained">
+              <details class="rail-info hide" id="hretBatt"><summary class="rail-metric" id="hretBattBtn" aria-label="Last battery" aria-describedby="hretBattTip"><span class="rail-metric-icon batt" id="hretBattIcon" aria-hidden="true"></span><span class="rail-val" id="hretBattVal"></span><span class="rail-unit" id="hretBattUnit" aria-hidden="true">%</span></summary><span class="rail-tip" id="hretBattTip"></span></details>
+              <details class="rail-info hide" id="hretUpd"><summary class="rail-metric" id="hretUpdBtn" aria-label="Last update" aria-describedby="hretUpdTip"><span class="rail-metric-icon" id="hretUpdIcon" aria-hidden="true"></span><span class="rail-val" id="hretUpdVal"></span><span class="rail-unit" id="hretUpdUnit"></span></summary><span class="rail-tip" id="hretUpdTip"></span></details>
+              <details class="rail-info hide" id="hretIdle"><summary class="rail-metric" id="hretIdleBtn" aria-label="Idle time" aria-describedby="hretIdleTip"><span class="rail-metric-icon" id="hretIdleIcon" aria-hidden="true"></span><span class="rail-val" id="hretIdleVal"></span><span class="rail-unit" id="hretIdleUnit"></span></summary><span class="rail-tip" id="hretIdleTip"></span></details>
+            </div>
           </div>
         </div>
         <div class="htext" id="htext">
@@ -62,7 +66,6 @@
           <p class="hsub" id="hlimit"></p>
           <p class="hsub" id="hsub"></p>
         </div>
-        <div class="hstats" id="hstats"></div>
       </section>
 
       <section class="pane pane-setup card rows" id="paneSettings" aria-label="Device settings">
@@ -134,7 +137,6 @@
   </div>
 </div>
 
-<!-- text-entry / confirmation sheet (replaces the native prompt()/confirm() dialogs) -->
 <div class="modal hide" id="askModal" role="dialog" aria-modal="true" aria-labelledby="askTitle">
   <div class="modal-backdrop" id="askBackdrop"></div>
   <div class="sheet modal-card" tabindex="-1">
