@@ -605,7 +605,7 @@ KEYBOARD_SNAPSHOT = r'''(()=>{
     return [0.2126,0.7152,0.0722].reduce((sum,w,i)=>{const c=rgba[i]/255;
       return sum+w*(c<=0.04045?c/12.92:Math.pow((c+0.055)/1.055,2.4));},0);};
   const a=luminance(style.outlineColor),b=luminance(getComputedStyle(document.getElementById("hero")).backgroundColor);
-  const boxes=[...document.querySelectorAll("#hero,#hicon,.hreadings .charge-val,.hreadings .charge-unit,.hreadings .rail-info,.card")].map(element=>{
+  const boxes=[...document.querySelectorAll("#hero,#hicon,.hreadings .charge-val,.hreadings .charge-unit,.hreadings .rail-info:not(.hide),.card")].map(element=>{
     const box=element.getBoundingClientRect();return {left:box.left,right:box.right,
       width:box.width,scrollWidth:element.scrollWidth,clientWidth:element.clientWidth};});
   return {...window.__nativeKeyboard,requests:window.__browserGateFetchCalls,
