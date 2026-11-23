@@ -296,10 +296,7 @@ function waveBarsHTML(){
   return s+'</svg>';
 }
 /* ---------- icons (2px outline shapes; stroke styling lives in CSS) ---------- */
-var FAN_BLADE='<path d="M10.8 10.2C9.2 6.8 10 3 12.6 2.7c3-.3 4.2 3.7 1.1 8"/>';
-var THERM='<path d="M9.5 13.8V5a2 2 0 0 0-4 0v8.8a3.5 3.5 0 1 0 4 0Z"/><circle cx="7.5" cy="16.7" r="1.2" fill="currentColor" stroke="none"/>';
-var PW='c1.1-1.3 1.1-2.7 0-4s-1.1-2.7 0-4 1.1-2.7 0-4';
-var DW='c-.8-1.5-.8-2.8 0-4.5s.8-3 0-4.5';
+var SNOWFLAKE_AXIS='<path d="M12 2v20M9 5l3 3 3-3M9 19l3-3 3 3"/>';
 var ICON={
   bolt:'<use href="#ic-bolt"/>',
   warn:'<use href="#ic-warn"/>',
@@ -311,21 +308,10 @@ var ICON={
   key:'<use href="#ic-key"/>',
   link:'<path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/>',
   search:'<circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/>',
-  fan:'<circle cx="12" cy="12" r="2.1"/>'+FAN_BLADE+'<g transform="rotate(120 12 12)">'+FAN_BLADE+'</g><g transform="rotate(240 12 12)">'+FAN_BLADE+'</g>',
-  precond:THERM+'<path d="M7.5 16.7v-6M14.8 18'+PW+'M19.2 18'+PW+'"/>',
-  overheat:THERM+'<circle cx="17.5" cy="8.5" r="2.5"/><path d="M7.5 16.7V9M17.5 3.2v1.1M17.5 12.7v1.1M12.2 8.5h1.1M21.7 8.5h1.1M13.8 4.8l.8.8M20.4 11.4l.8.8M21.2 4.8l-.8.8M14.6 11.4l-.8.8"/>',
-  defrost:'<path d="M3 8.5Q12 4.5 21 8.5L17.6 16.5Q12 14.2 6.4 16.5ZM8.4 20.5'+DW+'M12 20.5'+DW+'M15.6 20.5'+DW+'M7.3 12.8 8.4 11.2l1.1 1.6M10.9 12.8 12 11.2l1.1 1.6M14.5 12.8 15.6 11.2l1.1 1.6"/>',
-  updated:'<path d="M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5M12 7v5l3 2"/>',
-  idle:'<path d="M4 3h16M4 21h16M6 3v3.5a6 6 0 0 0 6 5.5 6 6 0 0 0 6-5.5V3M6 21v-3.5a6 6 0 0 1 6-5.5 6 6 0 0 1 6 5.5V21"/>'
+  snowflake:SNOWFLAKE_AXIS+'<g transform="rotate(60 12 12)">'+SNOWFLAKE_AXIS+'</g>'+
+    '<g transform="rotate(120 12 12)">'+SNOWFLAKE_AXIS+'</g>'
 };
 function iconSVG(name){ return '<svg viewBox="0 0 24 24" aria-hidden="true">'+(ICON[name]||'')+'</svg>'; }
-function batteryRailSVG(pct){
-  var c=Math.max(0,Math.min(100,pct));
-  var fillW=c>0?Math.max(2.4,16*c/100).toFixed(1):0;
-  return '<svg viewBox="0 0 26 16" aria-hidden="true"><rect x="1.25" y="2" width="20.5" height="12" rx="2.6"/><path d="M23.75 6v4" stroke-width="2"/>'+
-         (c>0?'<rect x="3.5" y="4.25" width="'+fillW+'" height="7.5" rx="1.2" fill="'+socColor(c)+'" stroke="none"/>':'')+'</svg>';
-}
-
 // ---------- battery gauge ----------
 // A fixed 240-unit box scaled by CSS (--gs). mode: soc | charging (flowing segment) | complete |
 // sleep (muted last-known arc) | waking | checking | empty | neutral. Pure markup, so setHTML()
@@ -369,43 +355,24 @@ function gaugeHTML(o){
   return s+'<span class="gcenter">'+center+'</span>';
 }
 
-// Tabular right-rail readings and disclosures.
 function chargeValue(label,value,unit){
   var rounded=Math.round(value);
-  return '<span class="charge-val"><span class="sr-only">'+esc(label)+' '+rounded+' '+esc(unit)+'</span>'+rounded+'</span>'+
-         '<span class="charge-unit" aria-hidden="true">'+esc(unit)+'</span>';
+  return '<span class="hmetric"><span class="sr-only">'+esc(label)+' '+rounded+' '+esc(unit)+'</span>'+
+         '<span aria-hidden="true">'+rounded+' <small>'+esc(unit)+'</small></span></span>';
 }
 function chargeStats(v,charging){
   if(!v||!charging) return '';
-  return (v.power>0?chargeValue('Charging power',v.power,'kW'):'')+
-         (v.amps>0?chargeValue('Charging current',v.amps,'A'):'');
+  return (v.amps>0?chargeValue('Charging current',v.amps,'A'):'')+
+         (v.power>0?chargeValue('Charging power',v.power,'kW'):'');
 }
-// Climate has no per-domain age in /status. Show explicitly cached settings/states, never
-// infer current activity from another domain's last_seen_s or attribute charger input to a
-// climate function. Raw charger_phases also does not establish the AC topology multiplier.
-var LAST_HDR='Last reported:\n';
-function climTip(s){ return LAST_HDR+s+'\nCurrent activity and power are unknown.'; }
-function climateItems(c){
-  var res={fan:null, precond:null, overheat:null, defrost:null};
-  if(!c) return res;
-  if(c.on===true) res.fan={icon:'fan', cool:false, tip:climTip('Climate control: On')};
-  if(c.preconditioning===true) res.precond={icon:'precond', cool:false, tip:climTip('Preconditioning: Active')};
-  if(c.cop==='On'||c.cop==='FanOnly'||c.cop_cooling===true){
-    var ov=[];
-    if(c.cop==='On'||c.cop==='FanOnly'){
-      var setting=c.cop==='FanOnly'?'Fan only':'On';
-      if(c.cop_temp==='Low'||c.cop_temp==='Medium'||c.cop_temp==='High') setting+=' · '+c.cop_temp;
-      ov.push('Cabin overheat protection setting: '+setting);
-    }
-    if(c.cop_cooling===true) ov.push('Cabin overheat protection: Cooling');
-    res.overheat={icon:'overheat', cool:c.cop_cooling===true, tip:climTip(ov.join('\n'))};
-  }
-  var defrost=[];
-  if(c.front_defrost===true) defrost.push('Front');
-  if(c.rear_defrost===true) defrost.push('Rear');
-  if(c.defrost_mode==='Normal'||c.defrost_mode==='Max') defrost.push(c.defrost_mode);
-  if(defrost.length) res.defrost={icon:'defrost', cool:false, tip:climTip('Defrost: '+defrost.join(' / '))};
-  return res;
+// The snowflake summarizes the last reported climate settings. /status has no climate age.
+function climateStatus(c){
+  if(!c) return '';
+  var reported=c.on===true || c.preconditioning===true || c.cop==='On' || c.cop==='FanOnly' ||
+               c.cop_cooling===true || c.front_defrost===true || c.rear_defrost===true ||
+               c.defrost_mode==='Normal' || c.defrost_mode==='Max';
+  return reported?'<span class="hclimate" role="img" aria-label="Last reported climate function">'+
+    iconSVG('snowflake')+'</span>':'';
 }
 // battery at/above its target and not charging → starting a charge is a no-op the car only
 // rejects as "complete". charge_limit is emitted by /status only when the car reported it, so
@@ -415,17 +382,6 @@ function chargeComplete(v,charging){
   return !charging && !!v && (v.status==='Complete' ||
     (v.charge_limit!=null && cur!=null && cur>=v.charge_limit));
 }
-// Compact "time ago" parts for the right-rail metrics and full text for tooltips.
-function fmtAgoParts(sec){
-  if(sec==null||sec<0) return null;
-  sec=Math.floor(sec);
-  if(sec<60) return {val:'<1', unit:'m', full:'<1 min'};
-  var m=Math.round(sec/60); if(m<60) return {val:String(m), unit:'m', full:m+' min'};
-  var h=Math.floor(m/60);   if(h<48) return {val:String(h), unit:'h', full:h+' h'};
-  var d=Math.floor(h/24);            return {val:String(d), unit:'d', full:d+' d'};
-}
-function fmtAgo(sec){ var p=fmtAgoParts(sec); return p?p.full:''; }
-
 // Only the named gauge button invokes the primary action. The surrounding card is informational.
 var heroActFn=null;
 function heroTap(){ if(heroActFn) return heroActFn(); }
@@ -438,54 +394,11 @@ function setRow(key,tone,valueHTML,statusHTML,barsMarkup){
   var st=$(key+'St'); if(st){ st.className='rs'+(tone?' '+tone:''); setHTML(st,statusHTML); }
   var b=$(key+'Bars'); if(b){ b.className='rbar'+(tone?' '+tone:''); setHTML(b,barsMarkup||''); }
 }
-var CLIMATE_SLOTS=[['fan','hclFan'],['precond','hclPrecond'],['overheat','hclOverheat'],['defrost','hclDefrost']];
-var RETAINED_SLOTS=[['battery','hretBatt'],['updated','hretUpd','updated'],['idle','hretIdle','idle']];
-function eachRail(fn){
-  for(var i=0;i<CLIMATE_SLOTS.length;i++) fn($(CLIMATE_SLOTS[i][1]));
-  for(var j=0;j<RETAINED_SLOTS.length;j++) fn($(RETAINED_SLOTS[j][1]));
-}
-function retainedState(s){
-  var ls=s.last||{}, lsoc=num(ls.usable_soc);
-  if(lsoc==null) lsoc=num(ls.soc);
-  if(lsoc!=null) lsoc=Math.round(Math.max(0,Math.min(100,lsoc)));
-  var ago=fmtAgoParts(num(s.last_seen_s));
-  var chargeAgo=fmtAgoParts(num(s.charge_age_s));
-  var res={soc:lsoc, battery:null, updated:null, idle:null};
-  if(lsoc!=null){
-    res.battery={
-      val:String(lsoc), unit:'%', icon:batteryRailSVG(lsoc),
-      label:'Last battery '+lsoc+' %',
-      tip:LAST_HDR+'Battery: '+lsoc+' %\nCached reading; live charge data is unavailable.'
-    };
-  }
-  if(chargeAgo){
-    res.updated={
-      val:chargeAgo.val, unit:chargeAgo.unit, icon:null,
-      label:'Charge updated '+chargeAgo.full+' ago',
-      tip:LAST_HDR+'Charge updated: '+chargeAgo.full+' ago'
-    };
-  }
-  if(ago && s.link!=='awake'){
-    res.idle={
-      val:ago.val, unit:ago.unit, icon:null,
-      label:'Idle '+ago.full,
-      tip:LAST_HDR+'Idle: '+ago.full
-    };
-  }
-  return res;
-}
-function syncRailTip(id,show,tip,cool){
-  var el=$(id); if(!el) return;
-  if(el.classList){
-    el.classList.toggle('hide',!show);
-    if(cool!==undefined) el.classList.toggle('tone-cool',!!cool);
-  }
-  if(!show) el.open=false;
-  var t=$(id+'Tip');
-  if(t){
-    var txt=show?tip:'';
-    if(t.textContent!==txt) t.textContent=txt;
-  }
+function retainedSoc(last){
+  if(!last) return null;
+  var soc=num(last.usable_soc);
+  if(soc==null) soc=num(last.soc);
+  return soc==null?null:Math.round(Math.max(0,Math.min(100,soc)));
 }
 function render(s){
   state=s;
@@ -542,8 +455,6 @@ function render(s){
   // setHTML preserves the hero animation phase between unchanged polls.
   var hic=$("hicon"), hl=$("hlabel"), hs=$("hsub");
   var g={mode:'neutral', pct:null, glyph:null, busy:false, limit:null}, head='', sub='', readings='';
-  var clim={fan:null, precond:null, overheat:null, defrost:null};
-  var ret={soc:null, battery:null, updated:null, idle:null}, showRet=false;
   var act=null, actLabel='', actIcon='bolt', busyText=null;
   $("hero").classList.remove('hide');
   var blocked=s.pairing_blocked;
@@ -572,33 +483,30 @@ function render(s){
     g={mode:charging?'charging':(complete?'complete':'soc'), pct:soc, busy:chgBusy, limit:num(v.charge_limit), glyph:(soc==null?'car':null)};
     head=complete?'Charge complete':(v.status||'Idle');
     if(soc==null) sub='Battery level not reported yet';
-    readings=chargeStats(v,charging);
-    clim=climateItems(s.tele&&s.tele.climate);
+    readings=chargeStats(v,charging)+climateStatus(s.tele&&s.tele.climate);
     if(chgBusy) busyText='Sending command…';
     else if(!complete){ act=toggleCharge; actLabel=charging?'Stop charging':'Start charging'; }
   } else if(paired){
-    var lk=retainedState(s);
+    var lsoc=retainedSoc(s.last);
     if(s.link==='awake'){
       if(waking){ waking=false; clearTimeout(wakeTimeout); }
-      g={mode:'neutral', pct:lk.soc, glyph:'car'};
-      head='Charge reading unavailable'; sub='Waiting for a fresh charge reading.'; showRet=true;
+      g={mode:'neutral', pct:lsoc, glyph:'car'};
+      head='Charge reading unavailable'; sub='Waiting for a fresh charge reading.';
     } else if(waking){
-      g={mode:'waking', pct:lk.soc, glyph:'alarm'};
+      g={mode:'waking', pct:lsoc, glyph:'alarm'};
       head='Waking up…'; sub='Reaching your Tesla over Bluetooth…'; busyText='Waking up…';
     } else if(s.link==='asleep'){
       // Proven reachable-but-sleeping: the always-on VCSEC health poll answered recently, so
-      // "asleep" is a fact and the wake button is meaningful. Last-known battery + how long the
-      // car has been asleep come from the retained cache — shown without waking the car.
-      // Keep the asleep card to last-known charge data; climate icons never trigger a poll.
-      g={mode:'sleep', pct:lk.soc, glyph:'moon'};
-      head='Vehicle asleep'; sub='Tap the icon to wake the car.'; showRet=true;
+      // "asleep" is a fact and the wake button is meaningful. The grey ring uses the cached SOC.
+      g={mode:'sleep', pct:lsoc, glyph:'moon'};
+      head='Vehicle asleep'; sub='Tap the icon to wake the car.';
       act=wakeCar; actLabel='Wake the car'; actIcon='alarm';
     } else if(s.link==='idle'){
       // Reachable over BLE but NOT provably asleep: polling stopped to let the car sleep and the
       // VCSEC sleep flag hasn't held ASLEEP long enough to confirm. We honestly don't know, so
       // we must NOT claim "asleep": a neutral "Parked" card that still offers the wake button.
-      g={mode:'sleep', pct:lk.soc, glyph:'car'};
-      head='Parked'; sub='No live reading — tap the icon to wake the car.'; showRet=true;
+      g={mode:'sleep', pct:lsoc, glyph:'car'};
+      head='Parked'; sub='No live reading — tap the icon to wake the car.';
       act=wakeCar; actLabel='Wake the car'; actIcon='alarm';
     } else if((s.ble&&s.ble.connect_fail)>=BLE_CONNECT_FAIL_WARN){
       // Paired, but the BLE link won't come up despite repeated attempts. Surface WHY.
@@ -611,7 +519,7 @@ function render(s){
     } else if(s.link==='unreachable'){
       // heard before, now stale: drove off / out of range / deep sleep
       g={mode:'empty', glyph:'bolt'};
-      head='Vehicle unreachable'; sub='Bring the device within Bluetooth range.'; showRet=true;
+      head='Vehicle unreachable'; sub='Bring the device within Bluetooth range.';
     } else {
       // link==='unknown' (nothing heard since boot — the on-demand link hasn't completed a signed
       // round-trip yet). Only claim "Bluetooth connected" when the momentary GATT link is actually
@@ -619,9 +527,7 @@ function render(s){
       g={mode:'checking'};
       head='Checking status…';
       sub=linked ? 'Bluetooth connected — checking status…' : 'Reaching your Tesla over Bluetooth…';
-      showRet=true;
     }
-    if(showRet) ret=lk;
   } else if(!configured){
     g={mode:'neutral', glyph:hasVin?'key':'pencil'};
     head='Set up needed'; sub=hasVin?'Generate a security key in Setup.':'Add the vehicle VIN in Setup to begin.';
@@ -645,35 +551,15 @@ function render(s){
   // Safe Mode stops Bluetooth and commands, so it never offers a vehicle action.
   if(safe){ act=null; busyText=null; }
   // The gauge button's label replaces its content for screen readers, so it carries the level.
-  var gm=gaugeHTML(g), lvl=(g.pct!=null)?' · battery '+Math.round(g.pct)+' %':'';
+  var gm=gaugeHTML(g), levelLabel=(g.mode==='sleep'||g.mode==='waking')?' · last reported battery ':' · battery ';
+  var lvl=g.pct==null?'':levelLabel+Math.round(g.pct)+' %';
   setHTML(hic, act ? '<button type="button" class="gbtn" onclick="heroTap()" aria-label="'+esc(actLabel+lvl)+'" title="'+esc(actLabel)+'">'+gm+'</button>'
                    : (busyText ? '<button type="button" class="gbtn" disabled aria-label="'+esc(busyText+lvl)+'">'+gm+'</button>' : gm));
   setHTML(hl,'<span>'+esc(head)+'</span>');
   $("hlimit").textContent=g.limit==null?'':'Limit '+g.limit+' %';
   hs.textContent=sub;
   hs.style.display=sub?'':'none';
-  setHTML($("hcharge"),readings);
-  var anyClim=false;
-  for(var ci=0;ci<CLIMATE_SLOTS.length;ci++){
-    var cKey=CLIMATE_SLOTS[ci][0], cId=CLIMATE_SLOTS[ci][1], cItem=clim[cKey];
-    if(cItem) anyClim=true;
-    syncRailTip(cId, !!cItem, cItem?cItem.tip:'', cKey==='overheat'?(cItem&&cItem.cool):undefined);
-    setHTML($(cId+'Icon'), cItem?iconSVG(cItem.icon):'');
-  }
-  var clList=$("hclimateList");
-  if(clList && clList.classList) clList.classList.toggle('hide',!anyClim);
-  var anyRet=false;
-  for(var ri=0;ri<RETAINED_SLOTS.length;ri++){
-    var rKey=RETAINED_SLOTS[ri][0], rId=RETAINED_SLOTS[ri][1], rIco=RETAINED_SLOTS[ri][2], rItem=ret[rKey];
-    if(rItem) anyRet=true;
-    syncRailTip(rId, !!rItem, rItem?rItem.tip:'');
-    var rbBtn=$(rId+'Btn'); if(rbBtn && rItem) rbBtn.setAttribute('aria-label',rItem.label);
-    setHTML($(rId+'Icon'), rItem?(rItem.icon||iconSVG(rIco)):'');
-    var rv=$(rId+'Val'); if(rv) rv.textContent=rItem?rItem.val:'';
-    var ru=$(rId+'Unit'); if(ru) ru.textContent=rItem?rItem.unit:(rKey==='battery'?'%':'');
-  }
-  var retBox=$("hretained");
-  if(retBox && retBox.classList) retBox.classList.toggle('hide',!anyRet);
+  setHTML($("hfooter"),readings);
   setHeroAct(actLabel,actIcon,act,busyText);
 
   // setup tiles ----------------------------------------------------
@@ -1684,15 +1570,7 @@ function askOtaInstall(status, changelog){
 
 if(typeof document!=='undefined' && typeof document.addEventListener==='function'){
   wireModalFieldSelection(document);
-  eachRail(function(det){
-    if(det && typeof det.addEventListener==='function'){
-      det.addEventListener('pointerleave',function(){ det.classList.remove('dismissed'); });
-    }
-  });
   document.addEventListener('click', function(e){
-    eachRail(function(railEl){
-      if(railEl && railEl.open && (!e || !railEl.contains || !railEl.contains(e.target))) railEl.open=false;
-    });
     var modalBackdrop = $("otaBackdrop");
     if(modalBackdrop && e.target === modalBackdrop){
       closeOtaModal(false);
@@ -1717,13 +1595,6 @@ if(typeof document!=='undefined' && typeof document.addEventListener==='function
       var modal = $("otaModal");
       if(modal && modal.classList && typeof modal.classList.contains==='function' && !modal.classList.contains('hide')){
         closeOtaModal(false);
-      } else {
-        eachRail(function(rEl){
-          if(rEl){
-            rEl.open=false;
-            if(rEl.matches && rEl.matches(':hover')) rEl.classList.add('dismissed');
-          }
-        });
       }
     } else if(e.key==='Enter' && askOpenNow && e.target === $("askInput")){
       e.preventDefault();
