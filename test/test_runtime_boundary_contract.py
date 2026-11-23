@@ -4178,9 +4178,10 @@ def require_ble_callback_lock_contract(ble_source: str) -> None:
             "ESP_LOGD", "ESP_LOGE", "ESP_LOGI", "ESP_LOGW", "OS_MBUF_PKTLEN",
             "ble_gap_connect", "ble_gap_terminate", "ble_gattc_disc_svc_by_uuid",
             "ble_hs_adv_parse_fields", "ble_write_payload_for_mtu", "cancel_scan_locked_",
-            "connect_attempt_may_advance", "connect_lifecycle_after_gap_connected",
+            "compare_exchange_strong", "connect_attempt_may_advance",
+            "connect_lifecycle_after_gap_connected",
             "connect_lifecycle_after_start_failure", "connect_lifecycle_during_gap_start",
-            "connection_snapshot_matches_", "data", "diag_verbose",
+            "connection_snapshot_matches_", "data", "diag_verbose", "disconnect_followup",
             "disconnect_from_callback_", "ensure_scanning_", "ensure_scanning_locked_",
             "esp_timer_get_time", "fetch_add", "fill", "g", "intent",
             "is_tesla_vehicle_name", "load", "memcpy", "note_connectable_", "note_scan_",
@@ -4234,9 +4235,9 @@ def require_ble_callback_lock_contract(ble_source: str) -> None:
         "note_scan_": "0bc069b1372559facfd9e3e2adb29a307f1332d2de58d80c7f60042cf57e44b3",
         "on_chr_disc": "02ae0d160e0c2e143672a61f53d687abb98b8f9268aa0af3cd925ed0a5f162f3",
         "on_dsc_disc": "5cb6705aca81956c2e1d6a493d3915dd89ed893f305b5f73b7c133e329d7f618",
-        "on_gap_event": "226ce68b7cac052357779119eb5559ee8eb6f8ae2e7b994d0e37f23981fea563",
+        "on_gap_event": "60f7e4887e765761a813f4a7a690c5b8e50d286a78461b5fba4be18101cce6dc",
         "on_mtu_exchange": "28a7ad2c78f9efd5f6f9a53b31c53ec7a51c79b0c6e2431837c79f752c4dc520",
-        "on_reset": "a6a11090a79118c9ef6526cb04fe27e35adb57b18f5801fa2479cb9a2110b990",
+        "on_reset": "363ed19eb14f6970e1d23580369b3c4c9ae67fe227ba47209ffdf48e09e2ac28",
         "on_scan_timeout": "7611bc6220fd5cc504a1f6b3b0503645a304f5ee97d32c47b91b22486f1fce95",
         "on_subscribe_write": "a369a89bd9bbdb4530995e36d99a966033f6e83cb018d1db625f941df7aad4b1",
         "on_svc_disc": "77cd5b3c710eddaba67c822084dca5bee1a39de1028fd5d330b30823d0dae50f",
@@ -5003,9 +5004,9 @@ def require_command_path_seams(telemetry: str, commands: str, ctrl: str) -> None
     loop = scrub_cpp(function_body_in(telemetry, "loop_task_fn_"))
     if not re.search(r"bool window = self->active_window_now_\(charging_state\);", loop):
         raise AssertionError("vehicle loop must take its active window from active_window_now_")
-    drop = re.search(r"if \(paired && prev_window && !window && self->ble_connected\(\)\) \{", loop)
+    drop = re.search(r"if \(paired && prev_window && !window\) \{", loop)
     if not drop:
-        raise AssertionError("idle disconnect must remain a falling edge on a paired live link")
+        raise AssertionError("idle disconnect must remain a falling edge on a paired link")
     end = balanced_end(loop, drop.end()-1, "{", "}", "idle disconnect")
     expected = """{
         tk::SemGuard command_guard(self->command_mutex_, 0);
@@ -5014,8 +5015,12 @@ def require_command_path_seams(telemetry: str, commands: str, ctrl: str) -> None
         } else {
             window = self->active_window_now_(charging_state);
             if (!window) {
-                ESP_LOGI(TAG, "idle: dropping link so car can sleep");
-                self->ble_->disconnect();
+                if (self->ble_connected()) {
+                    ESP_LOGI(TAG, "idle: dropping link so car can sleep");
+                    self->ble_->disconnect();
+                } else {
+                    self->ble_->stop_connecting();
+                }
             }
         }
     }"""
@@ -5136,6 +5141,11 @@ def self_test_ble_safety_contract() -> None:
                 "window = false;\n                if (!window)"), commands_src, ctrl_src),
         ("busy owner loses falling edge",
          mutate("idle defer", telemetry_src, "prev_window = window || defer_idle_drop;", "prev_window = window;"), commands_src, ctrl_src),
+        ("idle drop loses stop_connecting on unconnected warm-up",
+         mutate("idle stop_connecting", telemetry_src, "self->ble_->stop_connecting();", ""), commands_src, ctrl_src),
+        ("idle drop skips unconnected falling edge",
+         mutate("idle skip unconnected", telemetry_src, "if (paired && prev_window && !window) {",
+                "if (paired && prev_window && !window && self->ble_connected()) {"), commands_src, ctrl_src),
         ("boot seeds the window by plain assignment",
          telemetry_src, commands_src,
          mutate("seed assign", ctrl_src, "    if (tk::boot_activity_seed_allowed(tk::diag_crash_reset_info().code, boot_reason_slot().state)) {\n        last_cmd_ticks_.store(xTaskGetTickCount());",
@@ -8470,8 +8480,30 @@ def require_pairing_recovery_contract(pairing: str, commands: str, telemetry: st
     if "0 /* max_retries:" not in pair_body:
         raise AssertionError("an ambiguous Whitelist Add write must not be replayed automatically")
     probe = function_body_in(pairing, "poll_existing_key_")
+    scrubbed_probe = scrub_cpp(probe)
     if "get_vehicle_status(status, tk::ConnectOrigin::Background, 6000)" not in probe:
         raise AssertionError("automatic enrollment must retain the bounded non-waking status probe")
+    if "if (pairing_recovery_hint_.load(std::memory_order_acquire) && !invalidate_vcsec_ram_session_()) { return false; }" not in " ".join(scrubbed_probe.split()):
+        raise AssertionError("recovery hint probe must fail-closed invalidate VCSEC RAM session first")
+    if scrubbed_probe.index("invalidate_vcsec_ram_session_()") >= scrubbed_probe.index("get_vehicle_status("):
+        raise AssertionError("recovery probe must invalidate VCSEC RAM session before status probe")
+    ram_reset = function_body_in(telemetry, "invalidate_vcsec_ram_session_")
+    scrubbed_ram_reset = scrub_cpp(ram_reset)
+    for token in (
+        "tk::SemGuard cmd_guard(command_mutex_, pdMS_TO_TICKS(500));",
+        "tk::SemGuard veh_guard(vehicle_mutex_, pdMS_TO_TICKS(500));",
+        "retire_vcsec_contexts_();",
+        "invalidate_session_runtime_locked_(UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY);",
+        "peer->reset();",
+        "command_runner_.vcsec_session().reset();",
+    ):
+        if token not in scrubbed_ram_reset:
+            raise AssertionError(f"VCSEC RAM invalidation lost {token!r}")
+    if scrubbed_ram_reset.index("cmd_guard(command_mutex_") >= scrubbed_ram_reset.index("veh_guard(vehicle_mutex_"):
+        raise AssertionError("VCSEC RAM invalidation must acquire command_mutex_ before vehicle_mutex_")
+    for forbidden in ("storage_->", "ESP_LOG", "generate_key", "clear_session_and_cache_", "DOMAIN_INFOTAINMENT"):
+        if forbidden in scrubbed_ram_reset:
+            raise AssertionError(f"VCSEC RAM invalidation may not perform {forbidden!r}")
     snapshot = function_body_in(pairing, "enrollment_session_snapshot_")
     for token in ("storage_->probe_blob(tk::nvs_contract::kSessionVcsec, snapshot.stored)",
                   "tk::SemGuard vehicle_guard(vehicle_mutex_, wait_ticks)",
@@ -8586,6 +8618,33 @@ def self_test_pairing_recovery_canaries(pairing: str, commands: str,
            telemetry[:handler_start] + handler.replace(
                "peer->reset();", "peer->reset(); storage_->remove(tk::nvs_contract::kSessionVcsec);", 1)
            + telemetry[handler_end:])
+    probe_start = pairing.find("bool VehicleController::poll_existing_key_() {")
+    probe_end = pairing.find("tk::AutoEnrollmentSession VehicleController::enrollment_session_snapshot_(", probe_start)
+    if probe_start < 0 or probe_end < 0:
+        raise AssertionError("poll_existing_key_ canary anchors missing")
+    probe_src = pairing[probe_start:probe_end]
+    reject("recovery probe skips VCSEC RAM invalidation",
+           pairing[:probe_start] + probe_src.replace(
+               "!invalidate_vcsec_ram_session_()", "false", 1) + pairing[probe_end:],
+           commands, telemetry)
+    reset_start = telemetry.find("bool VehicleController::invalidate_vcsec_ram_session_() noexcept {")
+    reset_end = telemetry.find("tk::SessionAvailability VehicleController::session_availability()", reset_start)
+    if reset_start < 0 or reset_end < 0:
+        raise AssertionError("invalidate_vcsec_ram_session_ canary anchors missing")
+    reset_src = telemetry[reset_start:reset_end]
+    reject("VCSEC RAM invalidation erases stored NVS session",
+           pairing, commands,
+           telemetry[:reset_start] + reset_src.replace(
+               "peer->reset();", "peer->reset(); storage_->remove(tk::nvs_contract::kSessionVcsec);", 1)
+           + telemetry[reset_end:])
+    reject("VCSEC RAM invalidation inverts lock order",
+           pairing, commands,
+           telemetry[:reset_start] + reset_src.replace(
+               "tk::SemGuard cmd_guard(command_mutex_, pdMS_TO_TICKS(500));\n        if (!cmd_guard) return false;\n"
+               "        tk::SemGuard veh_guard(vehicle_mutex_, pdMS_TO_TICKS(500));\n        if (!veh_guard) return false;",
+               "tk::SemGuard veh_guard(vehicle_mutex_, pdMS_TO_TICKS(500));\n        if (!veh_guard) return false;\n"
+               "        tk::SemGuard cmd_guard(command_mutex_, pdMS_TO_TICKS(500));\n        if (!cmd_guard) return false;",
+               1) + telemetry[reset_end:])
 
 
 def require_wake_result_contract(commands: str, telemetry: str, pairing: str, ctrl_header: str) -> None:

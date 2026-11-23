@@ -27,8 +27,11 @@ def check_enqueue_deadlines(compiler: str, env: dict) -> None:
         assert block.count('if (timeout_ms == 0)') == 1, name
         blocks.append(block)
     facade = r'''
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <cassert>
+#include <cstring>
 #include <functional>
 #include <memory>
 #include <string>
@@ -41,9 +44,12 @@ static constexpr int VCSEC_InformationRequestType_INFORMATION_REQUEST_TYPE_GET_S
 namespace TeslaBLE {struct Client{int build_vcsec_information_request_message(int,uint8_t*,size_t*){return 0;}};}
 struct Probe{
  struct Outcome{bool success=false;std::string error;};
- struct Completion{uint32_t command_id=0,cmd_id=0;std::atomic<bool> completed{false};std::string error;int sem=1;};
+ struct Sem{unsigned gives=0;};
+ struct Completion{uint32_t command_id=0,cmd_id=0;std::atomic<bool> completed{false};std::array<char,96> error{};Sem sem_state{};Sem* sem=&sem_state;};
  using Builder=std::function<int(TeslaBLE::Client*,uint8_t*,size_t*)>;
  int vehicle_mutex_=1;unsigned callback_installs=0;
+ std::atomic<uint32_t> command_generation_{1};
+ std::shared_ptr<Completion> last_completion;
  uint32_t deadline=1100;std::string name="probe";
  tk::WakePolicy wp=tk::WakePolicy::NoWakeFail;
  bool auth_fail_is_health_probe=false,completes_on_transmit=false;
@@ -55,7 +61,7 @@ struct Probe{
  std::function<void()> vehicle_status_callback_;
  uint32_t remaining_ms_(uint32_t d){return clock_ms>=d?0:d-clock_ms;}
  template<class... A> auto make_result_cb_(A&&...){++callback_installs;return [](bool,const std::string&,tk::CommandFailureInfo){};}
- static void xSemaphoreGive(int){}
+ static void xSemaphoreGive(Sem* s){if(s)++s->gives;}
  METHODS
 };
 int main(){
@@ -69,6 +75,42 @@ int main(){
   unsigned builders=0;for(const auto& b:p.command_builders_)builders+=bool(b);
   assert(builders==unsigned(!expire));
  }
+ {
+  clock_ms=1000;lock_delay=10;Probe p;
+  assert(p.status());
+  auto* cmd=p.command_runner_.current_command();
+  assert(cmd && cmd->on_complete && p.last_completion);
+  const std::string long_err(200,'x');
+  cmd->on_complete(false,long_err,{});
+  assert(p.last_completion->completed.load());
+  assert(std::strlen(p.last_completion->error.data())==95);
+  assert(std::memcmp(p.last_completion->error.data(),long_err.data(),95)==0);
+  assert(p.last_completion->error[95]=='\0');
+  assert(p.last_completion->sem_state.gives==1);
+  cmd->on_complete(false,"second",{});
+  assert(p.last_completion->sem_state.gives==1);
+ }
+ {
+  clock_ms=1000;lock_delay=10;Probe p;
+  assert(p.status());
+  auto* cmd=p.command_runner_.current_command();
+  assert(cmd && cmd->on_complete && p.last_completion);
+  p.command_generation_.fetch_add(1);
+  cmd->on_complete(false,"stale",{});
+  assert(!p.last_completion->completed.load());
+  assert(p.last_completion->error[0]=='\0');
+  assert(p.last_completion->sem_state.gives==0);
+ }
+ {
+  clock_ms=1000;lock_delay=10;Probe p;
+  assert(p.status());
+  auto* cmd=p.command_runner_.current_command();
+  assert(cmd && cmd->on_complete && p.last_completion);
+  cmd->on_complete(true,"ignored",{});
+  assert(!p.last_completion->completed.load());
+  assert(p.last_completion->error[0]=='\0');
+  assert(p.last_completion->sem_state.gives==0);
+ }
 }
 '''
     methods = []
@@ -76,6 +118,7 @@ int main(){
         result_type = 'bool' if index == 2 else 'Outcome'
         prefix = ('[[maybe_unused]] Outcome out; [[maybe_unused]] uint32_t cmd_id=0,generation=1; '
                   'auto completion=std::make_shared<Completion>(); '
+                  'last_completion=completion; '
                   '[[maybe_unused]] Builder builder=[](TeslaBLE::Client*,uint8_t*,size_t*){return 0;}; '
                   '[[maybe_unused]] std::function<void()> callback=[]{}; ')
         methods.append(f'{result_type} {name}(){{ {prefix}\n{block}\n' +

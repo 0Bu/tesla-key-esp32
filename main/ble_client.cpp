@@ -332,6 +332,7 @@ void BleClient::on_reset() {
         scanning_    = false;
         connecting_.store(lifecycle.connecting);
         conn_handle_.store(BLE_HS_CONN_HANDLE_NONE);
+        pending_terminate_handle_.store(BLE_HS_CONN_HANDLE_NONE);
         write_handle_.store(0);
         ready_generation_.store(tk::ble::kNoReadyGeneration);
         write_payload_size_.store(tk::kBleDefaultWritePayload);
@@ -414,6 +415,14 @@ void BleClient::ensure_scanning_(TickType_t timeout) {
 }
 
 void BleClient::service_pending() {
+    const uint16_t orphan = pending_terminate_handle_.load();
+    if (orphan != BLE_HS_CONN_HANDLE_NONE) {
+        const int rc = ble_gap_terminate(orphan, BLE_ERR_REM_USER_CONN_TERM);
+        if (rc == 0 || rc == BLE_HS_ENOTCONN || rc == BLE_HS_EALREADY) {
+            uint16_t expected = orphan;
+            pending_terminate_handle_.compare_exchange_strong(expected, BLE_HS_CONN_HANDLE_NONE);
+        }
+    }
     const uint32_t pending = terminate_pending_generation_.exchange(tk::ble::kNoReadyGeneration);
     if (pending != tk::ble::kNoReadyGeneration) terminate_published_link_(pending);
     if (scan_pending_.exchange(false) && want_connect_.load()) ensure_scanning_(0);
@@ -593,13 +602,23 @@ int BleClient::target_connectable_since(int64_t since_us) const {
         count = std::min(snapshot.size(), scan_count_);
         std::copy_n(scan_.begin(), count, snapshot.begin());
     }
+    bool found = false;
+    int64_t best_connectable_us = 0;
+    int64_t best_last_us = 0;
     for (size_t i = 0; i < count; ++i) {
         const auto& s = snapshot[i];
         if (s.name[0] == '\0') continue;
         const bool matches = std::strcmp(s.name, target_name_.data()) == 0;
-        result = tk::connectable_verdict_in_attempt(
+        const int verdict = tk::connectable_verdict_in_attempt(
             matches, s.connectable, s.last_us, s.connectable_us, since_us);
-        if (matches) break;
+        if (verdict < 0) continue;
+        if (!found || s.connectable_us > best_connectable_us ||
+            (s.connectable_us == best_connectable_us && s.last_us > best_last_us)) {
+            found = true;
+            best_connectable_us = s.connectable_us;
+            best_last_us = s.last_us;
+            result = verdict;
+        }
     }
     return result;
 }
@@ -990,7 +1009,12 @@ int BleClient::on_gap_event(ble_gap_event* event) {
             // publish the handle only as a doomed link so it can be terminated; never start GATT.
             tk::SemGuard intent(intent_mutex_, 0);
             if (!intent) {
-                ble_gap_terminate(event->connect.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+                connecting_.store(false);
+                scan_pending_.store(true);
+                const int term_rc = ble_gap_terminate(event->connect.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+                if (term_rc != 0 && term_rc != BLE_HS_ENOTCONN && term_rc != BLE_HS_EALREADY) {
+                    pending_terminate_handle_.store(event->connect.conn_handle);
+                }
                 break;
             }
             const tk::ble::ConnectLifecycle discovering =
@@ -1002,6 +1026,8 @@ int BleClient::on_gap_event(ble_gap_event* event) {
             write_handle_.store(0);
             ready_generation_.store(tk::ble::kNoReadyGeneration);
             write_payload_size_.store(tk::kBleDefaultWritePayload);
+            uint16_t stale_orphan = event->connect.conn_handle;
+            pending_terminate_handle_.compare_exchange_strong(stale_orphan, BLE_HS_CONN_HANDLE_NONE);
             conn_handle_.store(event->connect.conn_handle);
             disconnecting_.store(false);
             connection_generation_.fetch_add(1);
@@ -1047,12 +1073,20 @@ int BleClient::on_gap_event(ble_gap_event* event) {
 
     case BLE_GAP_EVENT_DISCONNECT: {
         ESP_LOGD(TAG, "disconnected, reason=%d", event->disconnect.reason);
+        const uint16_t disconnected_handle = event->disconnect.conn.conn_handle;
+        uint16_t expected_orphan = disconnected_handle;
+        pending_terminate_handle_.compare_exchange_strong(expected_orphan, BLE_HS_CONN_HANDLE_NONE);
+        if (disconnected_handle == BLE_HS_CONN_HANDLE_NONE ||
+            conn_handle_.load() != disconnected_handle) {
+            if (want_connect_.load()) scan_pending_.store(true);
+            break;
+        }
         bool reconnect = false;
         {
             tk::SemGuard intent(intent_mutex_, 0);
-            // If a task owns the lifecycle transaction, cancel the old request instead of
-            // blocking the host or preserving an intent whose generation cannot be linearized.
-            if (!intent) want_connect_.store(false);
+            const tk::ble::DisconnectFollowup followup =
+                tk::ble::disconnect_followup(static_cast<bool>(intent), want_connect_.load());
+            if (followup.defer_reconcile) scan_pending_.store(true);
             // Invalidate first: connection state transitions and command tasks can run synchronously from
             // the callbacks below, and none may adopt the old handles under a fresh generation.
             disconnecting_.store(true);
@@ -1067,7 +1101,7 @@ int BleClient::on_gap_event(ble_gap_event* event) {
             // A new command may have called connect() after disconnect() initiated termination but
             // before this delayed event arrived. Preserve that fresh intent and restart its scan
             // after the old link snapshot has been retired.
-            reconnect = static_cast<bool>(intent) && want_connect_.load();
+            reconnect = followup.restart_scan_now;
             scanning_ = false;
             conn_rssi_valid_.store(false);   // stale once the link is gone
             disconnecting_.store(false);

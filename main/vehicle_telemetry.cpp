@@ -17,7 +17,9 @@
 #include <esp_log.h>
 #include <esp_timer.h>
 #include <esp_task_wdt.h>
+#include <algorithm>
 #include <cstdio>
+#include <cstring>
 #include <exception>
 #include <type_traits>
 #include <utility>
@@ -763,6 +765,27 @@ void VehicleController::invalidate_session_runtime_locked_(UniversalMessage_Doma
     session_runtime_bits_.fetch_and(~(15U << shift), std::memory_order_release);
 }
 
+bool VehicleController::invalidate_vcsec_ram_session_() noexcept {
+    if (!command_mutex_ || !vehicle_mutex_) return false;
+    try {
+        tk::SemGuard cmd_guard(command_mutex_, pdMS_TO_TICKS(500));
+        if (!cmd_guard) return false;
+        tk::SemGuard veh_guard(vehicle_mutex_, pdMS_TO_TICKS(500));
+        if (!veh_guard) return false;
+        retire_vcsec_contexts_();
+        invalidate_session_runtime_locked_(UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY);
+        if (client_) {
+            if (auto* peer = client_->get_peer(UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY)) {
+                peer->reset();
+            }
+        }
+        command_runner_.vcsec_session().reset();
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
 tk::SessionAvailability VehicleController::session_availability() const noexcept {
     const uint32_t identity = identity_epoch_.load(std::memory_order_acquire);
     if (!command_identity_ready_()) return {};
@@ -1190,8 +1213,11 @@ void VehicleController::handle_empty_vcsec_reply_(const UniversalMessage_Routabl
     if (msg.has_signedMessageStatus &&
         (msg.signedMessageStatus.operation_status != UniversalMessage_OperationStatus_E_OPERATIONSTATUS_OK ||
          msg.signedMessageStatus.signed_message_fault != UniversalMessage_MessageFault_E_MESSAGEFAULT_ERROR_NONE)) return;
-    if (msg.which_sub_sigData == UniversalMessage_RoutableMessage_signature_data_tag &&
-        msg.sub_sigData.signature_data.which_sig_type == Signatures_SignatureData_AES_GCM_Response_data_tag) {
+    if (msg.which_sub_sigData != 0) {
+        if (msg.which_sub_sigData != UniversalMessage_RoutableMessage_signature_data_tag ||
+            msg.sub_sigData.signature_data.which_sig_type != Signatures_SignatureData_AES_GCM_Response_data_tag) {
+            return;
+        }
         auto* peer = client_->get_peer(UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY);
         size_t hash_size = 0;
         const auto* hash = client_->get_last_request_hash(UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY, &hash_size);
@@ -1219,7 +1245,12 @@ void VehicleController::handle_vcsec_frame_(const UniversalMessage_RoutableMessa
     }
     if (msg.which_payload != UniversalMessage_RoutableMessage_protobuf_message_as_bytes_tag) return;
     const Signatures_SignatureData* sig_data = nullptr;
-    if (msg.which_sub_sigData == UniversalMessage_RoutableMessage_signature_data_tag) {
+    if (msg.which_sub_sigData != 0) {
+        if (msg.which_sub_sigData != UniversalMessage_RoutableMessage_signature_data_tag ||
+            msg.sub_sigData.signature_data.which_sig_type != Signatures_SignatureData_AES_GCM_Response_data_tag) {
+            ESP_LOGW(TAG, "Dropping VCSEC response with unsupported signature type");
+            return;
+        }
         sig_data = &msg.sub_sigData.signature_data;
     }
     UniversalMessage_MessageFault_E fault = UniversalMessage_MessageFault_E_MESSAGEFAULT_ERROR_NONE;
@@ -1322,6 +1353,12 @@ void VehicleController::handle_vcsec_frame_(const UniversalMessage_RoutableMessa
 }
 
 void VehicleController::handle_carserver_frame_(const UniversalMessage_RoutableMessage& msg) {
+    if (msg.which_payload != UniversalMessage_RoutableMessage_protobuf_message_as_bytes_tag) return;
+    if (msg.which_sub_sigData != 0 &&
+        (msg.which_sub_sigData != UniversalMessage_RoutableMessage_signature_data_tag ||
+         msg.sub_sigData.signature_data.which_sig_type != Signatures_SignatureData_AES_GCM_Response_data_tag)) {
+        return;
+    }
     if (!command_runner_.dispatcher().match_response_or_record_rejection(
             tk::BleDomain::Infotainment,
             msg.request_uuid.size > 0 ? msg.request_uuid.bytes : nullptr, msg.request_uuid.size)) {
@@ -1770,8 +1807,9 @@ void VehicleController::loop_task_fn_(void* arg) {
         bool window = self->active_window_now_(charging_state);
         bool defer_idle_drop = false;
 
-        // Falling edge: window just closed → drop the link once so the car can sleep.
-        if (paired && prev_window && !window && self->ble_connected()) {
+        // Falling edge: window just closed → drop the live link or cancel any warm-up connect
+        // attempt so the radio goes quiet and the car can sleep.
+        if (paired && prev_window && !window) {
             // Foreground commands and the background health probe own this same arbitration.
             // Recheck recency after acquiring it; retain the edge if its owner is still busy.
             tk::SemGuard command_guard(self->command_mutex_, 0);
@@ -1780,8 +1818,12 @@ void VehicleController::loop_task_fn_(void* arg) {
             } else {
                 window = self->active_window_now_(charging_state);
                 if (!window) {
-                    ESP_LOGI(TAG, "idle: dropping link so car can sleep");
-                    self->ble_->disconnect();
+                    if (self->ble_connected()) {
+                        ESP_LOGI(TAG, "idle: dropping link so car can sleep");
+                        self->ble_->disconnect();
+                    } else {
+                        self->ble_->stop_connecting();
+                    }
                 }
             }
         }
@@ -1999,15 +2041,19 @@ bool VehicleController::get_vehicle_status(VehicleStatusResult& out, tk::Connect
     }
 
     struct StatusCompletion {
+        static constexpr size_t kErrorCapacity = 96;
         SemaphoreHandle_t sem{xSemaphoreCreateBinary()};
         std::atomic<bool> completed{false};
         std::atomic<bool> success{false};
-        std::string error{};
+        std::array<char, kErrorCapacity> error{};
         uint32_t cmd_id{0};
         int32_t lock_state{0};
         int32_t sleep_status{0};
         int32_t user_presence{0};
         ~StatusCompletion() { if (sem) vSemaphoreDelete(sem); }
+        StatusCompletion() = default;
+        StatusCompletion(const StatusCompletion&) = delete;
+        StatusCompletion& operator=(const StatusCompletion&) = delete;
     };
     auto completion = std::make_shared<StatusCompletion>();
     if (!completion->sem) {
@@ -2036,11 +2082,22 @@ bool VehicleController::get_vehicle_status(VehicleStatusResult& out, tk::Connect
         const uint32_t timeout_ms = remaining_ms_(deadline);
         if (timeout_ms == 0) return false;
         vehicle_status_callback_ = std::move(callback);
-        auto on_complete = [completion](bool ok, const std::string& err, tk::CommandFailureInfo) {
-            if (!ok && !completion->completed.load()) {
-                completion->error = err;
+        auto on_complete = [this, completion, generation](bool ok, const std::string& err, tk::CommandFailureInfo) {
+            if (command_generation_.load() != generation) return;
+            try {
+                if (!ok && !completion->completed.exchange(true)) {
+                    const size_t n = std::min(err.size(), completion->error.size() - 1);
+                    if (n > 0) std::memcpy(completion->error.data(), err.data(), n);
+                    completion->error[n] = '\0';
+                    if (command_generation_.load() == generation && completion->sem) {
+                        xSemaphoreGive(completion->sem);
+                    }
+                }
+            } catch (...) {
                 completion->completed.store(true);
-                xSemaphoreGive(completion->sem);
+                if (command_generation_.load() == generation && completion->sem) {
+                    xSemaphoreGive(completion->sem);
+                }
             }
         };
         completion->cmd_id = command_runner_.enqueue(
@@ -2084,10 +2141,10 @@ bool VehicleController::get_vehicle_status(VehicleStatusResult& out, tk::Connect
         } else {
             if (origin == tk::ConnectOrigin::Foreground) {
                 ESP_LOGW(TAG, "vehicle-status poll failed before deadline: %s",
-                         completion->error.empty() ? "cancelled (e.g. link lost)" : completion->error.c_str());
+                         completion->error[0] == '\0' ? "cancelled (e.g. link lost)" : completion->error.data());
             } else {
                 ESP_LOGD(TAG, "vehicle-status poll cancelled before deadline (e.g. link lost): %s",
-                         completion->error.c_str());
+                         completion->error.data());
             }
         }
     }

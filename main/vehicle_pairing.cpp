@@ -924,6 +924,10 @@ std::string VehicleController::key_fingerprint() {
 // Keep the string-bearing status result out of the long-lived supervisor frame.
 __attribute__((noinline))
 bool VehicleController::poll_existing_key_() {
+    if (pairing_recovery_hint_.load(std::memory_order_acquire) &&
+        !invalidate_vcsec_ram_session_()) {
+        return false;
+    }
     VehicleStatusResult status;
     return get_vehicle_status(status, tk::ConnectOrigin::Background, 6000);
 }

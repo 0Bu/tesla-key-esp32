@@ -201,6 +201,7 @@ public:
     NativeSessionStorage* storage_{&session_storage};
     unsigned& session_persists{session_storage.saves};
     SemaphoreHandle_t vehicle_mutex_{xSemaphoreCreateMutex()};
+    SemaphoreHandle_t command_mutex_{xSemaphoreCreateMutex()};
     std::atomic<uint32_t> identity_epoch_{0}, session_runtime_bits_{0}, session_runtime_epoch_{0};
     std::function<void(const VCSEC_VehicleStatus&)> vehicle_status_callback_;
     explicit VehicleController(Client& client) : client_{&client} {}
@@ -212,7 +213,7 @@ public:
         if (during_sleep) during_sleep();
     }
     void on_vehicle_message_(const UniversalMessage_RoutableMessage&) { ++recovery_deliveries; }
-    ~VehicleController() { vSemaphoreDelete(vehicle_mutex_); }
+    ~VehicleController() { vSemaphoreDelete(vehicle_mutex_); vSemaphoreDelete(command_mutex_); }
     void mark_vcsec_unknown_() {
         native_require_unlocked();
         vcsec_sleep_state_.store(static_cast<int>(tk::SleepState::Unknown));
@@ -228,6 +229,7 @@ public:
     tk::SessionRuntimeState runtime_session_observation_locked_(UniversalMessage_Domain) noexcept;
     void publish_session_runtime_locked_(UniversalMessage_Domain, tk::SessionSaveState, uint32_t) noexcept;
     void invalidate_session_runtime_locked_(UniversalMessage_Domain) noexcept;
+    bool invalidate_vcsec_ram_session_() noexcept;
     tk::SessionAvailability session_availability() const noexcept;
     bool session_available() const noexcept;
     template <typename T> void on_charge_state_(const T&) { native_require_unlocked(); ++telemetry_deliveries; }
@@ -817,6 +819,26 @@ static void check_native_carserver_replay() {
     controller.handle_carserver_frame_(bad_tag);
     expect(controller.telemetry_deliveries == 0, "bad tag produces no native telemetry",
            "bad tag reached native telemetry");
+    {
+        auto empty_payload = plain;
+        empty_payload.which_payload = 0;
+        auto wrong_payload = plain;
+        wrong_payload.which_payload = UniversalMessage_RoutableMessage_session_info_request_tag;
+        auto sig_info_type = plain;
+        sig_info_type.which_sub_sigData = UniversalMessage_RoutableMessage_signature_data_tag;
+        sig_info_type.sub_sigData.signature_data.which_sig_type = Signatures_SignatureData_session_info_tag_tag;
+        auto sig_zero_type = plain;
+        sig_zero_type.which_sub_sigData = UniversalMessage_RoutableMessage_signature_data_tag;
+        sig_zero_type.sub_sigData.signature_data.which_sig_type = 0;
+        for (const auto& unsupported : {empty_payload, wrong_payload, sig_info_type, sig_zero_type}) {
+            controller.handle_carserver_frame_(unsupported);
+        }
+        expect(controller.telemetry_deliveries == 0 &&
+               controller.command_runner_.dispatcher().has_request(request_id) &&
+               controller.command_runner_.dispatcher().stats().routed_count == 0,
+               "CarServer drops non-protobuf payloads and unsupported signature variants before routing",
+               "unsupported CarServer payload or signature reached routing or telemetry");
+    }
     controller.handle_carserver_frame_(zero);
     expect(controller.telemetry_deliveries == 1, "authenticated zero is accepted after foreign UUID and bad tag",
            "authenticated zero was rejected or rejected input consumed replay state");
@@ -915,8 +937,8 @@ static Message command_status(Message message, VCSEC_OperationStatus_E operation
     vcsec.sub_message.commandStatus.operationStatus = operation;
     return payload(message, vcsec);
 }
-static Message session_info(Message message, const tk::BleUuid& challenge) {
-    const auto bytes = kat::unhex(kat::kSessionInfo);
+static Message session_info_bytes(Message message, const tk::BleUuid& challenge,
+                                      const std::vector<uint8_t>& bytes) {
     message.which_payload = UniversalMessage_RoutableMessage_session_info_tag;
     message.payload.session_info.size = bytes.size();
     std::memcpy(message.payload.session_info.bytes, bytes.data(), bytes.size());
@@ -945,6 +967,9 @@ static Message session_info(Message message, const tk::BleUuid& challenge) {
     tag.size = length;
     expect(sealed && length == 32, "independent SessionInfo HMAC seals", "SessionInfo HMAC sealing failed");
     return message;
+}
+static Message session_info(Message message, const tk::BleUuid& challenge) {
+    return session_info_bytes(message, challenge, kat::unhex(kat::kSessionInfo));
 }
 struct Fixture {
     Client client;
@@ -1941,6 +1966,116 @@ static void check_native_vcsec_routing() {
         send(f.controller, bad);
         expect(f.completions == 1 && !f.success && f.controller.session_persists == 0,
                "matched auth reply still requires authentic SessionInfo HMAC", "bad HMAC established auth");
+    }
+    {
+        const auto with_unsupported_sig = [](Message msg, pb_size_t sig_type) {
+            msg.which_sub_sigData = UniversalMessage_RoutableMessage_signature_data_tag;
+            msg.sub_sigData.signature_data.which_sig_type = sig_type;
+            return msg;
+        };
+        {
+            Fixture f;
+            f.enqueue();
+            f.controller.drive_command_runner_();
+            const auto request = f.request();
+            for (const pb_size_t sig_type : {
+                     static_cast<pb_size_t>(Signatures_SignatureData_session_info_tag_tag),
+                     static_cast<pb_size_t>(0),
+                 }) {
+                send(f.controller, with_unsupported_sig(envelope(request), sig_type));
+                send(f.controller, with_unsupported_sig(
+                    command_status(envelope(request), VCSEC_OperationStatus_E_OPERATIONSTATUS_OK), sig_type));
+                send(f.controller, with_unsupported_sig(status(envelope(request)), sig_type));
+            }
+            expect(f.completions == 0 && f.samples == 0 && f.controller.sleep_deliveries == 0,
+                   "VCSEC drops empty and protobuf replies with unsupported signature variants",
+                   "VCSEC accepted reply with unsupported signature variant");
+            send(f.controller, f.seal(command_status(envelope(request), VCSEC_OperationStatus_E_OPERATIONSTATUS_OK), 0));
+            expect(f.completions == 1 && f.success,
+                   "VCSEC still completes on subsequent authenticated reply after dropping unsupported signatures",
+                   "unsupported signature reply broke subsequent valid VCSEC reply");
+        }
+        {
+            Fixture f;
+            f.enqueue(Kind::Status);
+            f.controller.drive_command_runner_();
+            const auto request = f.request();
+            for (const pb_size_t sig_type : {
+                     static_cast<pb_size_t>(Signatures_SignatureData_session_info_tag_tag),
+                     static_cast<pb_size_t>(0),
+                 }) {
+                send(f.controller, with_unsupported_sig(status(envelope(request)), sig_type));
+            }
+            expect(f.completions == 0 && f.samples == 0 && f.controller.sleep_deliveries == 0,
+                   "VCSEC status poll drops replies with unsupported signature variants",
+                   "VCSEC status poll accepted unsupported signature variant");
+            send(f.controller, status(envelope(request)));
+            expect(f.completions == 1 && f.success && f.samples == 1 && f.controller.sleep_deliveries == 1,
+                   "VCSEC status poll completes on valid reply after dropping unsupported signatures",
+                   "VCSEC status poll failed after unsupported signature drop");
+        }
+    }
+    {
+        Fixture f;
+        const auto security = UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY;
+        const auto info = UniversalMessage_Domain_DOMAIN_INFOTAINMENT;
+        const auto stored_vcsec = kat::unhex(kat::kSessionInfo);
+        f.controller.session_storage.records[tk::nvs_contract::kSessionVcsec] = stored_vcsec;
+        f.controller.publish_session_runtime_locked_(security, tk::SessionSaveState::Confirmed, 0);
+        f.controller.publish_session_runtime_locked_(info, tk::SessionSaveState::Confirmed, 0);
+
+        expect(f.controller.session_available() &&
+               f.controller.session_availability().infotainment.usable &&
+               f.controller.command_runner_.vcsec_session().is_authenticated() &&
+               f.controller.command_runner_.info_session().is_authenticated() &&
+               f.client.get_peer(security)->is_initialized() &&
+               f.client.get_peer(info)->is_initialized(),
+               "F-03 setup establishes both VCSEC and Infotainment RAM sessions plus persisted VCSEC blob",
+               "F-03 fixture preconditions failed");
+
+        const bool invalidated = f.controller.invalidate_vcsec_ram_session_();
+        const auto stored_it = f.controller.session_storage.records.find(tk::nvs_contract::kSessionVcsec);
+        const auto runtime = f.controller.session_availability();
+        expect(invalidated &&
+               stored_it != f.controller.session_storage.records.end() &&
+               stored_it->second == stored_vcsec &&
+               f.controller.command_runner_.info_session().is_authenticated() &&
+               f.client.get_peer(info)->is_initialized() &&
+               runtime.infotainment.usable &&
+               !f.controller.command_runner_.vcsec_session().is_authenticated() &&
+               !f.client.get_peer(security)->is_initialized() &&
+               !f.controller.session_available() &&
+               !runtime.vcsec.known &&
+               f.controller.command_mutex_->available &&
+               f.controller.vehicle_mutex_->available,
+               "invalidate_vcsec_ram_session_ clears only VCSEC RAM session and preserves NVS and Infotainment",
+               "invalidate_vcsec_ram_session_ touched NVS/Infotainment or left VCSEC RAM active");
+
+        f.enqueue(Kind::Status, "VCSEC Status Poll");
+        f.controller.drive_command_runner_();
+        const auto auth = f.request();
+        expect(auth.payload == tk::VcsecRequestPayload::SessionInfoRequest &&
+               f.command()->state == tk::CommandState::WaitingVcsecAuth,
+               "enqueued GET_STATUS emits SendVcsecSessionInfoRequest after VCSEC RAM invalidation",
+               "GET_STATUS did not enter WaitingVcsecAuth after VCSEC RAM invalidation");
+
+        Signatures_SessionInfo whitelist_info = Signatures_SessionInfo_init_default;
+        auto in = pb_istream_from_buffer(stored_vcsec.data(), stored_vcsec.size());
+        expect(pb_decode(&in, Signatures_SessionInfo_fields, &whitelist_info),
+               "SessionInfo fixture decodes for KEY_NOT_ON_WHITELIST response",
+               "SessionInfo fixture decode failed");
+        whitelist_info.status = Signatures_Session_Info_Status_SESSION_INFO_STATUS_KEY_NOT_ON_WHITELIST;
+        uint8_t encoded_info[sizeof(Message::payload.session_info.bytes)]{};
+        auto out = pb_ostream_from_buffer(encoded_info, sizeof encoded_info);
+        expect(pb_encode(&out, Signatures_SessionInfo_fields, &whitelist_info),
+               "KEY_NOT_ON_WHITELIST SessionInfo encodes",
+               "KEY_NOT_ON_WHITELIST SessionInfo encode failed");
+        const std::vector<uint8_t> rejected_bytes(encoded_info, encoded_info + out.bytes_written);
+        send(f.controller, session_info_bytes(envelope(auth), auth.uuid, rejected_bytes));
+        expect(f.completions == 1 && !f.success && f.samples == 0 &&
+               f.last_reason == "key not on whitelist - pairing required",
+               "KEY_NOT_ON_WHITELIST SessionInfo fails GET_STATUS probe cleanly",
+               "KEY_NOT_ON_WHITELIST SessionInfo did not fail GET_STATUS probe cleanly");
     }
 
 }
