@@ -2,7 +2,7 @@
   "pre-tool-guards": {
     "PreToolUse": [
       {
-        "matcher": "^(?:run_command|view_file|replace_file_content|write_to_file|apply_patch|Read|Edit|MultiEdit|Write|Bash|exec_command|shell|shell_command)$",
+        "matcher": "^(?:run_command|view_file|replace_file_content|write_to_file|read_file|edit_file|write_file|apply_patch|Read|Edit|MultiEdit|Write|Bash|exec_command|shell|shell_command)$",
         "hooks": [
           {
             "type": "command",

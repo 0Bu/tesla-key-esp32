@@ -1,27 +1,36 @@
 #!/usr/bin/env bash
 # Offline destructive-path, target, manifest and publication contracts.
-# No arguments retain all checks; --build-and-manifest is paired with the separate
-# mandatory release-relevance gate by run-mock-tests.sh.
+# No arguments retain all checks; --build-and-manifest runs both build and manifest
+# contracts without release relevance; --build-contracts and --manifest-contracts
+# split those two fast sub-gates for run-mock-tests.sh.
 set -euo pipefail
 
-build_and_manifest_only=0
+run_relevance=1
+run_build_contracts=1
+run_manifest_contracts=1
 case "$#" in
   0) ;;
   1)
-    [[ "$1" == --build-and-manifest ]] || { echo "usage: test-build-contracts.sh [--build-and-manifest]" >&2; exit 2; }
-    build_and_manifest_only=1
+    case "$1" in
+      --build-and-manifest) run_relevance=0 ;;
+      --build-contracts) run_relevance=0; run_manifest_contracts=0 ;;
+      --manifest-contracts) run_relevance=0; run_build_contracts=0 ;;
+      *) echo "usage: test-build-contracts.sh [--build-and-manifest|--build-contracts|--manifest-contracts]" >&2; exit 2 ;;
+    esac
     ;;
-  *) echo "usage: test-build-contracts.sh [--build-and-manifest]" >&2; exit 2 ;;
+  *) echo "usage: test-build-contracts.sh [--build-and-manifest|--build-contracts|--manifest-contracts]" >&2; exit 2 ;;
 esac
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-if [[ "$build_and_manifest_only" -eq 0 ]]; then
+if [[ "$run_relevance" -eq 1 ]]; then
   "$repo_root/scripts/release-relevance.sh" --self-test
 fi
-"$repo_root/scripts/select-release-version.sh" --self-test
-"$repo_root/scripts/check-reproducible-build.sh" --self-test
-# Actual entry points must reject injected build settings before even their tool-free self-test.
-python3 - "$repo_root" <<'PY_ENV'
+
+if [[ "$run_build_contracts" -eq 1 ]]; then
+  "$repo_root/scripts/select-release-version.sh" --self-test
+  "$repo_root/scripts/check-reproducible-build.sh" --self-test
+  # Actual entry points must reject injected build settings before even their tool-free self-test.
+  python3 - "$repo_root" <<'PY_ENV'
 import os, subprocess, sys
 from pathlib import Path
 root = Path(sys.argv[1])
@@ -42,116 +51,124 @@ for script in ("ci-build-all.sh", "check-reproducible-build.sh"):
             assert result.returncode == 2 and name.encode() in result.stderr, (script, name, value)
 print("build override entry-point controls: PASS (2 positive, 32 negative)")
 PY_ENV
-"$repo_root/scripts/publish-pages-branch.sh" --self-test
-python3 "$repo_root/scripts/check-reproducible-artifacts.py" --self-test
-python3 "$repo_root/scripts/check-config-repair-contract.py"
-python3 "$repo_root/test/test_config_repair_role.py"
-python3 "$repo_root/test/test_config_repair_exchange.py"
-python3 "$repo_root/scripts/check-dependency-contract.py" --self-test
-python3 "$repo_root/scripts/check-otadata-contract.py" --self-test
-python3 "$repo_root/scripts/check-partition-contract.py" --self-test
-python3 "$repo_root/scripts/check-partition-contract.py" --csv "$repo_root/partitions.csv" >/dev/null
-python3 "$repo_root/scripts/check-firmware-artifacts.py" --self-test
-python3 "$repo_root/scripts/check-build-semantics.py" --self-test
-python3 "$repo_root/scripts/check-build-artifact-inventory.py" --self-test --source-root "$repo_root"
-python3 "$repo_root/scripts/report-firmware-size.py" --self-test
-"$repo_root/scripts/check-firmware-size.sh" --self-test
-"$repo_root/scripts/precheck-firmware.sh" --self-test
-python3 "$repo_root/scripts/check-release-assets.py" --self-test
-python3 "$repo_root/scripts/check-signed-root-inventory.py" --self-test
-python3 "$repo_root/test/test_signer_output_admission.py"
-python3 "$repo_root/test/test_signing_image_prefetch.py"
-python3 "$repo_root/test/test_dev_main_watch.py"
-python3 "$repo_root/test/test_deploy_candidate.py"
-python3 "$repo_root/scripts/prepare-reused-release.py" --self-test
-python3 "$repo_root/scripts/wait-pages-build.py" --self-test
-python3 "$repo_root/scripts/check-published-release.py" --self-test
-python3 "$repo_root/scripts/check-pages-source.py" --self-test
-python3 "$repo_root/scripts/check-dev-pages.py" --self-test
-python3 "$repo_root/scripts/check-pages-manifest.py" --self-test
-python3 "$repo_root/scripts/check-release-pages-bytes.py" --self-test
-python3 "$repo_root/scripts/generate-ota-changelog.py" --self-test
-python3 "$repo_root/test/test_pages_changelog.py"
-python3 "$repo_root/scripts/check-stack-usage.py" --self-test
-python3 "$repo_root/scripts/check-build-gate-contract.py" --self-test
-"$repo_root/scripts/e2e_evcc.sh" --self-test
-bash "$repo_root/scripts/idf-docker.sh" --self-test 2>/dev/null
-python3 "$repo_root/scripts/test-pages-shell-contract.py" --bash "$BASH"
-temp="$(mktemp -d)"
-trap 'rm -rf "$temp"' EXIT
-stage="$temp/fw"
-mkdir -p "$stage"
+  python3 "$repo_root/scripts/check-reproducible-artifacts.py" --self-test
+  python3 "$repo_root/scripts/check-config-repair-contract.py"
+  python3 "$repo_root/test/test_config_repair_role.py"
+  python3 "$repo_root/test/test_config_repair_exchange.py"
+  python3 "$repo_root/scripts/check-dependency-contract.py" --self-test
+  python3 "$repo_root/scripts/check-otadata-contract.py" --self-test
+  python3 "$repo_root/scripts/check-partition-contract.py" --self-test
+  python3 "$repo_root/scripts/check-partition-contract.py" --csv "$repo_root/partitions.csv" >/dev/null
+  python3 "$repo_root/scripts/check-firmware-artifacts.py" --self-test
+  python3 "$repo_root/scripts/check-build-semantics.py" --self-test
+  python3 "$repo_root/scripts/check-build-artifact-inventory.py" --self-test --source-root "$repo_root"
+  python3 "$repo_root/scripts/report-firmware-size.py" --self-test
+  "$repo_root/scripts/check-firmware-size.sh" --self-test
+  "$repo_root/scripts/precheck-firmware.sh" --self-test
+  python3 "$repo_root/scripts/check-release-assets.py" --self-test
+  python3 "$repo_root/scripts/check-signed-root-inventory.py" --self-test
+  python3 "$repo_root/test/test_signer_output_admission.py"
+  python3 "$repo_root/test/test_signing_image_prefetch.py"
+  python3 "$repo_root/test/test_dev_main_watch.py"
+  python3 "$repo_root/scripts/check-stack-usage.py" --self-test
+  python3 "$repo_root/scripts/check-build-gate-contract.py" --self-test
+  "$repo_root/scripts/e2e_evcc.sh" --self-test
+  bash "$repo_root/scripts/idf-docker.sh" --self-test 2>/dev/null
+fi
 
-make_bytes() {
-  local path="$1" count="$2"
-  dd if=/dev/zero of="$path" bs=1 count="$count" status=none
-}
+if [[ "$run_manifest_contracts" -eq 1 ]]; then
+  "$repo_root/scripts/publish-pages-branch.sh" --self-test
+  python3 "$repo_root/test/test_deploy_candidate.py"
+  python3 "$repo_root/scripts/prepare-reused-release.py" --self-test
+  python3 "$repo_root/scripts/wait-pages-build.py" --self-test
+  python3 "$repo_root/scripts/check-published-release.py" --self-test
+  python3 "$repo_root/scripts/check-pages-source.py" --self-test
+  python3 "$repo_root/scripts/check-dev-pages.py" --self-test
+  python3 "$repo_root/scripts/check-pages-manifest.py" --self-test
+  python3 "$repo_root/scripts/check-release-pages-bytes.py" --self-test
+  python3 "$repo_root/scripts/generate-ota-changelog.py" --self-test
+  python3 "$repo_root/test/test_pages_changelog.py"
+  python3 "$repo_root/scripts/test-pages-shell-contract.py" --bash "$BASH"
+  temp="$(mktemp -d)"
+  trap 'rm -rf "$temp"' EXIT
+  stage="$temp/fw"
+  mkdir -p "$stage"
 
-make_ff_bytes() {
-  local path="$1" count="$2"
-  python3 - "$path" "$count" <<'PY'
+  make_bytes() {
+    local path="$1" count="$2"
+    python3 - "$path" "$count" <<'PY'
+from pathlib import Path
+import sys
+
+Path(sys.argv[1]).write_bytes(b"\x00" * int(sys.argv[2]))
+PY
+  }
+
+  make_ff_bytes() {
+    local path="$1" count="$2"
+    python3 - "$path" "$count" <<'PY'
 from pathlib import Path
 import sys
 
 Path(sys.argv[1]).write_bytes(b"\xff" * int(sys.argv[2]))
 PY
-}
+  }
 
-for target in esp32 esp32s3 esp32c3 esp32c6; do
-  mkdir -p "$stage/$target"
-  make_bytes "$stage/$target/bootloader.bin" 1024
-  make_bytes "$stage/$target/partition-table.bin" 1024
-  make_bytes "$stage/$target/tesla-key-esp32.bin" 4096
-  make_ff_bytes "$stage/$target/ota_data_initial.bin" 8192
-done
+  for target in esp32 esp32s3 esp32c3 esp32c6; do
+    mkdir -p "$stage/$target"
+    make_bytes "$stage/$target/bootloader.bin" 1024
+    make_bytes "$stage/$target/partition-table.bin" 1024
+    make_bytes "$stage/$target/tesla-key-esp32.bin" 4096
+    make_ff_bytes "$stage/$target/ota_data_initial.bin" 8192
+  done
 
-sha=0123456789abcdef0123456789abcdef01234567
-temp_root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
-site="$(mktemp -d "$temp_root/tesla-key-pages.XXXXXX")"
-trap 'rm -rf "$temp" "$site"' EXIT
+  sha=0123456789abcdef0123456789abcdef01234567
+  temp_root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+  site="$(mktemp -d "$temp_root/tesla-key-pages.XXXXXX")"
+  trap 'rm -rf "$temp" "$site"' EXIT
 
-if FIRMWARE_STAGE_DIR="$stage" "$repo_root/scripts/build-pages.sh" . 1.2.3 "$sha" >/dev/null 2>&1; then
-  echo "build-pages path guard self-test failed: repository root accepted" >&2
-  exit 1
-fi
-if FIRMWARE_STAGE_DIR="$stage" "$repo_root/scripts/build-pages.sh" "$site" release-1 "$sha" >/dev/null 2>&1; then
-  echo "build-pages version self-test failed: browser-incompatible version accepted" >&2
-  exit 1
-fi
-if FIRMWARE_STAGE_DIR="$stage" "$repo_root/scripts/build-pages.sh" "$site" 01.2.3 "$sha" >/dev/null 2>&1; then
-  echo "build-pages version self-test failed: non-canonical leading-zero version accepted" >&2
-  exit 1
-fi
-if "$repo_root/scripts/test-release-contract.sh" release-1 "$sha" "$stage" >/dev/null 2>&1; then
-  echo "release-contract version self-test failed: browser-incompatible version accepted" >&2
-  exit 1
-fi
-if "$repo_root/scripts/test-release-contract.sh" 01.2.3 "$sha" "$stage" >/dev/null 2>&1; then
-  echo "release-contract version self-test failed: non-canonical leading-zero version accepted" >&2
-  exit 1
-fi
-signer_error="$temp/signer-version-error.txt"
-if "$repo_root/scripts/ci-sign-artifacts.sh" 01.2.3 "$stage" "$sha" . "$stage" \
-    >/dev/null 2>"$signer_error"; then
-  echo "signer version self-test failed: non-canonical leading-zero version accepted" >&2
-  exit 1
-fi
-grep -Fq "invalid display version" "$signer_error" || {
-  echo "signer version self-test failed after the version boundary" >&2
-  exit 1
-}
+  if FIRMWARE_STAGE_DIR="$stage" "$repo_root/scripts/build-pages.sh" . 1.2.3 "$sha" >/dev/null 2>&1; then
+    echo "build-pages path guard self-test failed: repository root accepted" >&2
+    exit 1
+  fi
+  if FIRMWARE_STAGE_DIR="$stage" "$repo_root/scripts/build-pages.sh" "$site" release-1 "$sha" >/dev/null 2>&1; then
+    echo "build-pages version self-test failed: browser-incompatible version accepted" >&2
+    exit 1
+  fi
+  if FIRMWARE_STAGE_DIR="$stage" "$repo_root/scripts/build-pages.sh" "$site" 01.2.3 "$sha" >/dev/null 2>&1; then
+    echo "build-pages version self-test failed: non-canonical leading-zero version accepted" >&2
+    exit 1
+  fi
+  if "$repo_root/scripts/test-release-contract.sh" release-1 "$sha" "$stage" >/dev/null 2>&1; then
+    echo "release-contract version self-test failed: browser-incompatible version accepted" >&2
+    exit 1
+  fi
+  if "$repo_root/scripts/test-release-contract.sh" 01.2.3 "$sha" "$stage" >/dev/null 2>&1; then
+    echo "release-contract version self-test failed: non-canonical leading-zero version accepted" >&2
+    exit 1
+  fi
+  signer_error="$temp/signer-version-error.txt"
+  if "$repo_root/scripts/ci-sign-artifacts.sh" 01.2.3 "$stage" "$sha" . "$stage" \
+      >/dev/null 2>"$signer_error"; then
+    echo "signer version self-test failed: non-canonical leading-zero version accepted" >&2
+    exit 1
+  fi
+  grep -Fq "invalid display version" "$signer_error" || {
+    echo "signer version self-test failed after the version boundary" >&2
+    exit 1
+  }
 
-FIRMWARE_STAGE_DIR="$stage" "$repo_root/scripts/build-pages.sh" "$site" 1.2.3 "$sha" >/dev/null
-python3 "$repo_root/scripts/check-pages-manifest.py" "$site" --source-sha "$sha" --version 1.2.3 >/dev/null
-# Later cases mutate only this output, not the canonical assembler inputs. Restore independent
-# copies of the validated snapshot instead of rebuilding the same site four more times.
-canonical_site="$temp/canonical-site"
-cp -R "$site" "$canonical_site"
-restore_site() {
-  rm -rf -- "$site"
-  cp -R "$canonical_site" "$site"
-}
-python3 - "$site/manifest.json" <<'PY'
+  FIRMWARE_STAGE_DIR="$stage" "$repo_root/scripts/build-pages.sh" "$site" 1.2.3 "$sha" >/dev/null
+  python3 "$repo_root/scripts/check-pages-manifest.py" "$site" --source-sha "$sha" --version 1.2.3 >/dev/null
+  # Later cases mutate only this output, not the canonical assembler inputs. Restore independent
+  # copies of the validated snapshot instead of rebuilding the same site four more times.
+  canonical_site="$temp/canonical-site"
+  cp -R "$site" "$canonical_site"
+  restore_site() {
+    rm -rf -- "$site"
+    cp -R "$canonical_site" "$site"
+  }
+  python3 - "$site/manifest.json" <<'PY'
 import json
 from pathlib import Path
 import sys
@@ -161,22 +178,22 @@ manifest = json.loads(path.read_text(encoding="utf-8"))
 manifest["version"] = "01.2.3"
 path.write_text(json.dumps(manifest), encoding="utf-8")
 PY
-if python3 "$repo_root/scripts/check-pages-manifest.py" "$site" \
-    --source-sha "$sha" --version 01.2.3 >/dev/null 2>&1; then
-  echo "manifest version self-test failed: non-canonical leading-zero version accepted" >&2
-  exit 1
-fi
-restore_site
-python3 - "$site/manifest.json" <<'PY'
+  if python3 "$repo_root/scripts/check-pages-manifest.py" "$site" \
+      --source-sha "$sha" --version 01.2.3 >/dev/null 2>&1; then
+    echo "manifest version self-test failed: non-canonical leading-zero version accepted" >&2
+    exit 1
+  fi
+  restore_site
+  python3 - "$site/manifest.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1], encoding="utf-8"))
 assert d["layoutVersion"] == 2 and len(d["builds"]) == 4
 assert all(len(build["parts"]) == 4 and build["parts"][-1]["offset"] == 0xF000 for build in d["builds"])
 PY
 
-# A same-size otadata mutation with a matching manifest digest must still be rejected by the
-# semantic erased-partition gate; digest/length checking alone cannot establish safe activation.
-python3 - "$site" <<'PY'
+  # A same-size otadata mutation with a matching manifest digest must still be rejected by the
+  # semantic erased-partition gate; digest/length checking alone cannot establish safe activation.
+  python3 - "$site" <<'PY'
 import hashlib, json, pathlib, sys
 
 site = pathlib.Path(sys.argv[1])
@@ -190,18 +207,18 @@ path.write_bytes(data)
 part["sha256"] = hashlib.sha256(data).hexdigest()
 manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 PY
-if python3 "$repo_root/scripts/check-pages-manifest.py" "$site" \
-    --source-sha "$sha" --version 1.2.3 >/dev/null 2>&1; then
-  echo "manifest otadata semantic self-test failed: non-erased bytes accepted" >&2
-  exit 1
-fi
-restore_site
+  if python3 "$repo_root/scripts/check-pages-manifest.py" "$site" \
+      --source-sha "$sha" --version 1.2.3 >/dev/null 2>&1; then
+    echo "manifest otadata semantic self-test failed: non-erased bytes accepted" >&2
+    exit 1
+  fi
+  restore_site
 
-# Model the four exact versioned merged.bin assets attached to a GitHub Release, then prove every
-# one of the 16 Pages parts is the byte-identical slice at its declared flash offset.
-release="$temp/release"
-mkdir -p "$release"
-python3 - "$site" "$release" 1.2.3 <<'PY'
+  # Model the four exact versioned merged.bin assets attached to a GitHub Release, then prove every
+  # one of the 16 Pages parts is the byte-identical slice at its declared flash offset.
+  release="$temp/release"
+  mkdir -p "$release"
+  python3 - "$site" "$release" 1.2.3 <<'PY'
 import json, pathlib, sys
 site = pathlib.Path(sys.argv[1])
 release = pathlib.Path(sys.argv[2])
@@ -221,12 +238,12 @@ for build in manifest["builds"]:
         merged[part["offset"] : part["offset"] + len(data)] = data
     (release / names[build["chipFamily"]]).write_bytes(merged)
 PY
-python3 "$repo_root/scripts/check-release-pages-bytes.py" "$site" "$release" \
-  --version 1.2.3 >/dev/null
+  python3 "$repo_root/scripts/check-release-pages-bytes.py" "$site" "$release" \
+    --version 1.2.3 >/dev/null
 
-# All Python acceptance paths must reject boolean offsets just as the shipped
-# installer does, while preserving canonical integer-zero bootloaders.
-python3 - "$repo_root" "$site" "$release" "$sha" <<'PY'
+  # All Python acceptance paths must reject boolean offsets just as the shipped
+  # installer does, while preserving canonical integer-zero bootloaders.
+  python3 - "$repo_root" "$site" "$release" "$sha" <<'PY'
 import importlib.util, json, pathlib, sys
 repo, site, release = map(pathlib.Path, sys.argv[1:4])
 def load(name):
@@ -262,7 +279,7 @@ local.validate(site, sys.argv[4], '1.2.3')
 merged.verify(site, release, '1.2.3')
 assert len(dev.parse_dev_manifest_parts(original, '1.2.3', sys.argv[4])) == 16
 PY
-node --input-type=module - "$site/manifest.json" "$repo_root/docs/web-installer.mjs" <<'JS'
+  node --input-type=module - "$site/manifest.json" "$repo_root/docs/web-installer.mjs" <<'JS'
 import fs from 'node:fs';
 import { pathToFileURL } from 'node:url';
 const { validateManifest } = await import(pathToFileURL(process.argv[3]));
@@ -277,9 +294,9 @@ for (const chip of [1, 2, 3]) {
 }
 JS
 
-# The merged image contract covers every byte, not only the four declared slices. NVS/gap bytes
-# must remain erased, and the app end is the exact end of the merged asset.
-python3 - "$release/tesla-key-esp32-1.2.3-merged.bin" <<'PY'
+  # The merged image contract covers every byte, not only the four declared slices. NVS/gap bytes
+  # must remain erased, and the app end is the exact end of the merged asset.
+  python3 - "$release/tesla-key-esp32-1.2.3-merged.bin" <<'PY'
 from pathlib import Path
 import sys
 
@@ -288,13 +305,13 @@ data = bytearray(path.read_bytes())
 data[0x9000] = 0
 path.write_bytes(data)
 PY
-if python3 "$repo_root/scripts/check-release-pages-bytes.py" "$site" "$release" \
-    --version 1.2.3 >/dev/null 2>&1; then
-  echo "release/Pages merged-gap self-test failed: non-erased NVS gap accepted" >&2
-  exit 1
-fi
-# Restore the exact merged fixture, then prove a trailing byte is rejected as undeclared data.
-python3 - "$site" "$release" 1.2.3 <<'PY'
+  if python3 "$repo_root/scripts/check-release-pages-bytes.py" "$site" "$release" \
+      --version 1.2.3 >/dev/null 2>&1; then
+    echo "release/Pages merged-gap self-test failed: non-erased NVS gap accepted" >&2
+    exit 1
+  fi
+  # Restore the exact merged fixture, then prove a trailing byte is rejected as undeclared data.
+  python3 - "$site" "$release" 1.2.3 <<'PY'
 import json, pathlib, sys
 
 site = pathlib.Path(sys.argv[1])
@@ -310,13 +327,13 @@ for part in build["parts"]:
 path = release / f"tesla-key-esp32-{version}-merged.bin"
 path.write_bytes(merged + b"\xff")
 PY
-if python3 "$repo_root/scripts/check-release-pages-bytes.py" "$site" "$release" \
-    --version 1.2.3 >/dev/null 2>&1; then
-  echo "release/Pages merged-length self-test failed: trailing byte accepted" >&2
-  exit 1
-fi
-# Restore all canonical Release fixtures before later adversarial cases.
-python3 - "$site" "$release" 1.2.3 <<'PY'
+  if python3 "$repo_root/scripts/check-release-pages-bytes.py" "$site" "$release" \
+      --version 1.2.3 >/dev/null 2>&1; then
+    echo "release/Pages merged-length self-test failed: trailing byte accepted" >&2
+    exit 1
+  fi
+  # Restore all canonical Release fixtures before later adversarial cases.
+  python3 - "$site" "$release" 1.2.3 <<'PY'
 import json, pathlib, sys
 
 site = pathlib.Path(sys.argv[1])
@@ -337,12 +354,12 @@ for build in manifest["builds"]:
         merged[part["offset"] : part["offset"] + len(payload)] = payload
     (release / names[build["chipFamily"]]).write_bytes(merged)
 PY
-python3 "$repo_root/scripts/check-release-pages-bytes.py" "$site" "$release" \
-  --version 1.2.3 >/dev/null
+  python3 "$repo_root/scripts/check-release-pages-bytes.py" "$site" "$release" \
+    --version 1.2.3 >/dev/null
 
-# Adversarial case: replace a Pages app and update its manifest digest, leaving version, sourceSha,
-# family, offsets and internal manifest validation intact. Only Release byte binding catches it.
-python3 - "$site" <<'PY'
+  # Adversarial case: replace a Pages app and update its manifest digest, leaving version, sourceSha,
+  # family, offsets and internal manifest validation intact. Only Release byte binding catches it.
+  python3 - "$site" <<'PY'
 import hashlib, json, pathlib, sys
 site = pathlib.Path(sys.argv[1])
 manifest_path = site / "manifest.json"
@@ -355,36 +372,37 @@ path.write_bytes(data)
 part["sha256"] = hashlib.sha256(data).hexdigest()
 manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 PY
-python3 "$repo_root/scripts/check-pages-manifest.py" "$site" \
-  --source-sha "$sha" --version 1.2.3 >/dev/null
-if python3 "$repo_root/scripts/check-release-pages-bytes.py" "$site" "$release" \
-    --version 1.2.3 >/dev/null 2>&1; then
-  echo "release/Pages byte-binding self-test failed: substituted Pages app accepted" >&2
-  exit 1
-fi
+  python3 "$repo_root/scripts/check-pages-manifest.py" "$site" \
+    --source-sha "$sha" --version 1.2.3 >/dev/null
+  if python3 "$repo_root/scripts/check-release-pages-bytes.py" "$site" "$release" \
+      --version 1.2.3 >/dev/null 2>&1; then
+    echo "release/Pages byte-binding self-test failed: substituted Pages app accepted" >&2
+    exit 1
+  fi
 
-# Restore the canonical snapshot for the remaining manifest integrity cases.
-restore_site
+  # Restore the canonical snapshot for the remaining manifest integrity cases.
+  restore_site
 
-mv "$stage/esp32c6" "$temp/esp32c6"
-if FIRMWARE_STAGE_DIR="$stage" "$repo_root/scripts/build-pages.sh" "$site" 1.2.3 "$sha" >/dev/null 2>&1; then
-  echo "build-pages target self-test failed: missing target accepted" >&2
-  exit 1
-fi
-mv "$temp/esp32c6" "$stage/esp32c6"
+  mv "$stage/esp32c6" "$temp/esp32c6"
+  if FIRMWARE_STAGE_DIR="$stage" "$repo_root/scripts/build-pages.sh" "$site" 1.2.3 "$sha" >/dev/null 2>&1; then
+    echo "build-pages target self-test failed: missing target accepted" >&2
+    exit 1
+  fi
+  mv "$temp/esp32c6" "$stage/esp32c6"
 
-mkdir "$stage/esp32c5"
-if FIRMWARE_STAGE_DIR="$stage" "$repo_root/scripts/build-pages.sh" "$site" 1.2.3 "$sha" >/dev/null 2>&1; then
-  echo "build-pages target self-test failed: unexpected target accepted" >&2
-  exit 1
-fi
-rmdir "$stage/esp32c5"
+  mkdir "$stage/esp32c5"
+  if FIRMWARE_STAGE_DIR="$stage" "$repo_root/scripts/build-pages.sh" "$site" 1.2.3 "$sha" >/dev/null 2>&1; then
+    echo "build-pages target self-test failed: unexpected target accepted" >&2
+    exit 1
+  fi
+  rmdir "$stage/esp32c5"
 
-restore_site
-printf x >> "$site/tesla-key-esp32.bin"
-if python3 "$repo_root/scripts/check-pages-manifest.py" "$site" >/dev/null 2>&1; then
-  echo "manifest digest/length self-test failed: tampered file accepted" >&2
-  exit 1
+  restore_site
+  printf x >> "$site/tesla-key-esp32.bin"
+  if python3 "$repo_root/scripts/check-pages-manifest.py" "$site" >/dev/null 2>&1; then
+    echo "manifest digest/length self-test failed: tampered file accepted" >&2
+    exit 1
+  fi
 fi
 
 echo "build/manifest contract self-test: PASS"

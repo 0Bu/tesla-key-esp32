@@ -9,7 +9,7 @@ set -euo pipefail
 contract_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 VERSION_RE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
 SELF_TEST_PYTHON=""  # Set only by this script's isolated --self-test fixture.
-RELEVANT_RE='^(cmake/admit-dependency-sources\.cmake$|scripts/dependency_source\.py$|scripts/nanopb-source\.json$|main/|patches/tesla-ble/|docs/(index\.html|installer-bootstrap\.mjs|serial-port-release\.mjs|web-installer\.mjs|vendor/|[^./][^/]*\.md$)|CMakeLists\.txt$|sdkconfig\.defaults(\.[a-z0-9]+)?$|dependencies\.lock\.[a-z0-9]+$|esp-idf-toolchain\.txt$|partitions\.csv$|version\.txt$|\.github/workflows/(build|signed-pr-preview|pr-preview-cleanup)\.yml$|scripts/firmware-(size|stack)-baseline\.json$|scripts/ota-signing-public-key\.sha256$|scripts/tesla-ble-patch-state\.json$|scripts/(ci-build-all|ci-build-verify|ci-sign-artifacts|next-version|select-release-version|release-relevance|test-release-contract|check-reproducible-build|idf-docker|idf-version|prefetch-idf-image|build-pages|publish-pages-branch|apply-tesla-ble-patches)\.sh$|scripts/(check-idf-container-mounts|apply-tesla-ble-patches|check-build-artifact-inventory|check-build-gate-contract|check-pages-manifest|check-pages-source|pages_publish_control|wait-pages-build|check-dev-pages|check-release-pages-bytes|check-release-assets|check-signed-root-inventory|prepare-reused-release|recover-release-pages|check-published-release|check-firmware-artifacts|check-partition-contract|check-dependency-contract|check-otadata-contract|check-build-semantics|check-stack-usage|check-sdkconfig-defaults|report-firmware-size|generate-ota-changelog)\.py$)'
+RELEVANT_RE='^(cmake/admit-dependency-sources\.cmake$|scripts/dependency_source\.py$|scripts/nanopb-source\.json$|main/|patches/tesla-ble/|docs/(index\.html|installer-bootstrap\.mjs|serial-port-release\.mjs|web-installer\.mjs|vendor/|[^./][^/]*\.md$)|CMakeLists\.txt$|sdkconfig\.defaults(\.[a-z0-9]+)?$|dependencies\.lock\.[a-z0-9]+$|esp-idf-toolchain\.txt$|partitions\.csv$|version\.txt$|LICENSE$|\.github/workflows/(build|signed-pr-preview|pr-preview-cleanup)\.yml$|scripts/firmware-(size|stack)-baseline\.json$|scripts/ota-signing-public-key\.sha256$|scripts/tesla-ble-patch-state\.json$|scripts/(ci-build-all|ci-build-verify|ci-sign-artifacts|next-version|select-release-version|release-relevance|test-release-contract|check-reproducible-build|idf-docker|idf-version|prefetch-idf-image|build-pages|publish-pages-branch|apply-tesla-ble-patches|verify-vendored-esptool-js|reconcile-pr-previews)\.sh$|scripts/(check-idf-container-mounts|apply-tesla-ble-patches|check-build-artifact-inventory|check-build-gate-contract|check-pages-manifest|check-pages-source|pages_publish_control|wait-pages-build|check-dev-pages|check-release-pages-bytes|check-release-assets|check-signed-root-inventory|prepare-reused-release|recover-release-pages|check-published-release|check-firmware-artifacts|check-partition-contract|check-dependency-contract|check-otadata-contract|check-build-semantics|check-stack-usage|check-sdkconfig-defaults|report-firmware-size|generate-ota-changelog|check-config-repair-contract|config_repair_contract|check-reproducible-artifacts|check-pr-preview-served)\.py$)'
 
 validate_sha() {
   local repo_root="$1" sha="$2"
@@ -1016,7 +1016,7 @@ with open(p, "r+", encoding="utf-8") as f:
   # Each classifier sees one actual operation against its immediate published baseline.
   # Re-publish only inside this owned inert fixture; no old image is relabeled in production.
   local markdown_counter=2 markdown_case markdown_base markdown_head markdown_version markdown_expected
-  for markdown_case in add edit rename delete unicode-name newline-name dependency-helper dependency-manifest dependency-cmake unshipped-root unshipped-nested unshipped-hidden unshipped-newline; do
+  for markdown_case in add edit rename delete unicode-name newline-name dependency-helper dependency-manifest dependency-cmake shipped-license vendor-esptool preview-reconcile config-repair-contract config-repair-module repro-artifacts preview-served unshipped-root unshipped-nested unshipped-hidden unshipped-newline; do
     markdown_base="$(git -C "$tmp" rev-parse HEAD)"
     markdown_version="1.0.$markdown_counter"
     markdown_counter=$((markdown_counter + 1))
@@ -1069,15 +1069,24 @@ with open(p, "r+", encoding="utf-8") as f:
         printf 'shipped newline path\n' > "$tmp/docs/"$'API\nguide.md'
         git -C "$tmp" add "docs/"$'API\nguide.md'
         ;;
-      dependency-helper|dependency-manifest|dependency-cmake)
-        # Each production dependency owner must independently trigger all three selectors.
+      dependency-helper|dependency-manifest|dependency-cmake|shipped-license|vendor-esptool|preview-reconcile|config-repair-contract|config-repair-module|repro-artifacts|preview-served)
+        # Each production dependency or shipped/gate owner must independently trigger all three selectors.
         case "$markdown_case" in
           dependency-helper) contract_path=scripts/dependency_source.py ;;
           dependency-manifest) contract_path=scripts/nanopb-source.json ;;
           dependency-cmake) contract_path=cmake/admit-dependency-sources.cmake ;;
+          shipped-license) contract_path=LICENSE ;;
+          vendor-esptool) contract_path=scripts/verify-vendored-esptool-js.sh ;;
+          preview-reconcile) contract_path=scripts/reconcile-pr-previews.sh ;;
+          config-repair-contract) contract_path=scripts/check-config-repair-contract.py ;;
+          config-repair-module) contract_path=scripts/config_repair_contract.py ;;
+          repro-artifacts) contract_path=scripts/check-reproducible-artifacts.py ;;
+          preview-served) contract_path=scripts/check-pr-preview-served.py ;;
         esac
-        mkdir -p "$tmp/${contract_path%/*}"
-        printf 'changed dependency source admission\n' > "$tmp/$contract_path"
+        if [[ "$contract_path" == */* ]]; then
+          mkdir -p "$tmp/${contract_path%/*}"
+        fi
+        printf 'changed dependency or release-relevant source admission\n' > "$tmp/$contract_path"
         git -C "$tmp" add "$contract_path"
         ;;
       unshipped-root)

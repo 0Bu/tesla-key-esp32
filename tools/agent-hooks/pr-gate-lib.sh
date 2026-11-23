@@ -312,7 +312,7 @@ gate_action_env_name_is_unsafe() {
 #   while these prefixes apply only when the shell later executes the action; losing them would
 #   validate one target and mutate another.
 gate_action_env_context_is_unsafe() {
-  local raw="$1" names name unsets
+  local raw="$1" names name
 
   names="$(printf '%s' "$raw" \
     | grep -Eo '(^|[[:space:];|&(){}])([A-Za-z_][A-Za-z0-9_]*)=' \
@@ -322,20 +322,144 @@ gate_action_env_context_is_unsafe() {
     gate_action_env_name_is_unsafe "$name" && return 0
   done <<< "$names"
 
-  unsets="$(printf '%s' "$raw" \
-    | grep -Eo -- '(-u|--unset)(=|[[:space:]]+)[A-Za-z_][A-Za-z0-9_]*' \
-    | sed -E 's/^(-u|--unset)(=|[[:space:]]+)//' || true)"
-  while IFS= read -r name; do
-    [ -n "$name" ] || continue
-    gate_action_env_name_is_unsafe "$name" && return 0
-  done <<< "$unsets"
-
   # Clearing the environment, changing env's cwd/search path, or selecting a different command
-  # lookup cannot be proven equivalent to the context the hook just audited.
-  printf '%s' "$raw" | grep -Eq \
-    '(^|[[:space:]])(-i|--ignore-environment|-0|--null|-C|--chdir|-P)(=|[[:space:]]|$)' \
-    && return 0
-  return 1
+  # lookup cannot be proven equivalent to the context the hook just audited. Scope option
+  # scanning strictly to `env` segments so flags on git/grep/sort (e.g. `git grep -i`,
+  # `git -C . status`, `sort -u`) are not misclassified.
+  command -v python3 >/dev/null 2>&1 || return 0
+  python3 - "$raw" <<'PY'
+import os
+import re
+import shlex
+import sys
+
+raw = sys.argv[1]
+
+
+def is_unsafe_env_name(name: str) -> bool:
+    if re.fullmatch(r"GIT_TRACE2?(?:_[A-Za-z0-9_].*)?", name):
+        return False
+    return bool(
+        re.fullmatch(
+            r"(?:GIT_.*|GH_REPO|GH_HOST|GH_CONFIG_DIR|GITHUB_REPOSITORY|HOME|XDG_CONFIG_HOME|PATH|PWD|OLDPWD|CDPATH|BASH_ENV|ENV|LD_PRELOAD|DYLD_.*)",
+            name,
+        )
+    )
+
+
+def env_options_unsafe(args: list[str]) -> bool:
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        if tok == "--":
+            i += 1
+            while i < len(args) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", args[i]):
+                if is_unsafe_env_name(args[i].split("=", 1)[0]):
+                    return True
+                i += 1
+            return False
+        if tok == "-":
+            return True
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tok):
+            if is_unsafe_env_name(tok.split("=", 1)[0]):
+                return True
+            i += 1
+            continue
+        if not tok.startswith("-"):
+            return False
+        i += 1
+        if tok.startswith("--"):
+            opt, has_eq, val = tok.partition("=")
+            if opt in {"--ignore-environment", "--null", "--chdir", "--split-string"}:
+                return True
+            if opt == "--unset":
+                if not has_eq:
+                    if i >= len(args):
+                        return True
+                    val = args[i]
+                    i += 1
+                if not val or is_unsafe_env_name(val) or is_unsafe_env_name(val.lstrip("=")):
+                    return True
+                continue
+            if opt == "--debug":
+                continue
+            return True
+        j = 1
+        while j < len(tok):
+            ch = tok[j]
+            if ch in {"i", "0", "C", "P", "S"}:
+                return True
+            if ch == "u":
+                if j + 1 < len(tok):
+                    val = tok[j + 1 :]
+                else:
+                    if i >= len(args):
+                        return True
+                    val = args[i]
+                    i += 1
+                if not val or is_unsafe_env_name(val) or is_unsafe_env_name(val.lstrip("=")):
+                    return True
+                break
+            if ch == "v":
+                j += 1
+                continue
+            return True
+    return False
+
+
+try:
+    lexer = shlex.shlex(raw.replace("\n", " ; "), posix=True, punctuation_chars=";&|()!<>")
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    raw_tokens = list(lexer)
+except ValueError:
+    if re.search(r"\benv\b|(?:^|\s|['\";|&()])(?:-u|--unset)", raw):
+        raise SystemExit(0)
+    raise SystemExit(1)
+
+segments: list[list[str]] = [[]]
+for token in raw_tokens:
+    if re.fullmatch(r"[;&|()]+", token):
+        if segments[-1]:
+            segments.append([])
+        continue
+    segments[-1].append(token)
+
+keywords = {"if", "then", "elif", "else", "do", "while", "until", "{", "}"}
+for seg in segments:
+    while seg:
+        head = seg[0]
+        if head in keywords or (head.startswith("!") and all(c == "!" for c in head)):
+            seg.pop(0)
+            continue
+        if len(seg) >= 2 and head.isdigit() and re.fullmatch(r"[<>]+[&|]?", seg[1]):
+            del seg[:3]
+            continue
+        if re.fullmatch(r"[<>]+[&|]?", head):
+            del seg[:2]
+            continue
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", head):
+            if is_unsafe_env_name(head.split("=", 1)[0]):
+                raise SystemExit(0)
+            seg.pop(0)
+            continue
+        if head == "builtin":
+            seg.pop(0)
+            continue
+        if head == "command":
+            seg.pop(0)
+            while seg and seg[0].startswith("-") and seg[0] != "-":
+                opt = seg.pop(0)
+                if opt == "--":
+                    break
+            continue
+        break
+    if seg and os.path.basename(seg[0]) == "env":
+        if env_options_unsafe(seg[1:]):
+            raise SystemExit(0)
+
+raise SystemExit(1)
+PY
 }
 
 # gate_gh_context_is_unsafe <segment>
@@ -431,50 +555,62 @@ def unwrap_wrapper(argv):
         if exe == "env":
             i = 1
             reparsed = False
-            value_options = {"-u", "-C", "-P", "-S", "--unset", "--chdir", "--split-string"}
+            value_options = {"-u", "-C", "-P", "-S", "-a", "--unset", "--chdir", "--split-string", "--argv0"}
             while i < len(argv):
                 token = argv[i]
                 if token == "--":
                     i += 1
                     break
+                if token == "-":
+                    i += 1
+                    continue
                 if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", token):
                     i += 1
                     continue
-                if token.startswith("-") and token != "-":
-                    key = token.split("=", 1)[0]
+                if token.startswith("-"):
                     i += 1
-                    # Darwin/GNU env accept attached short-option operands (-uNAME, -Cdir,
-                    # -Ppath and -Sstring) as well as combined flag-only forms such as -iv.
-                    attached_key = None
-                    attached_value = None
-                    for short in ("-u", "-C", "-P", "-S"):
-                        if token.startswith(short) and token != short:
-                            attached_key = short
-                            attached_value = token[len(short):].lstrip("=")
+                    if token.startswith("--"):
+                        key, has_eq, val = token.partition("=")
+                        if key in value_options:
+                            if has_eq:
+                                option_value = val
+                            else:
+                                if i >= len(argv):
+                                    return []
+                                option_value = argv[i]
+                                i += 1
+                            if key == "--split-string":
+                                try:
+                                    split_words = shlex.split(option_value, posix=True)
+                                except ValueError:
+                                    return []
+                                argv = split_words + argv[i:]
+                                reparsed = True
+                                break
+                        continue
+                    # Walk combined short flags (-iv, -iuNAME, -iS...) as well as -uNAME/-Cdir.
+                    j = 1
+                    while j < len(token):
+                        short = "-" + token[j]
+                        if short in {"-u", "-C", "-P", "-S", "-a"}:
+                            if j + 1 < len(token):
+                                option_value = token[j + 1 :].lstrip("=")
+                            else:
+                                if i >= len(argv):
+                                    return []
+                                option_value = argv[i]
+                                i += 1
+                            if short == "-S":
+                                try:
+                                    split_words = shlex.split(option_value, posix=True)
+                                except ValueError:
+                                    return []
+                                argv = split_words + argv[i:]
+                                reparsed = True
                             break
-                    if attached_key is not None:
-                        key = attached_key
-                    if key in value_options:
-                        if attached_value is not None:
-                            option_value = attached_value
-                        elif "=" in token:
-                            option_value = token.split("=", 1)[1]
-                        else:
-                            if i >= len(argv):
-                                return []
-                            option_value = argv[i]
-                            i += 1
-                        if key in {"-S", "--split-string"}:
-                            # `env -S/--split-string` reparses its operand into the executable and
-                            # argv. Model that non-executingly; otherwise the complete guarded
-                            # action could hide inside the value that a normal option parser skips.
-                            try:
-                                split_words = shlex.split(option_value, posix=True)
-                            except ValueError:
-                                return []
-                            argv = split_words + argv[i:]
-                            reparsed = True
-                            break
+                        j += 1
+                    if reparsed:
+                        break
                     continue
                 break
             else:

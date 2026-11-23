@@ -350,7 +350,8 @@ if command -v python3 >/dev/null 2>&1; then
     run_gate "local host result reuse and invalidation" 120 python3 test/test_local_checks.py
     run_gate "bounded hook read exceptions" 120 python3 test/test_hook_read_contract.py
     run_gate "release relevance and publication selectors" 120 scripts/release-relevance.sh --self-test
-    run_gate "build and manifest contract tests" 120 scripts/test-build-contracts.sh --build-and-manifest
+    run_gate "build and artifact contract tests" 120 scripts/test-build-contracts.sh --build-contracts
+    run_gate "publication and manifest contract tests" 120 scripts/test-build-contracts.sh --manifest-contracts
     run_gate "exact-source filtered publication checkout" 120 python3 test/test_ci_checkout.py
     run_gate "static Pages publication control" 120 python3 test/test_pages_publish_control.py
     run_gate "immutable Release Pages recovery" 120 python3 test/test_release_pages_recovery.py

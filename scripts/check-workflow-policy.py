@@ -617,6 +617,30 @@ def validate(root: Path) -> None:
         "group": "build-${{ github.ref }}",
         "cancel-in-progress": "${{ github.ref != 'refs/heads/main' }}",
     }, "build.yml: main publication must remain serialized without cancellation in progress")
+    changes_steps = [
+        step for step in host_model["prepare"]["steps"]
+        if step.get("id") == "changes" or step.get("name") == "Detect firmware-relevant changes"
+    ]
+    require(len(changes_steps) == 1,
+            "build.yml:prepare must have exactly one Detect firmware-relevant changes step")
+    changes_step = changes_steps[0]
+    changes_env = changes_step.get("env") or {}
+    changes_run = str(changes_step.get("run", ""))
+    require(
+        isinstance(changes_env, dict)
+        and changes_env.get("EVENT_NAME") == "${{ github.event_name }}"
+        and changes_env.get("GITHUB_REF") == "${{ github.ref }}"
+        and changes_env.get("PR_BASE_SHA") == "${{ github.event.pull_request.base.sha }}"
+        and changes_env.get("PR_HEAD_SHA") == "${{ github.event.pull_request.head.sha }}"
+        and "${{" not in changes_run,
+        "build.yml:prepare relevance step must pass GitHub contexts via env without ${{}} in run",
+    )
+    require(
+        "check-change-scope.py" not in changes_run
+        and './scripts/release-relevance.sh --changed-pr "$PR_BASE_SHA" "$PR_HEAD_SHA"' in changes_run
+        and './scripts/release-relevance.sh --changed-dev "$SOURCE_SHA"' in changes_run,
+        "build.yml:prepare must not short-circuit release-relevance.sh with check-change-scope.py",
+    )
     dev_push = "github.event_name == 'push' && github.ref == 'refs/heads/main'"
     initial_watch = [
         step for step in host_model["prepare"]["steps"]
@@ -1444,13 +1468,18 @@ def validate(root: Path) -> None:
     require(policy_text is not None and policy is not None and "current-head-records" in policy,
             "pr-policy.yml current-head-records job is missing")
     require(re.search(r"^  pull_request_target:\s*$", policy_text, re.MULTILINE) is not None,
-            "pr-policy.yml must use pull_request_target trusted-base execution")
-    require("github.event.pull_request.base.sha" in policy_text,
-            "pr-policy.yml must check out the exact trusted base SHA")
+            "pr-policy.yml must use pull_request_target trusted default-branch execution")
     policy_steps = workflow_model(root / ".github/workflows/pr-policy.yml", policy_text)["jobs"]["current-head-records"]["steps"]
-    require(len(policy_steps) == 2 and
-            policy_steps[0].get("with", {}).get("ref") == "${{ github.event.pull_request.base.sha }}",
-            "pr-policy.yml must use only the trusted base SHA for checkout")
+    require(len(policy_steps) == 2, "pr-policy.yml must have checkout and metadata validation steps")
+    policy_checkout_with = policy_steps[0].get("with", {})
+    require(isinstance(policy_checkout_with, dict)
+            and "github.event.pull_request.base.sha" not in str(policy_checkout_with.get("ref") or "")
+            and "ref: ${{ github.event.pull_request.base.sha }}" not in policy["current-head-records"]
+            and "ref: ${{ github.event.pull_request.head" not in policy["current-head-records"]
+            and policy_checkout_with.get("ref") == "${{ github.event.repository.default_branch }}",
+            "pr-policy.yml must check out only the trusted default branch")
+    require(str(policy_checkout_with.get("fetch-depth")) == "0",
+            "pr-policy.yml checkout must retain full history (fetch-depth: 0)")
     policy_env = policy_steps[1].get("env", {})
     policy_run = policy_steps[1].get("run", "")
     require(policy_env.get("PR_EVENT_HEAD") == "${{ github.event.pull_request.head.sha }}" and
@@ -2217,8 +2246,27 @@ def self_test(root: Path) -> None:
          "name: tesla-key-esp32-pr${{ needs.validate.outputs.pr }}-${{ needs.validate.outputs.head-sha }}",
          "name: tesla-key-esp32-pr${{ needs.validate.outputs.pr }}",
          "exact PR head SHA"),
-        ("trusted-pr-ref", "pr-policy.yml", "github.event.pull_request.base.sha",
-         "github.event.pull_request.head.sha", "trusted base SHA"),
+        ("trusted-pr-ref", "pr-policy.yml",
+         "ref: ${{ github.event.repository.default_branch }}",
+         "ref: ${{ github.event.pull_request.head.sha }}", "trusted default branch"),
+        ("historical-pr-base-ref", "pr-policy.yml",
+         "ref: ${{ github.event.repository.default_branch }}",
+         "ref: ${{ github.event.pull_request.base.sha }}", "trusted default branch"),
+        ("pr-policy-shallow-checkout", "pr-policy.yml",
+         "          fetch-depth: 0\n", "", "fetch-depth: 0"),
+        ("prepare-change-scope-short-circuit", "build.yml",
+         '          if [ "$EVENT_NAME" = pull_request ]; then\n'
+         '            if ! changed="$(./scripts/release-relevance.sh --changed-pr "$PR_BASE_SHA" "$PR_HEAD_SHA")"; then',
+         '          if [ "$EVENT_NAME" = pull_request ]; then\n'
+         '            feedback="$(python3 scripts/check-change-scope.py --base "$PR_BASE_SHA" --head "$PR_HEAD_SHA")" || feedback=full\n'
+         '            if [ "$feedback" = docs ]; then\n'
+         '              changed=no\n'
+         '            elif ! changed="$(./scripts/release-relevance.sh --changed-pr "$PR_BASE_SHA" "$PR_HEAD_SHA")"; then',
+         "must not short-circuit release-relevance.sh with check-change-scope.py"),
+        ("prepare-inline-context-in-run", "build.yml",
+         '          if [ "$EVENT_NAME" = pull_request ]; then',
+         '          if [ "${{ github.event_name }}" = pull_request ]; then',
+         "without ${{}} in run"),
         ("job-timeout", "pr-policy.yml", "    timeout-minutes: 5\n", "", "timeout-minutes"),
         ("bench-default-ref", "bench-acceptance.yml",
          "    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)\n", "",

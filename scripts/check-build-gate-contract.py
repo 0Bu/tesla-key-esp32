@@ -428,6 +428,19 @@ def validate(root: Path) -> None:
         ".gitignore: boundary-build trees must stay outside the source fingerprint",
     )
 
+    build_contract_lines = [line.strip() for line in build_contracts.splitlines()]
+    build_start_marker = 'if [[ "$run_build_contracts" -eq 1 ]]; then'
+    manifest_start_marker = 'if [[ "$run_manifest_contracts" -eq 1 ]]; then'
+    require(build_contracts.count(build_start_marker) == 1
+            and build_contracts.count(manifest_start_marker) == 1
+            and build_contracts.index(build_start_marker) < build_contracts.index(manifest_start_marker),
+            "test-build-contracts.sh: build and manifest sub-gate sections drifted")
+    build_section = build_contracts[
+        build_contracts.index(build_start_marker):build_contracts.index(manifest_start_marker)
+    ]
+    manifest_section = build_contracts[build_contracts.index(manifest_start_marker):]
+    build_section_lines = [line.strip() for line in build_section.splitlines()]
+    manifest_section_lines = [line.strip() for line in manifest_section.splitlines()]
     require(build_contracts.count(
                 'python3 "$repo_root/scripts/check-pages-source.py" --self-test') == 1,
             "test-build-contracts.sh: branch-backed Pages source self-test is not wired")
@@ -437,7 +450,7 @@ def validate(root: Path) -> None:
                  "wait-pages-build.py", "generate-ota-changelog.py", "check-build-gate-contract.py"):
         interpreter = "" if name.endswith(".sh") else "python3 "
         call = f'{interpreter}"$repo_root/scripts/{name}" --self-test'
-        require(build_contracts.splitlines().count(call) == 1,
+        require(build_contract_lines.count(call) == 1,
                 "test-build-contracts.sh: shared CI self-test owner drifted: " + name)
         require(f"scripts/{name} --self-test" not in build_workflow,
                 "build.yml: duplicate shared CI self-test: " + name)
@@ -461,16 +474,30 @@ def validate(root: Path) -> None:
     require(build_contracts.count(
                 'python3 "$repo_root/scripts/check-signed-root-inventory.py" --self-test') == 1,
             "test-build-contracts.sh: signed root inventory self-test is not wired")
-    shared_call = '    run_gate "build and manifest contract tests" 120 scripts/test-build-contracts.sh --build-and-manifest'
-    require(run_mock.splitlines().count(shared_call) == 1,
+    shared_build_call = '    run_gate "build and artifact contract tests" 120 scripts/test-build-contracts.sh --build-contracts'
+    shared_manifest_call = '    run_gate "publication and manifest contract tests" 120 scripts/test-build-contracts.sh --manifest-contracts'
+    run_mock_lines = run_mock.splitlines()
+    require(run_mock_lines.count(shared_build_call) == 1
+            and run_mock_lines.count(shared_manifest_call) == 1,
             "run-mock-tests.sh: mandatory shared publication gate is not wired")
     for name in ("check-dependency-contract.py", "check-otadata-contract.py",
                  "check-release-assets.py", "prepare-reused-release.py", "check-published-release.py"):
         call = f'python3 "$repo_root/scripts/{name}" --self-test'
-        require(build_contracts.splitlines().count(call) == 1,
+        require(build_contract_lines.count(call) == 1,
                 "test-build-contracts.sh: shared publication self-test owner drifted: " + name)
         require(f"python3 scripts/{name} --self-test" not in run_mock,
                 "run-mock-tests.sh: duplicate shared publication self-test: " + name)
+    for name in ("select-release-version.sh", "report-firmware-size.py", "check-build-gate-contract.py",
+                 "check-dependency-contract.py", "check-otadata-contract.py", "check-release-assets.py"):
+        interpreter = "" if name.endswith(".sh") else "python3 "
+        call = f'{interpreter}"$repo_root/scripts/{name}" --self-test'
+        require(build_section_lines.count(call) == 1,
+                "test-build-contracts.sh: build-contracts sub-gate owner drifted: " + name)
+    for name in ("prepare-reused-release.py", "wait-pages-build.py", "check-published-release.py",
+                 "check-dev-pages.py", "generate-ota-changelog.py"):
+        call = f'python3 "$repo_root/scripts/{name}" --self-test'
+        require(manifest_section_lines.count(call) == 1,
+                "test-build-contracts.sh: manifest-contracts sub-gate owner drifted: " + name)
     require(
         "TARGET_SUFFIXES = (\"\", \"-s3\", \"-c3\", \"-c6\")"
         in signed_root_inventory
@@ -1837,10 +1864,22 @@ def self_test(root: Path) -> None:
         ("release-reuse-selftest-wiring", "scripts/test-build-contracts.sh",
          'python3 "$repo_root/scripts/prepare-reused-release.py" --self-test\n', "",
          "immutable Release reuse self-test is not wired"),
-        ("release-reuse-host-wiring", "scripts/run-mock-tests.sh",
-         '    run_gate "build and manifest contract tests" 120 scripts/test-build-contracts.sh --build-and-manifest',
-         '    run_gate "build and manifest contract tests" 120 scripts/missing-build-contracts.sh --build-and-manifest',
+        ("release-reuse-host-build-wiring", "scripts/run-mock-tests.sh",
+         '    run_gate "build and artifact contract tests" 120 scripts/test-build-contracts.sh --build-contracts',
+         '    run_gate "build and artifact contract tests" 120 scripts/missing-build-contracts.sh --build-contracts',
          "mandatory shared publication gate is not wired"),
+        ("release-reuse-host-manifest-wiring", "scripts/run-mock-tests.sh",
+         '    run_gate "publication and manifest contract tests" 120 scripts/test-build-contracts.sh --manifest-contracts',
+         '    run_gate "publication and manifest contract tests" 120 scripts/missing-build-contracts.sh --manifest-contracts',
+         "mandatory shared publication gate is not wired"),
+        ("build-contracts-gate-disabled", "scripts/test-build-contracts.sh",
+         'if [[ "$run_build_contracts" -eq 1 ]]; then',
+         'if false; then',
+         "build and manifest sub-gate sections drifted"),
+        ("manifest-contracts-gate-disabled", "scripts/test-build-contracts.sh",
+         'if [[ "$run_manifest_contracts" -eq 1 ]]; then',
+         'if false; then',
+         "build and manifest sub-gate sections drifted"),
         ("root-pages-source", ".github/workflows/build.yml", PAGES_SOURCE_CHECK,
          "python3 scripts/check-pages-manifest.py", "use only branch-backed Pages authority"),
         ("dev-pages-validator-removed", ".github/workflows/build.yml",

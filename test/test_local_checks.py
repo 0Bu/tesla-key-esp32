@@ -167,6 +167,78 @@ class LocalChecks(unittest.TestCase):
         result = subprocess.run(["bash", str(hook)], cwd=self.root, capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_real_precommit_os_and_xss_boundaries(self):
+        hook = ROOT / ".githooks/pre-commit"
+
+        def run_precommit():
+            return subprocess.run(
+                ["bash", str(hook)], cwd=self.root, capture_output=True, text=True, timeout=10
+            )
+
+        def commit_fixture(relpath, content, message):
+            path = self.root / relpath
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+            self.git("add", relpath)
+            self.git(
+                "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false",
+                "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                "commit", "-qm", message,
+            )
+            return path
+
+        sdkconfig = self.root / "sdkconfig.defaults"
+        for bad in ("CONFIG_COMPILER_OPTIMIZATION_SIZE=y\n", "-Os\n", "  -Os \n"):
+            sdkconfig.write_text(bad)
+            self.git("add", "sdkconfig.defaults")
+            res = run_precommit()
+            self.assertEqual(res.returncode, 1, (bad, res.stdout, res.stderr))
+            self.assertIn("CONFIG_COMPILER_OPTIMIZATION_SIZE (-Os)", res.stderr)
+
+        sdkconfig.write_text("\tCONFIG_COMPILER_OPTIMIZATION_SIZEs=sy\n")
+        self.git("add", "sdkconfig.defaults")
+        res = run_precommit()
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.git("reset", "-q", "HEAD", "--", "sdkconfig.defaults")
+        sdkconfig.unlink()
+
+        commit_fixture("sdkconfig.defaults", "line1\n-Os\nline3\n", "Seed sdkconfig context")
+        sdkconfig.write_text("line1\n-Os\nline3_changed\n")
+        self.git("add", "sdkconfig.defaults")
+        res = run_precommit()
+        self.assertEqual(res.returncode, 0, res.stderr)
+        sdkconfig.write_text("line1\nline3_changed\n")
+        self.git("add", "sdkconfig.defaults")
+        res = run_precommit()
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.git("reset", "-q", "HEAD", "--", "sdkconfig.defaults")
+
+        app_js = self.root / "main/www/app.js"
+        app_js.parent.mkdir(parents=True, exist_ok=True)
+        for bad_js in ("eval(x);\n", "  document.write(x);\n"):
+            app_js.write_text(bad_js)
+            self.git("add", "main/www/app.js")
+            res = run_precommit()
+            self.assertEqual(res.returncode, 1, (bad_js, res.stdout, res.stderr))
+            self.assertIn("eval() and document.write()", res.stderr)
+
+        app_js.write_text("revalidate(x);\n")
+        self.git("add", "main/www/app.js")
+        res = run_precommit()
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.git("reset", "-q", "HEAD", "--", "main/www/app.js")
+        app_js.unlink()
+
+        commit_fixture("main/www/app.js", "eval(x);\nconst b = 2;\n", "Seed js context")
+        app_js.write_text("eval(x);\nconst b = 3;\n")
+        self.git("add", "main/www/app.js")
+        res = run_precommit()
+        self.assertEqual(res.returncode, 0, res.stderr)
+        app_js.write_text("const b = 3;\n")
+        self.git("add", "main/www/app.js")
+        res = run_precommit()
+        self.assertEqual(res.returncode, 0, res.stderr)
+
     def test_actual_runtime_tracks_browser_environment_and_selected_compiler_bytes(self):
         self.runtime.stop()
         executable = self.root / ".tmp/compiler"

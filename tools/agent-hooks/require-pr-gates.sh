@@ -258,8 +258,8 @@ fi
 
 if [ -n "$event_base" ]; then
   [ "$kind" = check ] && [ -n "$selector" ] && [ -n "$event_head" ] &&
-    [ "$(gate_full_head_sha)" = "$event_base" ] || {
-    echo "BLOCKED: event base must match the trusted policy checkout." >&2; exit 2
+    git -C "$root" merge-base --is-ancestor "${event_base}^{commit}" HEAD 2>/dev/null || {
+    echo "BLOCKED: event base is not an ancestor of the trusted policy checkout." >&2; exit 2
   }
 fi
 

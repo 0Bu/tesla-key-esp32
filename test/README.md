@@ -73,9 +73,10 @@ The [runner](../scripts/run-mock-tests.sh) owns exact order, timeouts and profil
 | `test_pages_publish.py`, `test_pages_publish_control.py`, `test_release_pages_recovery.py`, `test_pages_changelog.py` | Local Git publication, static marker, immutable recovery and change notes, with controlled Git/API/time |
 | `test_dependency_sources.py`, `test_dependency_cmake.py`, `test_dependency_harness.py`, `test_dependency_process.py`, `test_patch_incremental.py` | Exact Git/cache admission, actual CMake/runner order, timeout cleanup and mutation refusals |
 
-Standalone `scripts/test-build-contracts.sh` includes release relevance. Strict host runs relevance
-and `--build-and-manifest` as two consecutive gates, each with 120 s. Artifact fixtures use test
-keys. They establish neither signed delivery nor live Pages behavior.
+Standalone `scripts/test-build-contracts.sh` includes release relevance (`--build-and-manifest` runs
+both build and manifest checks without relevance). Strict host runs release relevance,
+`--build-contracts`, and `--manifest-contracts` as three consecutive gates, each with 120 s.
+Artifact fixtures use test keys. They establish neither signed delivery nor live Pages behavior.
 
 <a id="whats-covered"></a>
 
