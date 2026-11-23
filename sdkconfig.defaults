@@ -76,6 +76,9 @@ CONFIG_BT_NIMBLE_SECURITY_ENABLE=n
 # Writes use 20-byte chunks until a negotiated-MTU event raises their limit
 # (docs/adr/0005-tesla-ble-seam.md).
 CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=247
+# main/main.cpp raises NimBLE runtime logging to WARN (esp_log_level_set("NimBLE", ESP_LOG_WARN));
+# drop compile-time INFO strings across all four targets.
+CONFIG_BT_NIMBLE_LOG_LEVEL_WARNING=y
 
 # WiFi
 CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=10
@@ -224,9 +227,16 @@ CONFIG_LWIP_IPV6=n
 # tables. Serial/diag logging is unaffected. ~5 KB.
 CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_SILENT=y
 
-# No WPA3-OWE (Opportunistic Wireless Encryption / open-enhanced) STA support — we join a
-# WPA2-PSK home network. ~0.8 KB. (WPA3-SAE is a separate, heavier lever left for later.)
+# No WPA3-OWE (Opportunistic Wireless Encryption / open-enhanced) support on STA or SoftAP —
+# STA joins WPA2/WPA3-Personal home networks and the captive setup AP is intentionally open.
 CONFIG_ESP_WIFI_ENABLE_WPA3_OWE_STA=n
+CONFIG_ESP_WIFI_ENABLE_WPA3_OWE_SOFTAP=n
+
+# Drop unused MQTT-over-WebSocket transport (`ws://`/`wss://` are not part of the MQTT contract)
+# and unused mDNS browse / console-CLI paths (main/main.cpp only advertises `_http._tcp`).
+CONFIG_WS_TRANSPORT=n
+CONFIG_MDNS_ENABLE_BROWSE=n
+CONFIG_MDNS_ENABLE_CONSOLE_CLI=n
 
 # C++ exceptions needed by tesla-ble
 CONFIG_COMPILER_CXX_EXCEPTIONS=y
