@@ -181,9 +181,9 @@ class ProfileProtocolTests(unittest.TestCase):
                 if self.fault=="overflow": result["documentWidth"]=500
                 return json.loads(json.dumps(result))
             if "document.activeElement===" in expression: return True
-            if "document.activeElement.id === 'hclimateIcon'"==expression: return self.tabs>1
-            if expression.startswith("document.getElementById('hclimate').open"): return self.climate_open and self.actions==2
-            if expression=="!document.getElementById('hclimate').open": return not self.climate_open
+            if "document.activeElement.id === 'hclOverheatIcon'"==expression: return self.tabs>1
+            if expression.startswith("document.getElementById('hclOverheat').open"): return self.climate_open and self.actions==2
+            if expression=="!document.getElementById('hclOverheat').open": return not self.climate_open
             return {"result":"fail" if self.fault=="dom" else "pass","text":"controlled","width":390,"dark":False}
 
     def test_full_phase_sequence_and_both_native_keys_are_required(self):

@@ -1,4 +1,4 @@
-"""Blank bounded CSS/JavaScript documentation and trim JavaScript code indentation.
+"""Blank bounded CSS/JavaScript documentation and trim CSS/JavaScript indentation.
 
 The CSS pass supports the repository's bounded UTF-8, NUL-free subset. Strings, escapes,
 parenthesized regions, inline comments, legal/tooling notices and HTML style-end
@@ -22,14 +22,19 @@ def prune(source: bytes) -> bytes:
     output = bytearray()
     quote = None
     depth = 0
+    at_line_start = True
     i = 0
     while i < len(source):
         value = source[i]
+        if at_line_start and quote is None and depth == 0 and value in (32, 9):
+            i += 1
+            continue
         if value == 92:
             if i + 1 >= len(source):
                 raise ValueError('unfinished CSS escape')
             width = 3 if source[i + 1:i + 3] == b'\r\n' else 2
             output.extend(source[i:i + width])
+            at_line_start = False
             i += width
             continue
         if quote is not None:
@@ -55,9 +60,17 @@ def prune(source: bytes) -> bytes:
                      any(marker in lowered for marker in
                          (b'@license', b'copyright', b'@preserve', b'spdx', b'sourcemappingurl', b'sourceurl', b'</style')))
             if whole_line and depth == 0 and not legal:
-                output.extend(value if value in SPACE else 32 for value in comment)
-            else:
-                output.extend(comment)
+                endings_only = bytes(b for b in comment if b in (10, 13, 12))
+                if endings_only.startswith(b'\n') and output.endswith(b'\r'):
+                    output.append(32)
+                output.extend(endings_only)
+                if output.endswith(b'\r') and end_line < len(source) and source[end_line:end_line + 1] == b'\n':
+                    output.append(32)
+                at_line_start = True
+                i = end_line
+                continue
+            output.extend(comment)
+            at_line_start = False
             i = end
             continue
         if value in (34, 39):
@@ -69,6 +82,7 @@ def prune(source: bytes) -> bytes:
                 raise ValueError('unbalanced CSS parentheses')
             depth -= 1
         output.append(value)
+        at_line_start = (quote is None and value in (10, 13, 12))
         i += 1
     if quote is not None or depth:
         raise ValueError('unfinished CSS string or parentheses')
@@ -76,12 +90,12 @@ def prune(source: bytes) -> bytes:
 
 
 def prune_js(source: bytes) -> bytes:
-    """Blank whole-line // comments and trim code indentation without joining lines.
+    """Blank whole-line comments and trim code indentation without joining lines.
 
     Strings and regex literals cannot cross a physical line without templates or
     string continuations. Refuse those constructs, inline block openers and code
-    after block closers rather than attempting a general JavaScript lexer. Keep
-    whole-line block comments opaque, including their interior // lines.
+    after block closers rather than attempting a general JavaScript lexer. Whole-line
+    block comments are blanked to their line endings unless legal or HTML-sensitive.
     """
     if not isinstance(source, bytes) or len(source) > MAX_BYTES:
         raise ValueError('JavaScript input exceeds the bounded byte budget')
@@ -90,6 +104,7 @@ def prune_js(source: bytes) -> bytes:
         raise ValueError('JavaScript input contains unsupported text separators')
     output = bytearray()
     block = False
+    block_lines: list[bytes] = []
     for line in source.splitlines(keepends=True):
         body = line.rstrip(b'\r\n')
         stripped = body.lstrip(b' \t')
@@ -99,7 +114,24 @@ def prune_js(source: bytes) -> bytes:
             block = end < 0
             if not block and body[end + 2:].strip(b' \t'):
                 raise ValueError('JavaScript block comment must occupy whole lines')
-            output.extend(line)
+            block_lines.append(line)
+            if not block:
+                first = block_lines[0].lstrip(b' \t')
+                joined = b''.join(block_lines).lower()
+                keep = first.startswith((b'/*!', b'/*#', b'/*@')) or any(
+                    marker in joined for marker in
+                    (b'@license', b'copyright', b'@preserve', b'spdx', b'sourcemappingurl',
+                     b'sourceurl', b'<script', b'</script', b'<!--', b'-->'))
+                if keep:
+                    for bline in block_lines:
+                        output.extend(bline)
+                else:
+                    for bline in block_lines:
+                        ending = bline[len(bline.rstrip(b'\r\n')):]
+                        if ending.startswith(b'\n') and output.endswith(b'\r'):
+                            output.append(32)
+                        output.extend(ending)
+                block_lines.clear()
             continue
         if stripped.startswith(b'//'):
             lowered = stripped.lower()
