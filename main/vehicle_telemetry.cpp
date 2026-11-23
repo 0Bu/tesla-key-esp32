@@ -2040,8 +2040,8 @@ bool VehicleController::get_vehicle_status(VehicleStatusResult& out, tk::Connect
         return false;
     }
 
+    constexpr size_t kErrorCapacity = 96;
     struct StatusCompletion {
-        static constexpr size_t kErrorCapacity = 96;
         SemaphoreHandle_t sem{xSemaphoreCreateBinary()};
         std::atomic<bool> completed{false};
         std::atomic<bool> success{false};
