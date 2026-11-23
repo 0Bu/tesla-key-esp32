@@ -196,7 +196,7 @@ console.error = function() {
     heroActFn = function(){ primaryClicks++; };
     document.getElementById("hero").click();
     document.getElementById("hlabel").click();
-    document.getElementById("hstats").click();
+    document.querySelector(".hreadings").click();
     check(primaryClicks === 0, "informational hero clicks never dispatch a vehicle action");
     const primaryButton = document.querySelector("#hicon button");
     check(primaryButton && primaryButton.getAttribute("aria-label"), "primary action is a named button");
@@ -210,49 +210,60 @@ console.error = function() {
     check(contrast(primaryStyle.outlineColor,getComputedStyle(document.getElementById("hero")).backgroundColor)>=3,
           "primary action focus ring contrast >=3");
     primaryButton.removeAttribute("data-ui-focus"); primaryButton.removeAttribute("data-ui-focus-visible");
-    for(const [rule,original] of stateRules) rule.selectorText=original;
-    window.__browserGateCssRestored=true;
+
+    const overheat = document.getElementById("hclOverheat");
+    const overheatIcon = document.getElementById("hclOverheatIcon");
+    const overheatTip = document.getElementById("hclOverheatTip");
+    const defrost = document.getElementById("hclDefrost");
+    const defrostIcon = document.getElementById("hclDefrostIcon");
+    const defrostTip = document.getElementById("hclDefrostTip");
+    const climateList = document.getElementById("hclimateList");
+    const readings = document.getElementById("hcharge");
+    const retained = document.getElementById("hretained");
+    overheatIcon.setAttribute("data-ui-hover", "");
+    check(getComputedStyle(overheatIcon).backgroundColor === "rgba(0, 0, 0, 0)",
+          "climate icon has no background fill on hover");
+    overheatIcon.removeAttribute("data-ui-hover");
+    for (const [rule, original] of stateRules) rule.selectorText = original;
+    window.__browserGateCssRestored = true;
     primaryButton.click();
     check(primaryClicks === 1, "only the gauge button invokes the primary action once");
     heroActFn = actualHeroAction;
-    const climate = document.getElementById("hclimate");
-    const icon = document.getElementById("hclimateIcon");
-    const tip = document.getElementById("hclimateTip");
-    const readings = document.getElementById("hcharge");
-    const retained = document.getElementById("hstats");
-    check(tip.textContent.includes("Cabin overheat protection setting: Fan only"), "COP is labeled as a setting");
-    check(tip.textContent.startsWith("Last reported:") && tip.textContent.includes("Defrost: Front / Rear / Max"),
+
+    overheat.open = true;
+    check(getComputedStyle(overheatIcon).backgroundColor === "rgba(0, 0, 0, 0)",
+          "climate icon has no background fill when open");
+    overheat.open = false;
+    check(overheatTip.textContent.includes("Cabin overheat protection setting: Fan only"), "COP is labeled as a setting");
+    check(defrostTip.textContent.startsWith("Last reported:") && defrostTip.textContent.includes("Defrost: Front / Rear / Max"),
           "defrost remains explicitly cached after fresh charge contact");
-    check(!tip.textContent.includes("kW") && tip.textContent.includes("Current activity and power are unknown"),
+    check(!overheatTip.textContent.includes("kW") && overheatTip.textContent.includes("Current activity and power are unknown"),
           "climate details disclose activity and power limits");
-    const checkChipBounds = () => {
-      for (const chip of retained.children) {
-        check(chip.scrollWidth <= chip.clientWidth + 1, "chip content fits its tile");
-        for (const text of chip.children) {
-          check(text.scrollWidth <= text.clientWidth + 1, "chip label/value wraps within its tile");
-        }
-      }
-    };
-    checkChipBounds();
+
     render({paired: true, last_seen_s: 0,
-      vehicle: {status: "Charging", power: 5, amps: 16, soc: 42}, tele: {climate: {cop: "On"}}});
-    const chargeItems = [...readings.children, icon];
+      vehicle: {status: "Charging", power: 5, amps: 16, soc: 42}, tele: {climate: {on: true, cop: "On"}}});
+    const vals = [...readings.querySelectorAll(".charge-val")];
+    const units = [...readings.querySelectorAll(".charge-unit")];
+    const fanIcon = document.getElementById("hclFanIcon");
     const box = element => element.getBoundingClientRect();
     const center = rect => rect.left + rect.width / 2;
     const gauge = document.getElementById("hicon");
     const chargingGauge = box(gauge);
     const card = box(document.getElementById("hero"));
     const primary = document.querySelector(".hprimary");
-    check(chargeItems.length === 3 && chargeItems.every((item, index) => {
-      const b = box(item), first = box(chargeItems[0]);
-      return b.width === 58 && b.height === 44 && b.right === first.right &&
-        Math.abs(b.top - first.top - 44 * index) < 1 && getComputedStyle(item).borderStyle === "none";
-    }), "status items use matching borderless slots at the right edge");
+    check(vals.length === 2 && units.length === 2 &&
+          Math.abs(box(vals[0]).right - box(vals[1]).right) < 1 &&
+          Math.abs(box(units[0]).left - box(units[1]).left) < 1 &&
+          box(units[0]).left - box(vals[0]).right <= 4 &&
+          Math.abs(box(units[0]).right - box(fanIcon.querySelector("svg")).right) < 2 &&
+          Math.abs(box(fanIcon.querySelector("svg")).right - box(overheatIcon.querySelector("svg")).right) < 1,
+          "live charge numbers, units, and climate icons align tabularly at the right edge");
     check(Math.abs(center(chargingGauge) - center(card)) < 1, "ring stays horizontally centered with a full status rail");
 
     render({paired: true, last_seen_s: 0, vehicle: {status: "Charging", power: 5, soc: 42},
       tele: {climate: {cop: "On"}}});
-    check(readings.children.length === 1 && Math.abs(box(icon).top - box(readings.firstElementChild).bottom) < 1,
+    check(readings.querySelectorAll(".charge-val").length === 1 &&
+          box(overheatIcon).top >= box(readings).bottom - 1,
           "missing current leaves no gap above the climate icon");
 
     render({paired: true, last_seen_s: 0, vehicle: {status: "Starting", soc: 42, charge_limit: 80},
@@ -261,7 +272,7 @@ console.error = function() {
     const title = document.getElementById("hlabel");
     const soc = gauge.querySelector(".gnum");
     const newCard = box(document.getElementById("hero"));
-    check(!readings.children.length && Math.abs(box(icon).top - box(primary).top) < 1,
+    check(!readings.children.length && Math.abs(box(defrostIcon).top - box(primary).top) < 1,
           "climate occupies the first right-side slot when both charger readings are unavailable");
     check(title.textContent === "Starting" && limit.textContent === "Limit 80 %" &&
           box(limit).top >= box(title).bottom && !gauge.textContent.includes("Limit"),
@@ -271,28 +282,46 @@ console.error = function() {
           Math.abs((box(soc).top + box(soc).height / 2) - (box(gauge).top + box(gauge).height / 2)) < 1 &&
           parseFloat(getComputedStyle(soc).fontSize) >= box(gauge).width * .33,
           "SOC is the enlarged, centered content of the ring");
-    icon.click();
-    check(climate.open && getComputedStyle(tip).visibility === "visible" && primaryClicks === 1,
+    defrostIcon.click();
+    check(defrost.open && getComputedStyle(defrostTip).visibility === "visible" && primaryClicks === 1,
           "climate disclosure opens without dispatching a vehicle action");
-    const tipBox = box(tip);
+    const tipBox = box(defrostTip);
     check(tipBox.left >= 0 && tipBox.right <= innerWidth, "climate details fit the viewport");
     render({paired: true, last_seen_s: 0,
       vehicle: {status: "Charging", power: 11, amps: 16, actual_amps: 16, volts: 230, phases: 2},
       tele: {climate: {cop: "FanOnly", front_defrost: true, rear_defrost: true, defrost_mode: "Max"}}});
-    check(climate.open && tip.textContent.includes("Fan only"), "the disclosure stays open across status updates");
+    check(defrost.open && defrostTip.textContent.includes("Rear / Max"), "the disclosure stays open across status updates");
+    defrost.open = false;
     check(window.__browserGateFetchCalls === 2, "rendering climate does not request vehicle data");
 
     render({paired: true, link: "awake", last_seen_s: 0, charge_age_s: 31,
       last: {usable_soc: 0, status: "Charging"}, ble: {connected: true}});
     check(document.getElementById("hlabel").textContent.includes("Charge reading unavailable"),
           "fresh unrelated contact does not make old ChargeState look live");
-    check(retained.textContent.includes("Last battery") && retained.textContent.includes("Updated"),
-          "stale charge has an explicit retained battery and its own age");
-    check(!readings.textContent.includes("kW") && climate.classList.contains("hide") && !climate.open && !retained.textContent.includes("Idle"),
-          "awake stale charge has no live power or fabricated idle age");
+    check(!retained.classList.contains("hide") &&
+          document.getElementById("hretBattVal").textContent === "0" &&
+          !document.getElementById("hretUpd").classList.contains("hide"),
+          "stale charge shows retained battery and update metric on the right rail");
+    check(!readings.textContent.includes("kW") && climateList.classList.contains("hide") &&
+          document.getElementById("hretIdle").classList.contains("hide"),
+          "awake stale charge has no live power, climate icons, or fabricated idle age");
     check(!document.querySelector("#hicon button") && !heroActFn,
           "awake stale charge offers neither charging nor wake command");
-    checkChipBounds();
+
+    render({paired: true, link: "asleep", last_seen_s: 10800, charge_age_s: 14400, last: {soc: 76}});
+    const retRows = [document.getElementById("hretBattBtn"), document.getElementById("hretUpdBtn"), document.getElementById("hretIdleBtn")];
+    check(retRows.every(row => !row.parentElement.classList.contains("hide")),
+          "asleep card renders battery, updated, and idle rows on the right rail");
+    const rIcons = retRows.map(r => box(r.querySelector(".rail-metric-icon")));
+    const rVals = retRows.map(r => box(r.querySelector(".rail-val")));
+    const rUnits = retRows.map(r => box(r.querySelector(".rail-unit")));
+    check(rIcons.every(b => Math.abs(b.left - rIcons[0].left) < 1) &&
+          rVals.every(b => Math.abs(b.right - rVals[0].right) < 1) &&
+          rUnits.every(b => Math.abs(b.left - rUnits[0].left) < 1) &&
+          rUnits[0].left - rVals[0].right <= 4,
+          "retained right-rail icons, values, and units stay tabularly aligned and compact");
+    check(Math.abs(center(box(gauge)) - center(box(document.getElementById("hero")))) < 1,
+          "ring stays centered with retained right-rail metrics");
     check(window.__browserGateFetchCalls === 2, "rendering stale charge remains cache-only");
 
     const notesList = document.getElementById("otaChanges");
@@ -576,7 +605,7 @@ KEYBOARD_SNAPSHOT = r'''(()=>{
     return [0.2126,0.7152,0.0722].reduce((sum,w,i)=>{const c=rgba[i]/255;
       return sum+w*(c<=0.04045?c/12.92:Math.pow((c+0.055)/1.055,2.4));},0);};
   const a=luminance(style.outlineColor),b=luminance(getComputedStyle(document.getElementById("hero")).backgroundColor);
-  const boxes=[...document.querySelectorAll("#hero,#hicon,.hreadings .status-value,.card")].map(element=>{
+  const boxes=[...document.querySelectorAll("#hero,#hicon,.hreadings .charge-val,.hreadings .charge-unit,.hreadings .rail-info,.card")].map(element=>{
     const box=element.getBoundingClientRect();return {left:box.left,right:box.right,
       width:box.width,scrollWidth:element.scrollWidth,clientWidth:element.clientWidth};});
   return {...window.__nativeKeyboard,requests:window.__browserGateFetchCalls,
@@ -654,13 +683,13 @@ def run_profile(connection, html: Path, profile: tuple) -> None:
                 and box["right"] <= width + 1 and box["scrollWidth"] <= box["clientWidth"] + 1
                 for box in value["boxes"]), name + ": populated layout overflow")
     dispatch_key(connection, session, "Tab", "Tab", 9)
-    require(connection.evaluate("document.activeElement.id === 'hclimateIcon'", session),
+    require(connection.evaluate("document.activeElement.id === 'hclOverheatIcon'", session),
             name + ": keyboard can focus the climate icon")
     dispatch_key(connection, session, "Enter", "Enter", 13, "\r")
-    require(connection.evaluate("document.getElementById('hclimate').open && window.__nativeKeyboard.actions === 2", session),
+    require(connection.evaluate("document.getElementById('hclOverheat').open && window.__nativeKeyboard.actions === 2", session),
             name + ": keyboard opens climate details without a vehicle action")
     dispatch_key(connection, session, "Escape", "Escape", 27)
-    require(connection.evaluate("!document.getElementById('hclimate').open", session),
+    require(connection.evaluate("!document.getElementById('hclOverheat').open", session),
             name + ": Escape closes climate details")
     connection.call("Target.closeTarget", {"targetId": target})
 

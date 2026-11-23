@@ -723,34 +723,47 @@ test("climate details label cached settings without inferring AC power or curren
         vehicle: { status: "Stopped", actual_amps: 16, volts: 230, phases },
         tele: { climate: { cop: "On", cop_cooling: true, front_defrost: true } }
       });
-      const tip = element("hclimateTip").textContent;
-      assert.match(tip, /^Last reported:\nCabin overheat protection setting: On/);
-      assert.match(tip, /Cabin overheat protection: Cooling/);
-      assert.match(tip, /Defrost: Front/);
-      assert.match(tip, /Current activity and power are unknown/);
-      assert.doesNotMatch(tip, /kW|AC draw/);
+      const ovTip = element("hclOverheatTip").textContent;
+      const defTip = element("hclDefrostTip").textContent;
+      assert.match(ovTip, /^Last reported:\nCabin overheat protection setting: On/);
+      assert.match(ovTip, /Cabin overheat protection: Cooling/);
+      assert.match(defTip, /Defrost: Front/);
+      assert.match(ovTip, /Current activity and power are unknown/);
+      assert.match(defTip, /Current activity and power are unknown/);
+      assert.doesNotMatch(ovTip + defTip, /kW|AC draw/);
       assert.equal(element("hcharge").innerHTML, "");
+      assert.equal(element("hclimateList").classList.contains("hide"), false);
+      assert.equal(element("hclOverheat").classList.contains("tone-cool"), true);
     }
   }
 });
 
 test("climate settings do not require charger input and reject unknown active states", () => {
   const { context } = loadUi();
-  assert.equal(context.climateStatus({ cop: "FanOnly", cop_temp: "Medium" }).icon, "fan");
-  assert.match(context.climateStatus({ cop: "FanOnly", cop_temp: "Medium" }).tip, /Fan only · Medium/);
-  assert.match(context.climateStatus({ rear_defrost: true, defrost_mode: "Max" }).tip, /Rear \/ Max/);
-  assert.equal(context.climateStatus({ rear_defrost: true }).icon, "snowflake");
-  assert.equal(context.climateStatus({ cop_cooling: true }).icon, "snowflake");
-  assert.match(context.climateStatus({ on: true, preconditioning: true }).tip, /Climate control: On\nPreconditioning: Active/);
+  const copRes = context.climateItems({ cop: "FanOnly", cop_temp: "Medium" });
+  assert.equal(copRes.overheat.icon, "overheat");
+  assert.equal(copRes.overheat.cool, false);
+  assert.match(copRes.overheat.tip, /Fan only · Medium/);
+  assert.equal(copRes.fan, null);
+  const defRes = context.climateItems({ rear_defrost: true, defrost_mode: "Max" });
+  assert.equal(defRes.defrost.icon, "defrost");
+  assert.match(defRes.defrost.tip, /Rear \/ Max/);
+  assert.equal(context.climateItems({ cop_cooling: true }).overheat.cool, true);
+  const fanAndPre = context.climateItems({ on: true, preconditioning: true });
+  assert.equal(fanAndPre.fan.icon, "fan");
+  assert.match(fanAndPre.fan.tip, /Climate control: On/);
+  assert.equal(fanAndPre.precond.icon, "precond");
+  assert.match(fanAndPre.precond.tip, /Preconditioning: Active/);
   for (const cop of [undefined, "Off", "Unknown", "<script>"]) {
-    assert.equal(context.climateStatus({ cop }), null);
+    assert.equal(context.climateItems({ cop }).overheat, null);
   }
   for (const defrost_mode of [undefined, "Off", "Unknown", "<script>"]) {
-    assert.equal(context.climateStatus({ front_defrost: false, rear_defrost: false, defrost_mode }), null);
+    assert.equal(context.climateItems({ front_defrost: false, rear_defrost: false, defrost_mode }).defrost, null);
   }
-  const ignored = context.climateStatus({ cop: "On", cop_temp: '<img src=x onerror="alert(1)">' });
-  assert.doesNotMatch(ignored.tip, /<img/);
-  assert.equal(context.climateStatus(), null);
+  const ignored = context.climateItems({ cop: "On", cop_temp: '<img src=x onerror="alert(1)">' });
+  assert.doesNotMatch(ignored.overheat.tip, /<img/);
+  const empty = context.climateItems();
+  assert.deepEqual({ ...empty }, { fan: null, precond: null, overheat: null, defrost: null });
 });
 
 test("charging power remains vehicle-reported alongside explicitly cached climate details", () => {
@@ -760,15 +773,20 @@ test("charging power remains vehicle-reported alongside explicitly cached climat
     vehicle: { status: "Charging", power: 11, amps: 16, actual_amps: 16, volts: 230, phases: 2 },
     tele: { climate: { cop: "On", front_defrost: true } }
   });
-  assert.match(element("hcharge").innerHTML, /Charging power.*11 <small>kW/);
-  assert.match(element("hclimateTip").textContent, /Defrost: Front/);
-  assert.doesNotMatch(element("hclimateTip").textContent, /kW/);
+  assert.match(element("hcharge").innerHTML, /Charging power 11 kW.*11<\/span><span class="charge-unit"[^>]*>kW/);
+  assert.match(element("hcharge").innerHTML, /Charging current 16 A.*16<\/span><span class="charge-unit"[^>]*>A/);
+  assert.match(element("hclOverheatTip").textContent, /Cabin overheat protection setting: On/);
+  assert.match(element("hclDefrostTip").textContent, /Defrost: Front/);
+  assert.doesNotMatch(element("hclDefrostTip").textContent, /kW/);
+  assert.equal(element("hclFan").classList.contains("hide"), true);
   context.render({ paired: true, vehicle: { status: "Starting", soc: 42, charge_limit: 80 } });
   assert.equal(element("hlimit").textContent, "Limit 80 %");
   assert.doesNotMatch(element("hicon").innerHTML, /Limit/);
   assert.match(element("hicon").innerHTML, /42<small>%/);
   assert.equal(element("hcharge").innerHTML, "");
-  assert.equal(element("hclimate").classList.contains("hide"), true);
+  assert.equal(element("hclimateList").classList.contains("hide"), true);
+  assert.equal(element("hclOverheat").classList.contains("hide"), true);
+  assert.equal(element("hclDefrost").classList.contains("hide"), true);
 });
 
 test("awake without fresh charge shows last-known battery and offers no action", () => {
@@ -777,14 +795,21 @@ test("awake without fresh charge shows last-known battery and offers no action",
     context.render({paired: true, link: "awake", last_seen_s: 0, charge_age_s,
                     last: {usable_soc: 0, status: "Charging"}, ble: {connected: true}});
     assert.match(element("hlabel").innerHTML, /Charge reading unavailable/);
-    assert.match(element("hstats").innerHTML, /Last battery/);
-    assert.doesNotMatch(element("hstats").innerHTML, /Power|kW|Idle/);
-    assert.match(element("hstats").innerHTML, />0<\/span>/);
+    assert.equal(element("hretained").classList.contains("hide"), false);
+    assert.equal(element("hretBatt").classList.contains("hide"), false);
+    assert.equal(element("hretBattVal").textContent, "0");
+    assert.match(element("hretBattTip").textContent, /Battery: 0 %/);
+    assert.equal(element("hretIdle").classList.contains("hide"), true);
     assert.equal(element("hlimit").textContent, "");
     assert.equal(element("hcharge").innerHTML, "");
-    assert.equal(element("hclimate").classList.contains("hide"), true);
+    assert.equal(element("hclimateList").classList.contains("hide"), true);
     assert.equal(context.heroActFn, null);
-    if (charge_age_s !== undefined) assert.match(element("hstats").innerHTML, /Updated/);
+    if (charge_age_s !== undefined) {
+      assert.equal(element("hretUpd").classList.contains("hide"), false);
+      assert.match(element("hretUpdTip").textContent, /Charge updated:/);
+    } else {
+      assert.equal(element("hretUpd").classList.contains("hide"), true);
+    }
   }
 });
 
@@ -802,11 +827,12 @@ test("hero card remains visible when vehicle link is unreachable or unknown", ()
   assert.equal(hero.classList.contains("hide"), false);
   assert.match(element("hlabel").innerHTML, /Checking status/);
 
-  // Paired + idle: hero must stay visible and render last-known battery chips without error
+  // Paired + idle: hero must stay visible and render last-known battery in the right rail
   context.render({ paired: true, link: "idle", last: { usable_soc: 75 }, last_seen_s: 300, ble: { connected: false } });
   assert.equal(hero.classList.contains("hide"), false);
   assert.match(element("hlabel").innerHTML, /Parked/);
-  assert.match(element("hstats").innerHTML, /75/);
+  assert.equal(element("hretBattVal").textContent, "75");
+  assert.equal(element("hretIdle").classList.contains("hide"), false);
 });
 
 test("unpaired connected vehicle explains automatic pairing only in the hero", () => {
@@ -823,7 +849,7 @@ test("unpaired connected vehicle explains automatic pairing only in the hero", (
   assert.doesNotMatch(element("hsub").textContent, /^Approve the request/i);
 });
 
-test("render handles s.link === 'idle' without ReferenceError and sets chips", () => {
+test("render handles s.link === 'idle' without ReferenceError and populates right-rail metrics", () => {
   const { context, element } = loadUi();
   context.render({
     link: "idle",
@@ -834,9 +860,12 @@ test("render handles s.link === 'idle' without ReferenceError and sets chips", (
     last_seen_s: 120
   });
   assert.match(element("hlabel").innerHTML, /Parked/);
-  assert.match(element("hstats").innerHTML, /Last battery/);
-  assert.match(element("hstats").innerHTML, /75/);
-  assert.match(element("hstats").innerHTML, /Idle/);
+  assert.equal(element("hretBatt").classList.contains("hide"), false);
+  assert.equal(element("hretBattVal").textContent, "75");
+  assert.equal(element("hretIdle").classList.contains("hide"), false);
+  assert.equal(element("hretIdleVal").textContent, "2");
+  assert.equal(element("hretIdleUnit").textContent, "m");
+  assert.match(element("hretIdleTip").textContent, /Idle: 2 min/);
 });
 
 test("render displays safe mode banner when sys.safe_mode is active", () => {
@@ -3117,14 +3146,41 @@ test("failed and stalled status polls label cached values and recover without ov
 test("cached battery and elapsed fields reject nonnumeric values and preserve zero", () => {
   const {context} = loadUi();
   for(const value of [null, undefined, "", " ", "no", NaN, Infinity, {}, [], true, false]) {
-    const result = context.lastChips({last: {usable_soc: value, soc: value}, last_seen_s: value});
+    const result = context.retainedState({last: {usable_soc: value, soc: value}, last_seen_s: value});
     assert.equal(result.soc, null, String(value));
-    assert.equal(result.html, "", String(value));
+    assert.equal(result.battery, null, String(value));
+    assert.equal(result.updated, null, String(value));
+    assert.equal(result.idle, null, String(value));
   }
-  assert.equal(context.lastChips({last: {usable_soc: "bad", soc: 0}, last_seen_s: 0}).soc, 0);
-  assert.equal(context.lastChips({last: {soc: "64.6"}}).soc, 65);
-  assert.equal(context.lastChips({last: {soc: 200}}).soc, 100);
-  assert.equal(context.lastChips({last: {soc: -9}}).soc, 0);
+  const zeroRes = context.retainedState({last: {usable_soc: "bad", soc: 0}, last_seen_s: 0});
+  assert.equal(zeroRes.soc, 0);
+  assert.equal(zeroRes.battery.val, "0");
+  assert.equal(zeroRes.idle.val, "<1");
+  assert.equal(zeroRes.idle.unit, "m");
+  assert.equal(context.retainedState({last: {soc: "64.6"}}).soc, 65);
+  assert.equal(context.retainedState({last: {soc: 200}}).soc, 100);
+  assert.equal(context.retainedState({last: {soc: -9}}).soc, 0);
+});
+
+test("right-rail disclosures close on outside click, sibling click, and Escape", () => {
+  const { context, element, fire } = loadUi({ listeners: true });
+  context.render({
+    paired: true, last_seen_s: 0,
+    vehicle: { status: "Charging", soc: 64, power: 11, amps: 16 },
+    tele: { climate: { on: true, defrost_mode: "Max" } }
+  });
+  const fan = element("hclFan"), defrost = element("hclDefrost"), defrostIcon = element("hclDefrostIcon");
+  defrost.appendChild(defrostIcon);
+  fan.open = true;
+  defrost.open = true;
+  fire("click", { target: defrostIcon });
+  assert.equal(fan.open, false);
+  assert.equal(defrost.open, true);
+  fire("click", { target: element("hlabel") });
+  assert.equal(defrost.open, false);
+  defrost.open = true;
+  fire("keydown", { key: "Escape" });
+  assert.equal(defrost.open, false);
 });
 
 
