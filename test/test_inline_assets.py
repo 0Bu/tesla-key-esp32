@@ -18,8 +18,8 @@ SPEC.loader.exec_module(CSS)
 
 class ScannerTests(unittest.TestCase):
     def test_only_whole_line_comment_bytes_change(self):
-        raw = b'.x { color: red; }\n/* note\n\tX\r\n */\n.y {}'
-        self.assertEqual(CSS.prune(raw), b'.x { color: red; }\n       \n\t \r\n   \n.y {}')
+        raw = b'.x { color: red; }\n  .z {}\n/* note\n\tX\r\n */\n.y {}'
+        self.assertEqual(CSS.prune(raw), b'.x { color: red; }\n.z {}\n\n\r\n\n.y {}')
         for raw in (b'.x { color: /* note */ red; }', b'/* note */ .x {}', b'.x {} /* note */'):
             self.assertEqual(CSS.prune(raw), raw)
 
@@ -38,10 +38,11 @@ class ScannerTests(unittest.TestCase):
             self.assertEqual(CSS.prune(raw + b'\r\n.x {}'), raw + b'\r\n.x {}')
 
     def test_utf8_and_whitespace_are_preserved(self):
-        raw = '/* Erklärung */\r\n.x {content:"ä"}\f'.encode()
+        raw = '  /* Erklärung */\r\n\t.x {\n  content:"ä";\n  border:calc(\n    1px);\n}\f'.encode()
         result = CSS.prune(raw)
-        self.assertEqual(len(result), len(raw))
-        self.assertEqual(result, b' ' * len('/* Erklärung */'.encode()) + '\r\n.x {content:"ä"}\f'.encode())
+        self.assertEqual(result, '\r\n.x {\ncontent:"ä";\nborder:calc(\n    1px);\n}\f'.encode())
+        self.assertEqual(CSS.prune(result), result)
+        self.assertEqual(CSS.prune(b'a\r/* note */\nb'), b'a\r \nb')
         self.assertEqual(CSS.prune(b'\xef\xbb\xbf.x {}'), b'\xef\xbb\xbf.x {}')
 
     def test_malformed_or_unsupported_input_fails(self):
@@ -53,8 +54,8 @@ class ScannerTests(unittest.TestCase):
     def test_actual_css_is_bounded_and_idempotent(self):
         raw = (WWW / "style.css").read_bytes()
         result = CSS.prune(raw)
-        self.assertEqual(len(result), len(raw))
-        self.assertNotEqual(result, raw)
+        self.assertLess(len(result), len(raw))
+        self.assertEqual(result.count(b'\n'), raw.count(b'\n'))
         self.assertEqual(CSS.prune(result), result)
 
 
@@ -66,9 +67,22 @@ class JavaScriptTests(unittest.TestCase):
         self.assertEqual(result, expected)
         self.assertEqual(CSS.prune_js(result), result)
 
-    def test_block_comments_are_opaque(self):
-        raw = b'/* note\n// inside block\n`template` \\\n*/\n/* one line */\n'
-        self.assertEqual(CSS.prune_js(raw), raw)
+    def test_whole_line_block_comments_are_blanked_preserving_boundaries(self):
+        raw = b'/* note\n// inside block\n`template` \\\n*/\n\t/* one line */\n'
+        expected = b'\n\n\n\n\n'
+        result = CSS.prune_js(raw)
+        self.assertEqual(result, expected)
+        self.assertEqual(CSS.prune_js(result), result)
+        self.assertEqual(CSS.prune_js(b'var x=1;\r/* note */\nvar y=2;'), b'var x=1;\r \nvar y=2;')
+
+    def test_legal_and_html_block_comments_are_preserved(self):
+        for comment in (b'/*! notice */', b'/* @license */', b'/* SPDX-License-Identifier: MIT */',
+                        b'/* Copyright */', b'/* @preserve */', b'/*# sourceMappingURL=x */',
+                        b'/*@ sourceURL=x */', b'/* </ScRiPt> */', b'/* <!-- */',
+                        b'/*\n * Copyright\n */'):
+            raw = comment + b'\r\nvar x=1;\n'
+            with self.subTest(comment=comment):
+                self.assertEqual(CSS.prune_js(raw), raw)
 
     def test_distinct_cr_and_lf_boundaries_are_not_joined(self):
         expected = b'var x=1;\r \nvar y=2;'
@@ -122,11 +136,21 @@ class JavaScriptTests(unittest.TestCase):
         self.assertLess(len(result), len(raw))
         self.assertEqual(result.count(b'\n'), raw.count(b'\n'))
         changed = 0
+        block = False
         for before, after in zip(raw.splitlines(keepends=True), result.splitlines(keepends=True)):
+            body = before.rstrip(b'\r\n')
+            stripped = body.lstrip(b' \t')
+            if block or stripped.startswith(b'/*'):
+                start = 0 if block else before.index(b'/*') + 2
+                block = body.find(b'*/', start) < 0
+                if before != after:
+                    changed += 1
+                    self.assertEqual(after, before[len(body):])
+                continue
             if before != after:
                 changed += 1
-                if before.lstrip(b' \t').startswith(b'//'):
-                    self.assertEqual(after, before[len(before.rstrip(b'\r\n')):])
+                if stripped.startswith(b'//'):
+                    self.assertEqual(after, before[len(body):])
                 else:
                     self.assertEqual(after, before.lstrip(b' \t'))
         self.assertGreater(changed, 0)

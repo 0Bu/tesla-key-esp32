@@ -6,7 +6,8 @@ var state=null, otaTimer=null, otaAvail=null, otaOffer=null, waking=false, wakeT
 var otaBusy=false, otaPhase=null, otaPollState=null, otaDeadline=0, otaExpectedVersion=null, otaChannel='release', otaChannelInitialSet=false;
 var otaChannelInFlight=false, otaPrompting=false;
 var otaFlowToken=null;
-var fwFocusId=null;   // control that started the running check/channel change; refocused once the UI is idle again
+// control that started the running check/channel change; refocused once the UI is idle again
+var fwFocusId=null;
 
 function isOtaRunning(){
   if(otaPhase === 'update' || otaPhase === 'reboot') return true;
@@ -21,8 +22,8 @@ function isOtaFlowBusy(){ return isOtaBusy() || otaPrompting; }
 
 // Quotes are escaped too so esc() is safe in attribute values (title="…"), not just element content.
 function esc(s){return String(s).replace(/[&<>"']/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
-// Admit finite numeric fields before inserting radio data into HTML.
-function num(x){ if(typeof x!=='number' && typeof x!=='string') return null; if(typeof x==='string' && !x.trim()) return null; x=+x; return isFinite(x)?x:null; }   // absent/null/'' stay absent (+null is 0)
+// Admit finite numeric fields before inserting radio data into HTML (absent/null/'' stay absent; +null is 0).
+function num(x){ if(typeof x!=='number' && typeof x!=='string') return null; if(typeof x==='string' && !x.trim()) return null; x=+x; return isFinite(x)?x:null; }
 
 function requestJson(url,options){
   var opts=Object.assign({},options||{});
@@ -296,6 +297,9 @@ function waveBarsHTML(){
 }
 /* ---------- icons (2px outline shapes; stroke styling lives in CSS) ---------- */
 var FAN_BLADE='<path d="M10.8 10.2C9.2 6.8 10 3 12.6 2.7c3-.3 4.2 3.7 1.1 8"/>';
+var THERM='<path d="M9.5 13.8V5a2 2 0 0 0-4 0v8.8a3.5 3.5 0 1 0 4 0Z"/><circle cx="7.5" cy="16.7" r="1.2" fill="currentColor" stroke="none"/>';
+var PW='c1.1-1.3 1.1-2.7 0-4s-1.1-2.7 0-4 1.1-2.7 0-4';
+var DW='c-.8-1.5-.8-2.8 0-4.5s.8-3 0-4.5';
 var ICON={
   bolt:'<use href="#ic-bolt"/>',
   warn:'<use href="#ic-warn"/>',
@@ -308,20 +312,18 @@ var ICON={
   link:'<path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/>',
   search:'<circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/>',
   fan:'<circle cx="12" cy="12" r="2.1"/>'+FAN_BLADE+'<g transform="rotate(120 12 12)">'+FAN_BLADE+'</g><g transform="rotate(240 12 12)">'+FAN_BLADE+'</g>',
-  precond:'<path d="M9.5 13.8V5a2 2 0 0 0-4 0v8.8a3.5 3.5 0 1 0 4 0Z"/><path d="M7.5 16.7v-6"/><circle cx="7.5" cy="16.7" r="1.2" fill="currentColor" stroke="none"/><path d="M14.8 18c1.1-1.3 1.1-2.7 0-4s-1.1-2.7 0-4 1.1-2.7 0-4"/><path d="M19.2 18c1.1-1.3 1.1-2.7 0-4s-1.1-2.7 0-4 1.1-2.7 0-4"/>',
-  overheat:'<path d="M9.5 13.8V5a2 2 0 0 0-4 0v8.8a3.5 3.5 0 1 0 4 0Z"/><path d="M7.5 16.7V9"/><circle cx="7.5" cy="16.7" r="1.2" fill="currentColor" stroke="none"/><circle cx="17.5" cy="8.5" r="2.5"/><path d="M17.5 3.2v1.1M17.5 12.7v1.1M12.2 8.5h1.1M21.7 8.5h1.1M13.8 4.8l.8.8M20.4 11.4l.8.8M21.2 4.8l-.8.8M14.6 11.4l-.8.8"/>',
-  defrost:'<path d="M3 8.5Q12 4.5 21 8.5L17.6 16.5Q12 14.2 6.4 16.5Z"/><path d="M8.4 20.5c-.8-1.5-.8-2.8 0-4.5s.8-3 0-4.5M12 20.5c-.8-1.5-.8-2.8 0-4.5s.8-3 0-4.5M15.6 20.5c-.8-1.5-.8-2.8 0-4.5s.8-3 0-4.5"/><path d="M7.3 12.8 8.4 11.2l1.1 1.6M10.9 12.8 12 11.2l1.1 1.6M14.5 12.8 15.6 11.2l1.1 1.6"/>',
-  updated:'<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l3 2"/>',
+  precond:THERM+'<path d="M7.5 16.7v-6M14.8 18'+PW+'M19.2 18'+PW+'"/>',
+  overheat:THERM+'<circle cx="17.5" cy="8.5" r="2.5"/><path d="M7.5 16.7V9M17.5 3.2v1.1M17.5 12.7v1.1M12.2 8.5h1.1M21.7 8.5h1.1M13.8 4.8l.8.8M20.4 11.4l.8.8M21.2 4.8l-.8.8M14.6 11.4l-.8.8"/>',
+  defrost:'<path d="M3 8.5Q12 4.5 21 8.5L17.6 16.5Q12 14.2 6.4 16.5ZM8.4 20.5'+DW+'M12 20.5'+DW+'M15.6 20.5'+DW+'M7.3 12.8 8.4 11.2l1.1 1.6M10.9 12.8 12 11.2l1.1 1.6M14.5 12.8 15.6 11.2l1.1 1.6"/>',
+  updated:'<path d="M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5M12 7v5l3 2"/>',
   idle:'<path d="M4 3h16M4 21h16M6 3v3.5a6 6 0 0 0 6 5.5 6 6 0 0 0 6-5.5V3M6 21v-3.5a6 6 0 0 1 6-5.5 6 6 0 0 1 6 5.5V21"/>'
 };
 function iconSVG(name){ return '<svg viewBox="0 0 24 24" aria-hidden="true">'+(ICON[name]||'')+'</svg>'; }
 function batteryRailSVG(pct){
-  var clamped=Math.max(0,Math.min(100,pct));
-  var fillW=clamped>0?Math.max(2.4,16*clamped/100).toFixed(1):0;
-  var fillRect=clamped>0?'<rect x="3.5" y="4.25" width="'+fillW+'" height="7.5" rx="1.2" fill="'+socColor(clamped)+'" stroke="none"/>':'';
-  return '<svg viewBox="0 0 26 16" aria-hidden="true">'+
-         '<rect x="1.25" y="2" width="20.5" height="12" rx="2.6" fill="none" stroke="currentColor" stroke-width="1.75"/>'+
-         '<path d="M23.75 6v4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>'+fillRect+'</svg>';
+  var c=Math.max(0,Math.min(100,pct));
+  var fillW=c>0?Math.max(2.4,16*c/100).toFixed(1):0;
+  return '<svg viewBox="0 0 26 16" aria-hidden="true"><rect x="1.25" y="2" width="20.5" height="12" rx="2.6"/><path d="M23.75 6v4" stroke-width="2"/>'+
+         (c>0?'<rect x="3.5" y="4.25" width="'+fillW+'" height="7.5" rx="1.2" fill="'+socColor(c)+'" stroke="none"/>':'')+'</svg>';
 }
 
 // ---------- battery gauge ----------
@@ -381,15 +383,13 @@ function chargeStats(v,charging){
 // Climate has no per-domain age in /status. Show explicitly cached settings/states, never
 // infer current activity from another domain's last_seen_s or attribute charger input to a
 // climate function. Raw charger_phases also does not establish the AC topology multiplier.
+var LAST_HDR='Last reported:\n';
+function climTip(s){ return LAST_HDR+s+'\nCurrent activity and power are unknown.'; }
 function climateItems(c){
   var res={fan:null, precond:null, overheat:null, defrost:null};
   if(!c) return res;
-  if(c.on===true){
-    res.fan={icon:'fan', cool:false, tip:'Last reported:\nClimate control: On\nCurrent activity and power are unknown.'};
-  }
-  if(c.preconditioning===true){
-    res.precond={icon:'precond', cool:false, tip:'Last reported:\nPreconditioning: Active\nCurrent activity and power are unknown.'};
-  }
+  if(c.on===true) res.fan={icon:'fan', cool:false, tip:climTip('Climate control: On')};
+  if(c.preconditioning===true) res.precond={icon:'precond', cool:false, tip:climTip('Preconditioning: Active')};
   if(c.cop==='On'||c.cop==='FanOnly'||c.cop_cooling===true){
     var ov=[];
     if(c.cop==='On'||c.cop==='FanOnly'){
@@ -398,17 +398,13 @@ function climateItems(c){
       ov.push('Cabin overheat protection setting: '+setting);
     }
     if(c.cop_cooling===true) ov.push('Cabin overheat protection: Cooling');
-    res.overheat={icon:'overheat', cool:c.cop_cooling===true,
-                  tip:'Last reported:\n'+ov.join('\n')+'\nCurrent activity and power are unknown.'};
+    res.overheat={icon:'overheat', cool:c.cop_cooling===true, tip:climTip(ov.join('\n'))};
   }
   var defrost=[];
   if(c.front_defrost===true) defrost.push('Front');
   if(c.rear_defrost===true) defrost.push('Rear');
   if(c.defrost_mode==='Normal'||c.defrost_mode==='Max') defrost.push(c.defrost_mode);
-  if(defrost.length){
-    res.defrost={icon:'defrost', cool:false,
-                 tip:'Last reported:\nDefrost: '+defrost.join(' / ')+'\nCurrent activity and power are unknown.'};
-  }
+  if(defrost.length) res.defrost={icon:'defrost', cool:false, tip:climTip('Defrost: '+defrost.join(' / '))};
   return res;
 }
 // battery at/above its target and not charging → starting a charge is a no-op the car only
@@ -442,18 +438,12 @@ function setRow(key,tone,valueHTML,statusHTML,barsMarkup){
   var st=$(key+'St'); if(st){ st.className='rs'+(tone?' '+tone:''); setHTML(st,statusHTML); }
   var b=$(key+'Bars'); if(b){ b.className='rbar'+(tone?' '+tone:''); setHTML(b,barsMarkup||''); }
 }
-var CLIMATE_SLOTS=[
-  {key:'fan', id:'hclFan'},
-  {key:'precond', id:'hclPrecond'},
-  {key:'overheat', id:'hclOverheat'},
-  {key:'defrost', id:'hclDefrost'}
-];
-var RETAINED_SLOTS=[
-  {key:'battery', id:'hretBatt', icon:null},
-  {key:'updated', id:'hretUpd', icon:'updated'},
-  {key:'idle', id:'hretIdle', icon:'idle'}
-];
-var RAIL_IDS=['hclFan','hclPrecond','hclOverheat','hclDefrost','hretBatt','hretUpd','hretIdle'];
+var CLIMATE_SLOTS=[['fan','hclFan'],['precond','hclPrecond'],['overheat','hclOverheat'],['defrost','hclDefrost']];
+var RETAINED_SLOTS=[['battery','hretBatt'],['updated','hretUpd','updated'],['idle','hretIdle','idle']];
+function eachRail(fn){
+  for(var i=0;i<CLIMATE_SLOTS.length;i++) fn($(CLIMATE_SLOTS[i][1]));
+  for(var j=0;j<RETAINED_SLOTS.length;j++) fn($(RETAINED_SLOTS[j][1]));
+}
 function retainedState(s){
   var ls=s.last||{}, lsoc=num(ls.usable_soc);
   if(lsoc==null) lsoc=num(ls.soc);
@@ -465,21 +455,21 @@ function retainedState(s){
     res.battery={
       val:String(lsoc), unit:'%', icon:batteryRailSVG(lsoc),
       label:'Last battery '+lsoc+' %',
-      tip:'Last reported:\nBattery: '+lsoc+' %\nCached reading; live charge data is unavailable.'
+      tip:LAST_HDR+'Battery: '+lsoc+' %\nCached reading; live charge data is unavailable.'
     };
   }
   if(chargeAgo){
     res.updated={
       val:chargeAgo.val, unit:chargeAgo.unit, icon:null,
       label:'Charge updated '+chargeAgo.full+' ago',
-      tip:'Last reported:\nCharge updated: '+chargeAgo.full+' ago'
+      tip:LAST_HDR+'Charge updated: '+chargeAgo.full+' ago'
     };
   }
   if(ago && s.link!=='awake'){
     res.idle={
       val:ago.val, unit:ago.unit, icon:null,
       label:'Idle '+ago.full,
-      tip:'Last reported:\nIdle: '+ago.full
+      tip:LAST_HDR+'Idle: '+ago.full
     };
   }
   return res;
@@ -515,7 +505,8 @@ function render(s){
     if(wi&&wi.classList) wi.classList.add('hide'); if(ei&&ei.classList) ei.classList.remove('hide');
     setRow('wifi','', e.speed?esc(e.speed+' Mbit'+(e.full_duplex?' full duplex':' half duplex')):'', 'Connected');
   } else {
-    $("wifiLbl").textContent = w.std || 'Wi-Fi';   // standard sits in the label, e.g. "Wi-Fi 4"
+    // standard sits in the label, e.g. "Wi-Fi 4"
+    $("wifiLbl").textContent = w.std || 'Wi-Fi';
     if(wi&&wi.classList) wi.classList.remove('hide'); if(ei&&ei.classList) ei.classList.add('hide');
     if(w.ssid||s.ip){
       var wr=num(w.rssi);
@@ -571,8 +562,10 @@ function render(s){
     g={mode:'neutral', glyph:'link'};
     head='Reconnecting…'; sub='Reconnecting automatically with your existing key.';
   } else if(paired&&v){
-    if(waking){ waking=false; clearTimeout(wakeTimeout); }   // car is awake & reporting — stop the spinner
-    var soc=(v.usable_soc!=null?num(v.usable_soc):num(v.soc));   // null = the car has not reported a level (never 0 %)
+    // car is awake & reporting — stop the spinner
+    if(waking){ waking=false; clearTimeout(wakeTimeout); }
+    // null = the car has not reported a level (never 0 %)
+    var soc=(v.usable_soc!=null?num(v.usable_soc):num(v.soc));
     // "Charge complete" = battery reached its target and not charging; the start tap is gated
     // (the car would only reject a charge_start here as "complete"). See chargeComplete().
     var complete=chargeComplete(v,charging);
@@ -662,22 +655,22 @@ function render(s){
   setHTML($("hcharge"),readings);
   var anyClim=false;
   for(var ci=0;ci<CLIMATE_SLOTS.length;ci++){
-    var cSlot=CLIMATE_SLOTS[ci], cItem=clim[cSlot.key];
+    var cKey=CLIMATE_SLOTS[ci][0], cId=CLIMATE_SLOTS[ci][1], cItem=clim[cKey];
     if(cItem) anyClim=true;
-    syncRailTip(cSlot.id, !!cItem, cItem?cItem.tip:'', cSlot.key==='overheat'?(cItem&&cItem.cool):undefined);
-    setHTML($(cSlot.id+'Icon'), cItem?iconSVG(cItem.icon):'');
+    syncRailTip(cId, !!cItem, cItem?cItem.tip:'', cKey==='overheat'?(cItem&&cItem.cool):undefined);
+    setHTML($(cId+'Icon'), cItem?iconSVG(cItem.icon):'');
   }
   var clList=$("hclimateList");
   if(clList && clList.classList) clList.classList.toggle('hide',!anyClim);
   var anyRet=false;
   for(var ri=0;ri<RETAINED_SLOTS.length;ri++){
-    var rSlot=RETAINED_SLOTS[ri], rItem=ret[rSlot.key];
+    var rKey=RETAINED_SLOTS[ri][0], rId=RETAINED_SLOTS[ri][1], rIco=RETAINED_SLOTS[ri][2], rItem=ret[rKey];
     if(rItem) anyRet=true;
-    syncRailTip(rSlot.id, !!rItem, rItem?rItem.tip:'');
-    var rbBtn=$(rSlot.id+'Btn'); if(rbBtn && rItem) rbBtn.setAttribute('aria-label',rItem.label);
-    setHTML($(rSlot.id+'Icon'), rItem?(rItem.icon||iconSVG(rSlot.icon)):'');
-    var rv=$(rSlot.id+'Val'); if(rv) rv.textContent=rItem?rItem.val:'';
-    var ru=$(rSlot.id+'Unit'); if(ru) ru.textContent=rItem?rItem.unit:(rSlot.key==='battery'?'%':'');
+    syncRailTip(rId, !!rItem, rItem?rItem.tip:'');
+    var rbBtn=$(rId+'Btn'); if(rbBtn && rItem) rbBtn.setAttribute('aria-label',rItem.label);
+    setHTML($(rId+'Icon'), rItem?(rItem.icon||iconSVG(rIco)):'');
+    var rv=$(rId+'Val'); if(rv) rv.textContent=rItem?rItem.val:'';
+    var ru=$(rId+'Unit'); if(ru) ru.textContent=rItem?rItem.unit:(rKey==='battery'?'%':'');
   }
   var retBox=$("hretained");
   if(retBox && retBox.classList) retBox.classList.toggle('hide',!anyRet);
@@ -1194,7 +1187,8 @@ function wakeCar(){
   if(waking) return;
   var vin=state&&state.vin;
   if(!vin||vin==='UNKNOWN'){ toast('No VIN configured','err'); return; }
-  waking=true; if(state)render(state);                       // ring starts spinning immediately
+  // ring starts spinning immediately
+  waking=true; if(state)render(state);
   clearTimeout(wakeTimeout);
   // safety net: stop spinning if no charge data shows up in time
   wakeTimeout=setTimeout(function(){ if(waking){ wakeStop(); toast('Still asleep — try again', 'info', 'wake'); poll(); } }, 90000);
@@ -1690,18 +1684,15 @@ function askOtaInstall(status, changelog){
 
 if(typeof document!=='undefined' && typeof document.addEventListener==='function'){
   wireModalFieldSelection(document);
-  for(var rIdx=0;rIdx<RAIL_IDS.length;rIdx++){
-    (function(det){
-      if(det && typeof det.addEventListener==='function'){
-        det.addEventListener('pointerleave',function(){ det.classList.remove('dismissed'); });
-      }
-    })($(RAIL_IDS[rIdx]));
-  }
-  document.addEventListener('click', function(e){
-    for(var rClick=0;rClick<RAIL_IDS.length;rClick++){
-      var railEl=$(RAIL_IDS[rClick]);
-      if(railEl && railEl.open && (!e || !railEl.contains || !railEl.contains(e.target))) railEl.open=false;
+  eachRail(function(det){
+    if(det && typeof det.addEventListener==='function'){
+      det.addEventListener('pointerleave',function(){ det.classList.remove('dismissed'); });
     }
+  });
+  document.addEventListener('click', function(e){
+    eachRail(function(railEl){
+      if(railEl && railEl.open && (!e || !railEl.contains || !railEl.contains(e.target))) railEl.open=false;
+    });
     var modalBackdrop = $("otaBackdrop");
     if(modalBackdrop && e.target === modalBackdrop){
       closeOtaModal(false);
@@ -1727,13 +1718,12 @@ if(typeof document!=='undefined' && typeof document.addEventListener==='function
       if(modal && modal.classList && typeof modal.classList.contains==='function' && !modal.classList.contains('hide')){
         closeOtaModal(false);
       } else {
-        for(var rEsc=0;rEsc<RAIL_IDS.length;rEsc++){
-          var rEl=$(RAIL_IDS[rEsc]);
+        eachRail(function(rEl){
           if(rEl){
             rEl.open=false;
             if(rEl.matches && rEl.matches(':hover')) rEl.classList.add('dismissed');
           }
-        }
+        });
       }
     } else if(e.key==='Enter' && askOpenNow && e.target === $("askInput")){
       e.preventDefault();
