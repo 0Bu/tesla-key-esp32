@@ -1,1 +1,1 @@
-{"version":"1.6.10","changelog":"Maintenance and reliability improvements."}
+{"version":"1.6.11","changelog":"Reclaim esp32c6 flash headroom and sync config-repair stack baseline\nHarden agent guards, pr-policy checkout, and host test hermeticity"}

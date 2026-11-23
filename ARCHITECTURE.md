@@ -26,9 +26,12 @@ to keep animations running. A failed poll retains the frame, clears `feedOk` and
 countdown claims. Post-update verification polls separately at 1 s. Polling avoids per-client
 broadcast queues and blocked sends.
 
-The climate icon opens details for the last reported climate control, preconditioning, cabin
-overheat protection and defrost. The status feed has no climate-specific age. Charger input
-and other telemetry cannot establish live climate activity, climate power or an AC phase multiplier.
+The vehicle card footer shows the charging current and power reported by the vehicle. A single
+snowflake summarizes the last reported climate control, preconditioning, cabin overheat protection
+and defrost. The footer is informational and appears only when it has a reading or climate
+indicator. The grey ring uses the last known charge level, when available, while the vehicle is
+parked, asleep or waking. The status feed has no climate-specific age or climate power
+measurement. The reported phase count does not establish the AC topology multiplier.
 [User controls](USER_GUIDE.md) · [OTA polling](#browser-scheduling-and-metadata-capture)
 
 ## Read-only telemetry and command correctness
@@ -74,9 +77,12 @@ strings are never copied. All selected domains must be usable for success.
 debounced ASLEEP→AWAKE, or paired+connected with a stale/empty cache. Failed polls retry with
 30–300 s exponential backoff. Once fresh, the episode latch prevents repeated idle polls as the
 cache ages. Stable sleep/disconnect resets it; awake alone never opens the active window.
-A wake/bootstrap fire also enqueues one Drive State Poll; background entries expire after 10 s,
-so a slow charge round trip may leave the odometer last-known. The 10 s in-window charge cadence
-adds no drive poll. `logic/telemetry_poll.hpp` schedules one in-window telemetry attempt per 30 s,
+A wake/bootstrap charge poll adds one Drive State Poll when it fires between cadence ticks.
+Background entries expire after 10 s, so a slow charge round trip may leave the odometer last-known.
+Outside the active window, a fresh charging-to-`Stopped` transition can schedule a ChargeState-only
+probe at most every 30 s for five minutes, with BLE connected and VCSEC reporting `AWAKE` at
+scheduling time. The budget survives short BLE reconnects. Stable sleep or leaving `Stopped` ends it.
+`logic/telemetry_poll.hpp` schedules one in-window telemetry attempt per 30 s,
 normally rotating climate → drive → tires → closures and restarting at climate on window entry.
 Missing/stale climate gets at most two consecutive attempts before the next other domain; priority
 retries preserve the normal rotation's place. Queue refusal retains the pending domain and cadence.
@@ -168,7 +174,7 @@ margins, MQTTS margins or image acceptance.
 | Target | Configuration and evidence |
 |---|---|
 | esp32 | Separate IRAM. One controller connection, smaller NimBLE and WiFi RX pools, smaller diagnostic ring. Unpaired MQTT-off bench rose from 51200 B to above threshold for a manifest check. |
-| esp32s3 | Shared IRAM/DRAM. C3-derived tuning moved 23856 B out of IRAM and freed 24064 B of reserved DRAM span. A paired Ethernet board previously stayed pending at 53248 B for 600 s. A signed tuned preview held 90112 B and confirmed after 90 s. The diagnostic ring reserves 8 KiB less DRAM than the generic default. WiFi-only S3 was unmeasured. |
+| esp32s3 | Shared IRAM/DRAM. C3-derived tuning moved 23856 B out of IRAM and freed 24064 B of reserved DRAM span. A paired Ethernet board previously stayed pending at 53248 B for 600 s. A signed tuned preview held 90112 B and confirmed after 90 s. The default diagnostic ring uses 7680 B of RTC slow memory. |
 | esp32c3 | Shared IRAM/DRAM. WiFi hot paths in flash and smaller controller/NimBLE/WiFi pools. Unpaired MQTT-off bench moved from 38912 B and failed checks to successful manifest reads. A smaller ACL/HCI variant downloaded an image. Pairing, confirmation and MQTTS were unmeasured. |
 | esp32c6 | Same entry threshold. No target allocator history recorded here. |
 
@@ -180,9 +186,17 @@ point. Image writing, probation and transient between-sample margins need separa
 On a paired Ethernet S3 running v1.6.9, a warm metadata check started at 90112 B.
 After TLS closure and Operation reclamation, the next entry sample measured 57344 B
 despite 139920 B of free INTERNAL memory. The install and later checks were refused
-before starting a worker. The 8 KiB reduction in static diagnostic storage gives
-the heap more room. Its effect on the largest block after a warm check must be
-measured on hardware. The local `/diag` buffer retains fewer lines.
+before starting a worker. With the first 8 KiB diagnostic ring, the same board confirmed
+an Ethernet OTA at 100352 B. On WiFi the warm idle block was 60416 B before and after
+a direct upload attempt. It measured 54272 B in the upload handler, after reclaiming the
+previous metadata operation. The HTTP parser and any queued TCP data are still live at
+this point. The samples do not identify the individual allocations in the 6144 B drop.
+
+The S3 default now places the diagnostic ring in RTC slow memory, releasing its previous
+8192 B DRAM reservation. It clears the ring before enabling capture on each boot. Larger
+custom rings and configurations that reserve RTC storage for the ULP or redirect RTC data
+to fast memory use DRAM. A warm WiFi upload still needs hardware acceptance because the
+allocator may distribute the recovered memory among several blocks.
 
 ### TLS phases and diagnostic checkpoints
 

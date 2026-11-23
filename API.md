@@ -115,6 +115,11 @@ telemetry, restarted at climate on window entry. Missing/stale climate is retrie
 slot, with at most two consecutive attempts before another domain. After reboot it stays unavailable
 until a poll obtains a sample; the boot window is not seeded after a heap-watchdog restart.
 Drive refreshes through the rotation and a best-effort `NO_WAKE_SKIP` wake/bootstrap one-shot.
+After fresh `Charging` or `Starting` changes to `Stopped`, a separate ChargeState probe can
+detect a short charging pause outside the active window. It is scheduled at most once per 30 s for
+five minutes from that transition, with BLE connected and VCSEC reporting `AWAKE`. A probe
+reporting `Charging` or `Starting` resumes normal polling. The cache freshness rules above
+also apply during the pause.
 
 ### evcc integration
 
@@ -437,7 +442,7 @@ gate refuses the request before any save.
 | `ble` | `{connected, scanning, phase?, phase_s?, rssi?, addr}` when connected, otherwise includes `devices:[{addr,name,rssi,connectable}]`. `connect_fail?`/`car_connectable?` appear only while actively failing. |
 | `link` | `"awake"\|"idle"\|"asleep"\|"unreachable"\|"unknown"` — drives the hero (`"idle"` = reachable but not provably asleep, the "Parked" card). `vcsec_sleep` (`AWAKE\|ASLEEP\|UNKNOWN`) is the raw un-debounced flag, for diagnostics. |
 | `vehicle` | `{soc, usable_soc, status, charge_limit, power, amps, actual_amps, volts, phases}` — only when `link=="awake"` and the coherent ChargeState sample is at most 30 seconds old; each field only when reported. Other telemetry does not refresh this age. |
-| `last`, `last_seen_s`, `charge_age_s` | Last-known `{soc, usable_soc, status}`; seconds since any infotainment contact, and independently since this ChargeState sample. `charge_age_s` is omitted if no valid timestamped charge sample exists. The web UI identifies retained battery values as last known and offers no charge/wake action while awake without a fresh charge reading. |
+| `last`, `last_seen_s`, `charge_age_s` | Last-known `{soc, usable_soc, status}`; seconds since any infotainment contact, and independently since this ChargeState sample. `charge_age_s` is omitted if no valid timestamped charge sample exists. The [web UI](ARCHITECTURE.md#web-ui) uses the last known charge level for the grey ring when parked, asleep or waking. While awake without a fresh charge reading, the UI offers neither a charge nor a wake action. |
 | `mqtt` | `{configured, connected, tls, broker, error?}`; `broker` is the credential-free `host:port` even if the saved URI has userinfo. |
 | `syslog` | `{configured, resolved, reachable, host?, port?, error?, dropped_lines?}`; `reachable` is an advisory ping hint, never a delivery gate. |
 | `ota` | `{channel, verification}`; channel is `"release"\|"dev"`. Verification is the cached last observed running-image state: `stable`, `pending_verify` or `unknown`. Status performs no SDK/flash query for this field; it does not identify an earlier rollback. |
@@ -531,7 +536,8 @@ metric (km, km/h). An invalid or initially empty cache publishes retained `{}` o
 to clear stale readings; reconnecting rearms that clear. It then stays quiet until valid data returns.
 While a parked car sleeps, ordinary source polls pause and MQTT keeps serving
 last-known values until the next successful relevant poll. Charge and drive can also refresh on
-the wake/bootstrap one-shot outside an active window. These topics carry no per-domain age;
+the wake/bootstrap one-shot outside an active window. Charge can also refresh through the
+[short charging-pause probe](#vehicle-data). These topics carry no per-domain age;
 broker publication or link state alone does not establish each retained field's freshness.
 The device payload's `paired` and `session_available` retain their status-field meanings above;
 the broker connection's `availability` topic is independent of either session fact. Its recovery fields use the same cached state names as `/status`; `fatal_component` is absent outside Fatal. They describe device recovery, not fresh vehicle authentication. They add no command topic or discovery entity.
