@@ -147,7 +147,6 @@ class ProfileProtocolTests(unittest.TestCase):
             self.keys=[]
             self.clicks=[]
             self.tabs=0
-            self.climate_open=False
 
         def call(self, method, parameters=None, session=None):
             self.calls.append((method,parameters,session))
@@ -160,8 +159,6 @@ class ProfileProtocolTests(unittest.TestCase):
                 if parameters["type"]=="keyUp":
                     if key=="Tab":
                         self.tabs+=1
-                    elif self.tabs>1:
-                        self.climate_open=key=="Enter"
                     else:
                         count=0 if self.fault=="missing-action" else (2 if self.fault=="double-action" else 1)
                         self.actions+=count
@@ -181,9 +178,8 @@ class ProfileProtocolTests(unittest.TestCase):
                 if self.fault=="overflow": result["documentWidth"]=500
                 return json.loads(json.dumps(result))
             if "document.activeElement===" in expression: return True
-            if "document.activeElement.id === 'hclOverheatIcon'"==expression: return self.tabs>1
-            if expression.startswith("document.getElementById('hclOverheat').open"): return self.climate_open and self.actions==2
-            if expression=="!document.getElementById('hclOverheat').open": return not self.climate_open
+            if expression.startswith("document.activeElement.id === 'vinBtn'"):
+                return self.tabs>1 and self.actions==2 and self.fault!="footer-focus"
             return {"result":"fail" if self.fault=="dom" else "pass","text":"controlled","width":390,"dark":False}
 
     def test_full_phase_sequence_and_both_native_keys_are_required(self):
@@ -194,13 +190,13 @@ class ProfileProtocolTests(unittest.TestCase):
                          ["assembled-dom","keyboard-setup","trusted-tab","trusted-Enter","trusted-Space"])
         self.assertEqual(peer.actions,2)
         self.assertEqual([event["key"] for event in peer.keys],
-                         ["Tab","Tab","Enter","Enter"," "," ","Tab","Tab","Enter","Enter","Escape","Escape"])
+                         ["Tab","Tab","Enter","Enter"," "," ","Tab","Tab"])
         self.assertEqual(peer.calls[-1][0],"Target.closeTarget")
         self.assertTrue(any(call[0]=="Emulation.setDeviceMetricsOverride" for call in peer.calls))
         self.assertTrue(any(call[0]=="Emulation.setEmulatedMedia" for call in peer.calls))
 
     def test_each_required_runtime_refusal_is_effective(self):
-        for fault in ("dom","body","focus","missing-action","double-action","untrusted","request","overflow"):
+        for fault in ("dom","body","focus","missing-action","double-action","untrusted","request","overflow","footer-focus"):
             with self.subTest(fault=fault),mock.patch.object(gate.sys,"platform","linux"), \
                     mock.patch.object(gate,"report"),self.assertRaises(RuntimeError):
                 gate.run_profile(self.Peer(fault),Path("/tmp/offline.html"),gate.PROFILES[0])

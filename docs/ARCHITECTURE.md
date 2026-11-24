@@ -26,11 +26,12 @@ to keep animations running. A failed poll retains the frame, clears `feedOk` and
 countdown claims. Post-update verification polls separately at 1 s. Polling avoids per-client
 broadcast queues and blocked sends.
 
-Separate right-rail climate icons open details for the last reported climate control,
-preconditioning, cabin overheat protection and defrost, and retained battery, update-age and idle
-metrics sit as icon rows on the right rail instead of under the gauge. The status feed has no
-climate-specific age. Charger input and other telemetry cannot establish live climate activity,
-climate power or an AC phase multiplier.
+The vehicle card footer shows the charging current and power reported by the vehicle. A single
+snowflake summarizes the last reported climate control, preconditioning, cabin overheat protection
+and defrost. The footer is informational and appears only when it has a reading or climate
+indicator. The grey ring uses the last known charge level, when available, while the vehicle is
+parked, asleep or waking. The status feed has no climate-specific age or climate power
+measurement. The reported phase count does not establish the AC topology multiplier.
 [User controls](USER_GUIDE.md) · [OTA polling](#browser-scheduling-and-metadata-capture)
 
 ## Read-only telemetry and command correctness
