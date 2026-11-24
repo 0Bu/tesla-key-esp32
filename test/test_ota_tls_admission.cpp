@@ -46,9 +46,15 @@ extern thread_local bool network_thread;
 void observe_body_allocation(std::size_t);
 }
 static std::atomic<bool> fail_body_reserve{false};
+static std::atomic<int> fail_body_alloc_countdown{0};
 void* operator new(std::size_t n) {
     fixture::observe_body_allocation(n);
-    if (!fixture::network_thread && n>=1536 && n<16384 && fail_body_reserve.exchange(false)) throw std::bad_alloc();
+    if (!fixture::network_thread && n>=1536 && n<16384) {
+        if (fail_body_reserve.exchange(false)) throw std::bad_alloc();
+        int rem = fail_body_alloc_countdown.load(std::memory_order_relaxed);
+        while (rem > 0 && !fail_body_alloc_countdown.compare_exchange_weak(rem, rem - 1, std::memory_order_acq_rel)) {}
+        if (rem == 1) throw std::bad_alloc();
+    }
     if (void* p=std::malloc(n?n:1)) return p;
     throw std::bad_alloc();
 }
@@ -470,7 +476,7 @@ void reset(std::initializer_list<size_t> samples={65536}){
  info_calls=0;throw_memory_log=throw_memory_sample=false;
  delivered_bytes=header_end_bytes=0;read_limit=71;
  init_calls=connects=destroys=reads=deletes=0;begins=writes=ends=selectors=aborts=restart_calls=0;
- init_null=false;connect_ok=create_ok=lock_ok=true;throw_create=false;fail_body_reserve=false;
+ init_null=false;connect_ok=create_ok=lock_ok=true;throw_create=false;fail_body_reserve=false;fail_body_alloc_countdown=0;
  cleanup_hook_armed=cleanup_hook_entered=cleanup_hook_released=false;
  worker_returned=worker_paused_after_cleanup=false;
  changelog_destroy_fails=jump_image_clock=image_clock_jumped=reject_late_effect=raw_handle_live=false;
@@ -1144,6 +1150,64 @@ void prompt_reclaim_and_growth_checks(){
  CHECK(requested_requests.size()==4);
  CHECK(requested_requests[1].find("GET /v2/sub/manifest.json HTTP/1.1\r\nHost: update.example\r\n")!=std::string::npos);
  CHECK(requested_requests[2].find("GET /ota/m.json?v=1 HTTP/1.1\r\nHost: cdn.example\r\n")!=std::string::npos);
+
+ // Mid-transfer MetadataSink::append OOM (>4096 B manifest growth) fails closed cleanly and reclaims.
+ reset();
+ manifest=selected_manifest();manifest.pop_back();manifest+=",\"notes\":\""+std::string(4500,'n')+"\"}";
+ fail_body_alloc_countdown=2;
+ r=ota_check(0);join_worker();
+ CHECK(!r.ok&&!r.update_available&&std::string_view(r.reason)==kOtaNoMemory&&init_calls==1&&connects==1&&destroys==1&&!s_operation.load()&&fail_body_alloc_countdown==0);
+
+ // Optional-changelog mid-transfer MetadataSink::append OOM (>1536 B growth) withdraws the manifest offer as NoMemory.
+ reset();
+ changelog="{\"version\":\"1.6.3\",\"changelog\":\""+std::string(2600,'c')+"\"}";
+ fail_body_alloc_countdown=3;
+ r=ota_check(0);join_worker();
+ CHECK(!r.ok&&!r.update_available&&std::string_view(r.reason)==kOtaNoMemory&&init_calls==2&&connects==2&&destroys==2&&!s_operation.load()&&fail_body_alloc_countdown==0);
+
+ // Direct resolve_redirect boundary, scheme-smuggling, query, dot-segment, and authority/fragment rejection checks.
+ {
+  auto set_buf=[](const char* s){
+   std::array<char,tk::ota::kUrlBytes> b{};
+   std::snprintf(b.data(),b.size(),"%s",s);
+   return b;
+  };
+  constexpr const char* kBase="https://update.example/v1/m.json";
+  { auto b=set_buf(""); CHECK(!tk::ota::resolve_redirect(kBase,b)); }
+  { std::array<char,tk::ota::kUrlBytes> b; b.fill('a'); CHECK(!tk::ota::resolve_redirect(kBase,b)); }
+  { auto b=set_buf("/m.json"); CHECK(!tk::ota::resolve_redirect("http://update.example/m.json",b)); }
+  {
+   std::string rel="//cdn.example/";rel.append(tk::ota::kUrlBytes-6-rel.size(),'a');
+   CHECK(rel.size()==tk::ota::kUrlBytes-6);
+   auto b=set_buf(rel.c_str());
+   CHECK(!tk::ota::resolve_redirect(kBase,b));
+  }
+  {
+   std::string rel="//cdn.example/";rel.append(tk::ota::kUrlBytes-7-rel.size(),'a');
+   CHECK(rel.size()==tk::ota::kUrlBytes-7);
+   auto b=set_buf(rel.c_str());
+   CHECK(tk::ota::resolve_redirect(kBase,b));
+   CHECK(std::string_view(b.data()).size()==1023);
+  }
+  {
+   std::string base_dir="https://update.example/very/long/";
+   std::string rel(tk::ota::kUrlBytes-base_dir.size(),'x');
+   auto b=set_buf(rel.c_str());
+   CHECK(!tk::ota::resolve_redirect(base_dir.c_str(),b));
+  }
+  for(const char* bad:{"javascript:alert(1)","http:evil.example/x","foo:bar/baz","https://user@update.example/m.json","/m.json#frag"}){
+   auto b=set_buf(bad);
+   CHECK(!tk::ota::resolve_redirect(kBase,b));
+  }
+  { auto b=set_buf("/a:b/m.json"); CHECK(tk::ota::resolve_redirect(kBase,b)&&std::string_view(b.data())=="https://update.example/a:b/m.json"); }
+  { auto b=set_buf("sub/a:b"); CHECK(tk::ota::resolve_redirect("https://update.example/v2/manifest.json",b)&&std::string_view(b.data())=="https://update.example/v2/sub/a:b"); }
+  { auto b=set_buf("?v=2"); CHECK(tk::ota::resolve_redirect("https://update.example/ota/m.json?v=1",b)&&std::string_view(b.data())=="https://update.example/ota/m.json?v=2"); }
+  { auto b=set_buf("?v=2"); CHECK(tk::ota::resolve_redirect("https://update.example",b)&&std::string_view(b.data())=="https://update.example/?v=2"); }
+  { auto b=set_buf("/../../../etc/passwd"); CHECK(tk::ota::resolve_redirect("https://update.example/a/b/c",b)&&std::string_view(b.data())=="https://update.example/etc/passwd"); }
+  { auto b=set_buf("/a/b/.."); CHECK(tk::ota::resolve_redirect("https://update.example/v1/m.json",b)&&std::string_view(b.data())=="https://update.example/a/"); }
+  { auto b=set_buf("/a/."); CHECK(tk::ota::resolve_redirect("https://update.example/v1/m.json",b)&&std::string_view(b.data())=="https://update.example/a/"); }
+  { auto b=set_buf("../x"); CHECK(tk::ota::resolve_redirect("https://update.example/a/b/c",b)&&std::string_view(b.data())=="https://update.example/a/x"); }
+ }
  reset();
 }
 }

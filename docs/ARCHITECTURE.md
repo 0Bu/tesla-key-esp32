@@ -853,7 +853,7 @@ scheduling; two consecutive recoverable timeouts remain an additional bound. Lat
 never parse or persist. Both adapters shut down read-side on failure while retaining reply writes.
 The wildcard handler advertises Connection: close and retires every body-bearing connection even
 on early route/Origin/admission rejection or exceptions. Bodyless requests keep existing behavior
-(except `/ota/check` and `/ota/update`, which also emit `Connection: close` when `req->content_len == 0`);
+(except dispatched `/ota/check` and `/ota/update` responses, which also emit `Connection: close` when `req->content_len == 0`);
 captive preflight failures return ESP_FAIL to reject unread input.
 
 `read_body_result()` distinguishes empty, oversize, OOM and receive failure (normal cap 2 KiB).
