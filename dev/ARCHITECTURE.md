@@ -43,7 +43,8 @@ VCSEC status sampling does not apply Infotainment wake-policy decisions; `NoWake
 suppress that VCSEC request. Each health probe shares one eight-second connect/response budget.
 Command/query ownership, including the VCSEC health probe, pauses windowed telemetry.
 The idle-window falling edge takes the same command owner without waiting, resamples command
-recency and defers disconnect while a command/probe owns it. Tick stamps are loaded before time
+recency, defers disconnect while a command/probe owns it, and when idle either drops a connected
+link or cancels an in-flight warm-up connect attempt (`stop_connecting()`). Tick stamps are loaded before time
 samples, preserving unsigned counter wrap without treating a newly started command as old.
 Each entry point explicitly chooses foreground/background `ConnectOrigin`.
 
@@ -586,7 +587,8 @@ VCSEC query: it may connect, establish a session and send plaintext `GET_STATUS`
 a wake. `/status` can save an unknown guarded `paired_at` once and query local HCI RSSI. These are
 exceptions to cache-only wording, not evidence of fresh authenticated vehicle acceptance.
 
-Failure classification uses adverts observed in the current attempt: no target advert means out of
+Failure classification uses the freshest valid matching target slot (`connectable_us`, tie-broken by
+`last_us`) observed in the current attempt: no valid advert (including zero timestamps) means out of
 range, non-connectable means BLE limit, connectable-but-failed means connection failure. Separate
 90 s history drives the UI. Background logs report first cause, changes and hourly repeats;
 foreground failures always report. Named SCAN_RSP cannot freshen a stale primary connectability bit.
@@ -735,7 +737,11 @@ See [User guide](USER_GUIDE.md#pairing-and-identity).
 
 `paired` means a VCSEC session is stored, not that the car has freshly accepted it. Remote status
 faults and command error text set a volatile `reauth` hint; they never erase sessions or rotate
-the key. A successful health response clears only the hint, without proving authenticated acceptance.
+the key. When that hint is active, `poll_existing_key_()` invalidates only the in-memory VCSEC peer
+and runner session before probing (`invalidate_vcsec_ram_session_()`), failing closed on lock timeout
+while preserving NVS storage and Infotainment state so a usable RAM session still renegotiates
+`SessionInfo` with the vehicle. A successful health response clears only the hint, without proving
+authenticated acceptance.
 After a status probe, positively established session absence or a persistent recovery hint permits
 same-key enrollment. Both durable and usable RAM sessions suppress enrollment without a recovery
 hint, so failed session persistence alone cannot resubmit the key. Storage or runtime-snapshot
@@ -911,7 +917,7 @@ New code must fit this contract or revise it with implementation and evidence in
 | `cache_mutex_` | mutex, RAII, leaf | the `last_known_*` caches (`std::string` members ⇒ an unlocked copy is torn-read UB) |
 | `result_mutex_` | mutex, RAII, leaf | the externally visible `last_error_` snapshot HTTP/MCP read after a foreground command |
 | `CommandCompletion::sem` | per-request binary semaphore, shared ownership | fixed callback result/error record and generation-checked completion, signalled even after its catch-all |
-| `StatusCompletion::sem` | per-request binary semaphore, shared ownership | fixed status-success fields; the C++ runner failure callback may allocate its request-owned `std::string error` before signalling |
+| `StatusCompletion::sem` | per-request binary semaphore, shared ownership | fixed status-success fields and a fixed 96-byte error buffer (`kErrorCapacity`) written atomically with generation checks and catch-all semantics |
 | `ble_events_.mux` | dedicated `portMUX`, bounded POD and lock-free timer read | every ready/queue push, pop and clear; same-generation/window RX bytes pack into 16 static 244-byte cells; arrival and empty-queue timestamps are linearized here; ordered link barriers; unlock before generation/Client/runner/storage/link work |
 | `telemetry_pending_mux_` | `portMUX`, innermost, POD only | the fixed latest-value nanopb mailboxes, pending mask and charging-amps feedback generation written synchronously by tesla-ble callbacks |
 
@@ -950,9 +956,9 @@ parsing or callbacks. Use `tk::SemGuard`/`MutexGuard` and `InFlightGuard` for un
 - Cache snapshots are copied without calls out; parse/publish after releasing Vehicle lock.
 - `clear_session_and_cache_()` acquires Vehicle internally; do not call it while holding that lock.
 - Request-local shared completion survives timeout; generation invalidation prevents late completion
-  of another request. `CommandCompletion` callbacks write fixed fields and signal even after their
-  catch-all, without logging. `StatusCompletion` has a separate allocatable runner-error path; its
-  success callback copies fixed fields. Runner callbacks execute synchronously under Vehicle
+  of another request. Both `CommandCompletion` and `StatusCompletion` callbacks write fixed fields
+  (including `StatusCompletion`'s bounded error buffer) and signal even after their catch-all,
+  without logging or allocating. Runner callbacks execute synchronously under Vehicle
   ownership: normally on the Vehicle task, or in the controller caller during cancellation/clear.
   They borrow the runner's error only until return and copy bounded visible bytes before signalling,
   without an intermediate heap-owned error or nested completion adapter.
