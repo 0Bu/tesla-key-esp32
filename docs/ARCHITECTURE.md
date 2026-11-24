@@ -738,11 +738,13 @@ writers share one boot-initialized static operation mutex; NTP applies once and 
 before release, so a later browser writer cannot overwrite that commit. Only IMMED mode is used.
 The 100 ms admission wait is not an operation deadline: libc timekeeping locks can wait indefinitely.
 Early `gettimeofday` initializes libc's private locks before producers; that SDK bootstrap can
-allocate and abort on OOM. No storage, logging or network operation runs under the application clock gate or inside the
-`sntp_sync_time` callback on lwIP `tiT`. `sntp_sync_time` publishes the synced second count atomically
-with release ordering, and `heap_supervisor` drains `clock_service_ntp_checkpoint()` from a safe
-task context (with bounded `try/catch` containment) so NVS/log I/O never runs on `tiT`. The hook
-catches exceptions before returning to C; failed sync cannot clear prior authority.
+allocate and abort on OOM. No storage, logging or network operation runs under the application clock
+gate. After releasing the gate on lwIP `tiT`, `sntp_sync_time` updates SNTP status, publishes the
+synced second count atomically with release ordering, and emits its sync/error status log
+(`ESP_LOGI`/`ESP_LOGE`); checkpoint NVS I/O, time formatting and checkpoint warning logs never run
+on `tiT` and are drained by `heap_supervisor` via `clock_service_ntp_checkpoint()` (with bounded
+`try/catch` containment). The hook catches exceptions before returning to C; failed sync cannot
+clear prior authority.
 
 Checkpoint restore validates the full decimal value/window and applies it only while the warm clock
 is below the clock floor, checking the syscall result. Successful NTP samples offer a checkpoint on
@@ -1089,7 +1091,7 @@ review generated `sdkconfig` when changing the SDK or target configuration.
 | default event loop | `CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=2304` | WiFi/IP/Ethernet lifecycle callbacks |
 | ESP-MQTT client tasks | locked component `MQTT_TASK_STACK`, default 6144; project does not override | publisher events and the transient configuration broker-probe callback in `http_config.cpp` |
 | ping session task | project leaves `ESP_PING_DEFAULT_CONFIG()` task settings unchanged | network-watchdog and Syslog ping completion callbacks |
-| lwIP task | `CONFIG_LWIP_TCPIP_TASK_STACK_SIZE=3072` | `sntp_sync_time` clock update and atomic checkpoint publication (no NVS or time formatting), plus `syslog_arp_lookup_cb` via `esp_netif_tcpip_exec` |
+| lwIP task | `CONFIG_LWIP_TCPIP_TASK_STACK_SIZE=3072` | `sntp_sync_time` clock update, atomic checkpoint publication and sync/error status log (no checkpoint NVS or time formatting), plus `syslog_arp_lookup_cb` via `esp_netif_tcpip_exec` |
 
 The SDK also owns the FreeRTOS timer-service (`CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH=2048`)
 and driver tasks. A configured stack allocation
