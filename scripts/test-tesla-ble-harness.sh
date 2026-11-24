@@ -202,6 +202,7 @@ for result, name in (
     ("void", "drive_command_runner_"), ("bool", "apply_ble_link_state_"),
     ("tk::SessionRuntimeState", "runtime_session_observation_locked_"),
     ("void", "publish_session_runtime_locked_"), ("void", "invalidate_session_runtime_locked_"),
+    ("bool", "invalidate_vcsec_ram_session_"),
     ("tk::SessionAvailability", "session_availability"), ("bool", "session_available"),
     ("bool", "persist_session_"), ("bool", "save_session_runtime_locked_"), ("bool", "load_nvs_sessions_"),
     ("void", "establish_verified_session_locked_"),

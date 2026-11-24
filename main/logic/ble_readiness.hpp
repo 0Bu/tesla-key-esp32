@@ -64,6 +64,21 @@ constexpr ConnectLifecycle connect_lifecycle_after_command_ready() {
     return {false, false};
 }
 
+struct DisconnectFollowup {
+    bool restart_scan_now;
+    bool defer_reconcile;
+};
+
+// When BLE_GAP_EVENT_DISCONNECT cannot acquire intent_mutex_ without blocking, preserve
+// want_connect_ (a task may be asserting a fresh connect() intent) and defer scan
+// reconciliation to service_pending(). If stop_connecting()/disconnect() owns the lock,
+// it clears want_connect_ under the lock so the deferred reconcile stays idle.
+constexpr DisconnectFollowup disconnect_followup(bool intent_locked,
+                                                 bool want_connect) noexcept {
+    if (!intent_locked) return {false, true};
+    return {want_connect, false};
+}
+
 constexpr bool connect_scan_should_start(bool want_connect,
                                          bool disconnecting,
                                          bool has_gap_link,
