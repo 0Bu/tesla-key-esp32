@@ -49,9 +49,10 @@ inline ConnectFail connect_fail_from_connectable(int connectable) {
 
 // A connect failure must be classified from an advert observed during this attempt, not from
 // the longer-lived 90 s snapshot kept for a stable UI. Equal timestamps count as current: the
-// connect intent and first scan callback can share the same microsecond tick.
+// connect intent and first scan callback can share the same microsecond tick. Zero means
+// uninitialized (no observation yet) and must not match negative boot-window thresholds.
 inline bool advert_seen_in_attempt(int64_t advert_us, int64_t attempt_start_us) {
-    return advert_us >= attempt_start_us;
+    return advert_us > 0 && advert_us >= attempt_start_us;
 }
 
 // A SCAN_RSP can refresh the target name/RSSI without carrying the primary advert's

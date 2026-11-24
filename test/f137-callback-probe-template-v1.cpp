@@ -73,6 +73,7 @@ public:
     std::atomic<bool> host_synced_{true}, scanning_{true}, connecting_{true};
     std::atomic<bool> conn_rssi_valid_{true};
     std::atomic<std::uint16_t> conn_handle_{7}, write_handle_{9};
+    std::atomic<std::uint16_t> pending_terminate_handle_{42};
     std::atomic<std::size_t> write_payload_size_{244};
     void* intent_mutex_{nullptr};
     using Connected = bool (*)(void*, bool, std::uint16_t, std::uint32_t);
@@ -105,6 +106,7 @@ static void check_published(const BleClient& client) {
     CHECK(client.host_reset_count_ == 1);
     CHECK(!client.host_synced_ && !client.scanning_ && !client.disconnecting_);
     CHECK(client.conn_handle_ == BLE_HS_CONN_HANDLE_NONE && client.write_handle_ == 0);
+    CHECK(client.pending_terminate_handle_ == BLE_HS_CONN_HANDLE_NONE);
     CHECK(client.ready_generation_ == tk::ble::kNoReadyGeneration);
     CHECK(client.write_payload_size_ == tk::kBleDefaultWritePayload);
     CHECK(!client.conn_rssi_valid_ && client.connection_generation_ == 12);

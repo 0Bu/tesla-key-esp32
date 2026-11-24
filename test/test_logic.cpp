@@ -796,13 +796,18 @@ static void test_connect_outcome() {
     CHECK(tk::connect_fail_from_connectable(0)  == tk::ConnectFail::AtBleLimit);
     CHECK(tk::connect_fail_from_connectable(1)  == tk::ConnectFail::ConnectFailed);
     CHECK(!tk::advert_seen_in_attempt(999, 1000));
+    CHECK(!tk::advert_seen_in_attempt(0, -100));
+    CHECK(!tk::advert_seen_in_attempt(0, 0));
     CHECK(tk::advert_seen_in_attempt(1000, 1000));
     CHECK(tk::advert_seen_in_attempt(1001, 1000));
     // A fresh SCAN_RSP must not promote an older/default connectability bit into the current
-    // attempt. Both target identity and the primary-advert bit need their own fresh timestamp.
+    // attempt, and uninitialized 0 timestamps must not match negative boot-window thresholds.
     CHECK(tk::connectable_verdict_in_attempt(true, true, 1001, 999, 1000) == -1);
     CHECK(tk::connectable_verdict_in_attempt(true, false, 999, 1001, 1000) == -1);
     CHECK(tk::connectable_verdict_in_attempt(false, true, 1001, 1001, 1000) == -1);
+    CHECK(tk::connectable_verdict_in_attempt(true, true, 100, 0, -90000000) == -1);
+    CHECK(tk::connectable_verdict_in_attempt(true, false, 0, 100, -90000000) == -1);
+    CHECK(tk::connectable_verdict_in_attempt(true, false, 100, 100, -90000000) == 0);
     CHECK(tk::connectable_verdict_in_attempt(true, false, 1000, 1000, 1000) == 0);
     CHECK(tk::connectable_verdict_in_attempt(true, true, 1001, 1001, 1000) == 1);
 
@@ -5245,6 +5250,19 @@ static void test_ble_readiness() {
     CHECK(!connect_attempt_may_advance(false, true));
     CHECK(!connect_attempt_may_advance(true, false));
     CHECK(!connect_attempt_may_advance(false, false));
+
+    // Contested BLE_GAP_EVENT_DISCONNECT preserves want_connect_ and defers scan reconciliation;
+    // uncontended disconnect restarts scanning immediately iff want_connect_ is true.
+    {
+        const DisconnectFollowup d0 = disconnect_followup(false, true);
+        CHECK(!d0.restart_scan_now && d0.defer_reconcile);
+        const DisconnectFollowup d1 = disconnect_followup(false, false);
+        CHECK(!d1.restart_scan_now && d1.defer_reconcile);
+        const DisconnectFollowup d2 = disconnect_followup(true, true);
+        CHECK(d2.restart_scan_now && !d2.defer_reconcile);
+        const DisconnectFollowup d3 = disconnect_followup(true, false);
+        CHECK(!d3.restart_scan_now && !d3.defer_reconcile);
+    }
 }
 
 // ── BLE phase countdown (logic/ble_phase.hpp) — what the Bluetooth row counts down ────────────

@@ -12,7 +12,7 @@
       "files": {
         "CMakeFiles/__idf_main.dir/ble_client.cpp.su": {
           "/COMPONENT_MAIN_DIR/ble_client.cpp :: int BleClient::on_gap_event(ble_gap_event*)": 544,
-          "/COMPONENT_MAIN_DIR/ble_client.cpp :: int BleClient::target_connectable_since(int64_t) const": 720,
+          "/COMPONENT_MAIN_DIR/ble_client.cpp :: int BleClient::target_connectable_since(int64_t) const": 752,
           "/COMPONENT_MAIN_DIR/ble_client.cpp :: std::vector<TeslaScan> BleClient::nearby() const": 816
         },
         "CMakeFiles/__idf_main.dir/board.cpp.su": {},
@@ -135,7 +135,7 @@
       "files": {
         "CMakeFiles/__idf_main.dir/ble_client.cpp.su": {
           "/COMPONENT_MAIN_DIR/ble_client.cpp :: int BleClient::on_gap_event(ble_gap_event*)": 544,
-          "/COMPONENT_MAIN_DIR/ble_client.cpp :: int BleClient::target_connectable_since(int64_t) const": 720,
+          "/COMPONENT_MAIN_DIR/ble_client.cpp :: int BleClient::target_connectable_since(int64_t) const": 752,
           "/COMPONENT_MAIN_DIR/ble_client.cpp :: std::vector<TeslaScan> BleClient::nearby() const": 816
         },
         "CMakeFiles/__idf_main.dir/board.cpp.su": {},
@@ -259,7 +259,7 @@
       "files": {
         "CMakeFiles/__idf_main.dir/ble_client.cpp.su": {
           "/COMPONENT_MAIN_DIR/ble_client.cpp :: int BleClient::on_gap_event(ble_gap_event*)": 528,
-          "/COMPONENT_MAIN_DIR/ble_client.cpp :: int BleClient::target_connectable_since(int64_t) const": 720,
+          "/COMPONENT_MAIN_DIR/ble_client.cpp :: int BleClient::target_connectable_since(int64_t) const": 752,
           "/COMPONENT_MAIN_DIR/ble_client.cpp :: std::vector<TeslaScan> BleClient::nearby() const": 800
         },
         "CMakeFiles/__idf_main.dir/board.cpp.su": {},
@@ -376,8 +376,8 @@
     "esp32c6": {
       "files": {
         "CMakeFiles/__idf_main.dir/ble_client.cpp.su": {
-          "/COMPONENT_MAIN_DIR/ble_client.cpp :: int BleClient::on_gap_event(ble_gap_event*)": 544,
-          "/COMPONENT_MAIN_DIR/ble_client.cpp :: int BleClient::target_connectable_since(int64_t) const": 720,
+          "/COMPONENT_MAIN_DIR/ble_client.cpp :: int BleClient::on_gap_event(ble_gap_event*)": 560,
+          "/COMPONENT_MAIN_DIR/ble_client.cpp :: int BleClient::target_connectable_since(int64_t) const": 752,
           "/COMPONENT_MAIN_DIR/ble_client.cpp :: std::vector<TeslaScan> BleClient::nearby() const": 800
         },
         "CMakeFiles/__idf_main.dir/board.cpp.su": {},

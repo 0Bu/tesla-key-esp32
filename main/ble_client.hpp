@@ -294,6 +294,7 @@ private:
     // already being terminated. The host task clears it only after publishing a fresh link.
     std::atomic<bool> disconnecting_{false};
     std::atomic<uint32_t> terminate_pending_generation_{tk::ble::kNoReadyGeneration};
+    std::atomic<uint16_t> pending_terminate_handle_{BLE_HS_CONN_HANDLE_NONE};
     std::atomic<bool> scan_pending_{false};
     // Connect-failure tracking for the target car (see connect_fail_recent()). Stamped on
     // every connect attempt; the count climbs on each GAP connect error and resets on a

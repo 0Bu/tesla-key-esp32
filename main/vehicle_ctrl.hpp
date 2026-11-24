@@ -540,6 +540,7 @@ private:
     void publish_session_runtime_locked_(UniversalMessage_Domain domain, tk::SessionSaveState save,
                                          uint32_t identity_epoch) noexcept;
     void invalidate_session_runtime_locked_(UniversalMessage_Domain domain) noexcept;
+    bool invalidate_vcsec_ram_session_() noexcept;
     // Cache epoch is separate from command_generation_: ordinary commands do not change identity.
     std::atomic<uint32_t> session_runtime_bits_{0};
     std::atomic<uint32_t> session_runtime_epoch_{0};

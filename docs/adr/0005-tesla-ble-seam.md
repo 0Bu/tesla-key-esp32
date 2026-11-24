@@ -41,9 +41,12 @@ It does not correct the upstream standalone tag-fetch path or establish hardware
 ### Pairing recovery and enrollment (2026-10-20)
 
 Remote VCSEC faults and command error text are advisory recovery signals, not authority to replace
-the local key or erase persisted sessions. The configured supervisor probes status, then sends the
-stored Charging Manager key automatically with bounded backoff if a session is verifiably absent
-or an advisory recovery hint persists. There is no manual enrollment endpoint. The hint is not an
+the local key or erase persisted sessions. When an advisory `pairing_recovery_hint_` persists,
+`poll_existing_key_()` invalidates only the in-memory VCSEC peer and runner session
+(`invalidate_vcsec_ram_session_()`) before probing status so a live RAM session still re-runs the
+`SessionInfo` handshake while persisted NVS sessions and keys stay intact. The configured
+supervisor probes status, then sends the stored Charging Manager key automatically with bounded
+backoff if a session is verifiably absent or the advisory recovery hint persists. There is no manual enrollment endpoint. The hint is not an
 authenticated key-removal diagnosis: it can cause only another request for the same key and role,
 with NFC-card and touchscreen approval still required. Local transmission completion is not car
 approval. `paired` continues to mean that a VCSEC session is stored.
@@ -92,7 +95,12 @@ The entries above were checked against [vehicle-command `83baa078`](https://gith
 #### Native execution, framing and session reuse
 
 - **Connection ownership**: Failed GAP connection attempts do not publish LinkDown or erase
-  restored runtime sessions; an established disconnect/reset still invalidates them. Deferred
+  restored runtime sessions; an established disconnect/reset still invalidates them. Contested
+  `BLE_GAP_EVENT_DISCONNECT` preserves `want_connect_` and defers scan reconciliation via
+  `scan_pending_`, foreign/orphan disconnect handles cannot retire the active link handle, and
+  contested `BLE_GAP_EVENT_CONNECT` clears `connecting_`, retries failed `ble_gap_terminate`
+  calls via `pending_terminate_handle_` in `service_pending()`, and sets `scan_pending_` so
+  active scan intents recover. Deferred
   scan/termination work has a vehicle-loop consumer, and termination retains the connection
   generation captured by its request. It cannot retire a later command's link. Expired caller
   budgets are refused after the Vehicle-lock wait, before enqueue; zero is never substituted for
@@ -140,7 +148,10 @@ The entries above were checked against [vehicle-command `83baa078`](https://gith
 #### Command execution and response admission
 
 - **Serialized command execution**: Protected by `command_mutex_` to prevent BLE radio contention and preserve FreeRTOS task high-water mark.
-- **Encrypted VCSEC admission**: An AES-GCM-declared response requires an initialized VCSEC peer and a non-empty request hash before decryption. Missing context, a failed tag check or a repeated response-carried counter (including zero) drops it before protobuf decoding, sleep updates or status callbacks; it cannot fall through as plaintext. `Peer::validate_response_counter()` supplies the per-request window reset by `Client` when signing a new request, following `vehicle-command`'s decryption-context and counter handling. Intentional passive plaintext `VehicleStatus` broadcasts remain accepted by the separate status path.
+- **Encrypted VCSEC and CarServer admission**: Both `handle_carserver_frame_()` and the VCSEC
+  handlers (`handle_vcsec_frame_()` / `handle_empty_vcsec_reply_()`) reject unsupported non-zero
+  `which_sub_sigData` / non-`AES_GCM_Response_data` signature variants fail-closed, and non-empty
+  frame parsing requires `protobuf_message_as_bytes_tag`. An AES-GCM-declared response requires an initialized VCSEC peer and a non-empty request hash before decryption. Missing context, a failed tag check or a repeated response-carried counter (including zero) drops it before protobuf decoding, sleep updates or status callbacks; it cannot fall through as plaintext. `Peer::validate_response_counter()` supplies the per-request window reset by `Client` when signing a new request, following `vehicle-command`'s decryption-context and counter handling. Intentional passive plaintext `VehicleStatus` broadcasts remain accepted by the separate status path.
 - **Contextual application no-ops**: upstream
   [`getCarServerResponse`](https://github.com/teslamotors/vehicle-command/blob/fc5a1910ad45c42921d541089e3e366d0b897f52/pkg/vehicle/infotainment.go)
   returns a NominalError for an application ERROR; that error is not universal success. This
