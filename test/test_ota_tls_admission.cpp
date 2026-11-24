@@ -35,9 +35,12 @@
 #include <memory>
 #include <string_view>
 #include <new>
+#include <stdexcept>
 #include <string>
+#include <sys/wait.h>
 #include <thread>
 #include <type_traits>
+#include <unistd.h>
 #include <vector>
 
 uint32_t esp_random(){ return 0x12345678; } // Passive deterministic boot nonce, no entropy claim.
@@ -53,6 +56,7 @@ void observe_body_allocation(std::size_t);
 #define TEST_NOIPA
 #endif
 static std::atomic<bool> fail_body_reserve{false};
+static std::atomic<bool> fail_nothrow_alloc{false};
 static std::atomic<int> fail_body_alloc_countdown{0};
 TEST_NOIPA void* operator new(std::size_t n) {
     fixture::observe_body_allocation(n);
@@ -69,6 +73,7 @@ TEST_NOIPA void operator delete(void* p) noexcept {std::free(p);}
 TEST_NOIPA void operator delete(void* p,std::size_t) noexcept {std::free(p);}
 // Pair scalar nothrow allocation (e.g. OtaOperation) with malloc/free without tripping body tracking.
 TEST_NOIPA void* operator new(std::size_t n,const std::nothrow_t&) noexcept {
+    if (fail_nothrow_alloc.exchange(false)) return nullptr;
     return std::malloc(n?n:1);
 }
 TEST_NOIPA void operator delete(void* p,const std::nothrow_t&) noexcept {::operator delete(p);}
@@ -120,6 +125,9 @@ bool async_copy_ok=true;
 unsigned async_copies=0,async_completions=0,upload_reads=0;
 size_t upload_cursor=0;
 int upload_fail_at=-1;
+int upload_throw_at=-1;
+bool upload_throw_bad_alloc=false;
+int upload_flip_channel_at=-1;
 int upload_expire_at=-1;
 bool upload_expire_on_end=false;
 std::string upload_body,upload_reply,upload_status;
@@ -168,7 +176,7 @@ unsigned selected_stack=0,selected_priority=0;
 std::string manifest;
 std::string changelog="{\"version\":\"1.6.3\",\"changelog\":\"A change\"}";
 unsigned changelog_status=200;
-int raw_end_error=ESP_OK,raw_select_error=ESP_OK;
+int raw_end_error=ESP_OK,raw_select_error=ESP_OK,raw_abort_error=ESP_OK;
 std::string terminal_case;
 std::string image_version="1.6.3",extra_header;
 std::vector<std::string> redirect_locations,requested_requests;
@@ -240,7 +248,7 @@ extern "C" void vTaskDelay(TickType_t ticks){
  if(fixture::cleanup_hook_armed&&!fixture::cleanup_hook_entered){
   std::this_thread::sleep_for(std::chrono::microseconds(50));return;
  }
- if(ticks==10000&&(fixture::terminal_case=="uncertain"||fixture::terminal_case=="upload-uncertain"))fixture::check_uncertain_terminal();
+ if(ticks==10000&&(fixture::terminal_case=="uncertain"||fixture::terminal_case=="upload-uncertain"||fixture::terminal_case=="upload-abort-uncertain"))fixture::check_uncertain_terminal();
  fixture::now.fetch_add(ticks);
  if(ticks==10&&!fixture::hold_connect&&!fixture::hold_image_read&&fixture::worker.joinable()&&!fixture::worker_returned.load())
   std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -347,7 +355,8 @@ esp_err_t esp_ota_end(esp_ota_handle_t h){
 }
 esp_err_t esp_ota_abort(esp_ota_handle_t h){
  CHECK(!fixture::network_thread&&h==1&&fixture::raw_handle_live);fixture::check_writer_owner();
- ++fixture::aborts;fixture::raw_handle_live=false;return ESP_OK; // Abort is permitted after deadline.
+ ++fixture::aborts;if(fixture::raw_abort_error==ESP_OK)fixture::raw_handle_live=false;
+ return fixture::raw_abort_error; // Abort is permitted after deadline.
 }
 esp_err_t esp_ota_set_boot_partition(const esp_partition_t* p){
  CHECK(!fixture::network_thread&&p==&fixture::inactive&&fixture::ends==1);
@@ -396,6 +405,11 @@ int httpd_req_to_sockfd(httpd_req_t*){return -1;}
 int httpd_req_recv(httpd_req_t*,char* data,size_t n){
  ++fixture::upload_reads;
  if(fixture::upload_expire_at==static_cast<int>(fixture::upload_reads))fixture::now=300000;
+ if(fixture::upload_flip_channel_at==static_cast<int>(fixture::upload_reads))ota_set_channel(tk::OtaChannel::Release);
+ if(fixture::upload_throw_at==static_cast<int>(fixture::upload_reads)){
+  if(fixture::upload_throw_bad_alloc)throw std::bad_alloc();
+  throw std::runtime_error("upload transport throw");
+ }
  if(fixture::upload_fail_at==static_cast<int>(fixture::upload_reads))return -1;
  const auto count=std::min({n,fixture::read_limit,fixture::upload_body.size()-fixture::upload_cursor});
  std::memcpy(data,fixture::upload_body.data()+fixture::upload_cursor,count);
@@ -456,6 +470,17 @@ void check_effect_admission(){
  check_writer_owner();CHECK(!reject_late_effect||now.load()<30000);
 }
 [[noreturn]] void check_uncertain_terminal(){
+ if(terminal_case=="upload-abort-uncertain"){
+  CHECK(restart_calls==0&&ota_is_busy());
+  CHECK(s_operation_gate.state()==tk::OtaIdentityGateState::Ota&&ota_get_status().state==OtaState::Error);
+  CHECK(ota_get_status().upload);
+  CHECK(s_operation.load()&&!s_operation.load()->coordinator.writer_lease_released());
+  CHECK(s_operation.load()->coordinator.outcome()==tk::ota::Outcome::WriterUncertain);
+  CHECK(async_copies==1&&async_completions==1&&init_calls==0&&upload_status=="400 Bad Request");
+  CHECK(upload_reply.find("\"outcome\":\"unknown\"")!=std::string::npos);
+  CHECK(std::string_view(ota_get_status().message.data())=="upload uncertain; do not retry");
+  std::_Exit(0);
+ }
  CHECK(selectors==1&&ends==1&&restart_calls==0&&ota_is_busy());
  CHECK(s_operation_gate.state()==tk::OtaIdentityGateState::Ota&&ota_get_status().state==OtaState::Error);
  CHECK(s_operation.load()&&!s_operation.load()->coordinator.writer_lease_released());
@@ -483,7 +508,7 @@ void reset(std::initializer_list<size_t> samples={65536}){
  info_calls=0;throw_memory_log=throw_memory_sample=false;
  delivered_bytes=header_end_bytes=0;read_limit=71;
  init_calls=connects=destroys=reads=deletes=0;begins=writes=ends=selectors=aborts=restart_calls=0;
- init_null=false;connect_ok=create_ok=lock_ok=true;throw_create=false;fail_body_reserve=false;fail_body_alloc_countdown=0;
+ init_null=false;connect_ok=create_ok=lock_ok=true;throw_create=false;fail_body_reserve=false;fail_nothrow_alloc=false;fail_body_alloc_countdown=0;
  cleanup_hook_armed=cleanup_hook_entered=cleanup_hook_released=false;
  worker_returned=worker_paused_after_cleanup=false;
  changelog_destroy_fails=jump_image_clock=image_clock_jumped=reject_late_effect=raw_handle_live=false;
@@ -491,13 +516,13 @@ void reset(std::initializer_list<size_t> samples={65536}){
  sdk_state=ESP_OTA_IMG_VALID;queries=0;selected_task=nullptr;selected_argument=nullptr;
  queued_http_work=nullptr;queued_http_argument=nullptr;queue_calls=0;
  queue_ok=true;queue_throw_before=queue_throw_after=queue_inline=http_request_live=throw_entry_sample=require_error_owner=false;
- hold_connect=release_connect=connect_entered=hold_image_read=image_read_entered=false;changelog_status=200;raw_end_error=raw_select_error=ESP_OK;
+ hold_connect=release_connect=connect_entered=hold_image_read=image_read_entered=false;changelog_status=200;raw_end_error=raw_select_error=raw_abort_error=ESP_OK;
  image_version="1.6.3";image_mutation=0;extra_header.clear();redirect_locations.clear();requested_requests.clear();
  inactive={ESP_PARTITION_TYPE_APP,0,0x20000,0x1f0000};
  manifest=selected_manifest("1.6.3");changelog="{\"version\":\"1.6.3\",\"changelog\":\"A change\"}";
  std::snprintf(running_description.version,sizeof(running_description.version),"1.6.2");
  ota_set_channel(tk::OtaChannel::Release);
- async_copy_ok=true;async_copies=async_completions=upload_reads=0;upload_cursor=0;upload_fail_at=-1;
+ async_copy_ok=true;async_copies=async_completions=upload_reads=0;upload_cursor=0;upload_fail_at=-1;upload_throw_at=-1;upload_throw_bad_alloc=false;upload_flip_channel_at=-1;
  upload_expire_at=-1;upload_expire_on_end=false;
  upload_body.clear();upload_reply.clear();upload_status.clear();written_image.clear();
 }
@@ -596,11 +621,95 @@ void upload_checks(){
   CHECK(ota_get_status().channel==tk::OtaChannel::Dev&&ota_get_status().upload);
   CHECK(ota_get_status().configured_channel==(scenario==6?tk::OtaChannel::Release:tk::OtaChannel::Dev));
   if(scenario==0||scenario==4||scenario==5||scenario==6||scenario==7)CHECK(begins==0);
-  if(scenario==1)CHECK(ends==1&&aborts==0);
+  if(scenario==1){CHECK(ends==1&&aborts==0);CHECK(std::string_view(ota_get_status().message.data())=="upload validation failed");}
   if(scenario==2||scenario==3)CHECK(aborts==1);
-  if(scenario==8)CHECK(aborts==1&&ends==0);
-  if(scenario==9)CHECK(aborts==0&&ends==1);
+  if(scenario==2)CHECK(std::string_view(ota_get_status().message.data())=="upload interrupted");
+  if(scenario==6)CHECK(std::string_view(ota_get_status().message.data())=="upload refused");
+  if(scenario==7)CHECK(std::string_view(ota_get_status().message.data())=="update deadline reached");
+  if(scenario==8){CHECK(aborts==1&&ends==0);CHECK(std::string_view(ota_get_status().message.data())=="update deadline reached");}
+  if(scenario==9){CHECK(aborts==0&&ends==1);CHECK(std::string_view(ota_get_status().message.data())=="update deadline reached");}
   if(scenario==10)CHECK(begins==0);
+ }
+ // Direct upload preserves NoMemory, Deadline, WriterUncertain, and catch outcomes distinctly.
+ for(bool on_end:{false,true}){
+  reset();ota_set_channel(tk::OtaChannel::Dev);upload_body=image_body();
+  if(on_end)raw_end_error=ESP_ERR_NO_MEM;
+  else{raw_write_error_at=1;raw_write_error=ESP_ERR_NO_MEM;}
+  CHECK(ota_upload_start(&req,handed)==R::Started&&handed);run_selected();
+  CHECK(!ota_is_busy()&&!raw_handle_live&&async_completions==1&&upload_status=="400 Bad Request");
+  CHECK(ota_get_status().state==OtaState::Error&&ota_get_status().upload);
+  CHECK(std::string_view(ota_get_status().message.data())==kOtaNoMemory);
+  CHECK(aborts==int(!on_end)&&ends==int(on_end)&&selectors==0);
+ }
+ for(bool bad_alloc:{true,false}){
+  reset();ota_set_channel(tk::OtaChannel::Dev);upload_body=image_body();
+  upload_throw_at=10;upload_throw_bad_alloc=bad_alloc;
+  CHECK(ota_upload_start(&req,handed)==R::Started&&handed);run_selected();
+  CHECK(!ota_is_busy()&&!raw_handle_live&&async_completions==1&&upload_status=="400 Bad Request");
+  CHECK(ota_get_status().state==OtaState::Error&&ota_get_status().upload);
+  CHECK(std::string_view(ota_get_status().message.data())==(bad_alloc?kOtaNoMemory:"update operation failed unexpectedly"));
+  CHECK(aborts==1&&ends==0&&selectors==0);
+ }
+ {
+  reset();ota_set_channel(tk::OtaChannel::Dev);upload_body=image_body();
+  upload_flip_channel_at=10;
+  CHECK(ota_upload_start(&req,handed)==R::Started&&handed);run_selected();
+  CHECK(!ota_is_busy()&&!raw_handle_live&&async_completions==1&&upload_status=="400 Bad Request");
+  CHECK(ota_get_status().state==OtaState::Error&&ota_get_status().upload);
+  CHECK(std::string_view(ota_get_status().message.data())=="upload aborted");
+  CHECK(aborts==1&&ends==0&&selectors==0);
+ }
+ // Allocation failure of OtaOperation returns Result::NoMemory (HTTP 503) and cleans up gate.
+ reset();ota_set_channel(tk::OtaChannel::Dev);fail_nothrow_alloc=true;
+ CHECK(ota_upload_start(&req,handed)==R::NoMemory&&!handed&&!ota_is_busy()&&async_copies==0);
+ CHECK(ota_get_status().state==OtaState::Error&&ota_get_status().upload&&ota_get_status().channel==tk::OtaChannel::Dev);
+ CHECK(std::string_view(ota_get_status().message.data())==kOtaNoMemory&&!s_operation.load());
+ CHECK(s_operation_gate.state()==tk::OtaIdentityGateState::Idle);
+ reset();fail_nothrow_alloc=true;
+ CHECK(ota_check_start(42)==R::NoMemory&&!ota_is_busy());
+ CHECK(ota_get_status().state==OtaState::Error&&!ota_get_status().upload&&ota_get_status().target_pr==42);
+ CHECK(std::string_view(ota_get_status().message.data())==kOtaNoMemory&&!s_operation.load());
+ CHECK(s_operation_gate.state()==tk::OtaIdentityGateState::Idle);
+ reset_for_image();fail_nothrow_alloc=true;
+ CHECK(start_confirmed()==R::NoMemory&&!ota_is_busy());
+ CHECK(ota_get_status().state==OtaState::Error&&!ota_get_status().upload&&!ota_get_status().update_available);
+ CHECK(std::string_view(ota_get_status().message.data())==kOtaNoMemory&&!s_operation.load());
+ CHECK(s_operation_gate.state()==tk::OtaIdentityGateState::Idle);
+ // Outcome helpers and non-clobbering terminal cancellation guard.
+ CHECK(std::string_view(upload_error_message(tk::ota::Outcome::WriterUncertain,"fallback"))=="upload uncertain; do not retry");
+ CHECK(std::string_view(upload_error_message(tk::ota::Outcome::NoMemory,"fallback"))==kOtaNoMemory);
+ CHECK(std::string_view(upload_error_message(tk::ota::Outcome::Deadline,"fallback"))=="update deadline reached");
+ CHECK(std::string_view(upload_error_message(tk::ota::Outcome::NetworkError,"fallback"))=="fallback");
+ CHECK(std::string_view(coordinator_error_message(tk::ota::Outcome::WriterUncertain,false,false,"fallback"))=="update outcome is uncertain");
+ CHECK(std::string_view(coordinator_error_message(tk::ota::Outcome::Deadline,false,true,"fallback"))=="update check deadline reached");
+ {
+  reset();ota_set_channel(tk::OtaChannel::Dev);upload_body=image_body();
+  raw_write_error_at=1;raw_write_error=ESP_ERR_NO_MEM;
+  CHECK(ota_upload_start(&req,handed)==R::Started&&handed);
+  auto* op=s_operation.load();CHECK(op);
+  op->coordinator.cancel(tk::ota::Outcome::NoMemory);
+  cancel_coordinator_if_active(op->coordinator,tk::ota::Outcome::NetworkError);
+  CHECK(op->coordinator.outcome()==tk::ota::Outcome::NoMemory);
+  run_selected();
+ }
+ // Failed abort during upload/catch turns outcome into WriterUncertain and must not be overwritten.
+ for(int uncertain_mode=0;uncertain_mode<4;++uncertain_mode){
+  reset();ota_set_channel(tk::OtaChannel::Dev);upload_body=image_body();raw_abort_error=ESP_FAIL;
+  if(uncertain_mode==0)upload_fail_at=10;
+  else if(uncertain_mode==1)upload_expire_at=15;
+  else if(uncertain_mode==2){upload_throw_at=10;upload_throw_bad_alloc=true;}
+  else{upload_throw_at=10;upload_throw_bad_alloc=false;}
+  std::cout<<std::flush;std::cerr<<std::flush;
+  const pid_t pid=fork();
+  CHECK(pid>=0);
+  if(pid==0){
+   terminal_case="upload-abort-uncertain";
+   CHECK(ota_upload_start(&req,handed)==R::Started&&handed);
+   run_selected();
+   CHECK(false);
+  }
+  int status=0;CHECK(waitpid(pid,&status,0)==pid);
+  CHECK(WIFEXITED(status)&&WEXITSTATUS(status)==0);
  }
 }
 void run_queued_http(){

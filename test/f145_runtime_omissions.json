@@ -5,7 +5,7 @@
     {
       "id": "pre-init-largest",
       "path": "main/ota_transport.cpp",
-      "before": "if (!tk::tls_attempt_affordable(r.largest_internal(r.context))) return NetResult::NoMemory;",
+      "before": "if (!tk::ota_recovery_memory_affordable(pre_init_largest,\n            tk::ota_recovery_required_bytes(tk::OtaRecoveryUse::TlsAdmission))) return NetResult::NoMemory;",
       "occurrence": 0,
       "after": "if (false) return NetResult::NoMemory;",
       "expected": "normal fixture rejects actual init_calls==0 assertion for low INTERNAL (total free remains high)"
@@ -13,17 +13,17 @@
     {
       "id": "post-init-largest",
       "path": "main/ota_transport.cpp",
-      "before": "if (!tk::tls_attempt_affordable(r.largest_internal(r.context))) return NetResult::NoMemory;",
-      "occurrence": 1,
+      "before": "if (!tk::ota_recovery_memory_affordable(post_context_largest,\n            tk::ota_recovery_required_bytes(tk::OtaRecoveryUse::TlsAdmission))) return NetResult::NoMemory;",
+      "occurrence": 0,
       "after": "if (false) return NetResult::NoMemory;",
       "expected": "normal fixture rejects connects==0 for high,low INTERNAL sequence; real connect spy was entered"
     },
     {
       "id": "total-free-is-not-largest",
       "path": "main/ota_transport.cpp",
-      "before": "if (!tk::tls_attempt_affordable(r.largest_internal(r.context))) return NetResult::NoMemory;",
+      "before": "if (!tk::ota_recovery_memory_affordable(pre_init_largest,\n            tk::ota_recovery_required_bytes(tk::OtaRecoveryUse::TlsAdmission))) return NetResult::NoMemory;",
       "occurrence": 0,
-      "after": "if (!((void)r.largest_internal(r.context), tk::tls_attempt_affordable(esp_get_free_heap_size()))) return NetResult::NoMemory;",
+      "after": "if (!((void)pre_init_largest, tk::ota_recovery_memory_affordable(esp_get_free_heap_size(),\n            tk::ota_recovery_required_bytes(tk::OtaRecoveryUse::TlsAdmission)))) return NetResult::NoMemory;",
       "expected": "normal fixture must reject init_calls==0; the consumed physical low sample repeats rather than causing sample-exhaustion credit"
     },
     {

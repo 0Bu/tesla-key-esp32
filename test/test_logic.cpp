@@ -1091,7 +1091,6 @@ static void test_target() {
 // ─── OTA manifest body and version freshness contracts ─────────────────────────
 static void test_ota_contract() {
     using Order = tk::OtaVersionOrder;
-    using Read = tk::BoundedBodyReadResult;
 
     CHECK(tk::ota_upload_admissible(tk::OtaChannel::Dev, 512, "application/octet-stream"));
     CHECK(tk::ota_upload_admissible(tk::OtaChannel::Dev, tk::kOtaUploadMaxBytes, "application/octet-stream"));
@@ -1233,42 +1232,6 @@ static void test_ota_contract() {
     const auto unterminated_view = tk::bounded_c_string_view(unterminated);
     CHECK(unterminated_view.size() == sizeof(unterminated));
     CHECK(!tk::canonical_ota_version(unterminated_view));
-
-    tk::BoundedHttpBodyGate exact_limit(8192, false);
-    CHECK(exact_limit.valid_headers());
-    CHECK(exact_limit.next_read_size(512) == 512);
-    CHECK(exact_limit.accept_read(8191, false) == Read::Continue);
-    CHECK(exact_limit.next_read_size(512) == 2);  // last accepted byte plus oversize probe
-    CHECK(exact_limit.accept_read(1, true) == Read::Complete);
-    CHECK(exact_limit.bytes_received() == 8192);
-
-    tk::BoundedHttpBodyGate over_limit(8193, false);
-    CHECK(!over_limit.valid_headers());
-    CHECK(over_limit.accept_read(1, true) == Read::Reject);
-
-    tk::BoundedHttpBodyGate negative_after_prefix(10, false);
-    CHECK(negative_after_prefix.accept_read(5, false) == Read::Continue);
-    CHECK(negative_after_prefix.accept_read(-1, false) == Read::Reject);
-
-    tk::BoundedHttpBodyGate truncated(10, false);
-    CHECK(truncated.accept_read(5, false) == Read::Continue);
-    CHECK(truncated.accept_read(0, true) == Read::Reject);
-
-    tk::BoundedHttpBodyGate premature_complete(10, false);
-    CHECK(premature_complete.accept_read(5, true) == Read::Reject);
-
-    tk::BoundedHttpBodyGate empty(0, false);
-    CHECK(!empty.valid_headers());
-    CHECK(empty.accept_read(0, true) == Read::Reject);
-
-    tk::BoundedHttpBodyGate chunked_exact(0, true);
-    CHECK(chunked_exact.valid_headers());
-    CHECK(chunked_exact.accept_read(8192, true) == Read::Complete);
-
-    tk::BoundedHttpBodyGate chunked_over(0, true);
-    CHECK(chunked_over.accept_read(8192, false) == Read::Continue);
-    CHECK(chunked_over.next_read_size(512) == 1);
-    CHECK(chunked_over.accept_read(1, true) == Read::Reject);
 
     std::string depth_16_manifest = "{\"version\":\"1.2.3\",\"ignored\":";
     depth_16_manifest.append(15, '[');  // root object + 15 arrays = the accepted depth 16

@@ -3351,7 +3351,8 @@ def require_ping_probe_contract(header: str, generation_header: str,
 
 
 def require_ota_fetch_contract(ota_source: str, ota_logic: str,
-                               manifest_header: str) -> None:
+                               manifest_header: str,
+                               http_header: str, http_source: str) -> None:
     for token in ("static constexpr size_t kOtaManifestInitialReserveBytes = 4096;",
                   "static constexpr size_t kOtaChangelogInitialReserveBytes = 1536;"):
         if token not in ota_source:
@@ -3401,11 +3402,26 @@ def require_ota_fetch_contract(ota_source: str, ota_logic: str,
         "inline constexpr std::size_t kOtaVersionMaxBytes = 31;",
         "inline constexpr std::size_t kOtaManifestMaxBytes = 8192;",
         "input.size() > kOtaVersionMaxBytes",
-        "class BoundedHttpBodyGate",
-        "remaining_with_probe = (limit_ - received_) + 1",
     ):
         if token not in ota_logic:
             raise AssertionError(f"OTA bounded pure contract missing {token!r}")
+    for token in (
+        "class Framing {",
+        "ParseResult feed(const std::uint8_t*, std::size_t) noexcept;",
+        "ParseResult eof() noexcept;",
+        "enum class State : std::uint8_t { Headers, ChunkMetadata, Body, Trailers, Done };",
+        "std::uint64_t body_bytes() const noexcept { return body_bytes_; }",
+    ):
+        if token not in http_header:
+            raise AssertionError(f"OTA framing header contract missing {token!r}")
+    for token in (
+        "header_bytes_ >= limits_.headers_bytes",
+        "s.body_bytes_ == 0 || (!s.eof_body_ && !s.chunked_ && s.remaining_)",
+        "if (parsed != take || used+parsed != n) reject();",
+        "if (result_ != ParseResult::Complete) reject();",
+    ):
+        if token not in http_source:
+            raise AssertionError(f"OTA framing source contract missing {token!r}")
     for token in (
         "for (const cJSON* item = root->child; item; item = item->next)",
         "for (const cJSON* later = item->next; later; later = later->next)",
@@ -5403,6 +5419,8 @@ def require_runtime_source_contracts() -> None:
         SOURCES["ota_update.cpp"],
         (MAIN / "logic/ota_contract.hpp").read_text(encoding="utf-8"),
         (MAIN / "ota_manifest.hpp").read_text(encoding="utf-8"),
+        (MAIN / "ota_http.hpp").read_text(encoding="utf-8"),
+        SOURCES["ota_http.cpp"],
     )
     require_ota_status_lock_contract(
         SOURCES["ota_update.cpp"],
@@ -7446,17 +7464,19 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
     ota_source = SOURCES["ota_update.cpp"]
     ota_logic = (MAIN / "logic/ota_contract.hpp").read_text(encoding="utf-8")
     manifest_header = (MAIN / "ota_manifest.hpp").read_text(encoding="utf-8")
+    http_header = (MAIN / "ota_http.hpp").read_text(encoding="utf-8")
+    http_source = SOURCES["ota_http.cpp"]
     moved_release = ota_source.replace("std::string{}.swap(body);", "", 1).replace(
         "res.available.assign(available.data(), available.size());",
         "res.available.assign(available.data(), available.size());\n"
         "    std::string{}.swap(body);",
         1,
     )
-    for label, source, logic, manifest in (
+    for label, source, logic, manifest, framing_h, framing_cpp in (
         (
             "OTA bounded-body gate bypass",
             ota_source.replace("out.reserve(initial_reserve);", "out.reserve(16384);", 1),
-            ota_logic, manifest_header,
+            ota_logic, manifest_header, http_header, http_source,
         ),
         (
             "OTA manifest reserve bound drift",
@@ -7465,40 +7485,52 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
                 "static constexpr size_t kOtaManifestInitialReserveBytes = 16384;",
                 1,
             ),
-            ota_logic, manifest_header,
+            ota_logic, manifest_header, http_header, http_source,
         ),
         (
             "OTA JSON materialization bypass",
             ota_source.replace("tk::json_materialize<cJSON>", "fixture_json_parse<cJSON>", 1),
-            ota_logic, manifest_header,
+            ota_logic, manifest_header, http_header, http_source,
         ),
         (
             "OTA duplicate-key inspector bypass",
             ota_source.replace("tk::inspect_ota_manifest(j.get())", "fixture_manifest(j.get())", 1),
-            ota_logic, manifest_header,
+            ota_logic, manifest_header, http_header, http_source,
         ),
         (
             "OTA validate-before-copy bypass",
             ota_source.replace("tk::canonical_ota_version(available)", "true", 1),
-            ota_logic, manifest_header,
+            ota_logic, manifest_header, http_header, http_source,
         ),
-        ("OTA body-release ordering", moved_release, ota_logic, manifest_header),
+        ("OTA body-release ordering", moved_release, ota_logic, manifest_header, http_header, http_source),
         (
             "OTA manifest bound drift",
             ota_source,
             ota_logic.replace("kOtaManifestMaxBytes = 8192", "kOtaManifestMaxBytes = 16384", 1),
-            manifest_header,
+            manifest_header, http_header, http_source,
         ),
         (
             "OTA duplicate-root comparison bypass",
             ota_source, ota_logic,
             manifest_header.replace("std::strcmp(item->string, later->string) == 0", "false", 1),
+            http_header, http_source,
+        ),
+        (
+            "OTA framing header class drift",
+            ota_source, ota_logic, manifest_header,
+            http_header.replace("class Framing {", "class LegacyFraming {", 1),
+            http_source,
+        ),
+        (
+            "OTA framing eof completion bypass",
+            ota_source, ota_logic, manifest_header, http_header,
+            http_source.replace("if (result_ != ParseResult::Complete) reject();", "", 1),
         ),
     ):
         require_mutation_rejected(
             label,
-            lambda source=source, logic=logic, manifest=manifest:
-                require_ota_fetch_contract(source, logic, manifest),
+            lambda source=source, logic=logic, manifest=manifest, framing_h=framing_h, framing_cpp=framing_cpp:
+                require_ota_fetch_contract(source, logic, manifest, framing_h, framing_cpp),
         )
 
     status_source = SOURCES["http_status.cpp"]

@@ -1,5 +1,6 @@
 #include "http_handlers.hpp"
 #include "logic/mcp.hpp"
+#include "logic/command_fault.hpp"
 #include "logic/command_result.hpp"
 #include "logic/json_syntax.hpp"
 #include "logic/link_state.hpp"
@@ -216,14 +217,16 @@ static esp_err_t handle_tools_call_(GuardedReq rq, const tk::mcp_json::RpcId& id
     if (ok) rq.reply()->state.succeeded();
 
     // Command outcome text is shared with the REST /command path (logic/command_result.hpp)
-    // so the two can never report the same outcome differently. Tool-level failures are
-    // isError results, not JSON-RPC errors (the protocol reserves those for malformed calls).
+    // so the two can never report the same outcome differently. The runner already normalizes
+    // accepted no-ops for the current command; raw "already_set" cannot promote a failed
+    // command to success. Tool-level failures are isError results, not JSON-RPC errors
+    // (the protocol reserves those for malformed calls).
     std::string err = g_vehicle->last_command_error();
-    const bool effective_ok = ok || tk::is_nominal_already_set(err);
-    const char* text = ok && no_op != tk::CommandNoOp::None ? tk::command_noop_text(no_op) :
-        tk::command_result_text(effective_ok, err);
+    const char* text = !ok && tk::is_nominal_already_set(err)
+        ? tk::uncertain_command_reason() : tk::command_result_text(ok, err);
+    if (ok && no_op != tk::CommandNoOp::None) text = tk::command_noop_text(no_op);
     return send_effect_json(rq, 200, tk::mcp_json::build_result_envelope(
-        id, tk::mcp_json::build_tool_result(text, !effective_ok,
+        id, tk::mcp_json::build_tool_result(text, !ok,
             ok ? tk::command_noop_code(no_op) : nullptr)).release());
 }
 

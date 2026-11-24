@@ -462,6 +462,33 @@ static void test_nominal_charge_reply_adapters() {
             }
         }
     }
+    // Raw "already_set" with !ok must keep REST 502 and MCP isError=true in parity.
+    for (const auto no_op_state : {tk::CommandNoOp::None, tk::CommandNoOp::AlreadySet}) {
+        for (auto handler : {handle_command, mcp_named_command}) {
+            reset(handler);
+            runner_reply_enabled=true; runner_success=false; runner_error="already_set"; runner_noop=no_op_state;
+            api_command_name="charge_start";
+            httpd_req_t request;
+            CHECK(handle_all(&request)==ESP_OK && effects==1);
+            const auto json=reply_json(); CHECK(json);
+            if (handler==handle_command) {
+                CHECK(response_status==502);
+                const auto* response=cJSON_GetObjectItemCaseSensitive(json.get(),"response"); CHECK(response);
+                CHECK(!cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(response,"result")));
+                const auto* reason=cJSON_GetObjectItemCaseSensitive(response,"reason"); CHECK(cJSON_IsString(reason));
+                CHECK(std::strcmp(reason->valuestring,tk::uncertain_command_reason())==0);
+                CHECK(cJSON_GetObjectItemCaseSensitive(response,"noop")==nullptr);
+            } else {
+                CHECK(response_status==200);
+                const auto* response=cJSON_GetObjectItemCaseSensitive(json.get(),"result"); CHECK(response);
+                CHECK(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(response,"isError")));
+                const auto* content=cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(response,"content"),0); CHECK(content);
+                const auto* text=cJSON_GetObjectItemCaseSensitive(content,"text"); CHECK(cJSON_IsString(text));
+                CHECK(std::strcmp(text->valuestring,tk::uncertain_command_reason())==0);
+                CHECK(cJSON_GetObjectItemCaseSensitive(response,"structuredContent")==nullptr);
+            }
+        }
+    }
 }
 
 int main() {
