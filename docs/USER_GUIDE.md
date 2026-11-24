@@ -184,6 +184,11 @@ The web page labels a failed or timed-out device connection and retains the last
 A successful status refresh clears the notice. Vehicle actions use the named button inside the gauge;
 tapping the surrounding status card does not send a command.
 
+Charging current and power appear at the bottom of the vehicle card when the car reports them.
+The snowflake summarizes the last reported climate control, preconditioning, cabin overheat
+protection or defrost setting. It can reflect a cached report. The grey ring shows the last known
+charge level while parked, asleep or waking.
+
 If the hero reports **Pairing paused**, a local storage or identity recovery condition blocks
 normal automatic enrolment. The recovery notice describes it; storage checks and saved-key cleanup
 retry automatically. An ambiguous automatic first-key commit can request one guarded restart to
