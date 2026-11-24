@@ -6161,17 +6161,17 @@ static void test_ota_recovery_memory() {
     CHECK(tk::ota_recovery_required_bytes_for(static_cast<tk::OtaRecoveryUse>(255),profile)==0);
     CHECK(tk::ota_recovery_required_bytes_for(tk::OtaRecoveryUse::OperationEntry)==tk::kOtaRecoveryEntryRequiredB);
     CHECK(tk::ota_recovery_required_bytes_for(tk::OtaRecoveryUse::ImageConfirmation)==tk::kOtaRecoveryEntryRequiredB);
-    // A fresh ordinary S3 workload completed three checks at this recovered entry point.
+    // Pre-TLS demand reductions calibrate the shared entry/confirmation policy to 55296 B.
     // Both consumers must accept it; the next lower sample still fails closed.
     for (const auto use : {tk::OtaRecoveryUse::OperationEntry, tk::OtaRecoveryUse::ImageConfirmation}) {
         const auto required = tk::ota_recovery_required_bytes_for(use);
-        CHECK(!tk::ota_recovery_memory_affordable(59391, required));
-        CHECK(tk::ota_recovery_memory_affordable(59392, required));
-        CHECK(tk::ota_recovery_memory_affordable(59393, required));
-        for (const size_t observed : {size_t(59391), size_t(59392), size_t(59393)}) {
+        CHECK(!tk::ota_recovery_memory_affordable(55295, required));
+        CHECK(tk::ota_recovery_memory_affordable(55296, required));
+        CHECK(tk::ota_recovery_memory_affordable(55297, required));
+        for (const size_t observed : {size_t(55295), size_t(55296), size_t(55297)}) {
             const auto sample = tk::sample_runtime_health([] { return true; }, [] { return true; },
                 [] { return 0U; }, [&] { return observed; }, required);
-            CHECK(sample.healthy() == (observed == 59392 || observed == 59393));
+            CHECK(sample.healthy() == (observed == 55296 || observed == 55297));
             CHECK(sample.largest == observed);
         }
     }

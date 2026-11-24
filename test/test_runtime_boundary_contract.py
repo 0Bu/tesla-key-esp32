@@ -3336,13 +3336,19 @@ def require_ping_probe_contract(header: str, generation_header: str,
 
 def require_ota_fetch_contract(ota_source: str, ota_logic: str,
                                manifest_header: str) -> None:
+    for token in ("static constexpr size_t kOtaManifestInitialReserveBytes = 4096;",
+                  "static constexpr size_t kOtaChangelogInitialReserveBytes = 1536;"):
+        if token not in ota_source:
+            raise AssertionError("bounded actual OTA reserve constant missing " + token)
     fetch = function_body_in(ota_source, "http_get_to_buffer")
     check = function_body_in(ota_source, "perform_check")
-    for token in ("out.reserve(tk::kOtaManifestMaxBytes)",
+    for token in ("optional ? kOtaChangelogInitialReserveBytes : kOtaManifestInitialReserveBytes;",
+                  "out.reserve(initial_reserve);",
+                  "tk::ota::HttpLimits limits{tk::kOtaManifestMaxBytes};",
                   "operation.coordinator.start(url, limits, false, MetadataSink::append, &sink, optional)",
                   "operation.job.phase() == tk::ota::Phase::Closed", "poll_operation(operation)"):
         if token not in fetch:raise AssertionError("bounded actual OTA fetch missing "+token)
-    require_before("body allocation before worker request",fetch,"out.reserve(","operation.coordinator.start(")
+    require_before("body allocation before worker request",fetch,"out.reserve(initial_reserve);","operation.coordinator.start(")
 
     required_check_tokens = (
         "http_get_to_buffer(operation, manifest_url, body)",
@@ -7405,7 +7411,16 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
     for label, source, logic, manifest in (
         (
             "OTA bounded-body gate bypass",
-            ota_source.replace("out.reserve(tk::kOtaManifestMaxBytes)", "out.reserve(16384)", 1),
+            ota_source.replace("out.reserve(initial_reserve);", "out.reserve(16384);", 1),
+            ota_logic, manifest_header,
+        ),
+        (
+            "OTA manifest reserve bound drift",
+            ota_source.replace(
+                "static constexpr size_t kOtaManifestInitialReserveBytes = 4096;",
+                "static constexpr size_t kOtaManifestInitialReserveBytes = 16384;",
+                1,
+            ),
             ota_logic, manifest_header,
         ),
         (

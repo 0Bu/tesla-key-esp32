@@ -76,7 +76,7 @@ class LocalOtaTests(unittest.TestCase):
             "sys": {"board_mac": "02:00:00:00:00:17", "safe_mode": False,
                     "runtime_state": "ready", "largest_block": 65536, "uptime_s": 100}}
         self.before_ota = {"project": ota.PROJECT, "target": "esp32s3", "channel": "dev",
-            "busy": False, "verification": "stable", "recovery_required_bytes": 59392,
+            "busy": False, "verification": "stable", "recovery_required_bytes": 55296,
             "boot_id": "0123456789abcdef", "elf_sha256": ota.image_identity(UNSIGNED)}
 
     def tearDown(self):

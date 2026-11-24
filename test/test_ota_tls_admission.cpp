@@ -41,20 +41,28 @@
 #include <vector>
 
 uint32_t esp_random(){ return 0x12345678; } // Passive deterministic boot nonce, no entropy claim.
-namespace fixture { void observe_body_allocation(std::size_t); }
+namespace fixture {
+extern thread_local bool network_thread;
+void observe_body_allocation(std::size_t);
+}
 static std::atomic<bool> fail_body_reserve{false};
+static std::atomic<int> fail_body_alloc_countdown{0};
 void* operator new(std::size_t n) {
     fixture::observe_body_allocation(n);
-    if (n>=8192 && n<16384 && fail_body_reserve.exchange(false)) throw std::bad_alloc();
+    if (!fixture::network_thread && n>=1536 && n<16384) {
+        if (fail_body_reserve.exchange(false)) throw std::bad_alloc();
+        int rem = fail_body_alloc_countdown.load(std::memory_order_relaxed);
+        while (rem > 0 && !fail_body_alloc_countdown.compare_exchange_weak(rem, rem - 1, std::memory_order_acq_rel)) {}
+        if (rem == 1) throw std::bad_alloc();
+    }
     if (void* p=std::malloc(n?n:1)) return p;
     throw std::bad_alloc();
 }
 void operator delete(void* p) noexcept {std::free(p);}
 void operator delete(void* p,std::size_t) noexcept {std::free(p);}
-// Pair scalar nothrow allocation with this fixture's malloc/free replacement family.
+// Pair scalar nothrow allocation (e.g. OtaOperation) with malloc/free without tripping body tracking.
 void* operator new(std::size_t n,const std::nothrow_t&) noexcept {
-    try { return ::operator new(n); }
-    catch (...) { return nullptr; }
+    return std::malloc(n?n:1);
 }
 void operator delete(void* p,const std::nothrow_t&) noexcept {::operator delete(p);}
 namespace fixture {
@@ -66,10 +74,16 @@ std::atomic<int> checks{0};
 }
 #define CHECK(x) do { ++fixture::checks; if(!(x))fixture::failed(__LINE__,#x); } while(false)
 std::atomic<bool> track_manifest_lifetime{false};
+struct BodyAllocationEvent { std::size_t size; int init_calls; int destroys; };
+std::array<BodyAllocationEvent, 16> body_allocation_events{};
 std::atomic<size_t> live_manifest_allocations{0},manifest_allocations{0},body_allocations{0};
+extern std::atomic<int> init_calls,destroys;
 void observe_body_allocation(std::size_t n){
- if(track_manifest_lifetime&&n>=8192&&n<16384){
-  if(body_allocations.fetch_add(1)>0)CHECK(live_manifest_allocations==0);
+ if(!network_thread && track_manifest_lifetime && n>=1536 && n<16384){
+  const size_t index=body_allocations.fetch_add(1);
+  if(index>0)CHECK(live_manifest_allocations==0);
+  if(index<body_allocation_events.size())
+   body_allocation_events[index]={n,init_calls.load(),destroys.load()};
  }
 }
 void* tracked_json_allocate(size_t n){
@@ -150,6 +164,7 @@ unsigned changelog_status=200;
 int raw_end_error=ESP_OK,raw_select_error=ESP_OK;
 std::string terminal_case;
 std::string image_version="1.6.3",extra_header;
+std::vector<std::string> redirect_locations,requested_requests;
 int image_mutation=0;
 struct TlsConnection {std::string request,response;size_t offset=0;};
 TlsConnection connection;
@@ -220,7 +235,10 @@ extern "C" void vTaskDelay(TickType_t ticks){
  }
  if(ticks==10000&&(fixture::terminal_case=="uncertain"||fixture::terminal_case=="upload-uncertain"))fixture::check_uncertain_terminal();
  fixture::now.fetch_add(ticks);
- std::this_thread::sleep_for(std::chrono::microseconds(50));
+ if(ticks==10&&!fixture::hold_connect&&!fixture::hold_image_read&&fixture::worker.joinable()&&!fixture::worker_returned.load())
+  std::this_thread::sleep_for(std::chrono::milliseconds(1));
+ else
+  std::this_thread::sleep_for(std::chrono::microseconds(50));
 }
 extern "C" TickType_t xTaskGetTickCount(){return static_cast<TickType_t>(fixture::now.load());}
 extern "C" UBaseType_t uxTaskGetStackHighWaterMark(TaskHandle_t p){CHECK(p==nullptr);return 2048;}
@@ -262,12 +280,19 @@ ssize_t esp_tls_conn_read(esp_tls_t* p,void* out,size_t n){
  CHECK(p==&fixture::tls);++fixture::reads;auto& c=fixture::connection;
  if(c.response.empty()){
   CHECK(c.request.find("Accept-Encoding: identity\r\n")!=std::string::npos);
-  const bool change=c.request.find("changelog.json")!=std::string::npos;
-  const bool image=c.request.find(".bin")!=std::string::npos;
-  const std::string payload=image?fixture::image_body():change?fixture::changelog:fixture::manifest;
-  const unsigned status=change?fixture::changelog_status:200;
-  c.response="HTTP/1.1 "+std::to_string(status)+" Fixture\r\n"+fixture::extra_header+"Content-Length: "+
-    std::to_string(payload.size())+"\r\nConnection: close\r\n\r\n"+payload;
+  fixture::requested_requests.push_back(c.request);
+  if(!fixture::redirect_locations.empty()){
+   const auto loc=fixture::redirect_locations.front();
+   fixture::redirect_locations.erase(fixture::redirect_locations.begin());
+   c.response="HTTP/1.1 302 Found\r\nLocation: "+loc+"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+  }else{
+   const bool change=c.request.find("changelog.json")!=std::string::npos;
+   const bool image=c.request.find(".bin")!=std::string::npos;
+   const std::string payload=image?fixture::image_body():change?fixture::changelog:fixture::manifest;
+   const unsigned status=change?fixture::changelog_status:200;
+   c.response="HTTP/1.1 "+std::to_string(status)+" Fixture\r\n"+fixture::extra_header+"Content-Length: "+
+     std::to_string(payload.size())+"\r\nConnection: close\r\n\r\n"+payload;
+  }
   fixture::header_end_bytes=c.response.find("\r\n\r\n")+4;
  }
  if(fixture::hold_image_read&&c.request.find(".bin")!=std::string::npos&&c.offset>=600){
@@ -451,7 +476,7 @@ void reset(std::initializer_list<size_t> samples={65536}){
  info_calls=0;throw_memory_log=throw_memory_sample=false;
  delivered_bytes=header_end_bytes=0;read_limit=71;
  init_calls=connects=destroys=reads=deletes=0;begins=writes=ends=selectors=aborts=restart_calls=0;
- init_null=false;connect_ok=create_ok=lock_ok=true;throw_create=false;fail_body_reserve=false;
+ init_null=false;connect_ok=create_ok=lock_ok=true;throw_create=false;fail_body_reserve=false;fail_body_alloc_countdown=0;
  cleanup_hook_armed=cleanup_hook_entered=cleanup_hook_released=false;
  worker_returned=worker_paused_after_cleanup=false;
  changelog_destroy_fails=jump_image_clock=image_clock_jumped=reject_late_effect=raw_handle_live=false;
@@ -460,7 +485,8 @@ void reset(std::initializer_list<size_t> samples={65536}){
  queued_http_work=nullptr;queued_http_argument=nullptr;queue_calls=0;
  queue_ok=true;queue_throw_before=queue_throw_after=queue_inline=http_request_live=throw_entry_sample=require_error_owner=false;
  hold_connect=release_connect=connect_entered=hold_image_read=image_read_entered=false;changelog_status=200;raw_end_error=raw_select_error=ESP_OK;
- image_version="1.6.3";image_mutation=0;extra_header.clear();inactive={ESP_PARTITION_TYPE_APP,0,0x20000,0x1f0000};
+ image_version="1.6.3";image_mutation=0;extra_header.clear();redirect_locations.clear();requested_requests.clear();
+ inactive={ESP_PARTITION_TYPE_APP,0,0x20000,0x1f0000};
  manifest=selected_manifest("1.6.3");changelog="{\"version\":\"1.6.3\",\"changelog\":\"A change\"}";
  std::snprintf(running_description.version,sizeof(running_description.version),"1.6.2");
  ota_set_channel(tk::OtaChannel::Release);
@@ -582,7 +608,7 @@ void dev_source_error_checks(){
   CHECK(status.configured_channel==tk::OtaChannel::Dev&&!status.update_available&&!status.offer_changed);
   CHECK(std::string_view(status.message.data())==message&&!ota_is_busy()&&begins==0&&selectors==0);
  };
- reset();ota_set_channel(tk::OtaChannel::Dev);http_request_live=true;entry_largest=57344;
+ reset();ota_set_channel(tk::OtaChannel::Dev);http_request_live=true;entry_largest=55295;
  CHECK(ota_check_start_after_http(0,&http_server_marker)==tk::OtaStartResult::Started);
  http_request_live=false;run_queued_http();dev_error(kOtaNoMemory);
  reset();ota_set_channel(tk::OtaChannel::Dev);queue_ok=false;
@@ -602,21 +628,21 @@ void dev_source_error_checks(){
   CHECK(status.configured_channel==tk::OtaChannel::Release&&!status.update_available&&!status.offer_changed);
   CHECK(std::string_view(status.message.data())==message&&!ota_is_busy()&&begins==0&&selectors==0);
  };
- reset();ota_set_channel(tk::OtaChannel::Dev);http_request_live=true;entry_largest=57344;
+ reset();ota_set_channel(tk::OtaChannel::Dev);http_request_live=true;entry_largest=55295;
  CHECK(ota_check_start_after_http(0,&http_server_marker)==tk::OtaStartResult::Started);
  http_request_live=false;ota_set_channel(tk::OtaChannel::Release);run_queued_http();moved_error(kOtaNoMemory);
  reset();ota_set_channel(tk::OtaChannel::Dev);now=50;
  CHECK(ota_check_start_after_http(0,&http_server_marker)==tk::OtaStartResult::Started);
  ota_set_channel(tk::OtaChannel::Release);now=operation_budget(50,false).deadline();run_queued_http();
  moved_error("update deadline reached during setup");
- reset();ota_set_channel(tk::OtaChannel::Dev);http_request_live=true;entry_largest=57344;
+ reset();ota_set_channel(tk::OtaChannel::Dev);http_request_live=true;entry_largest=55295;
  CHECK(ota_check_start_after_http(0,&http_server_marker)==tk::OtaStartResult::Started);
  http_request_live=false;entry_largest=61440;create_ok=false;ota_set_channel(tk::OtaChannel::Release);
  run_queued_http();moved_error("could not start OTA coordinator task");
  reset();
 }
 void deferred_http_checks(){
- reset();now=100;http_request_live=true;entry_largest=57344;
+ reset();now=100;http_request_live=true;entry_largest=55295;
  manifest=selected_manifest("1.6.3-PR-400");
  changelog="{\"version\":\"1.6.3-PR-400\",\"changelog\":\"A change\"}";
  CHECK(ota_check_start_after_http(400,&http_server_marker)==tk::OtaStartResult::Started);
@@ -634,7 +660,7 @@ void deferred_http_checks(){
  CHECK(s_operation.load()->target_pr==400&&s_operation.load()->channel==tk::OtaChannel::Release);
  auto coordinator=selected_task;stale_work(stale_argument);
  CHECK(selected_task==coordinator&&entry_heap_reads==1); // Duplicate callback is not a new job.
- run_selected();join_worker();CHECK(!ota_is_busy()&&connects==2&&begins==0&&writes==0&&selectors==0);
+ run_selected();join_worker();CHECK(!ota_is_busy()&&!s_operation.load()&&connects==2&&begins==0&&writes==0&&selectors==0);
  // The completed captured Release result keeps its own source and is no offer under Dev.
  const auto published=ota_get_status();
  CHECK(published.state==OtaState::Error&&!published.update_available&&published.available[0]==0);
@@ -644,7 +670,7 @@ void deferred_http_checks(){
  {char notes[64];size_t len=99;CHECK(!ota_get_changelog(notes,sizeof(notes),len)&&len==0);}
 
  // A reused static capture does not authorize a callback from the previous ticket.
- reset();http_request_live=true;entry_largest=57344;
+ reset();http_request_live=true;entry_largest=55295;
  CHECK(ota_check_start_after_http(0,&http_server_marker)==tk::OtaStartResult::Started);
  CHECK(queued_http_argument!=stale_argument&&entry_heap_reads==0);
  stale_work(stale_argument);stale_work(nullptr);
@@ -653,14 +679,22 @@ void deferred_http_checks(){
   stale_work(reinterpret_cast<void*>(reinterpret_cast<std::uintptr_t>(queued_http_argument)|(std::uintptr_t{1}<<32)));
  CHECK(queued_http_work&&ota_is_busy()&&!s_operation.load()&&entry_heap_reads==0);
  http_request_live=false;entry_largest=61440;run_queued_http();run_selected();join_worker();
- CHECK(!ota_is_busy()&&connects==2&&begins==0&&selectors==0);
+ CHECK(!ota_is_busy()&&!s_operation.load()&&connects==2&&begins==0&&selectors==0);
 
  // Moving the reference is not permission to lower the actual post-cleanup screen.
- reset();http_request_live=true;entry_largest=57344;
+ reset();http_request_live=true;entry_largest=55295;
  CHECK(ota_check_start_after_http(0,&http_server_marker)==tk::OtaStartResult::Started);
  CHECK(entry_heap_reads==0);http_request_live=false;run_queued_http();
  CHECK(entry_heap_reads==1&&!selected_task&&!s_operation.load()&&init_calls==0&&!ota_is_busy());
  CHECK(std::string_view(ota_get_status().message.data())==kOtaNoMemory&&!ota_get_status().update_available);
+
+ // A warm S3 on a bisected 57344 B block passes deferred admission and reclaims promptly.
+ reset();http_request_live=true;entry_largest=57344;
+ CHECK(ota_check_start_after_http(0,&http_server_marker)==tk::OtaStartResult::Started);
+ http_request_live=false;run_queued_http();
+ CHECK(entry_heap_reads==1&&selected_task&&s_operation.load());
+ run_selected();join_worker();
+ CHECK(!ota_is_busy()&&!s_operation.load()&&ota_get_status().update_available&&connects==2);
 
  reset();queue_ok=false;http_request_live=true;
  CHECK(ota_check_start_after_http(0,&http_server_marker)==tk::OtaStartResult::Unavailable);
@@ -735,6 +769,7 @@ void manifest_lifetime_checks(){
  }
  manifest+="]}";
  live_manifest_allocations=manifest_allocations=body_allocations=0;
+ body_allocation_events.fill({});
  cJSON_Hooks hooks{tracked_json_allocate,tracked_json_release};
  cJSON_InitHooks(&hooks);
  track_manifest_lifetime=true;
@@ -742,6 +777,52 @@ void manifest_lifetime_checks(){
  track_manifest_lifetime=false;
  CHECK(result.ok&&result.update_available&&std::string_view(result.available.data())=="1.6.3");
  CHECK(manifest_allocations>=64&&live_manifest_allocations==0&&body_allocations==2);
+ CHECK(body_allocation_events[0].size>=4096&&body_allocation_events[0].size<4608);
+ CHECK(body_allocation_events[0].init_calls==0&&body_allocation_events[0].destroys==0);
+ CHECK(body_allocation_events[1].size>=1536&&body_allocation_events[1].size<=2064);
+ CHECK(body_allocation_events[1].init_calls==1&&body_allocation_events[1].destroys==1);
+ CHECK(connects==2&&begins==0&&writes==0&&selectors==0);
+
+ // Realistic 4-target (~3000 B >= 2991 B) build-pages manifest + <=1025 B changelog:
+ // must allocate body once before TLS and perform zero reallocations during TLS.
+ reset();
+ {
+  const auto image=image_body();tk::ota::Digest digest{};
+  CHECK(tk::ota::sha256(image.data(),image.size(),digest)==PSA_SUCCESS);
+  constexpr char hex[]="0123456789abcdef";std::string hash;
+  for(auto b:digest){hash+=hex[b>>4];hash+=hex[b&15];}
+  const std::array<const char*,4> suffixes{{"esp32","esp32s3","esp32c3","esp32c6"}};
+  const std::array<const char*,4> families{{"ESP32","ESP32-S3","ESP32-C3","ESP32-C6"}};
+  manifest="{\n  \"name\": \"tesla-key-esp32\",\n  \"layoutVersion\": 2,\n  \"sourceSha\": \""+std::string(40,'b')+"\",\n"
+           "  \"version\": \"1.6.3\",\n  \"new_install_prompt_erase\": true,\n  \"builds\": [\n";
+  for(size_t t=0;t<suffixes.size();++t){
+   if(t)manifest+=",\n";
+   const std::string app_bin=std::string("tesla-key-esp32")+
+     (std::strcmp(suffixes[t],"esp32")==0?"":std::string("-")+suffixes[t])+".bin";
+   manifest+="    {\n      \"chipFamily\": \""+std::string(families[t])+"\",\n      \"parts\": [\n"+
+     "        { \"path\": \"bootloader-"+std::string(suffixes[t])+".bin\", \"offset\": 4096, \"size\": 24576, \"sha256\": \""+std::string(64,'c')+"\" },\n"+
+     "        { \"path\": \"partition-table-"+std::string(suffixes[t])+".bin\", \"offset\": 32768, \"size\": 3072, \"sha256\": \""+std::string(64,'d')+"\" },\n"+
+     "        { \"path\": \""+app_bin+"\", \"offset\": 131072, \"size\": "+std::to_string(image.size())+", \"sha256\": \""+hash+"\" },\n"+
+     "        { \"path\": \"ota_data_initial-"+std::string(suffixes[t])+".bin\", \"offset\": 61440, \"size\": 8192, \"sha256\": \""+std::string(64,'e')+"\" }\n"+
+     "      ]\n    }";
+  }
+  manifest+="\n  ]\n}\n";
+  CHECK(manifest.size()>=2991&&manifest.size()<4096);
+  changelog="{\"version\":\"1.6.3\",\"changelog\":[\""+std::string(900,'n')+"\"]}";
+  CHECK(changelog.size()<=1025);
+ }
+ live_manifest_allocations=manifest_allocations=body_allocations=0;
+ body_allocation_events.fill({});
+ track_manifest_lifetime=true;
+ const auto four_target=ota_check(0);join_worker();
+ track_manifest_lifetime=false;
+ CHECK(four_target.ok&&four_target.update_available&&!s_operation.load());
+ CHECK(std::string_view(four_target.available.data())=="1.6.3");
+ CHECK(live_manifest_allocations==0&&body_allocations==2);
+ CHECK(body_allocation_events[0].size>=4096&&body_allocation_events[0].size<4608);
+ CHECK(body_allocation_events[0].init_calls==0&&body_allocation_events[0].destroys==0);
+ CHECK(body_allocation_events[1].size>=1536&&body_allocation_events[1].size<=2064);
+ CHECK(body_allocation_events[1].init_calls==1&&body_allocation_events[1].destroys==1);
  CHECK(connects==2&&begins==0&&writes==0&&selectors==0);
  cJSON_InitHooks(nullptr);
 }
@@ -794,7 +875,12 @@ void entry_recovery_checks(){
  }
  reset();entry_required=0;entry_largest=SIZE_MAX;
  CHECK(ota_check_start(0)==tk::OtaStartResult::NoMemory&&init_calls==0&&!selected_task);
- reset();const auto r=ota_check(0);join_worker();CHECK(r.ok);
+ // Clean check reclaims s_operation immediately; retained reference checks use an un-reclaimed operation.
+ reset();const auto clean_r=ota_check(0);join_worker();CHECK(clean_r.ok&&!s_operation.load());
+ reset();hold_connect=true;const auto r=ota_check(0);
+ {std::unique_lock<std::mutex> lock(connection_mutex);CHECK(connect_entered);}
+ {std::lock_guard<std::mutex> lock(connection_mutex);release_connect=true;}connection_ready.notify_all();join_worker();
+ CHECK(!r.ok);
  CHECK(s_operation_gate.try_begin(tk::OtaIdentityGateState::Ota));
  auto* old=s_operation.load(std::memory_order_acquire);CHECK(old);
  const auto phase=old->job.control.load();
@@ -891,10 +977,12 @@ void checkpoint_semantics_checks(){
  }
  CHECK(phase_count(rows,"tls_connected")==0&&phase_count(rows,"tls_destroyed")==1);
  for(size_t limit:{size_t(71),size_t(1)}){
-  reset();read_limit=limit;result=ota_check(0);join_worker();rows=records();
+  reset();read_limit=limit;const auto expected_gen=s_offer_serial.load()+1;
+  result=ota_check(0);join_worker();rows=records();
+  CHECK(!s_operation.load()&&phase_count(rows,"reclaim_ready")==1);
   CHECK(result.ok&&result.update_available&&init_calls==2&&connects==2&&destroys==2);
   CHECK(largest_cursor==4&&begins==0&&selectors==0);
-  for(const char* phase:{"before_operation","operation_ready","tasks_ready","manifest_ready","notes_ready"})
+  for(const char* phase:{"before_operation","operation_ready","tasks_ready","manifest_ready","notes_ready","reclaim_ready"})
    CHECK(phase_count(rows,phase)==1);
   for(const char* phase:{"tls_pre_init","tls_post_context","tls_connected","headers_observed","tls_destroyed","metadata_closed"})
    CHECK(phase_count(rows,phase)==2);
@@ -902,7 +990,8 @@ void checkpoint_semantics_checks(){
     "headers_observed","tls_destroyed","metadata_closed"}};
   size_t next=0;
   for(const auto& row:rows){
-   CHECK(row.generation==1&&row.origin==0&&row.free==diagnostic_free);
+   const unsigned want_gen=(std::strcmp(row.phase,"before_operation")==0)?expected_gen:1u;
+   CHECK(row.generation==want_gen&&row.origin==0&&row.free==diagnostic_free);
    if(std::find_if(sequence.begin(),sequence.end(),[&](const char* phase){return std::strcmp(row.phase,phase)==0;})!=sequence.end()){
     CHECK(std::strcmp(row.phase,sequence[next%sequence.size()])==0);++next;
    }
@@ -912,7 +1001,7 @@ void checkpoint_semantics_checks(){
    }
   }
   CHECK(next==12);
-  clean_previous();rows=records();CHECK(phase_count(rows,"reclaim_ready")==1);
+  clean_previous();
  }
  for(bool fail_sample:{false,true}){
   reset();throw_memory_sample=fail_sample;throw_memory_log=!fail_sample;
@@ -927,27 +1016,23 @@ void budget_checks(){
  reset_for_image();jump_image_clock=reject_late_effect=true;
  CHECK(start_confirmed()==tk::OtaStartResult::Started);
  CHECK(s_operation.load()&&s_operation.load()->job.deadline_ms>30000);
- run_selected();join_worker();auto* operation=s_operation.load();CHECK(operation);
- // The worker's original maximum remains live at 30s. Only the coordinator's real
- // declared-image-size tightening makes admission expire before the next raw effect.
- CHECK(image_clock_jumped&&operation->budget.deadline()<30000);
- CHECK(operation->coordinator.outcome()==tk::ota::Outcome::Deadline);
+ run_selected();join_worker();
+ // Prompt reclaim freed s_operation after Deadline; tight deadline is proven by abort before end.
+ CHECK(!s_operation.load()&&image_clock_jumped);
+ CHECK(ota_get_status().state==OtaState::Error);
+ CHECK(std::string_view(ota_get_status().message.data())=="update deadline reached");
  CHECK(begins==1&&writes>0&&aborts==1&&ends==0&&selectors==0&&restart_calls==0);
  CHECK(!raw_handle_live&&!ota_is_busy()&&!ota_get_status().update_available);
 }
 void cleanup_cas_checks(){
  reset();cleanup_hook_armed=true;const auto result=ota_check(0);
  CHECK(!result.ok&&std::string_view(result.reason)=="update check deadline reached"&&cleanup_hook_entered);
- const auto stop=std::chrono::steady_clock::now()+std::chrono::seconds(2);
- while(!worker_returned&&!worker_paused_after_cleanup&&std::chrono::steady_clock::now()<stop)
-  std::this_thread::yield();
  CHECK(worker_returned||worker_paused_after_cleanup);
- // Read atomics before join: an unchecked stale store loses Retired and parks the worker.
- // That mutant must fail this exact CHECK, never earn credit from timeout or destructor.
- auto* operation=s_operation.load();CHECK(operation);
- CHECK(operation->job.retired()&&operation->job.phase()==tk::ota::Phase::Acked);
- join_worker();CHECK(operation->coordinator.can_reclaim()&&connects==1&&destroys==1);
+ // Prompt reclaim succeeds only if kRetired was preserved and worker reached Phase::Acked.
+ CHECK(!s_operation.load()&&phase_count(records(),"reclaim_ready")==1);
+ join_worker();CHECK(connects==1&&destroys==1);
  CHECK(!ota_is_busy()&&begins==0&&selectors==0);
+ CHECK(ota_check_start(0)==tk::OtaStartResult::Started);run_selected();join_worker();CHECK(!ota_is_busy());
 }
 [[noreturn]] void cleanup_failed_checks(){
  reset();const auto first=ota_check(0);join_worker();CHECK(first.ok&&first.update_available);
@@ -1014,6 +1099,117 @@ void control_rmw_concurrency_checks(){
     (tk::ota::kRetired|tk::ota::kClose|static_cast<std::uint32_t>(tk::ota::Phase::Reading)));
  }
 }
+void prompt_reclaim_and_growth_checks(){
+ static_assert(sizeof(OtaOperation)>=3072&&sizeof(OtaOperation)<4600);
+ // Pre-init lock at boot creates s_lock before any /ota/* call.
+ reset();if(auto* mutex=s_lock.exchange(nullptr))vSemaphoreDelete(mutex);
+ ota_init_lock();CHECK(s_lock.load()!=nullptr);
+
+ // Manifest larger than the initial 4096 B reserve grows boundedly up to 8192 B and reclaims promptly.
+ reset();
+ manifest=selected_manifest();manifest.pop_back();manifest+=",\"notes\":\""+std::string(4500,'n')+"\"}";
+ const auto gen1=s_offer_serial.load()+1;
+ auto r=ota_check(0);join_worker();
+ CHECK(r.ok&&r.update_available&&!s_operation.load());
+ {
+  const auto rows=records();
+  CHECK(phase_count(rows,"reclaim_ready")==1);
+  for(const auto& row:rows){
+   if(std::strcmp(row.phase,"before_operation")==0)CHECK(row.generation==gen1);
+  }
+ }
+
+ // Second consecutive check increments before_operation generation and reclaims on start_network_task failure too.
+ reset();create_ok=false;
+ const auto gen2=s_offer_serial.load()+1;
+ CHECK(gen2==gen1+1);
+ CHECK(ota_check_start(0)==tk::OtaStartResult::InternalError);
+ CHECK(!s_operation.load()&&!ota_is_busy());
+ {
+  const auto rows=records();
+  CHECK(phase_count(rows,"reclaim_ready")==1);
+  for(const auto& row:rows){
+   if(std::strcmp(row.phase,"before_operation")==0)CHECK(row.generation==gen2);
+  }
+ }
+
+ // Default kOtaRecoveryEntryRequiredB (55296 B) rejects 55295 B and admits 55296 B and 57344 B.
+ reset();entry_largest=55295;
+ CHECK(ota_check_start(0)==tk::OtaStartResult::NoMemory&&init_calls==0&&!s_operation.load());
+ for(const size_t ok_largest:{size_t(55296),size_t(57344)}){
+  reset();entry_largest=ok_largest;
+  const auto ok_r=ota_check(0);join_worker();
+  CHECK(ok_r.ok&&ok_r.update_available&&!s_operation.load());
+ }
+
+ // In-place redirect resolution supports relative, scheme-relative, and absolute HTTPS targets.
+ reset();
+ redirect_locations={"/v2/../v2/sub/manifest.json","//cdn.example/ota/m.json?v=1"};
+ r=ota_check(0);join_worker();
+ CHECK(r.ok&&r.update_available&&!s_operation.load()&&connects==4);
+ CHECK(requested_requests.size()==4);
+ CHECK(requested_requests[1].find("GET /v2/sub/manifest.json HTTP/1.1\r\nHost: update.example\r\n")!=std::string::npos);
+ CHECK(requested_requests[2].find("GET /ota/m.json?v=1 HTTP/1.1\r\nHost: cdn.example\r\n")!=std::string::npos);
+
+ // Mid-transfer MetadataSink::append OOM (>4096 B manifest growth) fails closed cleanly and reclaims.
+ reset();
+ manifest=selected_manifest();manifest.pop_back();manifest+=",\"notes\":\""+std::string(4500,'n')+"\"}";
+ fail_body_alloc_countdown=2;
+ r=ota_check(0);join_worker();
+ CHECK(!r.ok&&!r.update_available&&std::string_view(r.reason)==kOtaNoMemory&&init_calls==1&&connects==1&&destroys==1&&!s_operation.load()&&fail_body_alloc_countdown==0);
+
+ // Optional-changelog mid-transfer MetadataSink::append OOM (>1536 B growth) withdraws the manifest offer as NoMemory.
+ reset();
+ changelog="{\"version\":\"1.6.3\",\"changelog\":\""+std::string(2600,'c')+"\"}";
+ fail_body_alloc_countdown=3;
+ r=ota_check(0);join_worker();
+ CHECK(!r.ok&&!r.update_available&&std::string_view(r.reason)==kOtaNoMemory&&init_calls==2&&connects==2&&destroys==2&&!s_operation.load()&&fail_body_alloc_countdown==0);
+
+ // Direct resolve_redirect boundary, scheme-smuggling, query, dot-segment, and authority/fragment rejection checks.
+ {
+  auto set_buf=[](const char* s){
+   std::array<char,tk::ota::kUrlBytes> b{};
+   std::snprintf(b.data(),b.size(),"%s",s);
+   return b;
+  };
+  constexpr const char* kBase="https://update.example/v1/m.json";
+  { auto b=set_buf(""); CHECK(!tk::ota::resolve_redirect(kBase,b)); }
+  { std::array<char,tk::ota::kUrlBytes> b; b.fill('a'); CHECK(!tk::ota::resolve_redirect(kBase,b)); }
+  { auto b=set_buf("/m.json"); CHECK(!tk::ota::resolve_redirect("http://update.example/m.json",b)); }
+  {
+   std::string rel="//cdn.example/";rel.append(tk::ota::kUrlBytes-6-rel.size(),'a');
+   CHECK(rel.size()==tk::ota::kUrlBytes-6);
+   auto b=set_buf(rel.c_str());
+   CHECK(!tk::ota::resolve_redirect(kBase,b));
+  }
+  {
+   std::string rel="//cdn.example/";rel.append(tk::ota::kUrlBytes-7-rel.size(),'a');
+   CHECK(rel.size()==tk::ota::kUrlBytes-7);
+   auto b=set_buf(rel.c_str());
+   CHECK(tk::ota::resolve_redirect(kBase,b));
+   CHECK(std::string_view(b.data()).size()==1023);
+  }
+  {
+   std::string base_dir="https://update.example/very/long/";
+   std::string rel(tk::ota::kUrlBytes-base_dir.size(),'x');
+   auto b=set_buf(rel.c_str());
+   CHECK(!tk::ota::resolve_redirect(base_dir.c_str(),b));
+  }
+  for(const char* bad:{"javascript:alert(1)","http:evil.example/x","foo:bar/baz","https://user@update.example/m.json","/m.json#frag"}){
+   auto b=set_buf(bad);
+   CHECK(!tk::ota::resolve_redirect(kBase,b));
+  }
+  { auto b=set_buf("/a:b/m.json"); CHECK(tk::ota::resolve_redirect(kBase,b)&&std::string_view(b.data())=="https://update.example/a:b/m.json"); }
+  { auto b=set_buf("sub/a:b"); CHECK(tk::ota::resolve_redirect("https://update.example/v2/manifest.json",b)&&std::string_view(b.data())=="https://update.example/v2/sub/a:b"); }
+  { auto b=set_buf("?v=2"); CHECK(tk::ota::resolve_redirect("https://update.example/ota/m.json?v=1",b)&&std::string_view(b.data())=="https://update.example/ota/m.json?v=2"); }
+  { auto b=set_buf("?v=2"); CHECK(tk::ota::resolve_redirect("https://update.example",b)&&std::string_view(b.data())=="https://update.example/?v=2"); }
+  { auto b=set_buf("/../../../etc/passwd"); CHECK(tk::ota::resolve_redirect("https://update.example/a/b/c",b)&&std::string_view(b.data())=="https://update.example/etc/passwd"); }
+  { auto b=set_buf("/a/b/.."); CHECK(tk::ota::resolve_redirect("https://update.example/v1/m.json",b)&&std::string_view(b.data())=="https://update.example/a/"); }
+  { auto b=set_buf("/a/."); CHECK(tk::ota::resolve_redirect("https://update.example/v1/m.json",b)&&std::string_view(b.data())=="https://update.example/a/"); }
+  { auto b=set_buf("../x"); CHECK(tk::ota::resolve_redirect("https://update.example/a/b/c",b)&&std::string_view(b.data())=="https://update.example/a/x"); }
+ }
+ reset();
+}
 }
 #include "ota_offer_http_fixture.hpp"
 int main(int argc,char** argv){
@@ -1063,6 +1259,7 @@ int main(int argc,char** argv){
   offer_binding_checks();dev_preview_binding_checks();hash_binding_checks();image_binding_checks();
   checkpoint_semantics_checks();
   control_rmw_concurrency_checks();
+  prompt_reclaim_and_growth_checks();
  }
  clean_previous();
  // Release only the passive status mutex after every actual worker is joined and context gone.

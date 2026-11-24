@@ -954,8 +954,9 @@ extern "C" void app_main() {
         ESP_LOGW(TAG, "SAFE MODE — NimBLE not started");
     }
 
-    // Seed diagnostic verification before HTTP/health/vehicle tasks can observe or change it.
+    // Seed diagnostic verification and pre-allocate the OTA status mutex before HTTP/health/vehicle tasks start.
     ota_refresh_verification_cache();
+    ota_init_lock();
 
     // Primary HTTP API (evcc + web UI + MCP). ESSENTIAL: it is the device's whole reason to
     // exist. http_server_start() unwinds a partial registration internally and returns false;

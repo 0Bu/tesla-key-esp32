@@ -25,6 +25,7 @@ public:
     ParseResult eof() noexcept;
     ParseResult result() const noexcept { return result_; }
     const char* location() const noexcept { return location_.data(); }
+    std::array<char, kUrlBytes>& location_buffer() noexcept { return location_; }
     std::uint64_t body_bytes() const noexcept { return body_bytes_; }
     bool has_declared_size() const noexcept { return has_length_; }
     std::uint64_t declared_size() const noexcept { return length_; }
@@ -64,6 +65,6 @@ private:
 };
 // Bounded HTTPS URL checks/resolution used by worker and coordinator, not a regex URL parser.
 bool valid_https_url(const char*, http_parser_url&) noexcept;
-bool resolve_redirect(const char* base, const char* location,
-                      std::array<char, kUrlBytes>& out) noexcept;
+bool resolve_redirect(const char* base,
+                      std::array<char, kUrlBytes>& target_and_out) noexcept;
 } // namespace tk::ota

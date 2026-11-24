@@ -148,14 +148,18 @@ DNS, TLS read/write/destroy and synchronous flash/verify/boot-selector calls are
 here: this is a network/effect-admission deadline, not a proved hard wall-time limit for an
 already-entered SDK operation.
 
-On timeout the coordinator retires the generation, aborts its own raw handle and releases the
-operation lease only after writer quiescence. Busy then becomes false, but a stalled network
-context remains occupied and charged. Every successor refuses until the old worker's real cleanup
-Ack and the coordinator's final access permit reclamation. There is no replacement worker,
-foreign TLS close, forced task deletion or reuse of the old Job. Ack is the worker's final Job
-access; only global own-stack sampling and self-delete follow. Ack does not prove RTOS stack/TCB
-reclamation. Uncertain writer cleanup or committed/uncertain boot selection retains the lease
-and parks after a returning restart instead of granting another effect.
+On clean completion or failure, `complete_operation()` waits boundedly (up to 200 ms) for the
+worker's cleanup `Acked` while still holding `OtaIdentityGateState::Ota` and reclaims the
+finished `OtaOperation` before releasing the gate, so idle heap and probation confirmation
+do not carry a retained `OtaOperation`. On timeout or a stalled worker, the coordinator retires
+the generation, aborts its own raw handle and releases the operation lease only after writer
+quiescence. Busy then becomes false, but a stalled network context remains occupied and
+charged in `s_operation` quarantine until the old worker's real cleanup Ack and a later
+admission permit reclamation. There is no replacement worker, foreign TLS close, forced task
+deletion or reuse of the old Job. Ack is the worker's final Job access; only global own-stack
+sampling and self-delete follow. Ack does not prove RTOS stack/TCB reclamation. Uncertain
+writer cleanup or committed/uncertain boot selection retains the lease and parks after a
+returning restart instead of granting another effect.
 
 Job retirement and connection-close flags remain full-word acquire/release read-modify-writes.
 Lock-free targets use `fetch_or`; non-lock-free targets reuse the existing strong CAS primitive,
@@ -164,10 +168,17 @@ its observed word, preserving phase and other flags. Already-set bits still perf
 
 ### Memory admission and target observations
 
-OTA entry and health confirmation use the same **59392 B INTERNAL largest-free-block** threshold
-from `logic/ota_recovery_memory.hpp`. Entry can reclaim a clean prior Operation before sampling
-and before new allocations. Read-only confirmation leaves retained Operation/task memory charged.
-Each checks a fresh real sample under its owner. Never credit old bytes or an estimated heap delta.
+OTA entry and health confirmation use the same **55296 B INTERNAL largest-free-block** threshold
+from `logic/ota_recovery_memory.hpp` (calibrated from the prior `59392 B` baseline after cutting
+pre-TLS contiguous manifest demand by `5344 B`: `4096 B` initial manifest buffer reserve and
+`1536 B` optional changelog reserve instead of `8192 B` in `http_get_to_buffer()`, with zero
+mid-TLS reallocation for real ~3 KiB 4-target manifests and bounded growth up to `8192 B`,
+in-place redirect resolution eliminating `Coordinator::redirect_[1024]`, shrinking `prefix_` from
+`512 B` to `288 B`, pre-initializing `s_lock` at boot, and setting `Connection: close` on
+`/ota/check` and `/ota/update` responses). Prompt completion reclamation also clears `s_operation`
+immediately when the worker acks cleanly; only a quarantined stalled/cleanup-failed Operation
+remains charged until a later admission reclaims it. Each entry/confirmation check samples a fresh
+real largest block under its owner. Never credit old bytes or an estimated heap delta.
 
 Historical observations explain the targets' RAM defaults. They do not establish current fleet
 margins, MQTTS margins or image acceptance.
@@ -217,8 +228,9 @@ Fixed `ota_mem` INFO records identify start time/generation, resource (`manifest
 largest block used by each guard, with a separate free-heap sample, from pre-allocation through
 TLS guards, connect, headers, destroy and reclaim eligibility. `headers_observed` can include
 the first body chunk. Destroy precedes final worker acknowledgement. `reclaim_ready` precedes
-Operation deletion, so it does not prove idle heap or task reclamation. Dropped lines make the
-series incomplete. These checkpoints do not measure transient allocation peaks.
+Operation deletion (promptly at clean completion or on the next admission after quarantine), so
+it does not prove RTOS task reclamation. Dropped lines make the series incomplete. These
+checkpoints do not measure transient allocation peaks.
 
 ### Transport, manifest and version validation
 
@@ -250,7 +262,7 @@ two interim responses and ten redirects. URLs/locations use 1024-byte storage, a
 remain bounded as below. Repeated redirects/retries never renew the original deadline. The image
 may use EOF framing only because complete image/signature verification remains mandatory.
 
-Manifest intake reserves one bounded body (8192 B). Non-chunked data needs positive bounded
+Manifest intake bounds each metadata body to 8192 B (reserving 4096 B initially for manifests and 1536 B for optional changelogs). Non-chunked data needs positive bounded
 Content-Length and exact completion; chunked data needs non-empty bounded complete transport.
 Negative/early-zero reads and truncation fail. Before cJSON, the allocation-free gate requires valid
 UTF-8/escapes, ≤16 levels, no U+0000 and one fully consumed document. The root has unique keys and
@@ -846,7 +858,8 @@ progress cannot reset it. A 5 s socket timeout can extend wall duration to about
 scheduling; two consecutive recoverable timeouts remain an additional bound. Late/incomplete bodies
 never parse or persist. Both adapters shut down read-side on failure while retaining reply writes.
 The wildcard handler advertises Connection: close and retires every body-bearing connection even
-on early route/Origin/admission rejection or exceptions. Bodyless requests keep existing behavior;
+on early route/Origin/admission rejection or exceptions. Bodyless requests keep existing behavior
+(except dispatched `/ota/check` and `/ota/update` responses, which also emit `Connection: close` when `req->content_len == 0`);
 captive preflight failures return ESP_FAIL to reject unread input.
 
 `read_body_result()` distinguishes empty, oversize, OOM and receive failure (normal cap 2 KiB).
