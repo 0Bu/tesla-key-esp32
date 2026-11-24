@@ -1089,7 +1089,7 @@ review generated `sdkconfig` when changing the SDK or target configuration.
 | default event loop | `CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=2304` | WiFi/IP/Ethernet lifecycle callbacks |
 | ESP-MQTT client tasks | locked component `MQTT_TASK_STACK`, default 6144; project does not override | publisher events and the transient configuration broker-probe callback in `http_config.cpp` |
 | ping session task | project leaves `ESP_PING_DEFAULT_CONFIG()` task settings unchanged | network-watchdog and Syslog ping completion callbacks |
-| lwIP task | `CONFIG_LWIP_TCPIP_TASK_STACK_SIZE=3072` | SNTP time-sync callback, including time formatting and the guarded timestamp save |
+| lwIP task | `CONFIG_LWIP_TCPIP_TASK_STACK_SIZE=3072` | `sntp_sync_time` clock update and atomic checkpoint publication (no NVS or time formatting), plus `syslog_arp_lookup_cb` via `esp_netif_tcpip_exec` |
 
 The SDK also owns the FreeRTOS timer-service (`CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH=2048`)
 and driver tasks. A configured stack allocation
