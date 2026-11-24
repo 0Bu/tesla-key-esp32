@@ -10,7 +10,7 @@ namespace tk::ota {
 namespace {
 constexpr std::size_t kPrefixBytes = sizeof(esp_image_header_t) +
     sizeof(esp_image_segment_header_t) + sizeof(esp_app_desc_t);
-static_assert(kPrefixBytes <= 512);
+static_assert(kPrefixBytes <= 288);
 Effect error(esp_err_t result) noexcept {
     return result == ESP_OK ? Effect::Ok : result == ESP_ERR_NO_MEM ? Effect::NoMemory : Effect::Failed;
 }

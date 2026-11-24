@@ -8,9 +8,14 @@ namespace tk {
 enum class OtaRecoveryUse : std::uint8_t { TlsAdmission, ImageConfirmation, OperationEntry };
 // Shared policy threshold for confirmation and pre-operation admission, not identical
 // allocator phases. The named S3 series supports an operating-point policy, not a
-// necessary minimum or universal TLS guarantee. The ordinary cold S3 workload completed
-// three transfers at 59392 B. Reference queries reclaim no bytes.
-inline constexpr std::size_t kOtaRecoveryEntryRequiredB = 59392;
+// necessary minimum or universal TLS guarantee. Three cold S3 transfers completed at
+// 59392 B (32768 B pre-TLS-init / >= 31744 B post-context). Reducing pre-TLS contiguous
+// OTA allocations by 5344 B for manifests (-4096 B initial reserve vs 8192 B, -1024 B
+// redirect_, -224 B prefix_) calibrates the threshold to 55296 B (54 KiB), yielding
+// +1248 B net more pre-init headroom than 59392 B with zero mid-TLS reallocation for
+// real ~3 KiB manifests, while admitting warm S3 devices on a 57344 B bisected block.
+// Reference queries reclaim no bytes.
+inline constexpr std::size_t kOtaRecoveryEntryRequiredB = 55296;
 // Pinned fixed-buffer profile: IN16384/OUT4096 + conservative overhead2048 + header13.
 // The largest single-record request screen is not a complete TLS heap budget/reservation.
 inline constexpr std::size_t kOtaTlsInContentB = 16384;

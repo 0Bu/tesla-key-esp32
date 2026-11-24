@@ -21,14 +21,6 @@ std::size_t bounded_len(const char* p, std::size_t maximum) noexcept {
     while (n < maximum && p[n]) ++n;
     return n;
 }
-bool append(std::array<char, kUrlBytes>& out, std::size_t& n,
-            const char* text, std::size_t count) noexcept {
-    if (n >= out.size() || count >= out.size() - n) return false;
-    std::memcpy(out.data() + n, text, count);
-    n += count;
-    out[n] = '\0';
-    return true;
-}
 } // namespace
 
 Framing::Framing(HttpLimits limits, BodyCallback sink, void* context) noexcept
@@ -282,37 +274,44 @@ bool valid_https_url(const char* text, http_parser_url& parsed) noexcept {
     return parsed.field_data[UF_HOST].len != 0 && parsed.field_data[UF_HOST].len <= 253 &&
         (!has(UF_PORT) || parsed.port != 0);
 }
-bool resolve_redirect(const char* base, const char* target,
+bool resolve_redirect(const char* base,
                       std::array<char, kUrlBytes>& out) noexcept {
     http_parser_url previous{}, next{};
     if (!valid_https_url(base, previous)) return false;
-    const auto n = bounded_len(target, kUrlBytes);
+    const auto n = bounded_len(out.data(), kUrlBytes);
     if (!n || n == kUrlBytes) return false;
-    std::size_t used = 0; out.fill(0);
-    if (n >= 8 && equal_ci(target,8,"https://")) {
-        if (!append(out,used,target,n)) return false;
-    } else if (n >= 2 && target[0]=='/' && target[1]=='/') {
-        if (!append(out,used,"https:",6) || !append(out,used,target,n)) return false;
+    if (n >= 8 && equal_ci(out.data(),8,"https://")) {
+        // Already an absolute HTTPS URL in out.
+    } else if (n >= 2 && out[0]=='/' && out[1]=='/') {
+        if (n >= out.size() - 6) return false;
+        std::memmove(out.data() + 6, out.data(), n + 1);
+        std::memcpy(out.data(), "https:", 6);
     } else {
         // A relative reference cannot hide another absolute scheme as a path segment.
-        for (std::size_t i=0;i<n && target[i]!='/' && target[i]!='?' && target[i]!='#';++i)
-            if (target[i]==':') return false;
+        for (std::size_t i=0;i<n && out[i]!='/' && out[i]!='?' && out[i]!='#';++i)
+            if (out[i]==':') return false;
         const auto path = previous.field_data[UF_PATH];
         std::size_t authority_end = path.len ? path.off : std::strlen(base);
         if (!path.len && (previous.field_set & (1u<<UF_QUERY)))
             authority_end = previous.field_data[UF_QUERY].off - 1;
-        if (!append(out,used,base,authority_end)) return false;
-        if (target[0] == '/') {
-            if (!append(out,used,target,n)) return false;
-        } else if (target[0] == '?') {
-            if (!append(out,used,path.len ? base+path.off : "/",path.len ? path.len : 1) ||
-                !append(out,used,target,n)) return false;
+        const char* sub_ptr = nullptr;
+        std::size_t sub_len = 0;
+        if (out[0] == '/') {
+            // Root-relative: authority only.
+        } else if (out[0] == '?') {
+            sub_ptr = path.len ? base + path.off : "/";
+            sub_len = path.len ? path.len : 1;
         } else {
             std::size_t directory = path.len;
             while (directory && base[path.off+directory-1] != '/') --directory;
-            if (!append(out,used,directory ? base+path.off : "/",directory ? directory : 1) ||
-                !append(out,used,target,n)) return false;
+            sub_ptr = directory ? base + path.off : "/";
+            sub_len = directory ? directory : 1;
         }
+        const std::size_t prefix_len = authority_end + sub_len;
+        if (prefix_len >= out.size() || n >= out.size() - prefix_len) return false;
+        std::memmove(out.data() + prefix_len, out.data(), n + 1);
+        std::memcpy(out.data(), base, authority_end);
+        if (sub_len) std::memcpy(out.data() + authority_end, sub_ptr, sub_len);
     }
     if (!valid_https_url(out.data(),next)) return false;
     // Remove literal dot segments in-place; query bytes are retained verbatim. No second URL

@@ -141,7 +141,7 @@ Outcome Coordinator::poll() noexcept {
     if (outcome_ != Outcome::Working) return outcome_;
     if (redirect_wait_) {
         if (job_.phase() != Phase::Closed) return outcome_;
-        if (!job_.request(redirect_.data())) { fail(Outcome::InvalidState); return outcome_; }
+        if (!job_.request(framing_->location())) { fail(Outcome::InvalidState); return outcome_; }
         framing_.emplace(limits_,receive,this);
         redirect_wait_ = false;
     }
@@ -166,7 +166,7 @@ Outcome Coordinator::poll() noexcept {
         }
         if (!alive()) fail(Outcome::Deadline);
         if (outcome_ == Outcome::Working && parse == ParseResult::Redirect) {
-            if (redirects_ >= 10 || !resolve_redirect(job_.url.data(),framing_->location(),redirect_))
+            if (redirects_ >= 10 || !resolve_redirect(job_.url.data(), framing_->location_buffer()))
                 fail(Outcome::ProtocolError);
             else { ++redirects_; redirect_wait_ = true; job_.close_connection(); }
         } else if (outcome_ == Outcome::Working && parse == ParseResult::Complete) {
