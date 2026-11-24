@@ -690,14 +690,23 @@ static void test_syslog_policy() {
     CHECK(tk::syslog_target_parse("192.0.2.1", host, port));
     CHECK(host == "192.0.2.1" && port == 514);
 
-    // Rejected: empty, empty host/port either side of ':', a non-numeric or
-    // out-of-range port.
+    // Rejected: empty, empty host/port either side of ':', non-numeric or
+    // out-of-range port, schemes, internal whitespace, path separators, extra colons.
+    // Failure leaves caller out-parameters untouched.
+    host = "sentinel"; port = 9999;
     CHECK(!tk::syslog_target_parse("", host, port));
     CHECK(!tk::syslog_target_parse(":514", host, port));
     CHECK(!tk::syslog_target_parse("192.0.2.1:", host, port));
     CHECK(!tk::syslog_target_parse("192.0.2.1:abc", host, port));
     CHECK(!tk::syslog_target_parse("192.0.2.1:0", host, port));
     CHECK(!tk::syslog_target_parse("192.0.2.1:65536", host, port));
+    CHECK(!tk::syslog_target_parse("udp://192.0.2.1:514", host, port));
+    CHECK(!tk::syslog_target_parse("syslog://host:514", host, port));
+    CHECK(!tk::syslog_target_parse("192.0.2.1/path", host, port));
+    CHECK(!tk::syslog_target_parse("host:1:2", host, port));
+    CHECK(!tk::syslog_target_parse("host:514/foo", host, port));
+    CHECK(!tk::syslog_target_parse("host name:514", host, port));
+    CHECK(host == "sentinel" && port == 9999);
 
     // /set_syslog validation: empty always disables; a valid target passes; a
     // malformed one, or one carrying whitespace, is rejected.
@@ -6213,14 +6222,24 @@ static void test_tls_memory() {
 }
 
 static void test_mqtt_uri() {
+    CHECK(tk::mqtt_ascii_lower("MQTTS://Broker.Example:8883") ==
+          "mqtts://broker.example:8883");
     CHECK(tk::mqtt_trim("  host:1883 \r\n") == "host:1883");
     CHECK(tk::mqtt_trim("   ").empty());
 
     // Plausibility: empty DISABLES and is fine; everything else needs host:port.
+    // Only case-insensitive mqtt:// and mqtts:// schemes are tolerated.
     CHECK(tk::mqtt_broker_is_plausible(""));
     CHECK(tk::mqtt_broker_is_plausible("192.168.1.5:1883"));
+    CHECK(tk::mqtt_broker_is_plausible("mqtt://broker.example:1883"));
+    CHECK(tk::mqtt_broker_is_plausible("MQTT://broker.example:1883"));
     CHECK(tk::mqtt_broker_is_plausible("mqtts://broker.example:8883"));
+    CHECK(tk::mqtt_broker_is_plausible("MQTTS://broker.example:8883"));
     CHECK(tk::mqtt_broker_is_plausible("user:pw@broker.example:1883"));   // last colon is the port
+    CHECK(!tk::mqtt_broker_is_plausible("ws://broker.example:1883"));
+    CHECK(!tk::mqtt_broker_is_plausible("wss://broker.example:8883"));
+    CHECK(!tk::mqtt_broker_is_plausible("http://broker.example:1883"));
+    CHECK(!tk::mqtt_broker_is_plausible("://broker.example:1883"));
     CHECK(!tk::mqtt_broker_is_plausible("broker.example"));               // no port
     CHECK(!tk::mqtt_broker_is_plausible("broker.example:"));
     CHECK(!tk::mqtt_broker_is_plausible(":1883"));
@@ -6229,14 +6248,19 @@ static void test_mqtt_uri() {
     CHECK(!tk::mqtt_broker_is_plausible("broker.example:18a3"));
     CHECK(!tk::mqtt_broker_is_plausible("broker example:1883"));          // whitespace
 
-    // THE RULE WORTH SHARING: credentials imply TLS. A plain-mqtt CONNECT carries the password in
-    // the clear, and a credentialed broker is the one that tends to live off the trusted LAN.
+    // THE RULE WORTH SHARING: credentials (username or password) imply TLS. A plain-mqtt
+    // CONNECT carries credentials in the clear, and a credentialed broker is the one that tends to
+    // live off the trusted LAN.
     CHECK(tk::mqtt_effective_uri("host:1883", false) == "mqtt://host:1883");
-    CHECK(tk::mqtt_effective_uri("host:1883", true)  == "mqtts://host:1883");
+    CHECK(tk::mqtt_effective_uri("host:1883", true)  == "mqtts://host:1883"); // includes password-only
     CHECK(tk::mqtt_effective_uri("u:p@host:1883", false) == "mqtts://u:p@host:1883");
-    // An explicit scheme is honoured in BOTH directions — including a deliberate downgrade.
+    // Explicit scheme is lowercased without altering authority/userinfo case, and honoured in both directions.
     CHECK(tk::mqtt_effective_uri("mqtt://host:1883", true) == "mqtt://host:1883");
+    CHECK(tk::mqtt_effective_uri("MQTT://User:Pass@Host.Example:1883", true) ==
+          "mqtt://User:Pass@Host.Example:1883");
     CHECK(tk::mqtt_effective_uri("mqtts://host:8883", false) == "mqtts://host:8883");
+    CHECK(tk::mqtt_effective_uri("MQTTS://Host.Example:8883", false) ==
+          "mqtts://Host.Example:8883");
     CHECK(tk::mqtt_effective_uri("   host:1883  ", false) == "mqtt://host:1883");
     CHECK(tk::mqtt_effective_uri("", true).empty());   // empty stays empty: it disables the bridge
 
@@ -6250,7 +6274,9 @@ static void test_mqtt_uri() {
     CHECK(tk::mqtt_broker_display("").empty());
 
     CHECK(tk::mqtt_uri_is_tls("mqtts://h:8883"));
+    CHECK(tk::mqtt_uri_is_tls("MQTTS://h:8883"));
     CHECK(!tk::mqtt_uri_is_tls("mqtt://h:1883"));
+    CHECK(!tk::mqtt_uri_is_tls("MQTT://h:1883"));
     CHECK(!tk::mqtt_uri_is_tls(""));
 
     // The probe's memory gate. TLS costs far more than plaintext, and the number that binds is the

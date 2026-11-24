@@ -15,3 +15,6 @@ struct BrowserClockResult { BrowserClockStatus status; int64_t seconds; };
 // Busy/Invalid/AlreadyNtpSynced prove no browser write; SetFailed preserves effect uncertainty.
 BrowserClockResult apply_browser_clock(double milliseconds) noexcept;
 BrowserClockResult apply_browser_clock_sample(tk::ClockSample sample) noexcept;
+
+// Persist any pending NTP checkpoint queued by sntp_sync_time() from a safe task context.
+void clock_service_ntp_checkpoint() noexcept;

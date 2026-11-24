@@ -158,7 +158,7 @@ if(Python3_Interpreter_FOUND)
         OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/syslog_adapters.generated.hpp
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/generate_syslog_adapters.py
                 ${CMAKE_CURRENT_BINARY_DIR}/syslog_adapters.generated.hpp
-        DEPENDS generate_syslog_adapters.py test_runtime_boundary_contract.py ../main/syslog.cpp
+        DEPENDS generate_syslog_adapters.py test_runtime_boundary_contract.py ../main/syslog.cpp ../main/syslog.hpp
         VERBATIM)
     add_executable(syslog_runtime_tests test_syslog_runtime.cpp
                    ${CMAKE_CURRENT_BINARY_DIR}/syslog_adapters.generated.hpp)

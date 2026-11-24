@@ -20,6 +20,8 @@
 #include "logic/connect_outcome.hpp"
 #include "logic/mqtt_state_lifecycle.hpp"
 
+static tk::TaskWatchdogSubscription* s_pub_watchdog = nullptr;
+
 static unsigned checks;
 #define CHECK(x) do {++checks;if(!(x)){std::fprintf(stderr,"FAIL line %d: %s\n",__LINE__,#x);std::exit(42);}}while(false)
 namespace fixture {
@@ -41,6 +43,7 @@ void log(int level,const char*,const char* format,...){
 }
 [[noreturn]] void finish(){
     CHECK(!present); // Must be true BEFORE actual self-delete; no destructor may fix it.
+    CHECK(s_pub_watchdog == nullptr); // ScopedPubWatchdog must unwind before self-delete.
     CHECK(samples >= 3);
     CHECK(tk::stack_watch_min_free_bytes(tk::StackWatch::Mqtt) == 4096u);
     CHECK(discoveries<2 && states<2); // Cleanup cannot replay a round.
@@ -108,7 +111,7 @@ extern "C" UBaseType_t uxTaskGetStackHighWaterMark(TaskHandle_t task){
 }
 static bool publish_discovery(){++fixture::discoveries;fixture::record("discovery");if(fixture::mode=="publisher-iteration-throw")throw std::bad_alloc();return true;}
 static bool publish_state(){++fixture::states;fixture::record("state");return true;}
-static bool pub(const char*,const char*){++fixture::availability;fixture::record("availability");return true;}
+static bool pub(const char*,const char*){if(s_pub_watchdog)s_pub_watchdog->feed();++fixture::availability;fixture::record("availability");return true;}
 
 // ACTUAL_COMPLETE_BODIES
 

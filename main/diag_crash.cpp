@@ -103,6 +103,7 @@ static CoredumpHeader s_header;
 static std::atomic<uint32_t> s_admission{NoArtifact};
 static std::atomic<bool> s_dismissed{false};
 static std::atomic<bool> s_query_error{false};
+static std::atomic<bool> s_erasing{false};
 static std::atomic_flag s_dump_owner = ATOMIC_FLAG_INIT;
 
 static Admission state(uint32_t value) { return static_cast<Admission>(value & kStateMask); }
@@ -111,6 +112,11 @@ static void invalidate(Admission next) noexcept {
     while (!s_admission.compare_exchange_weak(previous,
               ((previous + kGeneration) & ~kStateMask) | next,
               std::memory_order_acq_rel, std::memory_order_acquire)) {}
+}
+static bool invalidate_if_unchanged(uint32_t expected, Admission next) noexcept {
+    const uint32_t updated = ((expected + kGeneration) & ~kStateMask) | next;
+    return s_admission.compare_exchange_strong(
+        expected, updated, std::memory_order_acq_rel, std::memory_order_acquire);
 }
 CoredumpLease::CoredumpLease() noexcept
     : held_(!s_dump_owner.test_and_set(std::memory_order_acquire)) {}
@@ -169,12 +175,20 @@ CrashInfoView diag_crash_info_live() {
     const uint32_t before = s_admission.load(std::memory_order_acquire);
     HeaderQuery query;
     try { query = query_header(); } catch (...) { query.error = true; }
-    if (query.error) { s_query_error.store(true, std::memory_order_release); invalidate(Quarantined); }
-    else if (!query.header.present) {
-        if (state(before) != NoArtifact) invalidate(NoArtifact);
-    } else if ((state(before) == Current || state(before) == Foreign) &&
-               !same_header(query.header, s_header)) {
-        invalidate(Quarantined);
+    if (!s_erasing.load(std::memory_order_acquire)) {
+        if (query.error) {
+            const uint32_t expected_next = ((before + kGeneration) & ~kStateMask) | Quarantined;
+            if (invalidate_if_unchanged(before, Quarantined) &&
+                !s_erasing.load(std::memory_order_acquire) &&
+                s_admission.load(std::memory_order_acquire) == expected_next) {
+                s_query_error.store(true, std::memory_order_release);
+            }
+        } else if (!query.header.present) {
+            if (state(before) != NoArtifact) (void)invalidate_if_unchanged(before, NoArtifact);
+        } else if ((state(before) == Current || state(before) == Foreign) &&
+                   !same_header(query.header, s_header)) {
+            (void)invalidate_if_unchanged(before, Quarantined);
+        }
     }
     CrashInfoView info = crash_borrow(s_boot); // static immutable payload; no copy/allocation/leaf lock
     info.dismissed = s_dismissed.load(std::memory_order_acquire);
@@ -283,6 +297,12 @@ CoredumpOpenResult diag_crash_open_dump(const CoredumpLease& lease, bool raw, Co
 CrashEraseResult diag_crash_erase(bool dismiss, EffectReplyState& reply) noexcept {
     CoredumpLease lease;
     if (!lease.held()) return CrashEraseResult::Busy;
+    struct EraseInFlight {
+        EraseInFlight() noexcept { s_erasing.store(true, std::memory_order_release); }
+        ~EraseInFlight() noexcept { s_erasing.store(false, std::memory_order_release); }
+        EraseInFlight(const EraseInFlight&) = delete;
+        EraseInFlight& operator=(const EraseInFlight&) = delete;
+    } erasing;
     try {
         const auto query = locate_partition();
         if (!query.error && !query.part) {
@@ -295,7 +315,8 @@ CrashEraseResult diag_crash_erase(bool dismiss, EffectReplyState& reply) noexcep
         if (query.error) { s_query_error.store(true, std::memory_order_release); return CrashEraseResult::Unconfirmed; }
 #if defined(CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH)
         if (esp_core_dump_image_erase() != ESP_OK) {
-            s_query_error.store(true, std::memory_order_release); return CrashEraseResult::Unconfirmed;
+            invalidate(Quarantined); s_query_error.store(true, std::memory_order_release);
+            return CrashEraseResult::Unconfirmed;
         }
         invalidate(NoArtifact); s_query_error.store(false, std::memory_order_release);
         if (dismiss) s_dismissed.store(true, std::memory_order_release);

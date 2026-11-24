@@ -990,7 +990,11 @@ function editMqtt(){
       if(/[ \t\r\n]/.test(v)) return 'Invalid broker — spaces not allowed';
       if(utf8Len(v)>64) return 'Broker too long (max 64 bytes)';
       var auth=v, scheme=auth.indexOf('://');
-      if(scheme>=0) auth=auth.slice(scheme+3);
+      if(scheme>=0){
+        var sch=auth.slice(0,scheme).toLowerCase();
+        if(sch!=='mqtt'&&sch!=='mqtts') return 'Unsupported scheme — use mqtt:// or mqtts://';
+        auth=auth.slice(scheme+3);
+      }
       var colon=auth.lastIndexOf(':');
       if(colon<=0) return 'Invalid broker — use host:port';
       var host=auth.slice(0,colon), port=auth.slice(colon+1);

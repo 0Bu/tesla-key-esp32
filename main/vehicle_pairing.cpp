@@ -30,6 +30,24 @@
 
 static const char* TAG = "vehicle_ctrl";
 
+namespace {
+
+struct SecureByteWipe {
+    std::vector<uint8_t>& buf;
+    explicit SecureByteWipe(std::vector<uint8_t>& b) noexcept : buf(b) {}
+    ~SecureByteWipe() noexcept { wipe(); }
+    void wipe() noexcept {
+        if (!buf.empty()) {
+            volatile uint8_t* p = buf.data();
+            for (size_t i = 0; i < buf.size(); ++i) p[i] = 0;
+        }
+    }
+    SecureByteWipe(const SecureByteWipe&) = delete;
+    SecureByteWipe& operator=(const SecureByteWipe&) = delete;
+};
+
+}  // namespace
+
 // Actual shell: no key/config/session writes, no Client/BLE call and no image confirmation.
 // The existing command mutex owns the identity transaction, not a leaf cache. Acquire order is
 // ConfigRestart -> command mutex; storage reads are permitted here, never under Vehicle/leaf locks.
@@ -437,8 +455,17 @@ tk::KeyRotationResult VehicleController::generate_key_locked_() {
     }
 
     // Allocate the marker payload before changing any runtime gate. If allocation itself throws,
-    // no journal/key state has changed and the caller's outer exception boundary can respond.
-    const std::vector<uint8_t> marker_payload{1};
+    // no journal/key state has changed.
+    std::vector<uint8_t> marker_payload;
+    try {
+        marker_payload.assign(1, 1);
+    } catch (const std::exception& e) {
+        ESP_LOGE(TAG, "key rotation marker allocation threw (%s) — private key left unchanged", e.what());
+        return tk::KeyRotationResult::NotCommitted;
+    } catch (...) {
+        ESP_LOGE(TAG, "key rotation marker allocation threw (unknown) — private key left unchanged");
+        return tk::KeyRotationResult::NotCommitted;
+    }
     const bool runtime_was_safe = key_runtime_safe_.load();
     // Block every signer before tesla-ble mutates its in-memory key. Background polling reads
     // this gate too; foreground runners are additionally serialized by command_mutex_. It is
@@ -504,25 +531,41 @@ tk::KeyRotationResult VehicleController::generate_key_locked_() {
     }
     pairing_cleanup_pending_.store(true);
     {
+        tk::MutexGuard cache_guard(cache_mutex_);
+        key_fingerprint_cache_.clear();
+    }
+    try {
         std::string new_fp = compute_key_fingerprint_();
         tk::MutexGuard cache_guard(cache_mutex_);
         key_fingerprint_cache_ = std::move(new_fp);
+    } catch (const std::exception& e) {
+        ESP_LOGW(TAG, "key fingerprint refresh threw (%s) — leaving cache empty", e.what());
+    } catch (...) {
+        ESP_LOGW(TAG, "key fingerprint refresh threw (unknown) — leaving cache empty");
     }
     // Only an acquired NTP authority followed by a bounded time sample may stamp THIS key.
     // Failed/no stamp retires the previous key's date before the existing journal cleanup.
     if (storage_) {
-        const bool authoritative = clock_is_authoritative();
-        const time_t now = authoritative ? time(nullptr) : 0;
-        const auto date = tk::stamp_or_retire_key_date(
-            authoritative && tk::historical_date_valid(now, clock_plausibility_ceiling()),
-            [&] { return storage_->save_str(tk::nvs_contract::kKeyCreated,
-                                             std::to_string((long long)now)); },
-            [&] { return storage_->remove(tk::nvs_contract::kKeyCreated); });
-        if (date == tk::KeyCreatedDateResult::Stamped) {
-            key_created_untrusted_.store(false);
-        } else if (date == tk::KeyCreatedDateResult::Untrusted) {
+        try {
+            const bool authoritative = clock_is_authoritative();
+            const time_t now = authoritative ? time(nullptr) : 0;
+            const auto date = tk::stamp_or_retire_key_date(
+                authoritative && tk::historical_date_valid(now, clock_plausibility_ceiling()),
+                [&] { return storage_->save_str(tk::nvs_contract::kKeyCreated,
+                                                 std::to_string((long long)now)); },
+                [&] { return storage_->remove(tk::nvs_contract::kKeyCreated); });
+            if (date == tk::KeyCreatedDateResult::Stamped) {
+                key_created_untrusted_.store(false);
+            } else if (date == tk::KeyCreatedDateResult::Untrusted) {
+                key_created_untrusted_.store(true);
+                ESP_LOGW(TAG, "previous key creation date could not be retired; journal remains armed");
+            }
+        } catch (const std::exception& e) {
             key_created_untrusted_.store(true);
-            ESP_LOGW(TAG, "previous key creation date could not be retired; journal remains armed");
+            ESP_LOGW(TAG, "key creation date update threw (%s); journal remains armed", e.what());
+        } catch (...) {
+            key_created_untrusted_.store(true);
+            ESP_LOGW(TAG, "key creation date update threw (unknown); journal remains armed");
         }
     }
     // A new key invalidates any existing pairing: the stored session belonged to the
@@ -752,13 +795,27 @@ VehicleController::NewVehicleResetResult VehicleController::reset_for_new_vehicl
         return result;
     }
 
-    const tk::KeyRotationResult rotation = generate_key_locked_();
+    tk::KeyRotationResult rotation = tk::KeyRotationResult::CommitUnknown;
+    try {
+        rotation = generate_key_locked_();
+    } catch (const std::exception& e) {
+        ESP_LOGE(TAG, "VIN transition key rotation threw (%s) — classifying as ambiguous", e.what());
+    } catch (...) {
+        ESP_LOGE(TAG, "VIN transition key rotation threw (unknown) — classifying as ambiguous");
+    }
     result.state = tk::decide_vin_transition_apply(true, true, rotation);
     if (tk::key_rotation_committed(rotation)) {
         // The discovered BLE MAC belongs to the previous car; boot recovery can retry this via
         // vin_txn if the cross-namespace erase does not commit here.
-        const bool mac_removed = config_store_ &&
-                                 config_store_->remove(tk::nvs_contract::kBleMac);
+        bool mac_removed = false;
+        try {
+            mac_removed = config_store_ &&
+                          config_store_->remove(tk::nvs_contract::kBleMac);
+        } catch (const std::exception& e) {
+            ESP_LOGE(TAG, "old vehicle's BLE MAC cleanup threw (%s) — VIN journal remains armed", e.what());
+        } catch (...) {
+            ESP_LOGE(TAG, "old vehicle's BLE MAC cleanup threw (unknown) — VIN journal remains armed");
+        }
         if (!mac_removed) {
             ESP_LOGE(TAG, "old vehicle's BLE MAC cleanup incomplete — VIN journal remains armed");
             result.state = tk::VinTransitionApply::RecoverCommittedIdentity;
@@ -849,16 +906,17 @@ bool VehicleController::has_session() {
 __attribute__((noinline)) std::string VehicleController::compute_key_fingerprint_() {
     if (!storage_) return "";
     std::vector<uint8_t> pem;
+    SecureByteWipe pem_wipe{pem};
     if (!storage_->load(tk::nvs_contract::kPrivateKey, pem) || pem.empty()) return "";
     // mbedtls expects the PEM buffer to be NUL-terminated and the length to include it.
     // Ensure pem capacity is reserved (pem.reserve(kPemSize)) before pem.push_back('\0')
     // so reallocation does not orphan an unwiped memory block.
     if (pem.back() != '\0') {
         std::vector<uint8_t> padded;
+        SecureByteWipe padded_wipe{padded};
         padded.reserve(pem.size() + 1);
         padded.assign(pem.begin(), pem.end());
-        volatile uint8_t* p = pem.data();
-        for (size_t i = 0; i < pem.size(); ++i) p[i] = 0;
+        pem_wipe.wipe();
         pem = std::move(padded);
         pem.push_back('\0');
     }
@@ -866,21 +924,39 @@ __attribute__((noinline)) std::string VehicleController::compute_key_fingerprint
     // Mbed TLS 4 keeps PK only for encodings: the parsed key moves into a short-lived volatile
     // PSA key, whose export is the uncompressed P-256 point (0x04 || X || Y) that tesla-ble's
     // generate_key_id() hashes too. ESP-IDF initialises PSA Crypto during startup.
-    mbedtls_pk_context pk;
-    mbedtls_pk_init(&pk);
-    mbedtls_svc_key_id_t key_id = MBEDTLS_SVC_KEY_ID_INIT;
+    struct PkContextGuard {
+        mbedtls_pk_context ctx;
+        PkContextGuard() noexcept { mbedtls_pk_init(&ctx); }
+        ~PkContextGuard() noexcept { mbedtls_pk_free(&ctx); }
+        PkContextGuard(const PkContextGuard&) = delete;
+        PkContextGuard& operator=(const PkContextGuard&) = delete;
+    } pk_guard;
+    struct PsaKeyIdGuard {
+        mbedtls_svc_key_id_t id = MBEDTLS_SVC_KEY_ID_INIT;
+        PsaKeyIdGuard() noexcept = default;
+        ~PsaKeyIdGuard() noexcept { psa_destroy_key(id); } // PSA_SUCCESS no-op for the null id
+        PsaKeyIdGuard(const PsaKeyIdGuard&) = delete;
+        PsaKeyIdGuard& operator=(const PsaKeyIdGuard&) = delete;
+    } key_guard;
     std::string fp;
 
-    if (mbedtls_pk_parse_key(&pk, pem.data(), pem.size(), nullptr, 0) == 0) {
-        psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
-        if (mbedtls_pk_get_psa_attributes(&pk, PSA_KEY_USAGE_DERIVE, &attributes) == 0 &&
-            psa_get_key_type(&attributes) ==
+    if (mbedtls_pk_parse_key(&pk_guard.ctx, pem.data(), pem.size(), nullptr, 0) == 0) {
+        struct PsaAttributesGuard {
+            psa_key_attributes_t attrs = PSA_KEY_ATTRIBUTES_INIT;
+            PsaAttributesGuard() noexcept = default;
+            ~PsaAttributesGuard() noexcept { psa_reset_key_attributes(&attrs); }
+            PsaAttributesGuard(const PsaAttributesGuard&) = delete;
+            PsaAttributesGuard& operator=(const PsaAttributesGuard&) = delete;
+        } attributes_guard;
+        if (mbedtls_pk_get_psa_attributes(&pk_guard.ctx, PSA_KEY_USAGE_DERIVE,
+                                          &attributes_guard.attrs) == 0 &&
+            psa_get_key_type(&attributes_guard.attrs) ==
                 PSA_KEY_TYPE_ECC_KEY_PAIR(PSA_ECC_FAMILY_SECP_R1) &&
-            psa_get_key_bits(&attributes) == 256 &&
-            mbedtls_pk_import_into_psa(&pk, &attributes, &key_id) == 0) {
+            psa_get_key_bits(&attributes_guard.attrs) == 256 &&
+            mbedtls_pk_import_into_psa(&pk_guard.ctx, &attributes_guard.attrs, &key_guard.id) == 0) {
             uint8_t pub[65];
             size_t  publen = 0;
-            if (psa_export_public_key(key_id, pub, sizeof(pub), &publen) == PSA_SUCCESS) {
+            if (psa_export_public_key(key_guard.id, pub, sizeof(pub), &publen) == PSA_SUCCESS) {
                 // Tesla key id = first 4 bytes of SHA-1 over the uncompressed public point.
                 uint8_t sha[20];
                 size_t  shalen = 0;
@@ -892,16 +968,8 @@ __attribute__((noinline)) std::string VehicleController::compute_key_fingerprint
                 }
             }
         }
-        psa_reset_key_attributes(&attributes);
     }
 
-    if (!pem.empty()) {
-        volatile uint8_t* p = pem.data();
-        for (size_t i = 0; i < pem.size(); ++i) p[i] = 0;
-    }
-
-    psa_destroy_key(key_id);  // PSA_SUCCESS no-op for the null id
-    mbedtls_pk_free(&pk);
     return fp;
 }
 

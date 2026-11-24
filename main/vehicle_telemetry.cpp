@@ -14,9 +14,9 @@
 #include "logic/heap_supervision.hpp"
 #include "logic/uptime.hpp"
 #include "stack_watch.hpp"
+#include "task_watchdog_subscription.hpp"
 #include <esp_log.h>
 #include <esp_timer.h>
-#include <esp_task_wdt.h>
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
@@ -37,25 +37,6 @@
 static const char* TAG = "vehicle_ctrl";
 
 namespace {
-
-// A task that exits through the C++ exception boundary must unregister itself before FreeRTOS
-// self-deletion. The destructor runs during that unwind; no external task ever owns this handle.
-class TaskWatchdogSubscription {
-public:
-    bool subscribe() noexcept {
-        active_ = esp_task_wdt_add(nullptr) == ESP_OK;
-        return active_;
-    }
-    bool active() const noexcept { return active_; }
-    ~TaskWatchdogSubscription() {
-        if (active_ && esp_task_wdt_delete(nullptr) != ESP_OK) {
-            ESP_LOGE(TAG, "vehicle loop could not unregister from the task watchdog");
-        }
-    }
-
-private:
-    bool active_{false};
-};
 
 // Builder for the DriveState infotainment poll, shared by the telemetry rotation and the
 // wake/bootstrap one-shot so both ask for exactly the same thing.
@@ -1631,7 +1612,8 @@ void VehicleController::loop_task_fn_(void* arg) {
     // iteration so stalled BLE work or a blocked dependency does not look like normal polling.
     // A failed subscription is logged and the loop runs on unwatched: losing the watchdog is worse
     // than not having it, but far better than refusing to poll the car.
-    TaskWatchdogSubscription watchdog;
+    tk::TaskWatchdogSubscription watchdog;
+    try {
     if (!watchdog.subscribe()) {
         ESP_LOGW(TAG, "vehicle_loop could not subscribe to the task watchdog — a wedged poll will "
                       "no longer reboot the device automatically");
@@ -1649,7 +1631,7 @@ void VehicleController::loop_task_fn_(void* arg) {
       // Feed the task watchdog FIRST and UNCONDITIONALLY, before anything that can block or throw.
       // Gating it on the work below would make a long-but-legitimate command look like a hang; put
       // after the work, a throw would skip it and turn an already-contained OOM into a reboot.
-      if (watchdog.active()) esp_task_wdt_reset();
+      watchdog.feed();
       // FreeRTOS retains the historical low mark. The outer iteration scope records it after
       // this round, including contained faults and early continues, after local guards retire.
 
@@ -1903,11 +1885,30 @@ void VehicleController::loop_task_fn_(void* arg) {
 
       vTaskDelay(pdMS_TO_TICKS(50));
     }
+    } catch (...) {
+        tk::runtime_admission_mark_fatal();
+        // Do not delete a task whose watchdog entry might still exist. An uncertain
+        // cleanup parks this task without running another poll iteration.
+        bool reported = false;
+        while (!watchdog.release()) {
+            if (!reported) {
+                reported = true;
+                try { ESP_LOGE(TAG, "vehicle loop parked: watchdog removal unconfirmed"); }
+                catch (...) {}
+            }
+            watchdog.feed(true);
+            tk::stack_watch_sample(tk::StackWatch::Vehicle);
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+        try { ESP_LOGE(TAG, "vehicle loop boundary threw outside an iteration — stopping task"); }
+        catch (...) {}
+        tk::stack_watch_sample(tk::StackWatch::Vehicle); // no C++ unwind on delete
+        vTaskDelete(nullptr);
+    }
   } catch (...) {
       tk::runtime_admission_mark_fatal();
       try { ESP_LOGE(TAG, "vehicle loop boundary threw outside an iteration — stopping task"); }
       catch (...) {}
-      // TaskWatchdogSubscription has already unwound and removed this task from TWDT.
       tk::stack_watch_sample(tk::StackWatch::Vehicle); // no C++ unwind on delete
       vTaskDelete(nullptr);
   }

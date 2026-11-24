@@ -23,6 +23,13 @@ struct SyslogStatus {
     uint32_t dropped_lines{0};  // queue-full losses since boot, modulo 2^32
 };
 
+// Fixed bounded queue payload shared with diag_log.cpp so captured lines fit in a single
+// 256-byte stack frame without duplicating the message buffer across call boundaries.
+struct SyslogMsg {
+    char     text[256];
+    uint16_t len;
+};
+
 // Start the forwarder task. Reads NVS "syslog_uri" (web UI: Syslog row,
 // POST /set_syslog), falling back to CONFIG_TESLA_SYSLOG_SERVER. "" disables
 // forwarding (the task idles, draining and dropping whatever is queued). Config is
@@ -41,6 +48,7 @@ bool syslog_start(NvsStorageAdapter& config_store);
 // Queue one already-formatted line for forwarding. Non-blocking (counts queue-full losses;
 // a no-op before syslog_start() has run) so a stuck collector can never
 // stall the caller. Called from diag_log.cpp's esp_log capture hook.
+void syslog_send_msg(const SyslogMsg& msg) noexcept;
 void syslog_send(const char* msg, size_t len);
 
 // Snapshot for GET /status (the web UI's Syslog row).

@@ -1,4 +1,5 @@
 #include "diag_log.hpp"
+#include "syslog.hpp"
 #include "nvs_storage.hpp"
 #include "mqtt_probe_owner.hpp"
 #include "ping_probe.hpp"
@@ -26,6 +27,7 @@
 #include <new>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 int test_coredump_hash();
@@ -82,7 +84,7 @@ BaseType_t fake_scheduler_state = taskSCHEDULER_RUNNING;
 int current_task_token = 0;
 TaskHandle_t fake_current_task = &current_task_token;
 bool track_log_stack_queries = false;
-char log_stack_trace[16]{};
+char log_stack_trace[32]{};
 unsigned log_stack_trace_size = 0;
 int throw_serial_sink = 0;
 int throw_syslog_sink = 0;
@@ -420,6 +422,13 @@ extern "C" int host_test_vprintf(const char* fmt, va_list ap) {
         captured_serial.assign(buffer, n);
     }
     return n;
+}
+
+void syslog_send_msg(const SyslogMsg& msg) noexcept {
+    if (capture_log_sinks) {
+        CHECK(!last_mutex || !last_mutex->held);
+        captured_syslog.assign(msg.text, msg.len);
+    }
 }
 
 void syslog_send(const char* data, size_t len) {
@@ -1101,8 +1110,10 @@ static void test_diag_http_completion_matrix() {
 
 static void test_actual_logger_stack_sampling() {
     // The complete actual diag_log.cpp helper is compiled against these SDK doubles.
-    // Only the added sampling chain is tested for unsafe contexts; this does not claim
-    // that the pre-existing ring or Serial/syslog sink accepts arbitrary ISR logging.
+    // Unsafe callers (ISR, masked critical section, scheduler not running, null current task)
+    // still reach the fallback/Serial sink and redact known MQTT URI errors there, while skipping
+    // ring/syslog capture and incrementing the drop counter without touching task HWM.
+    static_assert(noexcept(syslog_send_msg(std::declval<const SyslogMsg&>())));
     CHECK(last_mutex != nullptr && !last_mutex->held);
     capture_log_sinks = true;
     track_log_stack_queries = true;
@@ -1114,29 +1125,45 @@ static void test_actual_logger_stack_sampling() {
                                refusal == 3 ? taskSCHEDULER_SUSPENDED : taskSCHEDULER_RUNNING;
         fake_current_task = refusal == 4 ? nullptr : &current_task_token;
         log_stack_trace_size = 0; log_stack_trace[0] = '\0';
+        captured_serial.clear(); captured_syslog.clear();
         const auto queries = stack_queries;
+        const auto dropped_before = diag_log_dropped_lines();
         emit_log("ordinary guarded diagnostic %d\n", refusal);
-        CHECK(std::strcmp(log_stack_trace, refusal == 0 ? "I" : refusal == 1 ? "IY" :
-                          refusal == 4 ? "IYSC" : "IYS") == 0);
+        CHECK(std::strcmp(log_stack_trace, refusal == 0 ? "II" : refusal == 1 ? "IYIY" :
+                          refusal == 4 ? "IYSCIYSC" : "IYSIYS") == 0);
         CHECK(stack_queries == queries);
+        CHECK(diag_log_dropped_lines() == dropped_before + 1);
         CHECK(tk::stack_watch_min_free_bytes(tk::StackWatch::DiagLogCallback) == before_min);
-        CHECK(captured_serial == captured_syslog);
+        CHECK(!captured_serial.empty());
+        CHECK(captured_syslog.empty());
+    }
+    fake_isr = true; fake_can_yield = true; fake_scheduler_state = taskSCHEDULER_RUNNING;
+    fake_current_task = &current_task_token;
+    log_stack_trace_size = 0; log_stack_trace[0] = '\0';
+    captured_serial.clear(); captured_syslog.clear();
+    {
+        const auto dropped_before = diag_log_dropped_lines();
+        emit_log("E (1) mqtt_client: Error parse uri (1) = mqtt://example:secret@broker.invalid\n");
+        CHECK(std::strcmp(log_stack_trace, "II") == 0);
+        CHECK(diag_log_dropped_lines() == dropped_before + 1);
+        CHECK(captured_serial == tk::kDiagMqttUriErrorLine);
+        CHECK(captured_syslog.empty());
     }
     fake_isr = false; fake_can_yield = true; fake_scheduler_state = taskSCHEDULER_RUNNING;
     fake_current_task = &current_task_token;
     fake_stack_free = 128; // A real observation retains a present zero lower bound.
-    for (int sink : {0, 1, 2}) {
+    for (int sink : {0, 1}) {
         for (int fault : {0, 1, 2}) {
             if (sink == 0 && fault != 0) continue;
             throw_serial_sink = sink == 1 ? fault : 0;
-            throw_syslog_sink = sink == 2 ? fault : 0;
+            throw_syslog_sink = 0;
             log_stack_trace_size = 0; log_stack_trace[0] = '\0';
             const auto queries = stack_queries;
             bool caught = false;
             try { emit_log("ordinary sink-unwind diagnostic\n"); }
             catch (...) { caught = true; }
             CHECK(caught == (fault != 0));
-            CHECK(std::strcmp(log_stack_trace, "IYSCH") == 0);
+            CHECK(std::strcmp(log_stack_trace, "IYSCIYSCH") == 0);
             CHECK(stack_queries == queries + 1);
             CHECK(tk::stack_watch_min_free_bytes(tk::StackWatch::DiagLogCallback) == 0u);
             CHECK(!last_mutex->held);
@@ -1144,8 +1171,9 @@ static void test_actual_logger_stack_sampling() {
     }
     throw_serial_sink = 0; throw_syslog_sink = 0;
     log_stack_trace_size = 0; log_stack_trace[0] = '\0';
+    captured_serial.clear(); captured_syslog.clear();
     emit_log("E (1) mqtt_client: Error parse uri (1) = mqtt://example:secret@broker.invalid\n");
-    CHECK(std::strcmp(log_stack_trace, "IYSCH") == 0);
+    CHECK(std::strcmp(log_stack_trace, "IYSCIYSCH") == 0);
     CHECK(captured_serial == tk::kDiagMqttUriErrorLine);
     CHECK(captured_syslog == tk::kDiagMqttUriErrorLine);
     CHECK(!last_mutex->held);
@@ -1153,9 +1181,11 @@ static void test_actual_logger_stack_sampling() {
     // and its capture strings are disabled so allocation denial targets the actual helper.
     capture_log_sinks = false;
     fail_global_allocation = true;
+    log_stack_trace_size = 0; log_stack_trace[0] = '\0';
     const auto queries = stack_queries;
     emit_log("I (1) net: WiFi connected to 'demo\nprivate-tail'\r\n");
     fail_global_allocation = false;
+    CHECK(std::strcmp(log_stack_trace, "IYSCIYSCH") == 0);
     CHECK(stack_queries == queries + 1);
     track_log_stack_queries = false;
     diag_log_clear();

@@ -413,7 +413,13 @@ owns export modes and response classes; no crash data belongs in public evidence
 
 The log hook mirrors console lines into the RAM ring and a fixed 24-item forwarding queue.
 Each `SyslogMsg` has 256 payload bytes plus a two-byte length (258 bytes per item); FreeRTOS
-queue-control storage is additional.
+queue-control storage is additional. `diag_vprintf_` formats directly into a single `SyslogMsg`
+stack buffer and passes it by reference to `syslog_send_msg()` without duplicating the 256-byte
+frame on the caller stack. Before locking the ring mutex or queueing to Syslog, `diag_vprintf_`
+checks the same task/context predicate (`diag_capture_context_safe_()`, also reused by stack HWM
+sampling) and counts unsafe-context skips under `dropped_lines` instead of invoking FreeRTOS
+mutex/queue primitives from an ISR, critical section or suspended/unstarted scheduler; known
+MQTT credential error redaction on the Serial sink still runs unconditionally.
 RFC5424 facility user severity follows E/W/I/D/V (3/4/6/7), skipping ANSI prefixes; unrecognized
 lines remain info. Firmware boot replay explicitly marks BOOT as INFO and CRASH as ERROR;
 message text alone cannot acquire either replay type. Replay snapshots the live crash report, so
@@ -430,7 +436,10 @@ consumer snapshots its handle once. Export limits live in
 [API](API.md#diagnostic-export-and-heap-trend). Configuration changes persist then reboot.
 
 DNS resolve/reprobe is throttled to about 10 s. Delivery requires resolution, not the advisory
-ARP/ICMP result. Hard route/link errors re-resolve; transient resource errors keep ordinary cadence.
+ARP/ICMP result. For local-subnet collectors, `syslog_ping_host()` checks subnet membership via
+`tk::net_active_netif()` / `esp_netif_get_ip_info()` and executes the `etharp_find_addr()` lookup
+inside lwIP's owning `tcpip_thread` via `esp_netif_tcpip_exec()`. Hard route/link errors
+re-resolve; transient resource errors keep ordinary cadence.
 Log only failure/recovery transitions; reject the forwarder's own `syslog:` lines to prevent loops.
 `syslog_start_gate.hpp` publishes the process-lifetime queue only after task creation succeeds;
 a scheduled consumer waits until commit, and cancelled unpublished resources unwind safely.
@@ -717,16 +726,20 @@ writers share one boot-initialized static operation mutex; NTP applies once and 
 before release, so a later browser writer cannot overwrite that commit. Only IMMED mode is used.
 The 100 ms admission wait is not an operation deadline: libc timekeeping locks can wait indefinitely.
 Early `gettimeofday` initializes libc's private locks before producers; that SDK bootstrap can
-allocate and abort on OOM. No storage, logging or network operation runs under the application clock
-gate. The hook catches exceptions before returning to C; failed sync cannot clear prior authority.
+allocate and abort on OOM. No storage, logging or network operation runs under the application clock gate or inside the
+`sntp_sync_time` callback on lwIP `tiT`. `sntp_sync_time` publishes the synced second count atomically
+with release ordering, and `heap_supervisor` drains `clock_service_ntp_checkpoint()` from a safe
+task context (with bounded `try/catch` containment) so NVS/log I/O never runs on `tiT`. The hook
+catches exceptions before returning to C; failed sync cannot clear prior authority.
 
 Checkpoint restore validates the full decimal value/window and applies it only while the warm clock
 is below the clock floor, checking the syscall result. Successful NTP samples offer a checkpoint on
 first sync and after six hours since the last confirmed save, with at least five minutes between
-attempts. Existing SNTP callbacks supply opportunities; there is no added task/timer or tight retry.
-The attempt is recorded before fallible work and save success only after storage confirms it.
-Checkpoint NVS/string/log work follows clock-gate release. This policy does not fix the inherited
-session-age epoch mismatch or prove RTC behavior on hardware.
+attempts. Existing SNTP callbacks publish checkpoint opportunities to `heap_supervisor`; there is
+no added task/timer or tight retry. The attempt is recorded before fallible work and save success
+only after storage confirms it. Checkpoint NVS/string/log work follows clock-gate release on
+`heap_supervisor`. This policy does not fix the inherited session-age epoch mismatch or prove RTC
+behavior on hardware.
 
 ## Pairing lifecycle / invalidation
 
@@ -883,7 +896,9 @@ on post-effect construction failure. The terminal latch precedes header setup, a
 header/chunk failure stops the attempt. The outer catch cannot start another reply after that latch.
 Continuation consumption precedes the once-only restart attempt, including on response failure.
 Configuration-restart continuations retain their already-held ConfigRestart owner; identity-recovery
-continuations follow their separate transaction rules. There is no effect retry, no borrowed handler-local data and no global outcome snapshot.
+continuations seal their `OtaIdentityMutationGuard` (`IdentityMutation` owner) across handler exit
+or OOM unwind so the operation gate remains held until the mandatory identity-recovery reboot. There
+is no effect retry, no borrowed handler-local data and no global outcome snapshot.
 Networking allocations, actual receipt and composed runtime stack headroom still require device
 validation; [API](API.md#response-classes) owns the wire outcome semantics.
 Pinned-cJSON allocation matrices verify these production seams, not the device scheduler/allocator.
@@ -1000,9 +1015,10 @@ telemetry round keeps its snapshot and builders in a separate non-inlined frame;
 its scheduling/attempt timestamp and exception boundary. Compiler frames do not bound composed
 runtime call depth.
 
-The MQTT publisher explicitly confirms current-task TWDT removal or absence before self-deletion;
-unconfirmed cleanup parks that same task, emits one contained diagnostic and attempts feeding,
-without replaying discovery/state. Self-delete does not imply C++ scope unwinding. The network
+Both the MQTT publisher and `vehicle_loop` use shared `tk::TaskWatchdogSubscription` to confirm
+current-task TWDT removal or absence before self-deletion; unconfirmed cleanup parks that same task
+without replaying discovery/state or polling iterations, emits one contained diagnostic, feeds and
+(for `vehicle_loop`) samples its stack lane. Self-delete does not imply C++ scope unwinding. The network
 watchdog contains per-iteration failures, discards its local failure/gateway proof, and requires a
 new matching reply before another recovery. It preserves the persistent asynchronous ping owner,
 semaphore and generation while a late completion is outstanding. Unknown SDK cleanup remains

@@ -96,37 +96,60 @@ static bool diag_mqtt_uri_error_(const char* line, size_t len) {
 // only reads the current task stack and updates the atomic bank, with no logger/allocation/mutex.
 // This prevents sampler-driven recursion without adding a global/TLS recursion flag. It does not
 // certify caller lock latency or identify every otherwise unregistered task that invokes logging.
+// Task-context gate shared by capture (ring/syslog queue) and stack-HWM sampling.
+// FreeRTOS mutex/queue primitives and uxTaskGetStackHighWaterMark() are illegal in ISR,
+// masked critical sections (!xPortCanYield()), or before/during scheduler suspension.
+static bool diag_capture_context_safe_() noexcept {
+    return !xPortInIsrContext() && xPortCanYield() &&
+           xTaskGetSchedulerState() == taskSCHEDULER_RUNNING &&
+           xTaskGetCurrentTaskHandle() != nullptr;
+}
+
 static void diag_stack_sample_safe_() noexcept {
-    if (xPortInIsrContext() || !xPortCanYield()) return;
-    if (xTaskGetSchedulerState() != taskSCHEDULER_RUNNING ||
-        xTaskGetCurrentTaskHandle() == nullptr) return;
+    if (!diag_capture_context_safe_()) return;
     tk::stack_watch_sample(tk::StackWatch::DiagLogCallback);
 }
+
+static_assert(sizeof(tk::kDiagMqttUriErrorLine) - 1 < sizeof(SyslogMsg::text),
+              "MQTT URI redaction line must fit in SyslogMsg");
 
 static int diag_vprintf_(const char* fmt, va_list ap) {
     struct F135SafeTaskSampleOnExit {
         ~F135SafeTaskSampleOnExit() noexcept { diag_stack_sample_safe_(); }
     } f135_callback_exit;
 
-    char line[256];
+    SyslogMsg msg;
     va_list ap2;
     va_copy(ap2, ap);
-    int n = vsnprintf(line, sizeof(line), fmt, ap2);
+    int n = vsnprintf(msg.text, sizeof(msg.text), fmt, ap2);
     va_end(ap2);
     if (n > 0) {
-        size_t len = (size_t)n < sizeof(line) ? (size_t)n : sizeof(line) - 1;
-        if (diag_mqtt_uri_error_(line, len)) {
-            diag_append_(tk::kDiagMqttUriErrorLine, sizeof(tk::kDiagMqttUriErrorLine) - 1);
-            syslog_send(tk::kDiagMqttUriErrorLine, sizeof(tk::kDiagMqttUriErrorLine) - 1);
+        size_t len = (size_t)n < sizeof(msg.text) ? (size_t)n : sizeof(msg.text) - 1;
+        msg.text[len] = '\0';
+        msg.len = static_cast<uint16_t>(len);
+        if (diag_mqtt_uri_error_(msg.text, len)) {
+            if (diag_capture_context_safe_()) {
+                constexpr size_t replacement_len = sizeof(tk::kDiagMqttUriErrorLine) - 1;
+                diag_append_(tk::kDiagMqttUriErrorLine, sizeof(tk::kDiagMqttUriErrorLine) - 1);
+                std::memcpy(msg.text, tk::kDiagMqttUriErrorLine, replacement_len + 1);
+                msg.len = static_cast<uint16_t>(replacement_len);
+                syslog_send_msg(msg);
+            } else {
+                s_dropped_lines.fetch_add(1, std::memory_order_relaxed);
+            }
             return diag_forward_fixed_("%s", tk::kDiagMqttUriErrorLine);
         }
-        diag_append_(line, len);
-        // Same capture point feeds the Syslog forwarder (syslog.cpp), so every line
-        // that reaches the serial console / /diag also reaches the configured
-        // collector — no separate call site to keep in sync. Non-blocking and a
-        // no-op before syslog_start() has run; syslog_send() itself filters out
-        // this module's own "syslog:"-tagged lines to avoid a feedback loop.
-        syslog_send(line, len);
+        if (diag_capture_context_safe_()) {
+            diag_append_(msg.text, len);
+            // Same capture point feeds the Syslog forwarder (syslog.cpp), so every line
+            // that reaches the serial console / /diag also reaches the configured
+            // collector — no separate call site to keep in sync. Non-blocking and a
+            // no-op before syslog_start() has run; syslog_send_msg() itself filters out
+            // this module's own "syslog:"-tagged lines to avoid a feedback loop.
+            syslog_send_msg(msg);
+        } else {
+            s_dropped_lines.fetch_add(1, std::memory_order_relaxed);
+        }
     }
     const auto previous = s_prev.load(std::memory_order_acquire);
     return previous ? previous(fmt, ap) : vprintf(fmt, ap);
