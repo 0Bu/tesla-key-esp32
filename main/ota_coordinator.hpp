@@ -65,8 +65,7 @@ private:
     HttpLimits limits_{};
     BodyCallback metadata_sink_{nullptr};
     void* metadata_context_{nullptr};
-    std::array<std::uint8_t,512> prefix_{};
-    std::array<char,kUrlBytes> redirect_{};
+    std::array<std::uint8_t,288> prefix_{};
     std::size_t prefix_size_{0};
     unsigned redirects_{0};
     Outcome outcome_{Outcome::Idle};

@@ -127,6 +127,7 @@ esp_err_t handle_ota_check(GuardedReq rq) {
     json.boolean(json.root(), "started", started);
     if (!started)
         json.string(json.root(), "reason", tk::ota_start_reason(result, true));
+    if (req->content_len == 0) (void)httpd_resp_set_hdr(req, "Connection", "close");
     return send_effect_json(rq, tk::ota_start_http_status(result), json.release());
 }
 
@@ -160,6 +161,7 @@ esp_err_t handle_ota_update(GuardedReq rq) {
     json.boolean(json.root(), "result", started);
     json.string(json.root(), "reason", tk::ota_start_reason(result, false));
     if (result == tk::OtaStartResult::OfferChanged) json.boolean(json.root(), "offer_changed", true);
+    if (req->content_len == 0) (void)httpd_resp_set_hdr(req, "Connection", "close");
     return send_effect_json(rq, tk::ota_start_http_status(result), json.release());
 }
 

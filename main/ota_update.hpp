@@ -104,6 +104,7 @@ tk::OtaVerificationState ota_verification_state();
 // This is diagnostic evidence; mutation admission always queries fresh SDK state.
 tk::OtaVerificationState ota_cached_verification_state() noexcept;
 tk::OtaVerificationState ota_refresh_verification_cache() noexcept;
+void ota_init_lock() noexcept;
 bool ota_identity_mutation_allowed(tk::IdentityMutationEntry entry);
 
 class OtaIdentityMutationGuard {

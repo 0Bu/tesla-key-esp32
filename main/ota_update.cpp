@@ -336,6 +336,10 @@ tk::OtaVerificationState ota_refresh_verification_cache() noexcept {
     return state;
 }
 
+void ota_init_lock() noexcept {
+    (void)ensure_lock();
+}
+
 static void set_state(OtaState st, int pct, const char* msg, bool upload = false) {
     std::array<char, kOtaStatusMessageCapacity> message{};
     copy_status_text(message, msg);
@@ -523,9 +527,9 @@ public:
     }
     bool release() noexcept {
         if (!held_) return true;
-        // Publish quiescence before releasing authority; no later global flag store can clear
-        // a successor operation's flags. This method is called only after raw writer abort/end.
-        if (!release_owned()) return false;
+        // Raw writer quiescence is confirmed; complete_operation() finishes Ota gate release
+        // after bounded worker-Ack wait and prompt OtaOperation reclamation.
+        if (s_operation_gate.state() != tk::OtaIdentityGateState::Ota) return false;
         held_ = false;
         return true;
     }
@@ -630,6 +634,9 @@ static tk::ota::Outcome poll_operation(OtaOperation& operation) noexcept {
     return operation.coordinator.poll();
 }
 
+static constexpr size_t kOtaManifestInitialReserveBytes = 4096;
+static constexpr size_t kOtaChangelogInitialReserveBytes = 1536;
+
 struct MetadataSink {
     std::string* output;
     bool no_memory{false};
@@ -644,9 +651,12 @@ struct MetadataSink {
 static OtaFetchResult http_get_to_buffer(OtaOperation& operation, const char* url,
                                         std::string& out, bool optional = false) {
     out.clear();
-    // One bounded body allocation before opening TLS; worker rechecks actual INTERNAL largest
-    // both before init and after context/task/URL/mailbox/body allocations, for every leg/redirect.
-    try { out.reserve(tk::kOtaManifestMaxBytes); }
+    // Reserve 4 KiB for manifests (~3 KiB across 4 targets) and 1.5 KiB for optional
+    // changelogs (<= 1025 B) before opening TLS, avoiding both mid-TLS reallocation and
+    // an unnecessary 8 KiB pre-TLS split.
+    const size_t initial_reserve =
+        optional ? kOtaChangelogInitialReserveBytes : kOtaManifestInitialReserveBytes;
+    try { out.reserve(initial_reserve); }
     catch (const std::bad_alloc&) {
         operation.coordinator.cancel(tk::ota::Outcome::NoMemory);
         return OtaFetchResult::NoMemory;
@@ -945,9 +955,21 @@ static void complete_operation(OtaOperation& operation) noexcept {
         tk::stack_watch_sample(operation.image ? tk::StackWatch::OtaWriter : tk::StackWatch::OtaCheck);
         returning_restart_park();
     }
-    // This is the coordinator's final Operation access. Network Ack is independently required
-    // before a later admission may reclaim its memory. No destructor references operation.
+    // This is the coordinator's final Operation access. Reclaim promptly while holding Ota
+    // if the worker acknowledges cleanly; otherwise retain quarantine until a later admission.
     operation.coordinator_done.store(true, std::memory_order_release);
+    if (operation.network_launch == NetworkLaunch::Started) {
+        static_assert(pdMS_TO_TICKS(10) >= 1);
+        for (unsigned i = 0; i < 20; ++i) {
+            const auto phase = operation.job.phase();
+            if (phase == tk::ota::Phase::Acked || phase == tk::ota::Phase::CleanupFailed) break;
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+    }
+    if (tk::ota::worker_clean(operation.job)) {
+        (void)reclaim_finished_operation();
+    }
+    (void)OtaLease::release_owned();
 }
 
 static void finish_check(OtaOperation& operation, OtaCheckResult& result) {
@@ -1170,7 +1192,7 @@ static tk::OtaStartResult prepare_owned_operation(uint64_t origin, unsigned pr,
     // No new Operation/task/body/TLS exists at this ordinary reference. The actual Ota owner
     // binds the requested target and fixed refusal publication against a successor.
     const auto entry_largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
-    tk::ota::memory_checkpoint("before_operation", 1, origin, entry_largest);
+    tk::ota::memory_checkpoint("before_operation", generation, origin, entry_largest);
     if (!tk::ota_recovery_memory_affordable(entry_largest,
             tk::ota_recovery_required_bytes(tk::OtaRecoveryUse::OperationEntry))) {
         set_check_error(kOtaNoMemory, channel_state, upload); // Withdraw any older offer under this owner.
@@ -1193,7 +1215,7 @@ static tk::OtaStartResult prepare_owned_operation(uint64_t origin, unsigned pr,
     if (expected) operation->expected = *expected;
     if (!s_network_slot.claim(operation->job.generation)) {
         // No worker/raw writer exists; release only this actual owner before discarding it.
-        (void)operation->lease.release();
+        (void)OtaLease::release_owned();
         delete operation; operation = nullptr;
         return Result::Busy;
     }
