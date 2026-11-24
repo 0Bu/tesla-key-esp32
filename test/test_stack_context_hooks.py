@@ -156,10 +156,17 @@ def contract(parts, owners, helpers):
     nimble = scrub(body_in(parts['main/ble_client.cpp'], 'nimble_host_task'))
     require(re.search(r'stack_watch_sample\(tk::StackWatch::NimbleHost\);\s*nimble_port_freertos_deinit\(\)', nimble),
             'sample before SDK host self-deletion')
+    gate = scrub(body_in(parts['main/diag_log.cpp'], 'diag_capture_context_safe_'))
+    gate_tokens = ['!xPortInIsrContext()', 'xPortCanYield()',
+                   'xTaskGetSchedulerState() == taskSCHEDULER_RUNNING',
+                   'xTaskGetCurrentTaskHandle() != nullptr']
+    gate_indexes = [gate.find(t) for t in gate_tokens]
+    require(all(x >= 0 for x in gate_indexes) and gate_indexes == sorted(gate_indexes),
+            'safe logger predicates in context gate')
+    require(not re.search(r'ESP_LOG|malloc|new\s|thread_local|xSemaphore|portENTER', gate),
+            'logger context gate does not recurse, allocate, wait or add state')
     log = scrub(body_in(parts['main/diag_log.cpp'], 'diag_stack_sample_safe_'))
-    tokens = ['if (xPortInIsrContext() || !xPortCanYield()) return;',
-              'if (xTaskGetSchedulerState() != taskSCHEDULER_RUNNING ||',
-              'xTaskGetCurrentTaskHandle() == nullptr) return;',
+    tokens = ['if (!diag_capture_context_safe_()) return;',
               'tk::stack_watch_sample(tk::StackWatch::DiagLogCallback);']
     indexes = [log.find(t) for t in tokens]
     require(all(x >= 0 for x in indexes) and indexes == sorted(indexes), 'safe logger predicates precede HWM')
@@ -244,10 +251,11 @@ def main(root, self_test):
         missing = copy.deepcopy(owners); missing['rows'].pop()
         mutations.append(('owner-row-omitted', parts, missing))
         log_path = 'main/diag_log.cpp'
-        for old in ['xPortInIsrContext()', '!xPortCanYield()',
-                    'xTaskGetSchedulerState() != taskSCHEDULER_RUNNING',
-                    'xTaskGetCurrentTaskHandle() == nullptr']:
-            mutations.append(('logger-predicate:' + old, {**parts, log_path: parts[log_path].replace(old, 'false', 1)}, owners))
+        for old, repl in [('!xPortInIsrContext()', 'true'),
+                          ('&& xPortCanYield()', '&& true'),
+                          ('xTaskGetSchedulerState() == taskSCHEDULER_RUNNING', 'true'),
+                          ('xTaskGetCurrentTaskHandle() != nullptr', 'true')]:
+            mutations.append(('logger-predicate:' + old, {**parts, log_path: parts[log_path].replace(old, repl, 1)}, owners))
         for label, altered, mapping in mutations:
             try:
                 contract(altered, mapping, helpers)

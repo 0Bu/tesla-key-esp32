@@ -994,6 +994,13 @@ test("broker and syslog validation mirror the firmware whitespace set and byte l
   // 60 two-byte characters: 60 UTF-16 units but 120+ bytes on the device
   assert.match(await check(() => context.editMqtt(), "\u00e4".repeat(60) + ":1883"), /too long/);
   assert.equal(await check(() => context.editMqtt(), "192.0.2.20:1883"), "");
+  assert.equal(await check(() => context.editMqtt(), "mqtt://192.0.2.20:1883"), "");
+  assert.equal(await check(() => context.editMqtt(), "mqtts://broker.example:8883"), "");
+  assert.equal(await check(() => context.editMqtt(), "MQTT://192.0.2.20:1883"), "");
+  assert.equal(await check(() => context.editMqtt(), "MQTTS://broker.example:8883"), "");
+  for (const bad of ["ws://192.0.2.20:1883", "wss://broker.example:8883", "http://broker.example:80", "HTTP://broker.example:80", "://192.0.2.20:1883"]) {
+    assert.equal(await check(() => context.editMqtt(), bad), "Unsupported scheme — use mqtt:// or mqtts://");
+  }
   assert.equal(await check(() => context.editSyslog(), "192.0.2.30"), "");
 });
 
@@ -1811,6 +1818,19 @@ test("askModal live validation enforces valid input, shows errors, and blocks sa
   assert.equal(element("askOk").disabled, true);
   assert.equal(element("askErr").classList.contains("hide"), false);
   assert.match(element("askErr").textContent, /host:port/i);
+
+  // Invalid scheme (only mqtt:// and mqtts:// are supported)
+  element("askInput").value = "wss://broker.example:8883";
+  context.askValidate();
+  assert.equal(element("askOk").disabled, true);
+  assert.equal(element("askErr").classList.contains("hide"), false);
+  assert.match(element("askErr").textContent, /Unsupported scheme — use mqtt:\/\/ or mqtts:\/\//);
+
+  // Valid uppercase mqtts:// scheme
+  element("askInput").value = "MQTTS://broker.example:8883";
+  context.askValidate();
+  assert.equal(element("askOk").disabled, false);
+  assert.equal(element("askErr").classList.contains("hide"), true);
 
   // Valid broker
   element("askInput").value = "192.0.2.20:1883";

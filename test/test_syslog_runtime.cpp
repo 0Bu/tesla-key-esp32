@@ -91,6 +91,43 @@ static void test_actual_queue_sender() {
     std::string large(1024, 'x');
     syslog_send(large.c_str(), large.size());
     CHECK(queued_line == std::string(255, 'x') && s_dropped_lines.load() == 10000);
+
+    // Direct bounded-struct path (used by diag_vprintf_ to avoid a second 256-B stack copy).
+    const unsigned sends_before = queue.sends;
+    const uint32_t drops_before = s_dropped_lines.load();
+    queued_line.clear();
+    SyslogMsg msg{};
+    msg.len = 0;
+    syslog_send_msg(msg);
+    msg.len = sizeof(msg.text);
+    syslog_send_msg(msg);
+    msg.len = 300;
+    syslog_send_msg(msg);
+    std::memcpy(msg.text, own, sizeof(own));
+    msg.len = static_cast<uint16_t>(sizeof(own) - 1);
+    syslog_send_msg(msg);
+    CHECK(queue.sends == sends_before && s_dropped_lines.load() == drops_before);
+
+    const char direct[] = "I (1) direct";
+    std::memcpy(msg.text, direct, sizeof(direct));
+    msg.len = static_cast<uint16_t>(sizeof(direct) - 1);
+    s_queue.store(nullptr);
+    syslog_send_msg(msg);
+    CHECK(queue.sends == sends_before && s_dropped_lines.load() == drops_before);
+
+    s_queue.store(&queue);
+    syslog_send_msg(msg);
+    CHECK(queue.sends == sends_before + 1 && queued_line == direct && s_dropped_lines.load() == drops_before);
+
+    std::memset(msg.text, 'y', sizeof(msg.text) - 1);
+    msg.text[sizeof(msg.text) - 1] = '\0';
+    msg.len = sizeof(msg.text) - 1;
+    syslog_send_msg(msg);
+    CHECK(queue.sends == sends_before + 2 && queued_line == std::string(255, 'y'));
+
+    queue.accepts = false;
+    syslog_send_msg(msg);
+    CHECK(queue.sends == sends_before + 3 && s_dropped_lines.load() == drops_before + 1);
     s_queue.store(nullptr);
 }
 

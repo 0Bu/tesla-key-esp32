@@ -62,7 +62,7 @@ using Handler = esp_err_t(*)(GuardedReq);
 static Handler selected;
 static bool fail_json, throw_error, throw_remove, throw_effect, save_ok, start_ok, ntp_synced;
 static bool fail_json_after_effect, guard_ok, key_refused, require_config_owner;
-static int effects, saves, removes, restarts, confirms, clock_calls, vin_transaction_entries;
+static int effects, saves, removes, restarts, confirms, clock_calls, vin_transaction_entries, identity_guard_seals;
 static int transport_calls, fail_transport, response_attempts, response_status, response_ends;
 static BrowserClockStatus clock_status;
 static bool updating;
@@ -95,6 +95,7 @@ template<typename... Args> void offline_log(Args...) noexcept {}
 #define ESP_LOGW(...) offline_log(__VA_ARGS__)
 #define ESP_LOGE(...) offline_log(__VA_ARGS__)
 #define CONFIG_TESLA_MQTT_USERNAME ""
+#define CONFIG_TESLA_MQTT_PASSWORD ""
 #define CONFIG_IDF_TARGET "esp32"
 struct esp_app_desc_t { char project_name[32]{"tesla-key-esp32"}; uint8_t app_elf_sha256[32]{}; };
 static const esp_app_desc_t* esp_app_get_description() { static const esp_app_desc_t description; return &description; }
@@ -254,6 +255,7 @@ static tk::OtaStartResult ota_upload_start(httpd_req_t*,bool& handed) noexcept {
 struct OtaIdentityMutationGuard {
     explicit OtaIdentityMutationGuard(tk::IdentityMutationEntry) {}
     explicit operator bool() const { return guard_ok; }
+    void seal() noexcept { if (guard_ok) ++identity_guard_seals; }
 };
 struct NvsStorageAdapter {
     bool save_str(const char*,const std::string&) { ++saves; return save_ok; }
@@ -354,7 +356,7 @@ static void reset(Handler handler) {
     api_command_name="charge_start"; api_body=nullptr; api_path_vin="TESTVIN0000000001";
     selected=handler; fail_json=false; throw_error=false; throw_remove=false; throw_effect=false;
     fail_json_after_effect=false; save_ok=true; start_ok=true; ntp_synced=true; guard_ok=true;
-    key_refused=false; effects=0; saves=0; removes=0; restarts=0; confirms=0; vin_transaction_entries=0;
+    key_refused=false; effects=0; saves=0; removes=0; restarts=0; confirms=0; vin_transaction_entries=0; identity_guard_seals=0;
     clock_calls=0; transport_calls=0; fail_transport=0;
     response_attempts=0; response_status=0; response_ends=0; wire_size=0; wire[0]='\0';
     rotation=tk::KeyRotationResult::Complete; vin_result=tk::VinTransitionApply::Complete;
@@ -849,7 +851,9 @@ int main() {
     reset(handle_set_vin); throw_remove=true; // typed committed result, then post-result cleanup throws
     CHECK(handle_all(&req)==0); check_outcome("applied_recovery_pending",false); CHECK(restarts==1); CHECK(confirms==0);
     reset(handle_gen_keys); throw_effect=true;
-    CHECK(handle_all(&req)==0); check_outcome("unknown",false); CHECK(restarts==0); // no guessed continuation
+    CHECK(handle_all(&req)==0); check_outcome("unknown",false); CHECK(restarts==1); CHECK(identity_guard_seals==1);
+    reset(handle_set_vin); req.input="{\"vin\":\"NEWVIN00000000001\"}"; throw_effect=true;
+    CHECK(handle_all(&req)==0); check_outcome("unknown",false); CHECK(restarts==1); CHECK(identity_guard_seals==1);
     for (auto handler : {handle_ota_check,handle_ota_update}) {
         for (auto result : {tk::OtaStartResult::Started,tk::OtaStartResult::Busy,
                             tk::OtaStartResult::PendingVerification,tk::OtaStartResult::Unavailable,

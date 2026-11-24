@@ -37,11 +37,6 @@ static const char* TAG = "syslog";
 // The network seam (net.hpp) gates every network call below on a live link, whichever
 // transport carries it.
 
-struct SyslogMsg {
-    char     text[256];
-    uint16_t len;
-};
-
 // Depth chosen small on purpose: this device's binding memory limit is the largest
 // *contiguous* free block (a few tens of KB steady-state — see the project AGENTS.md),
 // and the queue is one contiguous allocation taken once at boot. 24 * ~258 B ~= 6.2 KB.
@@ -136,29 +131,45 @@ static void ping_syslog_on_end(esp_ping_handle_t handle, void* args) noexcept {
     tk::ping_probe_on_end(handle, args);
 }
 
-static bool syslog_ping_host(const struct in_addr& ip) {
+struct SyslogArpLookupCtx {
+    uint32_t ipv4_addr;
+    bool found;
+};
+
+static esp_err_t syslog_arp_lookup_cb(void* arg) noexcept {
+    auto* ctx = static_cast<SyslogArpLookupCtx*>(arg);
+    if (!ctx) return ESP_ERR_INVALID_ARG;
     struct netif* net = netif_default;
-    if (net) {
-        uint32_t mask = netif_ip4_netmask(net)->addr;
-        bool is_local = ((ip.s_addr & mask) == (netif_ip4_addr(net)->addr & mask));
-        if (is_local) {
-            // Provoke an ARP request with a 0-length datagram, then read the ARP cache back.
-            int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
-            if (sock >= 0) {
-                struct sockaddr_in addr{};
-                addr.sin_family = AF_INET;
-                addr.sin_port   = htons(514);
-                addr.sin_addr   = ip;
-                char buf = 0;
-                sendto(sock, &buf, 0, 0, (struct sockaddr*)&addr, sizeof(addr));
-                close(sock);
-            }
-            vTaskDelay(pdMS_TO_TICKS(150)); // let the ARP reply land
-            ip4_addr_t ipaddr; ipaddr.addr = ip.s_addr;
-            struct eth_addr* eth_ret = nullptr;
-            const ip4_addr_t* ip_ret = nullptr;
-            if (etharp_find_addr(net, &ipaddr, &eth_ret, &ip_ret) >= 0) return true;
+    ip4_addr_t ipaddr{};
+    ipaddr.addr = ctx->ipv4_addr;
+    struct eth_addr* eth_ret = nullptr;
+    const ip4_addr_t* ip_ret = nullptr;
+    ctx->found = (net && etharp_find_addr(net, &ipaddr, &eth_ret, &ip_ret) >= 0);
+    return ESP_OK;
+}
+
+static bool syslog_ping_host(const struct in_addr& ip) {
+    esp_netif_t* active = tk::net_active_netif();
+    esp_netif_ip_info_t info{};
+    const bool is_local = active && esp_netif_get_ip_info(active, &info) == ESP_OK &&
+                          info.netmask.addr != 0 &&
+                          ((ip.s_addr & info.netmask.addr) == (info.ip.addr & info.netmask.addr));
+    if (is_local) {
+        // Provoke an ARP request with a 0-length datagram, then read the ARP cache back
+        // inside tcpip_thread where netif_default and the etharp table are owned.
+        int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
+        if (sock >= 0) {
+            struct sockaddr_in addr{};
+            addr.sin_family = AF_INET;
+            addr.sin_port   = htons(514);
+            addr.sin_addr   = ip;
+            char buf = 0;
+            sendto(sock, &buf, 0, 0, (struct sockaddr*)&addr, sizeof(addr));
+            close(sock);
         }
+        vTaskDelay(pdMS_TO_TICKS(150)); // let the ARP reply land
+        SyslogArpLookupCtx ctx{ip.s_addr, false};
+        if (esp_netif_tcpip_exec(syslog_arp_lookup_cb, &ctx) == ESP_OK && ctx.found) return true;
     }
 
     // ICMP echo (remote host, or a local host not yet in the ARP cache).
@@ -561,10 +572,10 @@ bool syslog_start(NvsStorageAdapter& config_store) {
     return false;
 }
 
-void syslog_send(const char* msg, size_t len) {
-    if (!msg || len == 0) return;
+void syslog_send_msg(const SyslogMsg& msg) noexcept {
     QueueHandle_t const queue = s_queue.load(std::memory_order_acquire);
     if (!queue) return;
+    if (msg.len == 0 || msg.len >= sizeof(msg.text)) return;
 
     // Loop guard: this module's own diagnostics (ESP_LOGx(TAG, ...) above) carry the
     // "syslog:" tag esp_log renders into every line, and diag_log.cpp's capture hook
@@ -574,11 +585,17 @@ void syslog_send(const char* msg, size_t len) {
     // failed" line would itself be queued for sending, and (while failing) logged
     // again on the next attempt — feeding the exact storm handle_send_failure()
     // above exists to avoid.
-    std::string_view sv(msg, len);
+    std::string_view sv(msg.text, msg.len);
     if (sv.find("syslog:") != std::string_view::npos) {
         return;
     }
 
+    if (xQueueSend(queue, &msg, 0) != pdPASS)
+        s_dropped_lines.fetch_add(1, std::memory_order_relaxed);  // never log from this log sink
+}
+
+[[gnu::noinline]] void syslog_send(const char* msg, size_t len) {
+    if (!msg || len == 0) return;
     SyslogMsg m;
     if (len >= sizeof(m.text)) {
         len = sizeof(m.text) - 1;
@@ -586,6 +603,5 @@ void syslog_send(const char* msg, size_t len) {
     std::memcpy(m.text, msg, len);
     m.text[len] = '\0';
     m.len = static_cast<uint16_t>(len);
-    if (xQueueSend(queue, &m, 0) != pdPASS)
-        s_dropped_lines.fetch_add(1, std::memory_order_relaxed);  // never log from this log sink
+    syslog_send_msg(m);
 }

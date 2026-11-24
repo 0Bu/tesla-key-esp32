@@ -118,9 +118,13 @@ public:
     OtaIdentityMutationGuard& operator=(OtaIdentityMutationGuard&&) = delete;
 
     explicit operator bool() const { return held_; }
+    // Retain IdentityMutation across scope unwind after a committed or ambiguous identity write
+    // until the mandatory reboot.
+    void seal() noexcept { if (held_) sealed_ = true; }
 
 private:
     bool held_ = false;
+    bool sealed_ = false;
 };
 
 // Acquire the same process-wide operation gate for a deliberate fault restart. The caller must

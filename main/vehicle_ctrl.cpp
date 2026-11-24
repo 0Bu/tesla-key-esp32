@@ -21,6 +21,24 @@
 
 static const char* TAG = "vehicle_ctrl";
 
+namespace {
+
+struct SecureByteWipe {
+    std::vector<uint8_t>& buf;
+    explicit SecureByteWipe(std::vector<uint8_t>& b) noexcept : buf(b) {}
+    ~SecureByteWipe() noexcept { wipe(); }
+    void wipe() noexcept {
+        if (!buf.empty()) {
+            volatile uint8_t* p = buf.data();
+            for (size_t i = 0; i < buf.size(); ++i) p[i] = 0;
+        }
+    }
+    SecureByteWipe(const SecureByteWipe&) = delete;
+    SecureByteWipe& operator=(const SecureByteWipe&) = delete;
+};
+
+}  // namespace
+
 #ifdef ESP_PLATFORM
 static_assert(sizeof(VehicleController) <= 8048 - 32,
               "deferred FIFO must retain measured space for callback containment");
@@ -195,10 +213,9 @@ bool VehicleController::init(const std::string& vin,
     client_->set_vin(vin);
     if (stored_private_key) {
         std::vector<uint8_t> key_bytes;
+        SecureByteWipe key_wipe{key_bytes};
         if (storage_->load(tk::nvs_contract::kPrivateKey, key_bytes) && !key_bytes.empty()) {
             client_->load_private_key(key_bytes.data(), key_bytes.size());
-            volatile uint8_t* p = key_bytes.data();
-            for (size_t i = 0; i < key_bytes.size(); ++i) p[i] = 0;
         }
     }
     // A blob's mere presence does not prove that the library parsed it. Commands may use the

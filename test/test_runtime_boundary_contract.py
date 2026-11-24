@@ -383,8 +383,9 @@ REVIEWED_ALLOWED_CALLS = {
     "ping_net_on_end": {"ping_probe_on_end"},
     "ping_syslog_on_end": {"ping_probe_on_end"},
     "diag_vprintf_": {
-        "va_copy", "vsnprintf", "va_end", "diag_append_", "syslog_send", "vprintf",
-        "diag_mqtt_uri_error_", "diag_forward_fixed_", "load", "previous",
+        "va_copy", "vsnprintf", "va_end", "diag_append_", "syslog_send_msg", "vprintf",
+        "diag_mqtt_uri_error_", "diag_capture_context_safe_", "diag_forward_fixed_",
+        "memcpy", "fetch_add", "load", "previous",
     },
     "ble_link_event_cb_": {"static_cast", "enqueue_ble_link_event_"},
     "ble_rx_event_cb_": {"static_cast", "enqueue_ble_rx_event_"},
@@ -399,9 +400,13 @@ REVIEWED_DELEGATED_HELPERS = {
     },
     "diag_vprintf_": {
         "diag_mqtt_uri_error_": {"diag_mqtt_uri_error"},
+        "diag_capture_context_safe_": {
+            "xPortInIsrContext", "xPortCanYield", "xTaskGetSchedulerState",
+            "xTaskGetCurrentTaskHandle",
+        },
         "diag_forward_fixed_": {"va_start", "previous", "load", "vprintf", "va_end"},
         "diag_append_": {"g", "diag_library_capture_content_end", "diag_capture_byte", "load", "fetch_add"},
-        "syslog_send": {"sv", "find", "memcpy", "load", "xQueueSend", "fetch_add"},
+        "syslog_send_msg": {"sv", "find", "load", "xQueueSend", "fetch_add"},
     },
     "ble_link_event_cb_": {
         "enqueue_ble_link_event_": {"store", "portENTER_CRITICAL", "push_link", "portEXIT_CRITICAL"},
@@ -945,12 +950,17 @@ private:
     require_reviewed_nonthrowing("merge", function_body_in(codec, "merge"), {"encode"}, delegated=True)
     require_reviewed_nonthrowing("encode", function_body_in(codec, "encode"), {"static_cast"}, delegated=True)
     log = parts["main/diag_log.cpp"]
+    if not re.search(r"bool\s+diag_capture_context_safe_\s*\(\)\s*noexcept", log):
+        raise AssertionError("F135 logger context gate must be noexcept")
+    same(function_body_in(log, "diag_capture_context_safe_"), '''{
+    return !xPortInIsrContext() && xPortCanYield() &&
+           xTaskGetSchedulerState() == taskSCHEDULER_RUNNING &&
+           xTaskGetCurrentTaskHandle() != nullptr;
+}''', "logger ISR/critical/scheduler/current-task context gate")
     if not re.search(r"void\s+diag_stack_sample_safe_\s*\(\)\s*noexcept", log):
         raise AssertionError("F135 logger sampler must be noexcept")
     same(function_body_in(log, "diag_stack_sample_safe_"), '''{
-    if (xPortInIsrContext() || !xPortCanYield()) return;
-    if (xTaskGetSchedulerState() != taskSCHEDULER_RUNNING ||
-        xTaskGetCurrentTaskHandle() == nullptr) return;
+    if (!diag_capture_context_safe_()) return;
     tk::stack_watch_sample(tk::StackWatch::DiagLogCallback);
 }''', "logger ISR/critical/scheduler/current-task refusal")
     f135_unwrap_sampling_prefix("diag_vprintf_", function_body_in(log, "diag_vprintf_"))
@@ -975,8 +985,9 @@ def self_test_f135_programs(parts: dict[str, str]) -> None:
         ("main/stack_watch.cpp", "if (slot >= kStackContextCount) return;", ""),
         ("main/logic/stack_sample_codec.hpp", "compare_exchange_strong", "compare_exchange_weak"),
         ("main/logic/stack_sample_codec.hpp", "const uint32_t next = merge(previous, lane, free_bytes);", "const uint32_t next = 0;"),
-        ("main/diag_log.cpp", "xPortInIsrContext() || !xPortCanYield()", "false"),
-        ("main/diag_log.cpp", "xTaskGetCurrentTaskHandle() == nullptr", "false"),
+        ("main/diag_log.cpp", "!xPortInIsrContext() && xPortCanYield()", "true"),
+        ("main/diag_log.cpp", "xTaskGetCurrentTaskHandle() != nullptr", "true"),
+        ("main/diag_log.cpp", "if (!diag_capture_context_safe_()) return;", ""),
     ):
         if parts[path].count(old) != 1:
             raise AssertionError("F135 program canary source missing/ambiguous: " + old)
@@ -2208,15 +2219,19 @@ def require_diag_redaction_stream_contract(
         raise AssertionError("known library identifier export must collapse the complete line")
     capture = function_body_in(diag_source, "diag_vprintf_")
     for token in (
-        "if (diag_mqtt_uri_error_(line, len))",
+        "if (diag_mqtt_uri_error_(msg.text, len))",
+        "if (diag_capture_context_safe_())",
         "diag_append_(tk::kDiagMqttUriErrorLine, sizeof(tk::kDiagMqttUriErrorLine) - 1)",
-        "syslog_send(tk::kDiagMqttUriErrorLine, sizeof(tk::kDiagMqttUriErrorLine) - 1)",
+        "syslog_send_msg(msg);",
         'return diag_forward_fixed_("%s", tk::kDiagMqttUriErrorLine);',
+        "diag_append_(msg.text, len);",
     ):
         if token not in capture:
             raise AssertionError(f"MQTT credential capture guard missing {token!r}")
     require_before("MQTT protection before ordinary raw capture", capture,
-                   "diag_mqtt_uri_error_", "diag_append_(line, len)")
+                   "diag_mqtt_uri_error_", "diag_append_(msg.text, len)")
+    require_before("task context guard before MQTT capture", capture,
+                   "if (diag_capture_context_safe_())", "diag_append_(tk::kDiagMqttUriErrorLine")
     init = function_body_in(diag_source, "diag_log_init")
     require_before("protect logs even when optional ring mutex fails", init,
                    "esp_log_set_vprintf(diag_vprintf_)", "xSemaphoreCreateMutex()")
@@ -2603,17 +2618,18 @@ def require_vehicle_task_start_contract(vehicle_source: str, telemetry_source: s
                 "return;" not in cancel.group("body"):
             raise AssertionError(f"{label} cancellation is not ack/self-delete/return")
 
-    watchdog_class = telemetry_source[
-        telemetry_source.find("class TaskWatchdogSubscription"):
-        telemetry_source.find("}  // namespace", telemetry_source.find(
-            "class TaskWatchdogSubscription"))
-    ]
-    for token in ("esp_task_wdt_add(nullptr)", "~TaskWatchdogSubscription()",
-                  "esp_task_wdt_delete(nullptr)"):
-        if token not in watchdog_class:
-            raise AssertionError(f"vehicle TWDT RAII contract missing {token!r}")
+    if '#include "task_watchdog_subscription.hpp"' not in telemetry_source:
+        raise AssertionError("vehicle TWDT RAII contract missing shared task_watchdog_subscription.hpp include")
+    for token in ("tk::TaskWatchdogSubscription watchdog;", "watchdog.feed();",
+                  "while (!watchdog.release())", "watchdog.feed(true);",
+                  "tk::stack_watch_sample(tk::StackWatch::Vehicle);", "vTaskDelete(nullptr);"):
+        if token not in loop_entry:
+            raise AssertionError(f"vehicle TWDT retirement contract missing {token!r}")
     require_before("vehicle TWDT subscription after entry admission", loop_entry,
-                   "self->await_task_start_()", "TaskWatchdogSubscription watchdog;")
+                   "self->await_task_start_()", "tk::TaskWatchdogSubscription watchdog;")
+    after_watchdog = loop_entry[loop_entry.find("tk::TaskWatchdogSubscription watchdog;"):]
+    require_before("vehicle TWDT park loop before self-delete", after_watchdog,
+                   "while (!watchdog.release())", "vTaskDelete(nullptr);")
 
 
 def require_vin_transition_cleanup_contract(main_source: str) -> None:
@@ -3613,17 +3629,36 @@ def require_syslog_start_lifetime_contract(syslog_source: str, gate_header: str,
     if "xQueueReceive(s_queue" in task:
         raise AssertionError("Syslog consumer re-reads sender publication")
 
-    send = function_body_in(syslog_source, "syslog_send")
-    if "if (xQueueSend(queue, &m, 0) != pdPASS)" not in scrub_cpp(send) or \
-       "s_dropped_lines.fetch_add(1, std::memory_order_relaxed)" not in scrub_cpp(send):
+    send_msg = function_body_in(syslog_source, "syslog_send_msg")
+    if "if (xQueueSend(queue, &msg, 0) != pdPASS)" not in scrub_cpp(send_msg) or \
+       "s_dropped_lines.fetch_add(1, std::memory_order_relaxed)" not in scrub_cpp(send_msg):
         raise AssertionError("Syslog producer must count queue-full loss without waiting or logging")
 
     for token in (
         "s_queue.load(std::memory_order_acquire)", "if (!queue) return;",
-        "xQueueSend(queue, &m, 0)",
+        "xQueueSend(queue, &msg, 0)",
     ):
-        if token not in send:
+        if token not in send_msg:
             raise AssertionError(f"Syslog hook queue lifetime missing {token!r}")
+
+    send = function_body_in(syslog_source, "syslog_send")
+    if "syslog_send_msg(m);" not in scrub_cpp(send):
+        raise AssertionError("Syslog legacy adapter must delegate to syslog_send_msg")
+
+    ping_host = scrub_cpp(function_body_in(syslog_source, "syslog_ping_host"))
+    for forbidden in ("netif_default", "netif_ip4_netmask", "netif_ip4_addr", "etharp_find_addr"):
+        if forbidden in ping_host:
+            raise AssertionError(f"syslog_ping_host must marshal lwIP state via tcpip_thread, not {forbidden!r}")
+    for required in ("tk::net_active_netif()", "esp_netif_get_ip_info(",
+                     "esp_netif_tcpip_exec(syslog_arp_lookup_cb,"):
+        if required not in ping_host:
+            raise AssertionError(f"syslog_ping_host missing lwIP marshalled ARP check {required!r}")
+    if not re.search(r"esp_err_t\s+syslog_arp_lookup_cb\s*\(\s*void\s*\*\s*\w*\s*\)\s*noexcept",
+                     syslog_source):
+        raise AssertionError("syslog_arp_lookup_cb must be noexcept")
+    require_reviewed_nonthrowing("syslog_arp_lookup_cb",
+                                 function_body_in(syslog_source, "syslog_arp_lookup_cb"),
+                                 {"etharp_find_addr"}, delegated=True)
 
     for token in (
         "test_syslog_start_gate", "task_create_failure", "Action::Cancel",
@@ -6822,9 +6857,9 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
         raise AssertionError("wrapped /diag boundary-mode bypass passed unexpectedly")
 
     for before, after in (
-        ('if (diag_mqtt_uri_error_(line, len))', 'if (false)'),
+        ('if (diag_mqtt_uri_error_(msg.text, len))', 'if (false)'),
         ('if (!s_hook_installed)', 'if (true)'),
-        ('return diag_forward_fixed_("%s", tk::kDiagMqttUriErrorLine);', 'return diag_forward_fixed_("%s", line);'),
+        ('return diag_forward_fixed_("%s", tk::kDiagMqttUriErrorLine);', 'return diag_forward_fixed_("%s", msg.text);'),
         ('static std::atomic<SemaphoreHandle_t> s_mtx{nullptr};', 'static SemaphoreHandle_t s_mtx{nullptr};'),
         ('static std::atomic<vprintf_like_t> s_prev{nullptr};', 'static vprintf_like_t s_prev{nullptr};'),
         ('static_assert(CONFIG_LOG_TIMESTAMP_SOURCE_RTOS,', 'static_assert(true,'),
@@ -6928,8 +6963,8 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
         (
             "vehicle TWDT unregister bypass",
             vehicle_source,
-            telemetry_source.replace("esp_task_wdt_delete(nullptr)",
-                                     "fixture_wdt_leak(nullptr)", 1),
+            telemetry_source.replace("while (!watchdog.release())",
+                                     "while (false)", 1),
             pairing_source,
         ),
         (
@@ -7343,6 +7378,15 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
                 1,
             ),
             logic_tests, runtime_tests,
+        ),
+        (
+            "Syslog direct lwIP ARP bypass",
+            syslog_source.replace(
+                "esp_netif_tcpip_exec(syslog_arp_lookup_cb, &ctx)",
+                "etharp_find_addr(nullptr, nullptr, nullptr, nullptr)",
+                1,
+            ),
+            syslog_gate, logic_tests, runtime_tests,
         ),
         (
             "Syslog executable publication matrix removal",
@@ -9117,6 +9161,11 @@ def require_clock_integration_contract(parts: dict[str, str]) -> None:
     require_before("explicit IMMED", startup, "sntp_set_sync_mode(SNTP_SYNC_MODE_IMMED);", "esp_sntp_init();")
     if "sntp_set_time_sync_notification_cb" in startup:
         raise AssertionError("strong clock hook must not also register a notification writer")
+    sync = body("boot", "sntp_sync_time")
+    if any(token in sync for token in ("save_str(", "checkpoint_ntp_time_(")):
+        raise AssertionError("sntp_sync_time must not perform NVS checkpoint writes on lwIP tiT")
+    if "s_clock_checkpoint_pending.store(true, std::memory_order_release);" not in sync:
+        raise AssertionError("sntp_sync_time must defer NTP checkpoint publication atomically")
     for name in ("apply_browser_clock", "apply_browser_clock_sample"):
         code = body("boot", name)
         if any(token in code for token in ("save_str(", "checkpoint_ntp_time_(", ".store(true", "mark_clock_authoritative")):
@@ -9137,6 +9186,9 @@ def self_test_clock_integration_contract(parts: dict[str, str]) -> None:
         ("smoothmodeenabled", "boot", "sntp_set_sync_mode(SNTP_SYNC_MODE_IMMED);", "sntp_set_sync_mode(SNTP_SYNC_MODE_SMOOTH);"),
         ("keydatetemplatebypassed", "pairing", "tk::stamp_or_retire_key_date(", "unreviewed_stamp_or_retire("),
         ("keydateboundsbypassed", "pairing", "tk::historical_date_valid(now, clock_plausibility_ceiling())", "true"),
+        ("clockcheckpointonlwip", "boot",
+         "s_clock_checkpoint_pending.store(true, std::memory_order_release);",
+         "checkpoint_ntp_time_(applied, 0);"),
         ("browserauthorityrestored", "boot", "BrowserClockResult apply_browser_clock(double milliseconds) noexcept {",
          "BrowserClockResult apply_browser_clock(double milliseconds) noexcept { s_ntp_synced.store(true);"),
     )

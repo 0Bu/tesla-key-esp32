@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdlib>
 #include <string>
+#include <utility>
 
 // Pure, hardware-free logic shared by the firmware and the host-side mock build
 // (test/, built without ESP-IDF). Anything in this directory must stay free of IDF,
@@ -18,19 +19,32 @@ namespace tk {
 // "syslog disabled", not a parse error.
 inline bool syslog_target_parse(const std::string& raw, std::string& host, int& port) {
     if (raw.empty()) return false;
-    size_t colon = raw.rfind(':');
+    if (raw.find("://") != std::string::npos) return false;
+    if (raw.find_first_of(" \t\r\n") != std::string::npos) return false;
+
+    std::string parsed_host;
+    int parsed_port = 514;
+    const size_t colon = raw.rfind(':');
     if (colon == std::string::npos) {
-        host = raw;
-        port = 514;
-        return !host.empty();
+        parsed_host = raw;
+    } else {
+        parsed_host = raw.substr(0, colon);
+        const std::string port_s = raw.substr(colon + 1);
+        if (parsed_host.empty() || port_s.empty() || port_s.size() > 5) return false;
+        for (char c : port_s) if (c < '0' || c > '9') return false;
+        const long p = strtol(port_s.c_str(), nullptr, 10);
+        if (p < 1 || p > 65535) return false;
+        parsed_port = static_cast<int>(p);
     }
-    host = raw.substr(0, colon);
-    std::string port_s = raw.substr(colon + 1);
-    if (host.empty() || port_s.empty() || port_s.size() > 5) return false;
-    for (char c : port_s) if (c < '0' || c > '9') return false;
-    long p = strtol(port_s.c_str(), nullptr, 10);
-    if (p < 1 || p > 65535) return false;
-    port = static_cast<int>(p);
+
+    if (parsed_host.empty() ||
+        parsed_host.find(':') != std::string::npos ||
+        parsed_host.find('/') != std::string::npos) {
+        return false;
+    }
+
+    host = std::move(parsed_host);
+    port = parsed_port;
     return true;
 }
 

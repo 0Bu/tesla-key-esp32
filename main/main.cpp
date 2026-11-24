@@ -110,8 +110,10 @@ static std::atomic<bool> s_ntp_synced{false}; // ever committed this boot; never
 static NvsStorageAdapter* s_cfg_store = nullptr;
 static StaticSemaphore_t s_clock_mutex_storage;
 static SemaphoreHandle_t s_clock_mutex = nullptr;
-// SNTP calls its hook serially on the TCP/IP task. Browser requests never touch this policy.
+// SNTP runs on lwIP tiT; heap_supervisor services deferred NVS checkpoints serially. Browser requests never touch this policy.
 static tk::ClockCheckpointPolicy s_clock_checkpoint;
+static std::atomic<bool> s_clock_checkpoint_pending{false};
+static std::atomic<int64_t> s_clock_checkpoint_seconds{0};
 
 int64_t clock_plausibility_ceiling() noexcept {
     return tk::clock_ceiling_seconds(esp_app_get_description()->date);
@@ -183,6 +185,14 @@ static void checkpoint_ntp_time_(tk::ClockSample sample, uint64_t monotonic_us) 
     if (!saved) ESP_LOGW(TAG, "NTP synced but its checkpoint was not confirmed");
 }
 
+void clock_service_ntp_checkpoint() noexcept {
+    if (!s_clock_checkpoint_pending.exchange(false, std::memory_order_acq_rel)) return;
+    const int64_t seconds = s_clock_checkpoint_seconds.load(std::memory_order_acquire);
+    try {
+        checkpoint_ntp_time_({seconds, 0}, static_cast<uint64_t>(esp_timer_get_time()));
+    } catch (...) {}
+}
+
 // Called by the C hook below. Only bounded POD/time operations while holding this gate.
 static bool apply_ntp_clock_(tk::ClockSample supplied, int64_t entered_us,
                               tk::ClockSample& applied) {
@@ -217,9 +227,11 @@ extern "C" void sntp_sync_time(struct timeval* source) {
             sntp_set_sync_status(SNTP_SYNC_STATUS_RESET);
             return;
         }
-        // Status, strings, storage and logging follow gate release.
+        // Status, deferred checkpoint publication and logging follow gate release.
+        // Never perform NVS I/O or heap allocation on lwIP tiT.
         sntp_set_sync_status(SNTP_SYNC_STATUS_COMPLETED);
-        checkpoint_ntp_time_(applied, static_cast<uint64_t>(esp_timer_get_time()));
+        s_clock_checkpoint_seconds.store(applied.seconds, std::memory_order_release);
+        s_clock_checkpoint_pending.store(true, std::memory_order_release);
         ESP_LOGI(TAG, "NTP time synced");
     } catch (...) {
         // Never unwind through the SDK C caller or reset an already committed authority bit.

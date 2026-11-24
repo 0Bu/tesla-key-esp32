@@ -298,6 +298,38 @@ int main() {
     CHECK(foreign.automatic_key_action_ != tk::AutomaticKeyAction::AutomaticCommitReload);
     CHECK(tk::decide_initial_key_boot_action(false, true) == tk::InitialKeyBootAction::HaltAfterEmptyRecovery);
     CHECK(tk::decide_initial_key_boot_action(true, true) == tk::InitialKeyBootAction::UseExisting);
+
+    // [F-06] OtaIdentityMutationGuard::seal() keeps IdentityMutation held across scope unwind.
+    reset(); expect_config_query = false;
+    {
+        OtaIdentityMutationGuard unsealed(tk::IdentityMutationEntry::HttpGenerateKey);
+        CHECK(bool(unsealed) && s_operation_gate.state() == Owner::IdentityMutation);
+    }
+    CHECK(s_operation_gate.state() == Owner::Idle);
+    for (bool unwind : {false, true}) {
+        reset(); expect_config_query = false;
+        bool caught = false;
+        try {
+            OtaIdentityMutationGuard sealed_guard(tk::IdentityMutationEntry::HttpSetVin);
+            CHECK(bool(sealed_guard) && s_operation_gate.state() == Owner::IdentityMutation);
+            sealed_guard.seal();
+            if (unwind) throw std::bad_alloc();
+        } catch (const std::bad_alloc&) {
+            caught = true;
+        }
+        CHECK(caught == unwind);
+        CHECK(s_operation_gate.state() == Owner::IdentityMutation);
+        CHECK(!s_operation_gate.try_begin(Owner::Ota));
+    }
+    reset(); expect_config_query = false;
+    CHECK(s_operation_gate.try_begin(Owner::Ota));
+    {
+        OtaIdentityMutationGuard denied(tk::IdentityMutationEntry::HttpGenerateKey);
+        CHECK(!bool(denied));
+        denied.seal();
+    }
+    CHECK(s_operation_gate.state() == Owner::Ota);
+    reset();
     // Every state uses the same pure names in the actual HTTP and MQTT emitters.
     for (auto runtime : {tk::RuntimeAdmissionState::Booting, tk::RuntimeAdmissionState::Ready,
                          tk::RuntimeAdmissionState::SafeMode, tk::RuntimeAdmissionState::Fatal}) {

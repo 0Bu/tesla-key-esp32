@@ -22,7 +22,6 @@
 #include "stack_watch.hpp"
 #include "task_watchdog_subscription.hpp"
 #include <esp_heap_caps.h>
-#include <esp_task_wdt.h>
 
 #include <atomic>
 #include <array>
@@ -91,6 +90,7 @@ static const std::string& state_topic(tk::mqtt::StateDomain domain) {
 // Unknown: right after a boot the broker may still hold pre-reboot readings.
 static std::array<tk::mqtt::DomainPublishState, tk::mqtt::kStateDomainCount> s_domain_state{};
 static std::atomic<bool> s_reset_domain_state{false};
+static tk::TaskWatchdogSubscription* s_pub_watchdog = nullptr;
 
 // ─── Publish helpers ──────────────────────────────────────────────────────────
 static bool pub(const char* topic, const char* payload, bool retain = true) {
@@ -100,7 +100,7 @@ static bool pub(const char* topic, const char* payload, bool retain = true) {
     // Every caller runs on mqtt_pub. Feeding only AFTER the blocking call returns preserves the
     // watchdog's ability to catch a wedged socket while proving progress through a long discovery
     // burst, whose many individually-completed publishes may legitimately outlive one 60 s cycle.
-    esp_task_wdt_reset();
+    if (s_pub_watchdog) s_pub_watchdog->feed();
     return message_id >= 0;
 }
 
@@ -469,16 +469,16 @@ static void mqtt_event_handler(void*, esp_event_base_t, int32_t event_id, void* 
         static bool first = true;
         if (first) first = false; else s_reconnects.fetch_add(1);
         ESP_LOGI(TAG, "connected to broker%s", s_tls.load() ? " (TLS)" : "");
-        s_connected = true;
-        s_disconnect_reported.store(false);
-        s_last_err  = ME_NONE;    // clear any prior failure now that we're up
-        s_need_discovery = true;  // (re)announce discovery + state from the publisher task
-        s_reset_domain_state.store(true);
+        s_disconnect_reported.store(false, std::memory_order_relaxed);
+        s_last_err.store(ME_NONE, std::memory_order_relaxed);    // clear any prior failure now that we're up
+        s_reset_domain_state.store(true, std::memory_order_relaxed);
+        s_need_discovery.store(true, std::memory_order_relaxed);  // (re)announce discovery + state from the publisher task
+        s_connected.store(true, std::memory_order_release);
         break;
     }
     case MQTT_EVENT_DISCONNECTED:
         if (!s_disconnect_reported.exchange(true)) ESP_LOGW(TAG, "disconnected from broker");
-        s_connected = false;
+        s_connected.store(false, std::memory_order_release);
         break;
     case MQTT_EVENT_ERROR: {
         // Record why the connection failed so /status can explain it. The common case for a
@@ -526,6 +526,12 @@ static void publisher_task(void*) {
         ESP_LOGW(TAG, "mqtt_pub could not subscribe to the task watchdog — a wedged publish will no "
                       "longer reboot the device automatically");
     }
+    struct ScopedPubWatchdog {
+        explicit ScopedPubWatchdog(tk::TaskWatchdogSubscription& w) noexcept { s_pub_watchdog = &w; }
+        ~ScopedPubWatchdog() noexcept { s_pub_watchdog = nullptr; }
+        ScopedPubWatchdog(const ScopedPubWatchdog&) = delete;
+        ScopedPubWatchdog& operator=(const ScopedPubWatchdog&) = delete;
+    } pub_watchdog_scope(watchdog);
 
     while (true) {
         tk::StackWatchScope f135_iteration_exit(tk::StackWatch::Mqtt);
@@ -542,7 +548,7 @@ static void publisher_task(void*) {
         // fragmented heap. An escape would unwind into the FreeRTOS C task trampoline →
         // std::terminate → reboot; contain it, skip this round, and try again next tick.
         try {
-            if (s_connected) {
+            if (s_connected.load(std::memory_order_acquire)) {
                 tk::periodic_log_reset(outage_notice);
                 if (s_reset_domain_state.exchange(false)) {
                     for (auto& state : s_domain_state) state = tk::mqtt::domain_after_reconnect(state);
@@ -658,7 +664,7 @@ static bool mqtt_ha_start_impl(VehicleController& vehicle,
     // /set_mqtt's save-time pre-flight has to dial the SAME URI this does. A probe that succeeded
     // against a differently-derived URI would be a green check for a broker the bridge never
     // connects to, which is worse than no check at all.
-    s_uri = tk::mqtt_effective_uri(s_uri, !s_user.empty());
+    s_uri = tk::mqtt_effective_uri(s_uri, !s_user.empty() || !s_pass.empty());
     s_tls = tk::mqtt_uri_is_tls(s_uri);
     // Status, UI defaults and logs receive only the credential-free authority. Keep s_uri intact
     // for the client itself: removing userinfo there would break authentication.

@@ -119,12 +119,17 @@ static void deliver(int64_t seconds=1800000000, int32_t micros=123000) {
     sntp_sync_time(&sample);
 #endif
 }
+static void deliver_and_service(int64_t seconds=1800000000, int32_t micros=123000) {
+    deliver(seconds, micros);
+    clock_service_ntp_checkpoint();
+}
 static void reset() {
     held=busy=set_fail=set_throw=save_fail=save_throw=false;
     takes=gives=sets=saves=logs=weak_notices=0;
     wall_seconds=1700000000; wall_microseconds=0; monotonic_us=1000000;
     before_take={}; after_time_sample={}; storage.text.clear(); save_elapsed_us=0;
     s_ntp_synced.store(false); s_clock_checkpoint={}; s_cfg_store=&storage;
+    s_clock_checkpoint_pending.store(false); s_clock_checkpoint_seconds.store(0);
     sntp_set_sync_mode(SNTP_SYNC_MODE_IMMED);
     sntp_set_sync_status(SNTP_SYNC_STATUS_RESET);
     initialize_clock_gate_();
@@ -137,52 +142,72 @@ static void reset() {
 int main() {
     CHECK(!tk::stack_watch_min_free_bytes(tk::StackWatch::SntpSync).has_value());
     reset();
+    clock_service_ntp_checkpoint(); CHECK(saves==0);
     auto browser=apply_browser_clock(1750000000123.0);
     CHECK(browser.status==BrowserClockStatus::Applied && sets==1 && saves==0);
     CHECK(wall_seconds==1750000000 && wall_microseconds==123000 && !clock_is_authoritative());
     deliver();
-    CHECK(sets==2 && saves==1 && weak_notices==0 && clock_is_authoritative());
+    // F-07: sntp_sync_time must never write NVS synchronously on lwIP tiT.
+    CHECK(sets==2 && saves==0 && weak_notices==0 && clock_is_authoritative());
     CHECK(clock_fixture_status()==SNTP_SYNC_STATUS_COMPLETED && !held && takes==gives);
     CHECK(wall_seconds==1800000000 && wall_microseconds==123000);
+    clock_service_ntp_checkpoint();
+    CHECK(saves==1 && storage.text[tk::nvs_contract::kLastTime]=="1800000000");
+    clock_service_ntp_checkpoint();
+    CHECK(saves==1);
     browser=apply_browser_clock(1750000000000.0);
     CHECK(browser.status==BrowserClockStatus::AlreadyNtpSynced && sets==2);
     CHECK(apply_browser_clock(0).status==BrowserClockStatus::AlreadyNtpSynced && sets==2);
 
     reset(); before_take=[] { deliver(); };
     CHECK(apply_browser_clock(1750000000000.0).status==BrowserClockStatus::AlreadyNtpSynced);
-    CHECK(sets==1 && saves==1 && wall_seconds==1800000000);
+    CHECK(sets==1 && saves==0 && wall_seconds==1800000000);
+    clock_service_ntp_checkpoint();
+    CHECK(saves==1);
     reset(); before_take=[] { monotonic_us+=250; };
     deliver(1800000000,999900);
-    CHECK(sets==1 && wall_seconds==1800000001 && wall_microseconds==150 && clock_is_authoritative());
+    CHECK(sets==1 && saves==0 && wall_seconds==1800000001 && wall_microseconds==150 && clock_is_authoritative());
+    clock_service_ntp_checkpoint();
+    CHECK(saves==1 && storage.text[tk::nvs_contract::kLastTime]=="1800000001");
     reset(); before_take=[] { monotonic_us+=200; };
-    deliver(clock_plausibility_ceiling()-1,999900);
+    deliver_and_service(clock_plausibility_ceiling()-1,999900);
     CHECK(sets==0 && saves==0 && !clock_is_authoritative() && !held);
-    reset(); before_take=[] { --monotonic_us; }; deliver();
+    reset(); before_take=[] { --monotonic_us; }; deliver_and_service();
     CHECK(sets==0 && saves==0 && !clock_is_authoritative() && !held);
     reset(); before_take=[] {
         CHECK(apply_browser_clock(1750000000000.0).status==BrowserClockStatus::Applied);
         CHECK(!clock_is_authoritative());
     };
     deliver();
-    CHECK(sets==2 && saves==1 && wall_seconds==1800000000 && clock_is_authoritative());
+    CHECK(sets==2 && saves==0 && wall_seconds==1800000000 && clock_is_authoritative());
+    clock_service_ntp_checkpoint();
+    CHECK(saves==1);
     reset(); deliver(); deliver(1699999999);
-    CHECK(sets==1 && saves==1 && clock_is_authoritative() && clock_fixture_status()==SNTP_SYNC_STATUS_RESET);
+    CHECK(sets==1 && saves==0 && clock_is_authoritative() && clock_fixture_status()==SNTP_SYNC_STATUS_RESET);
+    clock_service_ntp_checkpoint();
+    CHECK(saves==1 && storage.text[tk::nvs_contract::kLastTime]=="1800000000");
     CHECK(apply_browser_clock(1750000000000.0).status==BrowserClockStatus::AlreadyNtpSynced);
+    reset(); deliver(1800000000); deliver(1800000005);
+    CHECK(saves==0);
+    clock_service_ntp_checkpoint();
+    CHECK(saves==1 && storage.text[tk::nvs_contract::kLastTime]=="1800000005");
     reset(); save_elapsed_us=2000000; deliver();
+    CHECK(saves==0);
+    clock_service_ntp_checkpoint();
     CHECK(s_clock_checkpoint.last_success_us==static_cast<uint64_t>(monotonic_us) && saves==1);
-    monotonic_us+=tk::ClockCheckpointPolicy::kSuccessIntervalUs-1; deliver(); CHECK(saves==1);
-    ++monotonic_us; deliver(); CHECK(saves==2);
-    reset(); busy=true; deliver();
+    monotonic_us+=tk::ClockCheckpointPolicy::kSuccessIntervalUs-1; deliver_and_service(); CHECK(saves==1);
+    ++monotonic_us; deliver_and_service(); CHECK(saves==2);
+    reset(); busy=true; deliver_and_service();
     CHECK(!clock_is_authoritative() && sets==0 && saves==0 && !held);
     CHECK(apply_browser_clock(1750000000000.0).status==BrowserClockStatus::Busy);
     reset(); CHECK(apply_browser_clock(0).status==BrowserClockStatus::Invalid && sets==0);
     for (int fault : {1,2}) {
-        reset(); set_fail=fault==1; set_throw=fault==2; deliver();
+        reset(); set_fail=fault==1; set_throw=fault==2; deliver_and_service();
         CHECK(sets==1 && saves==0 && !clock_is_authoritative() && !held);
         CHECK(clock_fixture_status()==SNTP_SYNC_STATUS_RESET);
         CHECK(apply_browser_clock(1750000000000.0).status==BrowserClockStatus::SetFailed && !held);
     }
-    reset(); deliver(); set_fail=true; deliver();
+    reset(); deliver_and_service(); set_fail=true; deliver_and_service();
     CHECK(clock_is_authoritative() && sets==2 && saves==1);
     CHECK(apply_browser_clock(1750000000000.0).status==BrowserClockStatus::AlreadyNtpSynced);
     for (int mode : {0,1,2}) {
@@ -190,16 +215,19 @@ int main() {
         if (mode==0) sntp_sync_time(nullptr);
         if (mode==1) deliver(1800000000,1000000);
         if (mode==2) { sntp_set_sync_mode(SNTP_SYNC_MODE_SMOOTH); deliver(); }
+        clock_service_ntp_checkpoint();
         CHECK(sets==0 && saves==0 && !clock_is_authoritative() && weak_notices==0);
     }
     for (bool throws : {false,true}) {
         reset(); save_throw=throws; save_fail=!throws; deliver();
+        CHECK(saves==0 && clock_is_authoritative());
+        clock_service_ntp_checkpoint();
         CHECK(saves==1 && clock_is_authoritative() && !s_clock_checkpoint.succeeded);
-        monotonic_us+=tk::ClockCheckpointPolicy::kAttemptIntervalUs-1; deliver(); CHECK(saves==1);
-        ++monotonic_us; save_throw=save_fail=false; deliver();
+        monotonic_us+=tk::ClockCheckpointPolicy::kAttemptIntervalUs-1; deliver_and_service(); CHECK(saves==1);
+        ++monotonic_us; save_throw=save_fail=false; deliver_and_service();
         CHECK(saves==2 && s_clock_checkpoint.succeeded);
-        monotonic_us+=tk::ClockCheckpointPolicy::kSuccessIntervalUs-1; deliver(); CHECK(saves==2);
-        ++monotonic_us; deliver(); CHECK(saves==3);
+        monotonic_us+=tk::ClockCheckpointPolicy::kSuccessIntervalUs-1; deliver_and_service(); CHECK(saves==2);
+        ++monotonic_us; deliver_and_service(); CHECK(saves==3);
     }
     reset(); storage.text[tk::nvs_contract::kLastTime]="1800000000";
     restore_clock_from_nvs(storage); CHECK(sets==0); // warm time is never moved to the cache
@@ -215,7 +243,8 @@ int main() {
     reset(); VehicleController vehicle{&storage};
     after_time_sample=[] { deliver(); }; // old getter sampled browser time, then NTP committed
     CHECK(vehicle.paired_at()==0 && saves==0 && !clock_is_authoritative());
-    after_time_sample={}; deliver();
+    after_time_sample={}; deliver(); CHECK(saves==0);
+    clock_service_ntp_checkpoint(); CHECK(saves==1);
     CHECK(vehicle.paired_at()==1800000000 && saves==2);
     CHECK(storage.text[tk::nvs_contract::kPairedAt]=="1800000000");
     for (const char* bad : {"-1", "1600000000", "1800000000x", "2082758400"}) {

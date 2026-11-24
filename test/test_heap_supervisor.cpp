@@ -119,6 +119,7 @@ bool ble_host_synced() noexcept { ++host_reads; return synced; }
 uint32_t ble_host_reset_count() noexcept { ++host_reads; return host_resets; }
 bool ota_is_busy() { return ota_busy; }
 void ota_request_heap_abort() noexcept { ++ota_abort_requests; }
+void clock_service_ntp_checkpoint() noexcept {}
 namespace tk { bool net_is_up() { return network_up; } }
 
 // The generated production TU's logs execute a fallible host sink, rather than the quiet SDK

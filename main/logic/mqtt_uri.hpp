@@ -17,8 +17,17 @@
 // and it was previously only checkable on the device.
 #include <cstddef>
 #include <string>
+#include <string_view>
 
 namespace tk {
+
+inline std::string mqtt_ascii_lower(std::string_view in) {
+    std::string out(in);
+    for (char& c : out) {
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    }
+    return out;
+}
 
 // Surrounding whitespace, as every entry path trims it: the web UI form, a curl body and the NVS
 // value read back at boot must all agree on what "the same broker" means, or an unchanged value
@@ -32,8 +41,9 @@ inline std::string mqtt_trim(const std::string& in) {
 
 // Is this a broker value we are willing to store? Empty is fine (it DISABLES MQTT); otherwise it
 // must be host:port — a non-empty host, a ':' separator, and a numeric port in 1..65535. An
-// optional "scheme://" prefix is tolerated, and so is "user:pass@host:port" userinfo, because
-// rfind(':') takes the LAST colon and the port is what follows it.
+// optional "mqtt://" or "mqtts://" scheme prefix (case-insensitive) is tolerated, and so is
+// "user:pass@host:port" userinfo, because rfind(':') takes the LAST colon and the port is what
+// follows it.
 inline bool mqtt_broker_is_plausible(const std::string& broker) {
     if (broker.empty()) return true;                  // empty = disable
     if (broker.size() > kServiceTargetInputMaxBytes) return false;
@@ -41,7 +51,11 @@ inline bool mqtt_broker_is_plausible(const std::string& broker) {
 
     std::string authority = broker;
     const size_t scheme = authority.find("://");
-    if (scheme != std::string::npos) authority = authority.substr(scheme + 3);
+    if (scheme != std::string::npos) {
+        const std::string s = mqtt_ascii_lower(std::string_view(authority).substr(0, scheme));
+        if (s != "mqtt" && s != "mqtts") return false;
+        authority = authority.substr(scheme + 3);
+    }
 
     const size_t colon = authority.rfind(':');
     if (colon == std::string::npos || colon == 0) return false;   // need host:port
@@ -61,13 +75,16 @@ inline bool mqtt_broker_is_plausible(const std::string& broker) {
 // default to TLS rather than plaintext, because an MQTT CONNECT carries username and password in
 // the clear on plain mqtt — and a credentialed broker is exactly the one that tends to live off the
 // trusted LAN (a cloud, VLAN or VPN broker in the usual Home Assistant setup). Credentials are
-// "present" if a username is configured or the authority embeds userinfo. A bare, credential-free
+// "present" if credentials are configured or the authority embeds userinfo. A bare, credential-free
 // local broker stays on plaintext. An explicit scheme is always honoured, in either direction.
-inline std::string mqtt_effective_uri(const std::string& broker, bool have_username) {
+inline std::string mqtt_effective_uri(const std::string& broker, bool have_credentials) {
     const std::string b = mqtt_trim(broker);
     if (b.empty()) return {};
-    if (b.find("://") != std::string::npos) return b;
-    const bool has_creds = have_username || b.find('@') != std::string::npos;
+    const size_t scheme = b.find("://");
+    if (scheme != std::string::npos) {
+        return mqtt_ascii_lower(std::string_view(b).substr(0, scheme)) + b.substr(scheme);
+    }
+    const bool has_creds = have_credentials || b.find('@') != std::string::npos;
     return (has_creds ? "mqtts://" : "mqtt://") + b;
 }
 
@@ -89,7 +106,7 @@ inline std::string mqtt_broker_display(const std::string& uri) {
 // Does this URI open a TLS session? Decides both the CA bundle attachment and the pre-flight's
 // memory budget below.
 inline bool mqtt_uri_is_tls(const std::string& uri) {
-    return uri.rfind("mqtts://", 0) == 0;
+    return uri.size() >= 8 && mqtt_ascii_lower(std::string_view(uri).substr(0, 8)) == "mqtts://";
 }
 
 // ── save-time pre-flight ────────────────────────────────────────────────────────────────────────

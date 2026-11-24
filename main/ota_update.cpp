@@ -117,7 +117,7 @@ OtaIdentityMutationGuard::OtaIdentityMutationGuard(tk::IdentityMutationEntry ent
 }
 
 OtaIdentityMutationGuard::~OtaIdentityMutationGuard() {
-    if (held_) finish_operation(tk::OtaIdentityGateState::IdentityMutation);
+    if (held_ && !sealed_) finish_operation(tk::OtaIdentityGateState::IdentityMutation);
 }
 
 bool ota_fault_restart_begin() {

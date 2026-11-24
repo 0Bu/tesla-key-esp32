@@ -151,8 +151,15 @@ esp_err_t handle_gen_keys(GuardedReq rq) {
     const bool allow_replace = query_param_is(req, "force", "1");
     rq.reply()->state.shape = tk::ReplyShape::FlatResult;
     rq.reply()->state.attempting(tk::RequestEffect::Identity);
-    const VehicleController::KeyGenerationResult generated =
-        g_vehicle->generate_key_result(allow_replace);
+    VehicleController::KeyGenerationResult generated{};
+    try {
+        generated = g_vehicle->generate_key_result(allow_replace);
+    } catch (...) {
+        rq.reply()->state.continuation = tk::ReplyContinuation::IdentityRestart;
+        rq.reply()->state.recovery_pending = true;
+        identity_guard.seal();
+        throw;
+    }
     if (generated.key_probe_failed) {
         rq.reply()->state.possible_effects = 0;
         rq.reply()->state.outcome = tk::RequestOutcome::NotAttempted;
@@ -194,6 +201,7 @@ esp_err_t handle_gen_keys(GuardedReq rq) {
     if (reboot_to_restore) {
         rq.reply()->state.continuation = tk::ReplyContinuation::IdentityRestart;
         rq.reply()->state.recovery_pending = true;
+        identity_guard.seal();
     }
     if (ok) rq.reply()->state.succeeded();
     else if (rotation == tk::KeyRotationResult::CleanupPending)
@@ -315,6 +323,9 @@ esp_err_t handle_set_vin(GuardedReq rq) {
             if (marker.empty()) return false; // never persist an undecodable identity journal
             if (!g_config->save_str(tk::nvs_contract::kVinTransition, marker)) return false;
             vin_marker_written = true;
+            rq.reply()->state.continuation = tk::ReplyContinuation::IdentityRestart;
+            rq.reply()->state.recovery_pending = true;
+            identity_guard.seal();
             return tk::cfg_save(*g_config, next);
         });
 
@@ -331,6 +342,7 @@ esp_err_t handle_set_vin(GuardedReq rq) {
         rq.reply()->state.continuation = tk::ReplyContinuation::IdentityRestart;
         // A known committed identity remains partial until its local post-result work ends.
         rq.reply()->state.recovery_pending = true;
+        identity_guard.seal();
     }
     if (reset.state == A::Complete || reset.state == A::RecoverCommittedIdentity)
         rq.reply()->state.identity_recovery();
@@ -552,7 +564,8 @@ static tk::MqttProbeResult mqtt_probe_broker(const std::string& uri) {
             // Only a non-empty broker is probed — an empty value explicitly disables the bridge.
             if (!broker.empty()) {
                 const std::string uri = tk::mqtt_effective_uri(
-                    broker, !std::string(CONFIG_TESLA_MQTT_USERNAME).empty());
+                    broker,
+                    (CONFIG_TESLA_MQTT_USERNAME[0] != '\0' || CONFIG_TESLA_MQTT_PASSWORD[0] != '\0'));
                 const tk::MqttProbeResult result = mqtt_probe_broker(uri);
                 if (result != tk::MqttProbeResult::Ok) {
                     ESP_LOGW(TAG, "set_mqtt: broker check failed (%s) — not saving",

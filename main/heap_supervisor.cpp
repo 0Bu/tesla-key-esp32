@@ -11,6 +11,7 @@
 #include "runtime_admission.hpp"
 #include "safe_mode.hpp"
 #include "task_config.hpp"
+#include "time_sync.hpp"
 
 #include <esp_heap_caps.h>
 #include <esp_log.h>
@@ -191,6 +192,7 @@ void supervisor_iteration(SupervisorState& s) {
         (void)heap_trend_record(uptime_seconds(static_cast<uint64_t>(esp_timer_get_time())),
                                 free_bytes, static_cast<uint32_t>(largest));
     } catch (...) { report_degraded(s, now_ms, "optional heap trend failed"); }
+    clock_service_ntp_checkpoint();
 
     // A supervisor samples its own stack only; never relabel it as a Vehicle measurement. This
     // is a runtime observation, not certification that 3072 bytes covers every failure path.
