@@ -3333,3 +3333,402 @@ test("the evcc sheet is refused while firmware work is busy or without a configu
   await context.openEvcc();
   assert.equal(element("askModal").classList.contains("hide"), true);
 });
+
+test("degraded config replies in editVin, editMqtt, and editSyslog replace the active load toast cleanly", async () => {
+  const cases = [
+    { method: "editVin", key: "vin", url: "/set_vin", input: "5YJ3E1EA1JF000001" },
+    { method: "editMqtt", key: "mqtt", url: "/set_mqtt", input: "192.0.2.50:1883" },
+    { method: "editSyslog", key: "syslog", url: "/set_syslog", input: "192.0.2.50:514" },
+  ];
+  for (const { method, key, url, input } of cases) {
+    for (const outcome of ["unknown", "succeeded"]) {
+      const { context, element } = loadUi();
+      const reason = "operation outcome unknown; reply degraded";
+      let releasePost;
+      context.state = { vin: "UNKNOWN", key_present: false, mqtt: { broker: "" }, syslog: { host: "" } };
+      context.askText = async () => input;
+      context.askConfirm = async () => true;
+      context.fetch = (reqUrl) => {
+        if (reqUrl.startsWith("/status")) {
+          return Promise.resolve({ ok: true, status: 200, async json() { return context.state; } });
+        }
+        assert.equal(reqUrl, url);
+        return new Promise((resolve) => {
+          releasePost = () => resolve({
+            ok: true,
+            status: 200,
+            async json() {
+              return { response: { result: outcome === "succeeded", outcome, reply_degraded: true, reason } };
+            }
+          });
+        });
+      };
+
+      const pending = context[method]();
+      await new Promise((resolve) => setImmediate(resolve));
+      const toasts = element("toasts");
+      assert.equal(toasts.children.length, 1, `${method} (${outcome}) shows single load toast while in flight`);
+      assert.match(toasts.children[0].className, /\bload\b/);
+      assert.equal(toasts.children[0].dataset.key, key);
+
+      releasePost();
+      await pending;
+
+      const loadNodes = toasts.children.filter((el) => /\bload\b/.test(el.className || ""));
+      assert.equal(loadNodes.length, 0, `${method} (${outcome}) must leave zero .toast.load nodes`);
+      assert.equal(toasts.children.length, 1, `${method} (${outcome}) must replace load toast in-place`);
+      assert.equal(toasts.children[0].dataset.key, key);
+      assert.match(toasts.children[0].className, outcome === "succeeded" ? /\btoast info\b/ : /\btoast err\b/);
+      assert.match(toasts.children[0].innerHTML, /operation outcome unknown; reply degraded/);
+      assert.equal(context.cfgBusy, false);
+    }
+  }
+});
+
+test("all six mutating UI actions enforce per-action fetch deadlines and release busy state on timeout", async () => {
+  const actions = [
+    { name: "toggleCharge", timeoutMs: 35000, busyFlag: "chgBusy", key: "charge", errPattern: /Command failed/ },
+    { name: "wakeCar", timeoutMs: 35000, busyFlag: "waking", key: "wake", errPattern: /Wake failed/ },
+    { name: "editVin", timeoutMs: 15000, busyFlag: "cfgBusy", key: "vin", errPattern: /Failed to save VIN/ },
+    { name: "editMqtt", timeoutMs: 15000, busyFlag: "cfgBusy", key: "mqtt", errPattern: /Failed to save MQTT broker/ },
+    { name: "editSyslog", timeoutMs: 10000, busyFlag: "cfgBusy", key: "syslog", errPattern: /Failed to save Syslog server/ },
+    { name: "genKey", timeoutMs: 15000, busyFlag: "cfgBusy", key: "key", errPattern: /Key generation failed/ },
+  ];
+
+  for (const { name, timeoutMs, busyFlag, key, errPattern } of actions) {
+    const { context, element } = loadUi();
+    let aborted = false;
+    let seenSignal = null;
+    const timers = [];
+    const postCalls = [];
+
+    context.AbortController = class {
+      constructor() { this.signal = { aborted: false }; }
+      abort() { aborted = true; this.signal.aborted = true; }
+    };
+    context.setTimeout = (fn, ms) => {
+      const entry = { id: timers.length + 1, fn, ms, cleared: false };
+      timers.push(entry);
+      return entry.id;
+    };
+    context.clearTimeout = (id) => {
+      const entry = timers.find((t) => t.id === id);
+      if (entry) entry.cleared = true;
+    };
+    context.state = {
+      vin: "5YJ3E1EA1JF000001",
+      key_present: false,
+      vehicle: { status: "Stopped", soc: 40 },
+      mqtt: { broker: "" },
+      syslog: { host: "" }
+    };
+    context.askText = async () => (name === "editVin" ? "5YJ3E1EB8NF123456" :
+                                    name === "editMqtt" ? "192.0.2.50:1883" : "192.0.2.50:514");
+    context.askConfirm = async () => true;
+    context.fetch = (url, opts) => {
+      if (url.startsWith("/status")) {
+        return Promise.resolve({ ok: true, status: 200, async json() { return context.state; } });
+      }
+      postCalls.push({ url, opts });
+      seenSignal = opts && opts.signal;
+      return new Promise(() => {});
+    };
+
+    const pending = context[name]();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(postCalls.length, 1, `${name} sent one POST`);
+    assert.ok(seenSignal, `${name} attaches AbortController signal`);
+    assert.equal(context[busyFlag], true, `${name} sets ${busyFlag} while request is pending`);
+    const deadlineTimer = timers.find((t) => t.ms === timeoutMs && !t.cleared);
+    assert.ok(deadlineTimer, `${name} arms ${timeoutMs}ms timeout`);
+
+    deadlineTimer.fn();
+    await pending;
+
+    assert.equal(aborted, true, `${name} aborts hung request on ${timeoutMs}ms expiry`);
+    assert.equal(context[busyFlag], false, `${name} clears ${busyFlag} on timeout`);
+    const toasts = element("toasts");
+    assert.equal(toasts.children.filter((el) => /\bload\b/.test(el.className || "")).length, 0,
+      `${name} clears load toast on timeout`);
+    const errToast = toasts.children.find((el) => el.dataset.key === key);
+    assert.ok(errToast, `${name} keeps keyed toast`);
+    assert.match(errToast.className, /\btoast err\b/);
+    assert.match(errToast.innerHTML, errPattern);
+  }
+});
+
+test("wakeCar guards late HTTP responses and errors after wake settlement or superseding wake attempts", async () => {
+  // 1) Late HTTP success after render()/settleWakeToast() already settled 'Car is awake'
+  {
+    const { context, element } = loadUi();
+    let resolveWake;
+    context.state = { paired: true, vin: "5YJ3E1EA1JF000001", key_present: true, link: "asleep" };
+    context.fetch = (url) => {
+      if (url.startsWith("/status")) {
+        return Promise.resolve({
+          ok: true, status: 200,
+          async json() {
+            return { paired: true, vin: "5YJ3E1EA1JF000001", key_present: true, vehicle: { soc: 77, status: "Idle" } };
+          }
+        });
+      }
+      return new Promise((resolve) => { resolveWake = resolve; });
+    };
+
+    const wakePromise = context.wakeCar();
+    assert.equal(context.waking, true);
+    assert.match(element("toasts").children[0].innerHTML, /Waking the car/);
+
+    await context.poll();
+    assert.equal(context.waking, false);
+    assert.equal(element("toasts").children.length, 1);
+    assert.match(element("toasts").children[0].className, /\btoast ok\b/);
+    assert.match(element("toasts").children[0].innerHTML, /Car is awake/);
+
+    resolveWake({ ok: true, status: 200, async json() { return { response: { result: true } }; } });
+    await wakePromise;
+
+    assert.equal(context.waking, false);
+    assert.equal(element("toasts").children.length, 1);
+    assert.match(element("toasts").children[0].className, /\btoast ok\b/);
+    assert.match(element("toasts").children[0].innerHTML, /Car is awake/);
+    assert.equal(element("toasts").children.filter((el) => /\bload\b/.test(el.className || "")).length, 0);
+  }
+
+  // 2) Late HTTP error or network/timeout rejection after 'Car is awake'
+  for (const mode of ["reject", "http502"]) {
+    const { context, element } = loadUi();
+    let settleWake;
+    context.state = { paired: true, vin: "5YJ3E1EA1JF000001", key_present: true, link: "asleep" };
+    context.fetch = (url) => {
+      if (url.startsWith("/status")) {
+        return Promise.resolve({
+          ok: true, status: 200,
+          async json() {
+            return { paired: true, vin: "5YJ3E1EA1JF000001", key_present: true, link: "awake" };
+          }
+        });
+      }
+      return new Promise((resolve, reject) => { settleWake = { resolve, reject }; });
+    };
+
+    const wakePromise = context.wakeCar();
+    await context.poll();
+    assert.equal(context.waking, false);
+    assert.match(element("toasts").children[0].innerHTML, /Car is awake/);
+
+    if (mode === "reject") settleWake.reject(new Error("request timed out"));
+    else settleWake.resolve({ ok: false, status: 502, async json() { return { response: { result: false, reason: "timeout" } }; } });
+    await wakePromise;
+
+    assert.equal(context.waking, false);
+    assert.match(element("toasts").children[0].className, /\btoast ok\b/);
+    assert.match(element("toasts").children[0].innerHTML, /Car is awake/);
+  }
+
+  // 3) Superseded wake attempt (tok !== wakeToken) cannot cancel or overwrite newer active wakeCar()
+  for (const staleOutcome of ["reject", "failResult", "okResult"]) {
+    const { context, element } = loadUi();
+    const timers = [];
+    let wakeCalls = 0;
+    let staleControl;
+    let resolveCurrent;
+
+    context.setTimeout = (fn, ms) => {
+      const entry = { id: timers.length + 1, fn, ms, cleared: false };
+      timers.push(entry);
+      return entry.id;
+    };
+    context.clearTimeout = (id) => {
+      const entry = timers.find((t) => t.id === id);
+      if (entry) entry.cleared = true;
+    };
+    context.state = { paired: true, vin: "5YJ3E1EA1JF000001", key_present: true, link: "asleep" };
+    context.fetch = (url) => {
+      if (url.startsWith("/status")) {
+        return Promise.resolve({ ok: true, status: 200, async json() { return context.state; } });
+      }
+      wakeCalls++;
+      if (wakeCalls === 1) {
+        return new Promise((resolve, reject) => { staleControl = { resolve, reject }; });
+      }
+      return new Promise((resolve) => { resolveCurrent = resolve; });
+    };
+
+    const wake1 = context.wakeCar();
+    assert.equal(context.waking, true);
+
+    // Simulate intermediate awake state, then vehicle returning to sleep before second wake
+    context.render({ paired: true, vin: "5YJ3E1EA1JF000001", key_present: true, link: "awake" });
+    context.settleWakeToast();
+    assert.equal(context.waking, false);
+    context.state = { paired: true, vin: "5YJ3E1EA1JF000001", key_present: true, link: "asleep" };
+
+    const wake2 = context.wakeCar();
+    assert.equal(context.waking, true);
+    const activeSafetyTimer = timers.find((t) => t.ms === 90000 && !t.cleared);
+    assert.ok(activeSafetyTimer, "second wake attempt armed its 90s safety timer");
+
+    if (staleOutcome === "reject") staleControl.reject(new Error("request timed out"));
+    else if (staleOutcome === "failResult") staleControl.resolve({ ok: false, status: 502, async json() { return { response: { result: false, reason: "stale" } }; } });
+    else staleControl.resolve({ ok: true, status: 200, async json() { return { response: { result: true } }; } });
+    await wake1;
+
+    assert.equal(context.waking, true, `stale ${staleOutcome} must not clear active waking`);
+    assert.equal(activeSafetyTimer.cleared, false, `stale ${staleOutcome} must not clear active wakeTimeout`);
+    assert.match(element("toasts").children[0].className, /\btoast load\b/);
+    assert.match(element("toasts").children[0].innerHTML, /Waking the car/);
+
+    resolveCurrent({ ok: true, status: 200, async json() { return { response: { result: true } }; } });
+    await wake2;
+    assert.equal(context.waking, true);
+    assert.match(element("toasts").children[0].innerHTML, /Wake sent/);
+  }
+});
+
+test("cfgBusy serializes config and key saves against overlapping submissions and clears on all outcomes", async () => {
+  // 1) In-flight editVin blocks editMqtt, editSyslog, genKey, and re-entrant editVin with info toast
+  {
+    const { context, element } = loadUi();
+    let releasePost;
+    let promptCalls = 0;
+    const postUrls = [];
+    context.state = { vin: "UNKNOWN", key_present: false, mqtt: { broker: "" }, syslog: { host: "" } };
+    context.askText = async () => { promptCalls++; return "5YJ3E1EA1JF000001"; };
+    context.askConfirm = async () => { promptCalls++; return true; };
+    context.fetch = (url) => {
+      if (url.startsWith("/status")) {
+        return Promise.resolve({ ok: true, status: 200, async json() { return context.state; } });
+      }
+      postUrls.push(url);
+      return new Promise((resolve) => { releasePost = resolve; });
+    };
+
+    const vinPromise = context.editVin();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(context.cfgBusy, true);
+    assert.deepEqual(postUrls, ["/set_vin"]);
+    assert.equal(promptCalls, 1);
+
+    await context.editMqtt();
+    await context.editSyslog();
+    await context.genKey();
+    await context.editVin();
+
+    assert.equal(promptCalls, 1, "blocked actions must not open prompts while cfgBusy is true");
+    assert.deepEqual(postUrls, ["/set_vin"], "blocked actions must not send POST requests");
+    const toasts = element("toasts");
+    assert.ok(toasts.children.some((el) => /\btoast load\b/.test(el.className) && el.dataset.key === "vin"),
+      "active vin load toast stays visible");
+    assert.ok(toasts.children.some((el) => /\btoast info\b/.test(el.className) && /in progress/i.test(el.innerHTML)),
+      "blocked call shows concise info toast");
+
+    releasePost({ ok: true, status: 200, async json() { return { response: { result: true, reason: "saved" } }; } });
+    await vinPromise;
+    assert.equal(context.cfgBusy, false);
+
+    // Next save proceeds once cfgBusy is cleared
+    context.askText = async () => "192.0.2.50:1883";
+    const mqttPromise = context.editMqtt();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(postUrls, ["/set_vin", "/set_mqtt"]);
+    releasePost({ ok: true, status: 200, async json() { return { response: { result: true, reason: "saved" } }; } });
+    await mqttPromise;
+    assert.equal(context.cfgBusy, false);
+  }
+
+  // 2) Pre-send overlap (two async prompts resolving in the same turn) sends only one POST
+  {
+    const { context } = loadUi();
+    let releaseFirst;
+    const postUrls = [];
+    const toasts = [];
+    context.state = { vin: "UNKNOWN", key_present: false, mqtt: { broker: "" }, syslog: { host: "" } };
+    context.toast = (msg, kind, key) => toasts.push({ msg, kind, key });
+    let firstAsk = true;
+    context.askText = () => {
+      if (firstAsk) {
+        firstAsk = false;
+        return Promise.resolve("192.0.2.50:1883");
+      }
+      return new Promise((resolve) => queueMicrotask(() => resolve("192.0.2.60:514")));
+    };
+    context.fetch = (url) => {
+      postUrls.push(url);
+      return new Promise((resolve) => { releaseFirst = resolve; });
+    };
+
+    const p1 = context.editMqtt();
+    const p2 = context.editSyslog();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(postUrls, ["/set_mqtt"]);
+    assert.equal(context.cfgBusy, true);
+    assert.ok(toasts.some((t) => t.kind === "info" && /in progress/i.test(t.msg)));
+
+    releaseFirst({ ok: true, status: 200, async json() { return { response: { result: true, reason: "saved" } }; } });
+    await Promise.all([p1, p2]);
+    assert.equal(context.cfgBusy, false);
+  }
+
+  // 3) Cancel / unchanged leaves cfgBusy false, and failure/catch clears cfgBusy false
+  {
+    const { context } = loadUi();
+    context.state = { vin: "5YJ3E1EA1JF000001", key_present: false, mqtt: { broker: "192.0.2.50:1883" } };
+    context.askText = async () => null;
+    await context.editVin();
+    assert.equal(context.cfgBusy, false);
+
+    context.askText = async () => "192.0.2.50:1883";
+    await context.editMqtt();
+    assert.equal(context.cfgBusy, false);
+
+    context.askText = async () => "192.0.2.99:514";
+    context.fetch = async () => { throw new Error("network down"); };
+    await context.editSyslog();
+    assert.equal(context.cfgBusy, false);
+
+    context.fetch = async () => ({ ok: false, status: 500, async json() { return null; } });
+    await context.genKey();
+    assert.equal(context.cfgBusy, false);
+
+    context.fetch = async (url) => {
+      if (url.startsWith("/status")) {
+        return { ok: true, status: 200, async json() { return context.state; } };
+      }
+      return { ok: true, status: 200, async json() { return { result: false, outcome: "unknown", reply_degraded: true, reason: "degraded" }; } };
+    };
+    await context.genKey();
+    assert.equal(context.cfgBusy, false);
+  }
+});
+
+test("editSyslog host validation mirrors firmware syslog_policy.hpp", async () => {
+  const { context, element } = loadUi();
+  const check = async (value) => {
+    const p = context.editSyslog();
+    element("askInput").value = value;
+    context.askValidate();
+    const err = element("askErr").classList.contains("hide") ? "" : element("askErr").textContent;
+    context.askClose(null);
+    await p.catch(() => {});
+    return err;
+  };
+  context.state = {};
+
+  for (const good of ["", "192.0.2.30", "192.0.2.30:514", "syslog.example", "syslog.example:1514"]) {
+    assert.equal(await check(good), "", `expected valid syslog target: ${good}`);
+  }
+  for (const badScheme of ["://192.0.2.30:514", "1://192.0.2.30", "192.0.2.30://514", "udp://192.0.2.30:514", "foo_bar://192.0.2.30"]) {
+    assert.match(await check(badScheme), /no scheme/i, `expected scheme rejection: ${badScheme}`);
+  }
+  for (const badSlash of ["192.0.2.30/path", "/192.0.2.30", "192.0.2.30/path:514", "192.0.2.30:514/path"]) {
+    assert.notEqual(await check(badSlash), "", `expected slash rejection: ${badSlash}`);
+  }
+  for (const badColon of ["192.0.2.30:1:514", "foo:bar:514", "[::1]:514", "::1", ":514", "192.0.2.30:", "192.0.2.30:0", "192.0.2.30:65536"]) {
+    assert.notEqual(await check(badColon), "", `expected colon/port rejection: ${badColon}`);
+  }
+  for (const badSpace of ["192.0.2.30 :514", "192.0.2.30\t514", "192.0.2.30\r514"]) {
+    assert.match(await check(badSpace), /spaces/i, `expected whitespace rejection: ${JSON.stringify(badSpace)}`);
+  }
+});

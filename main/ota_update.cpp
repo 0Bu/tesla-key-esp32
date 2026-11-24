@@ -21,7 +21,6 @@
 #include <cJSON.h>
 
 #include "logic/heap_watchdog.hpp"
-#include "logic/tls_memory.hpp"
 #include "logic/json_syntax.hpp"
 #include "logic/ota_contract.hpp"
 #include "logic/ota_changelog_range.hpp"
@@ -873,6 +872,34 @@ static void set_check_done(const OtaCheckResult& r, const OtaOperation& operatio
     return std::string(CONFIG_TESLA_OTA_FIRMWARE_BASE_URL "tesla-key-esp32" TESLA_OTA_IMG_SUFFIX ".bin");
 }
 
+static const char* coordinator_error_message(tk::ota::Outcome outcome, bool upload,
+                                             bool check, const char* fallback) noexcept {
+    switch (outcome) {
+        case tk::ota::Outcome::WriterUncertain:
+            return upload ? "upload uncertain; do not retry" : "update outcome is uncertain";
+        case tk::ota::Outcome::NoMemory:
+            return kOtaNoMemory;
+        case tk::ota::Outcome::Deadline:
+            return check ? "update check deadline reached" : "update deadline reached";
+        default:
+            return fallback;
+    }
+}
+
+static const char* upload_error_message(tk::ota::Outcome outcome, const char* fallback) noexcept {
+    return coordinator_error_message(outcome, true, false, fallback);
+}
+
+static void cancel_coordinator_if_active(tk::ota::Coordinator& coordinator,
+                                         tk::ota::Outcome reason) noexcept {
+    const auto current = coordinator.outcome();
+    if (current == tk::ota::Outcome::Idle ||
+        current == tk::ota::Outcome::Working ||
+        current == tk::ota::Outcome::MetadataReady) {
+        coordinator.cancel(reason);
+    }
+}
+
 // The coordinator is the only caller of the real raw-OTA effect table.
 static void ota_task_impl(OtaOperation& operation, const OtaCheckResult& pre) {
     if (!pre.ok || !pre.update_available) {
@@ -924,10 +951,9 @@ static void ota_task_impl(OtaOperation& operation, const OtaCheckResult& pre) {
             return;
         }
         if (state != tk::ota::Outcome::Working) {
-            set_check_error(state == tk::ota::Outcome::NoMemory ? kOtaNoMemory :
-                            state == tk::ota::Outcome::Deadline ? "update deadline reached" :
-                            state == tk::ota::Outcome::WriterUncertain ? "update outcome is uncertain" :
-                            "download or image validation failed", operation.channel_state);
+            set_check_error(coordinator_error_message(state, false, false,
+                                                      "download or image validation failed"),
+                            operation.channel_state);
             return;
         }
         const uint64_t total = operation.coordinator.declared_size();
@@ -1027,34 +1053,41 @@ static void ota_upload_impl(OtaOperation& operation) {
     size_t received = 0;
     while (received < req->content_len) {
         tk::StackWatchScope f135_ota_chunk_exit(tk::StackWatch::OtaWriter);
-        if (s_heap_abort_requested.load(std::memory_order_acquire) ||
-            ota_get_channel() != tk::OtaChannel::Dev ||
-            !operation.budget.live(operation_now(nullptr))) {
-            operation.coordinator.cancel(tk::ota::Outcome::Deadline);
-            set_check_error("upload aborted", operation.channel_state, true); return;
+        const bool deadline_abort = s_heap_abort_requested.load(std::memory_order_acquire) ||
+                                    !operation.budget.live(operation_now(nullptr));
+        if (deadline_abort || ota_get_channel() != tk::OtaChannel::Dev) {
+            cancel_coordinator_if_active(operation.coordinator,
+                deadline_abort ? tk::ota::Outcome::Deadline : tk::ota::Outcome::ProtocolError);
+            set_check_error(upload_error_message(operation.coordinator.outcome(), "upload aborted"),
+                            operation.channel_state, true); return;
         }
         const size_t want = std::min(operation.job.block.size(), req->content_len - received);
         const int count = httpd_req_recv(req, reinterpret_cast<char*>(operation.job.block.data()), want);
         if (count <= 0 || static_cast<size_t>(count) > want) {
-            operation.coordinator.cancel(tk::ota::Outcome::NetworkError);
-            set_check_error("upload interrupted", operation.channel_state, true); return;
+            cancel_coordinator_if_active(operation.coordinator, tk::ota::Outcome::NetworkError);
+            set_check_error(upload_error_message(operation.coordinator.outcome(), "upload interrupted"),
+                            operation.channel_state, true); return;
         }
         if (!operation.coordinator.upload(operation.job.block.data(), static_cast<size_t>(count))) {
-            set_check_error("upload validation failed", operation.channel_state, true); return;
+            set_check_error(upload_error_message(operation.coordinator.outcome(), "upload validation failed"),
+                            operation.channel_state, true); return;
         }
         received += static_cast<size_t>(count);
         set_state(OtaState::Downloading, static_cast<int>(received * 100 / req->content_len), "uploading", true);
     }
-    if (s_heap_abort_requested.load(std::memory_order_acquire) ||
-        ota_get_channel() != tk::OtaChannel::Dev) {
-        operation.coordinator.cancel(tk::ota::Outcome::Deadline);
-        set_check_error("upload aborted", operation.channel_state, true); return;
+    {
+        const bool deadline_abort = s_heap_abort_requested.load(std::memory_order_acquire);
+        if (deadline_abort || ota_get_channel() != tk::OtaChannel::Dev) {
+            cancel_coordinator_if_active(operation.coordinator,
+                deadline_abort ? tk::ota::Outcome::Deadline : tk::ota::Outcome::ProtocolError);
+            set_check_error(upload_error_message(operation.coordinator.outcome(), "upload aborted"),
+                            operation.channel_state, true); return;
+        }
     }
     operation.coordinator.finish_upload(); // Same SDK signature check and boot selection as pull OTA.
     if (operation.coordinator.outcome() != tk::ota::Outcome::Committed) {
-        set_check_error(operation.coordinator.outcome() == tk::ota::Outcome::WriterUncertain
-            ? "upload uncertain; do not retry"
-            : "upload validation failed", operation.channel_state, true); return;
+        set_check_error(upload_error_message(operation.coordinator.outcome(), "upload validation failed"),
+                        operation.channel_state, true); return;
     }
     set_state(OtaState::Done, 100, "update complete — rebooting", true);
     finish_upload_request(operation, true);
@@ -1082,12 +1115,22 @@ static void run_coordinator_task(void* argument, bool image) noexcept {
             }
         }
     } catch (const std::bad_alloc&) {
-        operation.coordinator.cancel(tk::ota::Outcome::NoMemory);
-        set_check_error(kOtaNoMemory, operation.channel_state, operation.upload_request != nullptr);
+        cancel_coordinator_if_active(operation.coordinator, tk::ota::Outcome::NoMemory);
+        const auto outcome = operation.coordinator.outcome();
+        if (outcome != tk::ota::Outcome::Committed) {
+            const bool upload = operation.upload_request != nullptr;
+            set_check_error(coordinator_error_message(outcome, upload, !image, kOtaNoMemory),
+                            operation.channel_state, upload);
+        }
     } catch (...) {
-        operation.coordinator.cancel(tk::ota::Outcome::NetworkError);
-        set_check_error("update operation failed unexpectedly", operation.channel_state,
-                        operation.upload_request != nullptr);
+        cancel_coordinator_if_active(operation.coordinator, tk::ota::Outcome::NetworkError);
+        const auto outcome = operation.coordinator.outcome();
+        if (outcome != tk::ota::Outcome::Committed) {
+            const bool upload = operation.upload_request != nullptr;
+            set_check_error(coordinator_error_message(
+                outcome, upload, !image, "update operation failed unexpectedly"),
+                operation.channel_state, upload);
+        }
     }
     if (operation.upload_request) {
         finish_upload_request(operation, false);
@@ -1207,7 +1250,7 @@ static tk::OtaStartResult prepare_owned_operation(uint64_t origin, unsigned pr,
     if (!operation) {
         set_check_error(kOtaNoMemory, channel_state, upload);
         release_unstarted_operation();
-        return Result::InternalError;
+        return Result::NoMemory;
     }
     operation->channel_state = channel_state;
     operation->offer_generation = generation;
