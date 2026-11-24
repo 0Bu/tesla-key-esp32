@@ -45,9 +45,16 @@ namespace fixture {
 extern thread_local bool network_thread;
 void observe_body_allocation(std::size_t);
 }
+#if defined(__GNUC__) && !defined(__clang__)
+#define TEST_NOIPA __attribute__((noipa))
+#elif defined(__clang__)
+#define TEST_NOIPA __attribute__((noinline))
+#else
+#define TEST_NOIPA
+#endif
 static std::atomic<bool> fail_body_reserve{false};
 static std::atomic<int> fail_body_alloc_countdown{0};
-void* operator new(std::size_t n) {
+TEST_NOIPA void* operator new(std::size_t n) {
     fixture::observe_body_allocation(n);
     if (!fixture::network_thread && n>=1536 && n<16384) {
         if (fail_body_reserve.exchange(false)) throw std::bad_alloc();
@@ -58,13 +65,13 @@ void* operator new(std::size_t n) {
     if (void* p=std::malloc(n?n:1)) return p;
     throw std::bad_alloc();
 }
-void operator delete(void* p) noexcept {std::free(p);}
-void operator delete(void* p,std::size_t) noexcept {std::free(p);}
+TEST_NOIPA void operator delete(void* p) noexcept {std::free(p);}
+TEST_NOIPA void operator delete(void* p,std::size_t) noexcept {std::free(p);}
 // Pair scalar nothrow allocation (e.g. OtaOperation) with malloc/free without tripping body tracking.
-void* operator new(std::size_t n,const std::nothrow_t&) noexcept {
+TEST_NOIPA void* operator new(std::size_t n,const std::nothrow_t&) noexcept {
     return std::malloc(n?n:1);
 }
-void operator delete(void* p,const std::nothrow_t&) noexcept {::operator delete(p);}
+TEST_NOIPA void operator delete(void* p,const std::nothrow_t&) noexcept {::operator delete(p);}
 namespace fixture {
 std::atomic<int> checks{0};
 [[noreturn]] void failed(int line,const char* expression){
