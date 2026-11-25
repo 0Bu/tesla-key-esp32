@@ -371,6 +371,7 @@ fi
 
 if printf '%s\n' '.github/workflows/renovate.yaml' 'esp-idf-toolchain.txt' | gate_is_renovate_maintenance >/dev/null 2>&1 \
    || printf '%s\n' 'esp-idf-toolchain.txt' | gate_is_renovate_maintenance >/dev/null 2>&1 \
+   || printf '%s\n' 'tools/browser/Dockerfile' | gate_is_renovate_maintenance >/dev/null 2>&1 \
    || printf '%s\n' 'main/idf_component.yml' | gate_is_renovate_maintenance >/dev/null 2>&1 \
    || printf '%s\n' 'main/main.cpp' | gate_is_renovate_maintenance >/dev/null 2>&1 \
    || printf '%s\n' '.github/workflows/build.yml' | gate_is_renovate_maintenance >/dev/null 2>&1 \
@@ -378,6 +379,51 @@ if printf '%s\n' '.github/workflows/renovate.yaml' 'esp-idf-toolchain.txt' | gat
   fail_case 'non-renovate or mixed files accepted by gate_is_renovate_maintenance'
 else
   pass_case 'non-renovate and mixed files rejected by gate_is_renovate_maintenance'
+fi
+
+digest_old='65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87e4b031bc36928'
+digest_new='63bb298d2b7b88f176f51b5189f54ce6535c997682ea70885d2132f5d473a8a5'
+valid_browser_patch="$(printf '@@ -1,4 +1,4 @@\n-FROM python:3.15-slim@sha256:%s\n+FROM python:3.15-slim@sha256:%s\n \n RUN apt-get update \\\n     && apt-get install --no-install-recommends -y chromium fonts-liberation \\' "$digest_old" "$digest_new")"
+valid_browser_u0_patch="$(printf '@@ -1 +1 @@\n-FROM python:3.15-slim@sha256:%s\n+FROM python:3.15-slim@sha256:%s\n' "$digest_old" "$digest_new")"
+if printf '%s' "$valid_browser_patch" | gate_is_browser_dockerfile_digest_patch \
+   && printf '%s' "$valid_browser_u0_patch" | gate_is_browser_dockerfile_digest_patch; then
+  pass_case 'valid browser Dockerfile digest patches match'
+else
+  fail_case 'valid browser Dockerfile digest patch rejected'
+fi
+
+browser_patch_bad=0
+for bad_patch in \
+  "$(printf '@@ -1,4 +1,4 @@\n-FROM python:3.15-slim@sha256:%s\n+FROM python:3.16-slim@sha256:%s\n \n RUN apt-get update \\\n     && apt-get install --no-install-recommends -y chromium fonts-liberation \\' "$digest_old" "$digest_new")" \
+  "$(printf '@@ -1,4 +1,4 @@\n-FROM attacker/python:3.15-slim@sha256:%s\n+FROM attacker/python:3.15-slim@sha256:%s\n \n RUN apt-get update \\\n     && apt-get install --no-install-recommends -y chromium fonts-liberation \\' "$digest_old" "$digest_new")" \
+  "$(printf '@@ -1 +1 @@\n-FROM --platform=linux/amd64 python:3.15-slim@sha256:%s\n+FROM --platform=linux/amd64 python:3.15-slim@sha256:%s\n' "$digest_old" "$digest_new")" \
+  "$(printf '@@ -1 +1 @@\n-FROM python:3.15-slim@sha256:%s AS base\n+FROM python:3.15-slim@sha256:%s AS base\n' "$digest_old" "$digest_new")" \
+  "$(printf '@@ -1 +1 @@\n-FROM python:3.15-slim@sha256:%s\n+FROM python:3.15-slim@sha256:%s\n' "$digest_old" "$digest_old")" \
+  "$(printf '@@ -1 +1 @@\n-FROM python:3.15-slim@sha256:%s\n+FROM python:3.15-slim@sha256:%s\n' "$digest_old" "$(printf '%s' "$digest_new" | tr 'a-f' 'A-F')")" \
+  "$(printf '@@ -1 +1 @@\n-FROM python:3.15-slim@sha256:%s\n+FROM python:3.15-slim@sha256:%s\n' "$digest_old" "${digest_new%?}")" \
+  "$(printf '@@ -1,4 +1,4 @@\n-FROM python:3.15-slim@sha256:%s\n+FROM python:3.15-slim@sha256:%s\n \n-RUN apt-get update \\\n+RUN apt-get update --fix-missing \\' "$digest_old" "$digest_new")" \
+  "$(printf '@@ -1 +1,2 @@\n-FROM python:3.15-slim@sha256:%s\n+FROM python:3.15-slim@sha256:%s\n+ENV EXTRA=1\n' "$digest_old" "$digest_new")" \
+  "$(printf '@@ -1,2 +1,1 @@\n-FROM python:3.15-slim@sha256:%s\n-RUN true\n+FROM python:3.15-slim@sha256:%s\n' "$digest_old" "$digest_new")" \
+  "$(printf '@@ -1 +1 @@\n-FROM python:3.15-slim@sha256:%s\n+FROM python:3.15-slim@sha256:%s\n@@ -3 +3 @@\n-RUN a\n+RUN b\n' "$digest_old" "$digest_new")" \
+  "$(printf '@@ -2,2 +2,2 @@\n-FROM python:3.15-slim@sha256:%s\n+FROM python:3.15-slim@sha256:%s\n RUN apt-get update \\' "$digest_old" "$digest_new")" \
+  "$(printf '@@ -1,3 +1,3 @@\n-FROM python:3.15-slim@sha256:%s\n+FROM python:3.15-slim@sha256:%s\n RUN apt-get update \\' "$digest_old" "$digest_new")" \
+  "$(printf '@@ -1 +1 @@\n-FROM python:3.15-slim@sha256:%s\n+FROM python:3.15-slim@sha256:%s\n\\ No newline at end of file\n' "$digest_old" "$digest_new")"; do
+  if printf '%s' "$bad_patch" | gate_is_browser_dockerfile_digest_patch >/dev/null 2>&1; then
+    browser_patch_bad=1
+    break
+  fi
+done
+[ "$browser_patch_bad" = 0 ] && pass_case 'adversarial browser Dockerfile patches rejected' || fail_case 'adversarial browser Dockerfile patch accepted'
+
+valid_git_diff="$(printf 'diff --git a/tools/browser/Dockerfile b/tools/browser/Dockerfile\nindex 6ad5339..abcdef1 100644\n--- a/tools/browser/Dockerfile\n+++ b/tools/browser/Dockerfile\n%s' "$valid_browser_u0_patch")"
+mode_git_diff="$(printf 'diff --git a/tools/browser/Dockerfile b/tools/browser/Dockerfile\nindex 6ad5339..abcdef1 100755\n--- a/tools/browser/Dockerfile\n+++ b/tools/browser/Dockerfile\n%s' "$valid_browser_u0_patch")"
+wrong_file_git_diff="$(printf 'diff --git a/tools/browser/Otherfile b/tools/browser/Otherfile\nindex 6ad5339..abcdef1 100644\n--- a/tools/browser/Otherfile\n+++ b/tools/browser/Otherfile\n%s' "$valid_browser_u0_patch")"
+if printf '%s' "$valid_git_diff" | gate_is_browser_dockerfile_git_diff \
+   && ! printf '%s' "$mode_git_diff" | gate_is_browser_dockerfile_git_diff >/dev/null 2>&1 \
+   && ! printf '%s' "$wrong_file_git_diff" | gate_is_browser_dockerfile_git_diff >/dev/null 2>&1; then
+  pass_case 'browser Dockerfile git diff checks mode and path'
+else
+  fail_case 'browser Dockerfile git diff check'
 fi
 
 if printf '%s\n' 'main/command_exec.cpp' | gate_vehicle_command_relevant \
@@ -536,6 +582,46 @@ printf '%s\n' .github/renovate.json >"$tmp/renovate-config.files"
 expect_rc 0 'Renovate config maintenance needs no manual records' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/no-gates.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/renovate-config.files" "$gate" --check --project-dir "$root"
 printf '%s\n' .github/workflows/renovate.yaml .github/renovate.json >"$tmp/renovate-both.files"
 expect_rc 0 'combined Renovate maintenance needs no manual records' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/no-gates.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/renovate-both.files" "$gate" --check --project-dir "$root"
+
+printf '%s\n' tools/browser/Dockerfile >"$tmp/browser.files"
+expect_rc 2 'browser Dockerfile without diff pages fails closed' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/no-gates.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/browser.files" "$gate" --check --project-dir "$root"
+python3 - "$tmp/browser-valid.pages.json" "$valid_browser_patch" <<'PY'
+import json, pathlib, sys
+pathlib.Path(sys.argv[1]).write_text(json.dumps({
+    "expected": 1,
+    "pages": [[{"filename": "tools/browser/Dockerfile", "status": "modified", "additions": 1, "deletions": 1, "changes": 2, "patch": sys.argv[2]}]],
+}), encoding="utf-8")
+PY
+expect_rc 0 'browser Dockerfile digest-only pages pass offline check without manual records' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/no-gates.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/browser.files" AGENT_CHANGED_FILES_PAGES_FILE="$tmp/browser-valid.pages.json" "$gate" --check --project-dir "$root"
+
+python3 - "$tmp/browser-valid.pages.json" "$tmp" "$digest_old" "$digest_new" <<'PY'
+import copy, json, pathlib, sys
+base = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+tmp = pathlib.Path(sys.argv[2])
+old_d, new_d = sys.argv[3], sys.argv[4]
+cases = {}
+for name, mut in [
+    ("added", lambda d: d["pages"][0][0].update({"status": "added"})),
+    ("renamed", lambda d: d["pages"][0][0].update({"previous_filename": "tools/browser/old.Dockerfile"})),
+    ("changes3", lambda d: d["pages"][0][0].update({"changes": 3})),
+    ("nullpatch", lambda d: d["pages"][0][0].update({"patch": None})),
+    ("tagbump", lambda d: d["pages"][0][0].update({"patch": f"@@ -1 +1 @@\n-FROM python:3.15-slim@sha256:{old_d}\n+FROM python:3.16-slim@sha256:{new_d}\n"})),
+    ("runedit", lambda d: d["pages"][0][0].update({"patch": "@@ -3 +3 @@\n-RUN apt-get update \\\n+RUN apt-get update --fix-missing \\\n"})),
+    ("expected2", lambda d: d.update({"expected": 2})),
+]:
+    obj = copy.deepcopy(base)
+    mut(obj)
+    (tmp / f"browser-{name}.pages.json").write_text(json.dumps(obj), encoding="utf-8")
+PY
+for bad_pages in added renamed changes3 nullpatch tagbump runedit expected2; do
+  expect_rc 2 "tampered browser pages ($bad_pages) fails closed" env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/no-gates.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/browser.files" AGENT_CHANGED_FILES_PAGES_FILE="$tmp/browser-$bad_pages.pages.json" "$gate" --check --project-dir "$root"
+done
+printf '%s\n' tools/browser/Dockerfile .github/workflows/renovate.yaml >"$tmp/browser-mixed-renovate.files"
+expect_rc 2 'mixed browser Dockerfile and Renovate workflow fails closed' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/no-gates.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/browser-mixed-renovate.files" AGENT_CHANGED_FILES_PAGES_FILE="$tmp/browser-valid.pages.json" "$gate" --check --project-dir "$root"
+printf '%s\n' tools/browser/Dockerfile main/main.cpp >"$tmp/browser-mixed-main.files"
+expect_rc 2 'mixed browser Dockerfile and main.cpp fails closed' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/no-gates.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/browser-mixed-main.files" AGENT_CHANGED_FILES_PAGES_FILE="$tmp/browser-valid.pages.json" "$gate" --check --project-dir "$root"
+ln -s "$tmp/browser-valid.pages.json" "$tmp/browser-symlink.pages.json"
+expect_rc 2 'symlinked changed-files-pages-file rejected' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/no-gates.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/browser.files" "$gate" --check --project-dir "$root" --changed-files-pages-file "$tmp/browser-symlink.pages.json"
 # The exemption depends only on the complete diff, never on bot identity or a branch/title.
 printf '%s\n' "$local_checks_record" >"$tmp/local-checks.md"
 for other_path in esp-idf-toolchain.txt main/idf_component.yml dependencies.lock.esp32 docs/index.html main/main.cpp .github/workflows/build.yml docs/DEVELOPMENT.md; do
@@ -649,6 +735,10 @@ case "$args" in
       vehicle) printf '[[{"filename":"main/vehicle_commands.cpp"}]]\n' ;;
       renovate) printf '[[{"filename":".github/workflows/renovate.yaml"}]]\n' ;;
       renovate-rename) printf '[[{"filename":".github/workflows/renovate.yaml","previous_filename":".github/workflows/build.yml"}]]\n' ;;
+      browser-digest) printf '[[{"filename":"tools/browser/Dockerfile","status":"modified","additions":1,"deletions":1,"changes":2,"patch":"@@ -1,4 +1,4 @@\\n-FROM python:3.15-slim@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87e4b031bc36928\\n+FROM python:3.15-slim@sha256:63bb298d2b7b88f176f51b5189f54ce6535c997682ea70885d2132f5d473a8a5\\n \\n RUN apt-get update \\\\\\n     && apt-get install --no-install-recommends -y chromium fonts-liberation \\\\"}]]\n' ;;
+      browser-tag-bump) printf '[[{"filename":"tools/browser/Dockerfile","status":"modified","additions":1,"deletions":1,"changes":2,"patch":"@@ -1,4 +1,4 @@\\n-FROM python:3.15-slim@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87e4b031bc36928\\n+FROM python:3.16-slim@sha256:63bb298d2b7b88f176f51b5189f54ce6535c997682ea70885d2132f5d473a8a5\\n \\n RUN apt-get update \\\\\\n     && apt-get install --no-install-recommends -y chromium fonts-liberation \\\\"}]]\n' ;;
+      browser-run-edit) printf '[[{"filename":"tools/browser/Dockerfile","status":"modified","additions":1,"deletions":1,"changes":2,"patch":"@@ -3,2 +3,2 @@\\n-RUN apt-get update \\\\\\n+RUN apt-get update --fix-missing \\\\\\n     && apt-get install --no-install-recommends -y chromium fonts-liberation \\\\"}]]\n' ;;
+      browser-rename) printf '[[{"filename":"tools/browser/Dockerfile","previous_filename":"tools/browser/old.Dockerfile","status":"renamed","additions":1,"deletions":1,"changes":2,"patch":"@@ -1 +1 @@\\n-FROM python:3.15-slim@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87e4b031bc36928\\n+FROM python:3.15-slim@sha256:63bb298d2b7b88f176f51b5189f54ce6535c997682ea70885d2132f5d473a8a5"}]]\n' ;;
       *) printf '[[{"filename":"main/main.cpp"}]]\n' ;;
     esac ;;
   *) exit 91 ;;
@@ -659,6 +749,12 @@ merge_body="$(printf '%s\n' "$local_checks_record" '- [x] $project-review clean 
 printf '%s' "$canonical_payload" >"$tmp/payload.json"
 expect_rc 0 'canonical merge passes exact current-head evidence' env PATH="$tmp/bin:$PATH" TEST_HEAD="$sha" TEST_BODY="$merge_body" TEST_CHANGED=1 TEST_FILES_MODE=normal "$gate" --project-dir "$root" --payload-file "$tmp/payload.json"
 expect_rc 0 'Renovate canonical merge needs no manual records' env PATH="$tmp/bin:$PATH" TEST_HEAD="$sha" TEST_BODY='' TEST_CHANGED=1 TEST_FILES_MODE=renovate "$gate" --project-dir "$root" --payload-file "$tmp/payload.json"
+expect_rc 0 'browser Dockerfile digest PR needs no manual records via gh discovery' env PATH="$tmp/bin:$PATH" TEST_HEAD="$sha" TEST_BASE="$sha" TEST_BODY='' TEST_CHANGED=1 TEST_FILES_MODE=browser-digest "$gate" --pr 123 --expected-head "$sha" --expected-base "$sha"
+expect_rc 0 'browser Dockerfile digest canonical merge needs no manual records' env PATH="$tmp/bin:$PATH" TEST_HEAD="$sha" TEST_BODY='' TEST_CHANGED=1 TEST_FILES_MODE=browser-digest "$gate" --project-dir "$root" --payload-file "$tmp/payload.json"
+for bad_browser_mode in browser-tag-bump browser-run-edit browser-rename; do
+  expect_rc 2 "PR policy blocks $bad_browser_mode without manual records" env PATH="$tmp/bin:$PATH" TEST_HEAD="$sha" TEST_BASE="$sha" TEST_BODY='' TEST_CHANGED=1 TEST_FILES_MODE="$bad_browser_mode" "$gate" --pr 123 --expected-head "$sha" --expected-base "$sha"
+  expect_rc 2 "canonical merge blocks $bad_browser_mode without manual records" env PATH="$tmp/bin:$PATH" TEST_HEAD="$sha" TEST_BODY='' TEST_CHANGED=1 TEST_FILES_MODE="$bad_browser_mode" "$gate" --project-dir "$root" --payload-file "$tmp/payload.json"
+done
 expect_rc 0 'PR policy accepts matching event head and trusted live base' env PATH="$tmp/bin:$PATH" TEST_HEAD="$sha" TEST_BASE="$sha" TEST_FILES_MODE=renovate "$gate" --pr 123 --expected-head "$sha" --expected-base "$sha"
 expect_rc 2 'PR policy refuses a changed live base with the same head' env PATH="$tmp/bin:$PATH" TEST_HEAD="$sha" TEST_BASE=1111111111111111111111111111111111111111 TEST_FILES_MODE=renovate "$gate" --pr 123 --expected-head "$sha" --expected-base "$sha"
 

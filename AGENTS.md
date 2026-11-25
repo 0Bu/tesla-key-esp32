@@ -151,9 +151,11 @@ capable host Python for gates. Hooks are lexical defense in depth, not authoriza
   required when the BLE/command relevance classifier in `tools/agent-hooks/pr-gate-lib.sh` applies.
   Consult those skills for exact scope; no silent relevance exemptions.
 - Strict Renovate maintenance (`gate_is_renovate_maintenance`, only `.github/workflows/renovate.yaml`
-  or `.github/renovate.json`) needs no manual records at merge/check, including `$local-checks`.
-  Mixed changes and project dependency updates require the applicable checks and reviews.
-  Human PR creation and pushes retain their normal gates; the exception grants no merge authority.
+  or `.github/renovate.json`) and diff-verified `FROM python:<ver>-slim@sha256:<64-hex>` digest-only
+  updates to `tools/browser/Dockerfile` (`gate_is_renovate_maintenance_pr`) need no manual records at
+  merge/check, including `$local-checks`. Mixed changes and project dependency updates require the
+  applicable checks and reviews. Human PR creation and pushes retain their normal gates; the
+  exception grants no merge authority.
 - Records name the exact current PR head and expire after every push. Local hooks/scripts enforce
   advisory records; server-side enforcement needs the required `pr-policy / current-head-records`
   check. GitHub validates the recorded results. Report findings with severity, path/line, cause,

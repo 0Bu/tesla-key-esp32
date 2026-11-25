@@ -14,8 +14,9 @@ documentation prose it touches — are safe to publish. This project's own histo
 both failure modes: a PR body quoting the tester's real LAN IP, MAC addresses and a real Tesla
 VIN as "example" values, and a run of early PR bodies written entirely in German. `$pr-hygiene`
 is the dedicated gate for exactly those two concerns, checked at PR creation,
-every push, and merge (PRs limited exclusively to `.github/workflows/renovate.yaml` or
-`.github/renovate.json` are exempt at merge/check via `gate_is_renovate_maintenance`) — never assume a clean `$skill-audit` or `$project-review` also covers it;
+every push, and merge (PRs limited exclusively to `.github/workflows/renovate.yaml`,
+`.github/renovate.json`, or a diff-verified digest-only `tools/browser/Dockerfile` bump are exempt
+at merge/check via `gate_is_renovate_maintenance_pr`) — never assume a clean `$skill-audit` or `$project-review` also covers it;
 their scope is coherence. `$project-review` does check that repository documentation is in
 English, but neither screens the PR title, body or commit messages for language, and neither
 screens any content for private data.
@@ -95,8 +96,8 @@ against the new head.
 [`tools/agent-hooks/require-pr-gates.sh`](../../../tools/agent-hooks/require-pr-gates.sh), invoked
 by the project hook configuration, requires a uniquely present `$pr-hygiene` record stamped with
 the exact commit being published at PR creation, push and merge, except for strict Renovate
-maintenance at merge/check. This exception depends only on the complete changed-file list,
-not the PR author. `$skill-audit` gates create/push. Ordinary merges additionally require
+maintenance and diff-verified digest-only `tools/browser/Dockerfile` updates at merge/check.
+This exception depends only on the complete changed-file list and unified diff, not the PR author. `$skill-audit` gates create/push. Ordinary merges additionally require
 `$local-checks`, `$project-review` and the applicable conditional reviews (`$feature-docs` and
 `$vehicle-command-audit`). The aggregate `--check` used by the `pr-policy` workflow requires every applicable record, `$skill-audit` included. There is no
 file marker; pass state lives only in the PR body and is parsed by the neutral core, using the

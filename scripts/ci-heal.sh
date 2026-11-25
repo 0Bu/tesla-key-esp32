@@ -31,7 +31,8 @@ if [ ! -f "$lib" ] || ! . "$lib"; then
   exit 2
 fi
 for gate_fn in gate_feature_docs_relevant gate_vehicle_command_relevant \
-               gate_is_renovate_maintenance gate_pr_changed_files; do
+               gate_is_renovate_maintenance gate_is_renovate_maintenance_pr \
+               gate_is_browser_dockerfile_git_diff gate_pr_changed_files; do
   declare -F "$gate_fn" >/dev/null 2>&1 || {
     echo "ci-heal: error: pr-gate-lib.sh lacks $gate_fn — refusing to run" >&2
     exit 2
@@ -428,8 +429,8 @@ attestation_for() {
 # Prints the gates the PR needs, one per line — the same set the merge/check hook enforces.
 # Returns 1 when the changed-file list cannot be established (never guess).
 required_gates_for_files() {
-  local files_file="$1" rc=0
-  if gate_is_renovate_maintenance "$files_file"; then
+  local files_file="$1" pages_file="${2:-}" rc=0
+  if gate_is_renovate_maintenance_pr "$files_file" "$pages_file"; then
     return 0
   fi
   printf '%s\n' local-checks skill-audit project-review pr-hygiene
@@ -445,15 +446,16 @@ required_gates_for_files() {
 }
 
 required_gates_for_pr() (
-  local files_file
+  local files_file pages_file
   files_file="$(mktemp)" || return 1
-  trap 'rm -f -- "$files_file"' EXIT
-  gate_pr_changed_files "$1" > "$files_file" || return 1
-  required_gates_for_files "$files_file"
+  pages_file="$(mktemp)" || { rm -f -- "$files_file"; return 1; }
+  trap 'rm -f -- "$files_file" "$pages_file"' EXIT
+  gate_pr_changed_files "$1" "$pages_file" > "$files_file" || return 1
+  required_gates_for_files "$files_file" "$pages_file"
 )
 
 required_gates_for_candidate() (
-  local candidate="$1" base remote_main files_file
+  local candidate="$1" base remote_main files_file name_status
   base="$(git rev-parse --verify refs/remotes/origin/main)" || return 1
   remote_main="$(git ls-remote --exit-code https://github.com/0Bu/tesla-key-esp32.git refs/heads/main)" || return 1
   [ "$remote_main" = "$base"$'\t'refs/heads/main ] || return 1
@@ -464,6 +466,13 @@ required_gates_for_candidate() (
   # Git quotes paths containing literal tabs, newlines, quotes and backslashes.
   # Refuse those paths so quoting cannot hide an anchored review classifier.
   if grep -q '^"' "$files_file"; then return 1; fi
+  if [ "$(wc -l < "$files_file" | tr -d ' ')" -eq 1 ] && [ "$(cat "$files_file")" = "tools/browser/Dockerfile" ]; then
+    name_status="$(git -c core.fsmonitor=false -c core.quotePath=false diff --no-renames --name-status "$base" "$candidate")" || return 1
+    if [ "$name_status" = $'M\ttools/browser/Dockerfile' ] && \
+       git -c core.fsmonitor=false -c core.quotePath=false diff --no-renames --no-ext-diff -U0 "$base" "$candidate" -- tools/browser/Dockerfile | gate_is_browser_dockerfile_git_diff; then
+      return 0
+    fi
+  fi
   required_gates_for_files "$files_file"
 )
 
@@ -1166,7 +1175,7 @@ self_test() {
     attest_names=(); attest_evidence=()
     STUB_HEAD="$SHA_A"; STUB_LOCAL="$SHA_A"; STUB_BRANCH=feature; STUB_REF=feature
     STUB_SEQ="green"; STUB_FAILED=""; STUB_REPRO=ok; STUB_DIRTY=0; STUB_ANCESTOR=0
-    STUB_MERGEABLE=MERGEABLE; STUB_FILES="docs/notes.md"; STUB_FILES_FAIL=0
+    STUB_MERGEABLE=MERGEABLE; STUB_FILES="docs/notes.md"; STUB_FILES_PAGES=""; STUB_FILES_FAIL=0
     STUB_HEAD_MOVE_AFTER=0; STUB_HEAD_COUNTER="$T/head-counter"; echo 0 > "$STUB_HEAD_COUNTER"
     STUB_RECORDS_AFTER=SUCCESS; STUB_RECORDS_READ_FAIL=0
     STUB_BUILD=SUCCESS; STUB_ROLLUP_EXTRA=""; STUB_ROLLUP_AFTER_EXTRA=""; STUB_LAST_WATCH=""
@@ -1205,10 +1214,21 @@ self_test() {
     print_failed_job_logs()   { echo "(stub) failed logs"; }
     fetch_failed_runs()       { printf '%s' "$STUB_FAILED"; }
     run_local_verifications() { echo "verify $1" >> "$LOG_VERIFY"; [ "$STUB_REPRO" != fail ]; }
-    gate_pr_changed_files()   { [ "$STUB_FILES_FAIL" != 1 ] && printf '%s' "$STUB_FILES"; }
+    gate_pr_changed_files()   {
+      [ "$STUB_FILES_FAIL" != 1 ] || return 1
+      if [ -n "${2:-}" ] && [ -n "$STUB_FILES_PAGES" ]; then
+        printf '%s' "$STUB_FILES_PAGES" > "$2"
+      fi
+      printf '%s' "$STUB_FILES"
+    }
     required_gates_for_candidate() {
       printf '%s' "$STUB_FILES" > "$T/candidate-files"
-      required_gates_for_files "$T/candidate-files"
+      if [ -n "$STUB_FILES_PAGES" ]; then
+        printf '%s' "$STUB_FILES_PAGES" > "$T/candidate-pages"
+        required_gates_for_files "$T/candidate-files" "$T/candidate-pages"
+      else
+        required_gates_for_files "$T/candidate-files"
+      fi
     }
     # Every stamp changes the PR body unless STUB_BODY_UNCHANGED is set (the records were already
     # current); only a changed body fires `edited`.
@@ -1693,6 +1713,27 @@ self_test() {
   for record in skill-audit=audit-a pr-hygiene=hygiene-c; do
     grep -Fq -- "--gate $record" "$LOG_STAMPS" || { echo "self-test: Renovate push record missing: $record" >&2; fail=1; }
   done
+
+  sc_browser_digest() {
+    STUB_FILES="tools/browser/Dockerfile"
+    STUB_FILES_PAGES='{"expected":1,"pages":[[{"filename":"tools/browser/Dockerfile","status":"modified","additions":1,"deletions":1,"changes":2,"patch":"@@ -1,4 +1,4 @@\n-FROM python:3.15-slim@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87e4b031bc36928\n+FROM python:3.15-slim@sha256:63bb298d2b7b88f176f51b5189f54ce6535c997682ea70885d2132f5d473a8a5\n \n RUN apt-get update \\\n     && apt-get install --no-install-recommends -y chromium fonts-liberation \\"}]]}'
+    STUB_BUILD=SKIPPED
+  }
+  run_case sc_browser_digest 0
+  expect_lines browser_digest "$LOG_STAMPS" 0; expect_out browser_digest "READY FOR MERGE"
+
+  sc_browser_without_proof() { STUB_FILES="tools/browser/Dockerfile"; STUB_FILES_PAGES=""; }
+  run_case sc_browser_without_proof 3
+  expect_out browser_without_proof "no attestation for: local-checks skill-audit project-review pr-hygiene"
+  expect_lines browser_without_proof "$LOG_STAMPS" 0
+
+  sc_browser_run_edit() {
+    STUB_FILES="tools/browser/Dockerfile"
+    STUB_FILES_PAGES='{"expected":1,"pages":[[{"filename":"tools/browser/Dockerfile","status":"modified","additions":1,"deletions":1,"changes":2,"patch":"@@ -3,3 +3,3 @@\n-RUN apt-get update \\\n+RUN apt-get update --fix-missing \\\n     && apt-get install --no-install-recommends -y chromium fonts-liberation \\"}]]}'
+  }
+  run_case sc_browser_run_edit 3
+  expect_out browser_run_edit "no attestation for: local-checks skill-audit project-review pr-hygiene"
+  expect_lines browser_run_edit "$LOG_STAMPS" 0
 
   rm -rf "$T"
   trap - EXIT
