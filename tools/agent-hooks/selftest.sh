@@ -622,6 +622,14 @@ printf '%s\n' tools/browser/Dockerfile main/main.cpp >"$tmp/browser-mixed-main.f
 expect_rc 2 'mixed browser Dockerfile and main.cpp fails closed' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/no-gates.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/browser-mixed-main.files" AGENT_CHANGED_FILES_PAGES_FILE="$tmp/browser-valid.pages.json" "$gate" --check --project-dir "$root"
 ln -s "$tmp/browser-valid.pages.json" "$tmp/browser-symlink.pages.json"
 expect_rc 2 'symlinked changed-files-pages-file rejected' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/no-gates.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/browser.files" "$gate" --check --project-dir "$root" --changed-files-pages-file "$tmp/browser-symlink.pages.json"
+python3 -c 'import pathlib,sys; pathlib.Path(sys.argv[1]).write_bytes(b"{" + b" "*1048577 + b"}")' "$tmp/browser-oversized.pages.json"
+if ! gate_is_renovate_maintenance_pr "" </dev/null >/dev/null 2>&1 \
+   && ! gate_is_browser_dockerfile_digest_pages "$tmp/browser-symlink.pages.json" >/dev/null 2>&1 \
+   && ! gate_is_browser_dockerfile_digest_pages "$tmp/browser-oversized.pages.json" >/dev/null 2>&1; then
+  pass_case 'gate_is_renovate_maintenance_pr rejects empty arg, symlinks, and oversized pages JSON'
+else
+  fail_case 'gate_is_renovate_maintenance_pr edge-case rejection'
+fi
 # The exemption depends only on the complete diff, never on bot identity or a branch/title.
 printf '%s\n' "$local_checks_record" >"$tmp/local-checks.md"
 for other_path in esp-idf-toolchain.txt main/idf_component.yml dependencies.lock.esp32 docs/index.html main/main.cpp .github/workflows/build.yml docs/DEVELOPMENT.md; do

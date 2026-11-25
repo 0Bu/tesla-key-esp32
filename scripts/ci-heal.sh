@@ -469,7 +469,7 @@ required_gates_for_candidate() (
   if [ "$(wc -l < "$files_file" | tr -d ' ')" -eq 1 ] && [ "$(cat "$files_file")" = "tools/browser/Dockerfile" ]; then
     name_status="$(git -c core.fsmonitor=false -c core.quotePath=false diff --no-renames --name-status "$base" "$candidate")" || return 1
     if [ "$name_status" = $'M\ttools/browser/Dockerfile' ] && \
-       git -c core.fsmonitor=false -c core.quotePath=false diff --no-renames --no-ext-diff -U0 "$base" "$candidate" -- tools/browser/Dockerfile | gate_is_browser_dockerfile_git_diff; then
+       git -c core.fsmonitor=false -c core.quotePath=false diff --no-renames --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/ -U0 "$base" "$candidate" -- tools/browser/Dockerfile | gate_is_browser_dockerfile_git_diff; then
       return 0
     fi
   fi

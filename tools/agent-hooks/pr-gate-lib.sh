@@ -96,7 +96,7 @@ gate_is_renovate_maintenance() {
 _gate_browser_dockerfile_check() {
   local mode="$1" target="${2:-}"
   python3 -c '
-import json, pathlib, re, sys
+import json, os, re, stat, sys
 
 mode = sys.argv[1]
 target = sys.argv[2]
@@ -147,7 +147,24 @@ if mode == "git-diff":
 
 if mode == "pages":
     try:
-        envelope = json.loads(pathlib.Path(target).read_text(encoding="utf-8"))
+        fd = os.open(target, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise SystemExit(1)
+            chunks = []
+            total = 0
+            while True:
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > 1048576:
+                    raise SystemExit(1)
+                chunks.append(chunk)
+            raw = b"".join(chunks).decode("utf-8")
+        finally:
+            os.close(fd)
+        envelope = json.loads(raw)
     except Exception:
         raise SystemExit(1)
     if not isinstance(envelope, dict):
@@ -212,10 +229,10 @@ gate_is_browser_dockerfile_digest_pages() {
 #   update to tools/browser/Dockerfile. Mixed diffs or missing diff proof fail closed (rc=1).
 gate_is_renovate_maintenance_pr() {
   local files_file="${1:-}" pages_file="${2:-}" count=0 line only_path=""
+  [ -n "$files_file" ] && [ -f "$files_file" ] && [ -r "$files_file" ] && [ ! -L "$files_file" ] || return 1
   if gate_is_renovate_maintenance "$files_file"; then
     return 0
   fi
-  [ -n "$files_file" ] && [ -f "$files_file" ] && [ -r "$files_file" ] && [ ! -L "$files_file" ] || return 1
   [ -n "$pages_file" ] || return 1
   while IFS= read -r line || [ -n "$line" ]; do
     [ -n "$line" ] || continue
