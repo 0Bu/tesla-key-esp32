@@ -17,7 +17,10 @@ The key grants vehicle reads, wake and charging. Protect it as a vehicle credent
 
 First-boot generation enables hardware entropy before WiFi/BLE. IDF6 PSA uses the hardware RNG.
 Keys from before the entropy fix need deliberate re-key/re-pair. Remote faults cannot authorize
-identity rotation or session erase. See [pairing lifecycle](ARCHITECTURE.md#pairing-lifecycle--invalidation)
+identity rotation or session erase. Private-key buffers read into RAM during controller startup or
+fingerprint calculation are wiped via RAII across normal return and exception unwind, and HTTP
+identity mutations seal their `OtaIdentityMutationGuard` on committed/ambiguous recovery unwind so
+the operation gate stays held until reboot. See [pairing lifecycle](ARCHITECTURE.md#pairing-lifecycle--invalidation)
 and the [lifetime of an established peer binding](adr/0005-tesla-ble-seam.md#established-session-continuity-2026-10-23).
 
 ## Unencrypted-flash reality (factory devices)
@@ -52,12 +55,15 @@ Identity changes and NVS writes require their own authorized scope.
 
 ## MQTT transport
 
-Schemeless broker entries select TLS when a username or URI userinfo exists; credential-free
-entries select plaintext. Explicit `mqtt://` and `mqtts://` schemes are honored, so an explicit
-plaintext URI can send credentials without encryption. TLS verifies bundled CA roots and has no
-plaintext fallback. Status exposes the selected transport and connection error without broker
-credentials. Configuration belongs to the [user guide](USER_GUIDE.md#home-assistant-mqtt);
-the [runtime owner](ARCHITECTURE.md#home-assistant-mqtt-bridge) defines admission and retries.
+Broker URIs accept optional case-insensitive `mqtt://` and `mqtts://` schemes and reject all other
+schemes. Schemeless broker entries select TLS (`mqtts://`) when a username or password or URI
+userinfo exists; credential-free entries select plaintext (`mqtt://`). Explicit `mqtt://` and
+`mqtts://` schemes are normalized to lowercase scheme prefixes while keeping authority/userinfo case
+and honoring the explicit transport direction, so an explicit `mqtt://` URI can send credentials
+without encryption. TLS verifies bundled CA roots and has no plaintext fallback. Status exposes the
+selected transport and connection error without broker credentials. Configuration belongs to the
+[user guide](USER_GUIDE.md#home-assistant-mqtt); the
+[runtime owner](ARCHITECTURE.md#home-assistant-mqtt-bridge) defines admission and retries.
 
 ## HTTP API exposure
 

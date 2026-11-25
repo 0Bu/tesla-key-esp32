@@ -43,7 +43,8 @@ VCSEC status sampling does not apply Infotainment wake-policy decisions; `NoWake
 suppress that VCSEC request. Each health probe shares one eight-second connect/response budget.
 Command/query ownership, including the VCSEC health probe, pauses windowed telemetry.
 The idle-window falling edge takes the same command owner without waiting, resamples command
-recency and defers disconnect while a command/probe owns it. Tick stamps are loaded before time
+recency, defers disconnect while a command/probe owns it, and when idle either drops a connected
+link or cancels an in-flight warm-up connect attempt (`stop_connecting()`). Tick stamps are loaded before time
 samples, preserving unsigned counter wrap without treating a newly started command as old.
 Each entry point explicitly chooses foreground/background `ConnectOrigin`.
 
@@ -147,14 +148,18 @@ DNS, TLS read/write/destroy and synchronous flash/verify/boot-selector calls are
 here: this is a network/effect-admission deadline, not a proved hard wall-time limit for an
 already-entered SDK operation.
 
-On timeout the coordinator retires the generation, aborts its own raw handle and releases the
-operation lease only after writer quiescence. Busy then becomes false, but a stalled network
-context remains occupied and charged. Every successor refuses until the old worker's real cleanup
-Ack and the coordinator's final access permit reclamation. There is no replacement worker,
-foreign TLS close, forced task deletion or reuse of the old Job. Ack is the worker's final Job
-access; only global own-stack sampling and self-delete follow. Ack does not prove RTOS stack/TCB
-reclamation. Uncertain writer cleanup or committed/uncertain boot selection retains the lease
-and parks after a returning restart instead of granting another effect.
+On clean completion or failure, `complete_operation()` waits boundedly (up to 200 ms) for the
+worker's cleanup `Acked` while still holding `OtaIdentityGateState::Ota` and reclaims the
+finished `OtaOperation` before releasing the gate, so idle heap and probation confirmation
+do not carry a retained `OtaOperation`. On timeout or a stalled worker, the coordinator retires
+the generation, aborts its own raw handle and releases the operation lease only after writer
+quiescence. Busy then becomes false, but a stalled network context remains occupied and
+charged in `s_operation` quarantine until the old worker's real cleanup Ack and a later
+admission permit reclamation. There is no replacement worker, foreign TLS close, forced task
+deletion or reuse of the old Job. Ack is the worker's final Job access; only global own-stack
+sampling and self-delete follow. Ack does not prove RTOS stack/TCB reclamation. Uncertain
+writer cleanup or committed/uncertain boot selection retains the lease and parks after a
+returning restart instead of granting another effect.
 
 Job retirement and connection-close flags remain full-word acquire/release read-modify-writes.
 Lock-free targets use `fetch_or`; non-lock-free targets reuse the existing strong CAS primitive,
@@ -163,10 +168,17 @@ its observed word, preserving phase and other flags. Already-set bits still perf
 
 ### Memory admission and target observations
 
-OTA entry and health confirmation use the same **59392 B INTERNAL largest-free-block** threshold
-from `logic/ota_recovery_memory.hpp`. Entry can reclaim a clean prior Operation before sampling
-and before new allocations. Read-only confirmation leaves retained Operation/task memory charged.
-Each checks a fresh real sample under its owner. Never credit old bytes or an estimated heap delta.
+OTA entry and health confirmation use the same **55296 B INTERNAL largest-free-block** threshold
+from `logic/ota_recovery_memory.hpp` (calibrated from the prior `59392 B` baseline after cutting
+pre-TLS contiguous manifest demand by `5344 B`: `4096 B` initial manifest buffer reserve and
+`1536 B` optional changelog reserve instead of `8192 B` in `http_get_to_buffer()`, with zero
+mid-TLS reallocation for real ~3 KiB 4-target manifests and bounded growth up to `8192 B`,
+in-place redirect resolution eliminating `Coordinator::redirect_[1024]`, shrinking `prefix_` from
+`512 B` to `288 B`, pre-initializing `s_lock` at boot, and setting `Connection: close` on
+`/ota/check` and `/ota/update` responses). Prompt completion reclamation also clears `s_operation`
+immediately when the worker acks cleanly; only a quarantined stalled/cleanup-failed Operation
+remains charged until a later admission reclaims it. Each entry/confirmation check samples a fresh
+real largest block under its owner. Never credit old bytes or an estimated heap delta.
 
 Historical observations explain the targets' RAM defaults. They do not establish current fleet
 margins, MQTTS margins or image acceptance.
@@ -216,8 +228,9 @@ Fixed `ota_mem` INFO records identify start time/generation, resource (`manifest
 largest block used by each guard, with a separate free-heap sample, from pre-allocation through
 TLS guards, connect, headers, destroy and reclaim eligibility. `headers_observed` can include
 the first body chunk. Destroy precedes final worker acknowledgement. `reclaim_ready` precedes
-Operation deletion, so it does not prove idle heap or task reclamation. Dropped lines make the
-series incomplete. These checkpoints do not measure transient allocation peaks.
+Operation deletion (promptly at clean completion or on the next admission after quarantine), so
+it does not prove RTOS task reclamation. Dropped lines make the series incomplete. These
+checkpoints do not measure transient allocation peaks.
 
 ### Transport, manifest and version validation
 
@@ -249,7 +262,7 @@ two interim responses and ten redirects. URLs/locations use 1024-byte storage, a
 remain bounded as below. Repeated redirects/retries never renew the original deadline. The image
 may use EOF framing only because complete image/signature verification remains mandatory.
 
-Manifest intake reserves one bounded body (8192 B). Non-chunked data needs positive bounded
+Manifest intake bounds each metadata body to 8192 B (reserving 4096 B initially for manifests and 1536 B for optional changelogs). Non-chunked data needs positive bounded
 Content-Length and exact completion; chunked data needs non-empty bounded complete transport.
 Negative/early-zero reads and truncation fail. Before cJSON, the allocation-free gate requires valid
 UTF-8/escapes, ≤16 levels, no U+0000 and one fully consumed document. The root has unique keys and
@@ -412,7 +425,13 @@ owns export modes and response classes; no crash data belongs in public evidence
 
 The log hook mirrors console lines into the RAM ring and a fixed 24-item forwarding queue.
 Each `SyslogMsg` has 256 payload bytes plus a two-byte length (258 bytes per item); FreeRTOS
-queue-control storage is additional.
+queue-control storage is additional. `diag_vprintf_` formats directly into a single `SyslogMsg`
+stack buffer and passes it by reference to `syslog_send_msg()` without duplicating the 256-byte
+frame on the caller stack. Before locking the ring mutex or queueing to Syslog, `diag_vprintf_`
+checks the same task/context predicate (`diag_capture_context_safe_()`, also reused by stack HWM
+sampling) and counts unsafe-context skips under `dropped_lines` instead of invoking FreeRTOS
+mutex/queue primitives from an ISR, critical section or suspended/unstarted scheduler; known
+MQTT credential error redaction on the Serial sink still runs unconditionally.
 RFC5424 facility user severity follows E/W/I/D/V (3/4/6/7), skipping ANSI prefixes; unrecognized
 lines remain info. Firmware boot replay explicitly marks BOOT as INFO and CRASH as ERROR;
 message text alone cannot acquire either replay type. Replay snapshots the live crash report, so
@@ -429,7 +448,10 @@ consumer snapshots its handle once. Export limits live in
 [API](API.md#diagnostic-export-and-heap-trend). Configuration changes persist then reboot.
 
 DNS resolve/reprobe is throttled to about 10 s. Delivery requires resolution, not the advisory
-ARP/ICMP result. Hard route/link errors re-resolve; transient resource errors keep ordinary cadence.
+ARP/ICMP result. For local-subnet collectors, `syslog_ping_host()` checks subnet membership via
+`tk::net_active_netif()` / `esp_netif_get_ip_info()` and executes the `etharp_find_addr()` lookup
+inside lwIP's owning `tcpip_thread` via `esp_netif_tcpip_exec()`. Hard route/link errors
+re-resolve; transient resource errors keep ordinary cadence.
 Log only failure/recovery transitions; reject the forwarder's own `syslog:` lines to prevent loops.
 `syslog_start_gate.hpp` publishes the process-lifetime queue only after task creation succeeds;
 a scheduled consumer waits until commit, and cancelled unpublished resources unwind safely.
@@ -586,7 +608,8 @@ VCSEC query: it may connect, establish a session and send plaintext `GET_STATUS`
 a wake. `/status` can save an unknown guarded `paired_at` once and query local HCI RSSI. These are
 exceptions to cache-only wording, not evidence of fresh authenticated vehicle acceptance.
 
-Failure classification uses adverts observed in the current attempt: no target advert means out of
+Failure classification uses the freshest valid matching target slot (`connectable_us`, tie-broken by
+`last_us`) observed in the current attempt: no valid advert (including zero timestamps) means out of
 range, non-connectable means BLE limit, connectable-but-failed means connection failure. Separate
 90 s history drives the UI. Background logs report first cause, changes and hourly repeats;
 foreground failures always report. Named SCAN_RSP cannot freshen a stale primary connectability bit.
@@ -716,15 +739,21 @@ before release, so a later browser writer cannot overwrite that commit. Only IMM
 The 100 ms admission wait is not an operation deadline: libc timekeeping locks can wait indefinitely.
 Early `gettimeofday` initializes libc's private locks before producers; that SDK bootstrap can
 allocate and abort on OOM. No storage, logging or network operation runs under the application clock
-gate. The hook catches exceptions before returning to C; failed sync cannot clear prior authority.
+gate. After releasing the gate on lwIP `tiT`, `sntp_sync_time` updates SNTP status, publishes the
+synced second count atomically with release ordering, and emits its sync/error status log
+(`ESP_LOGI`/`ESP_LOGE`); checkpoint NVS I/O, time formatting and checkpoint warning logs never run
+on `tiT` and are drained by `heap_supervisor` via `clock_service_ntp_checkpoint()` (with bounded
+`try/catch` containment). The hook catches exceptions before returning to C; failed sync cannot
+clear prior authority.
 
 Checkpoint restore validates the full decimal value/window and applies it only while the warm clock
 is below the clock floor, checking the syscall result. Successful NTP samples offer a checkpoint on
 first sync and after six hours since the last confirmed save, with at least five minutes between
-attempts. Existing SNTP callbacks supply opportunities; there is no added task/timer or tight retry.
-The attempt is recorded before fallible work and save success only after storage confirms it.
-Checkpoint NVS/string/log work follows clock-gate release. This policy does not fix the inherited
-session-age epoch mismatch or prove RTC behavior on hardware.
+attempts. Existing SNTP callbacks publish checkpoint opportunities to `heap_supervisor`; there is
+no added task/timer or tight retry. The attempt is recorded before fallible work and save success
+only after storage confirms it. Checkpoint NVS/string/log work follows clock-gate release on
+`heap_supervisor`. This policy does not fix the inherited session-age epoch mismatch or prove RTC
+behavior on hardware.
 
 ## Pairing lifecycle / invalidation
 
@@ -735,7 +764,11 @@ See [User guide](USER_GUIDE.md#pairing-and-identity).
 
 `paired` means a VCSEC session is stored, not that the car has freshly accepted it. Remote status
 faults and command error text set a volatile `reauth` hint; they never erase sessions or rotate
-the key. A successful health response clears only the hint, without proving authenticated acceptance.
+the key. When that hint is active, `poll_existing_key_()` invalidates only the in-memory VCSEC peer
+and runner session before probing (`invalidate_vcsec_ram_session_()`), failing closed on lock timeout
+while preserving NVS storage and Infotainment state so a usable RAM session still renegotiates
+`SessionInfo` with the vehicle. A successful health response clears only the hint, without proving
+authenticated acceptance.
 After a status probe, positively established session absence or a persistent recovery hint permits
 same-key enrollment. Both durable and usable RAM sessions suppress enrollment without a recovery
 hint, so failed session persistence alone cannot resubmit the key. Storage or runtime-snapshot
@@ -840,7 +873,8 @@ progress cannot reset it. A 5 s socket timeout can extend wall duration to about
 scheduling; two consecutive recoverable timeouts remain an additional bound. Late/incomplete bodies
 never parse or persist. Both adapters shut down read-side on failure while retaining reply writes.
 The wildcard handler advertises Connection: close and retires every body-bearing connection even
-on early route/Origin/admission rejection or exceptions. Bodyless requests keep existing behavior;
+on early route/Origin/admission rejection or exceptions. Bodyless requests keep existing behavior
+(except dispatched `/ota/check` and `/ota/update` responses, which also emit `Connection: close` when `req->content_len == 0`);
 captive preflight failures return ESP_FAIL to reject unread input.
 
 `read_body_result()` distinguishes empty, oversize, OOM and receive failure (normal cap 2 KiB).
@@ -877,7 +911,9 @@ on post-effect construction failure. The terminal latch precedes header setup, a
 header/chunk failure stops the attempt. The outer catch cannot start another reply after that latch.
 Continuation consumption precedes the once-only restart attempt, including on response failure.
 Configuration-restart continuations retain their already-held ConfigRestart owner; identity-recovery
-continuations follow their separate transaction rules. There is no effect retry, no borrowed handler-local data and no global outcome snapshot.
+continuations seal their `OtaIdentityMutationGuard` (`IdentityMutation` owner) across handler exit
+or OOM unwind so the operation gate remains held until the mandatory identity-recovery reboot. There
+is no effect retry, no borrowed handler-local data and no global outcome snapshot.
 Networking allocations, actual receipt and composed runtime stack headroom still require device
 validation; [API](API.md#response-classes) owns the wire outcome semantics.
 Pinned-cJSON allocation matrices verify these production seams, not the device scheduler/allocator.
@@ -911,7 +947,7 @@ New code must fit this contract or revise it with implementation and evidence in
 | `cache_mutex_` | mutex, RAII, leaf | the `last_known_*` caches (`std::string` members ⇒ an unlocked copy is torn-read UB) |
 | `result_mutex_` | mutex, RAII, leaf | the externally visible `last_error_` snapshot HTTP/MCP read after a foreground command |
 | `CommandCompletion::sem` | per-request binary semaphore, shared ownership | fixed callback result/error record and generation-checked completion, signalled even after its catch-all |
-| `StatusCompletion::sem` | per-request binary semaphore, shared ownership | fixed status-success fields; the C++ runner failure callback may allocate its request-owned `std::string error` before signalling |
+| `StatusCompletion::sem` | per-request binary semaphore, shared ownership | fixed status-success fields and a fixed 96-byte error buffer (`kErrorCapacity`) written atomically with generation checks and catch-all semantics |
 | `ble_events_.mux` | dedicated `portMUX`, bounded POD and lock-free timer read | every ready/queue push, pop and clear; same-generation/window RX bytes pack into 16 static 244-byte cells; arrival and empty-queue timestamps are linearized here; ordered link barriers; unlock before generation/Client/runner/storage/link work |
 | `telemetry_pending_mux_` | `portMUX`, innermost, POD only | the fixed latest-value nanopb mailboxes, pending mask and charging-amps feedback generation written synchronously by tesla-ble callbacks |
 
@@ -950,9 +986,9 @@ parsing or callbacks. Use `tk::SemGuard`/`MutexGuard` and `InFlightGuard` for un
 - Cache snapshots are copied without calls out; parse/publish after releasing Vehicle lock.
 - `clear_session_and_cache_()` acquires Vehicle internally; do not call it while holding that lock.
 - Request-local shared completion survives timeout; generation invalidation prevents late completion
-  of another request. `CommandCompletion` callbacks write fixed fields and signal even after their
-  catch-all, without logging. `StatusCompletion` has a separate allocatable runner-error path; its
-  success callback copies fixed fields. Runner callbacks execute synchronously under Vehicle
+  of another request. Both `CommandCompletion` and `StatusCompletion` callbacks write fixed fields
+  (including `StatusCompletion`'s bounded error buffer) and signal even after their catch-all,
+  without logging or allocating. Runner callbacks execute synchronously under Vehicle
   ownership: normally on the Vehicle task, or in the controller caller during cancellation/clear.
   They borrow the runner's error only until return and copy bounded visible bytes before signalling,
   without an intermediate heap-owned error or nested completion adapter.
@@ -994,9 +1030,10 @@ telemetry round keeps its snapshot and builders in a separate non-inlined frame;
 its scheduling/attempt timestamp and exception boundary. Compiler frames do not bound composed
 runtime call depth.
 
-The MQTT publisher explicitly confirms current-task TWDT removal or absence before self-deletion;
-unconfirmed cleanup parks that same task, emits one contained diagnostic and attempts feeding,
-without replaying discovery/state. Self-delete does not imply C++ scope unwinding. The network
+Both the MQTT publisher and `vehicle_loop` use shared `tk::TaskWatchdogSubscription` to confirm
+current-task TWDT removal or absence before self-deletion; unconfirmed cleanup parks that same task
+without replaying discovery/state or polling iterations, emits one contained diagnostic, feeds and
+(for `vehicle_loop`) samples its stack lane. Self-delete does not imply C++ scope unwinding. The network
 watchdog contains per-iteration failures, discards its local failure/gateway proof, and requires a
 new matching reply before another recovery. It preserves the persistent asynchronous ping owner,
 semaphore and generation while a late completion is outstanding. Unknown SDK cleanup remains
@@ -1054,7 +1091,7 @@ review generated `sdkconfig` when changing the SDK or target configuration.
 | default event loop | `CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=2304` | WiFi/IP/Ethernet lifecycle callbacks |
 | ESP-MQTT client tasks | locked component `MQTT_TASK_STACK`, default 6144; project does not override | publisher events and the transient configuration broker-probe callback in `http_config.cpp` |
 | ping session task | project leaves `ESP_PING_DEFAULT_CONFIG()` task settings unchanged | network-watchdog and Syslog ping completion callbacks |
-| lwIP task | `CONFIG_LWIP_TCPIP_TASK_STACK_SIZE=3072` | SNTP time-sync callback, including time formatting and the guarded timestamp save |
+| lwIP task | `CONFIG_LWIP_TCPIP_TASK_STACK_SIZE=3072` | `sntp_sync_time` clock update, atomic checkpoint publication and sync/error status log (no checkpoint NVS or time formatting), plus `syslog_arp_lookup_cb` via `esp_netif_tcpip_exec` |
 
 The SDK also owns the FreeRTOS timer-service (`CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH=2048`)
 and driver tasks. A configured stack allocation

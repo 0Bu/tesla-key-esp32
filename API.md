@@ -41,7 +41,9 @@ dispatch; the same rule applies to vehicle-data routes.
 - **No-ops.** Exact `already_set` is success. An authenticated current Infotainment rejection
   with `is_charging` or `complete` satisfies `charge_start`. `not_charging` satisfies `charge_stop`.
   Inverse pairs, `requested` and uncertain results remain failures. A complete successful no-op
-  for start/stop carries `response.noop` and a reason. It asserts neither a physical transition
+  carries `response.noop` (`already_set` on any command; `complete`, `is_charging` or
+  `not_charging` on the matching `charge_start`/`charge_stop` pair) and a reason. It asserts
+  neither a physical transition
   nor new telemetry. [Status and degraded replies](#response-classes)
 - **Uncertain execution.** Possible payload submission without confirmation reports
   `command outcome unknown; command may have executed`. Check state before another command.
@@ -187,7 +189,7 @@ request to a known device address can still trigger this foreground read. See [s
 | `GET /heap` | `{dt, b0, b_boot, unit:"KiB", scale:10, free[], largest[]}` — 24 h memory trend; interpretation below. |
 | `POST /gen_keys[?force=1]` | Generate the ECDSA P-256 key (refuses overwrite without `force`, `409`). Identity mutation is Stable-only: `PendingVerify`, unknown OTA state or an active OTA/update returns `503` before anything changes. |
 | `POST /set_vin` | `{"vin":"<17-character VIN>"}`; trims and uppercases the value. An unchanged VIN skips persistence and reboot. A changed VIN rotates identity and reboots; pending identity recovery returns `409`, with the same Stable-only `503` rule as `/gen_keys`. |
-| `POST /set_mqtt` | `{"broker":"host:port"}` or a full `mqtt://`/`mqtts://` URI; `""` disables. Transport selection follows the rules below. Changed brokers are tested before persistence; failure saves nothing. |
+| `POST /set_mqtt` | `{"broker":"host:port"}` or a full case-insensitive `mqtt://`/`mqtts://` URI; `""` disables. Transport selection follows the rules below. Changed brokers are tested before persistence; failure saves nothing. |
 | `POST /set_syslog` | `{"server":"host:port"}` (a bare host defaults to 514; `""` disables) and reboot. |
 | `POST /set_wifi` | `{"ssid":"…","pass":"…"}` with one-shot credential rollback. Both unchanged and saved credentials return the same acceptance text; only a changed pair is written and requests a reboot. curl/`provision.py` only; validation and rollback below. |
 | `POST /set_time` | `{"ms":<epoch milliseconds>}` — temporary browser estimate, neither persisted nor authority for new durable dates. After valid body/schema intake, synchronized NTP makes this a successful no-op. |
@@ -415,9 +417,11 @@ cannot be read; they preserve the unreadable state instead of saving defaults ov
 `/set_mqtt` connects to a changed non-empty broker before saving: refusal/credentials return `400`,
 unreachable/no answer or TLS/certificate verification failure `502`, insufficient contiguous memory `503`. Failure neither persists nor
 reboots; an empty broker disables MQTT. A failed durable configuration save returns `500`.
-Without an explicit scheme, a configured username or URI userinfo selects `mqtts://`; an
-unauthenticated broker selects `mqtt://`. Explicit schemes are honored. TLS verifies bundled CA
-roots and never falls back to plaintext; inspect `/status.mqtt.tls` and `error` for diagnosis.
+Without an explicit scheme, a configured username, password, or URI userinfo selects `mqtts://`;
+an unauthenticated broker selects `mqtt://`. Only case-insensitive `mqtt://` and `mqtts://`
+schemes are accepted and normalized to lowercase scheme prefixes while keeping authority/userinfo
+case intact; other schemes are rejected. TLS verifies bundled CA roots and never falls back to
+plaintext; inspect `/status.mqtt.tls` and `error` for diagnosis.
 
 `/set_wifi` accepts an empty password for an open network, 8–63 UTF-8 bytes for WPA2, or exactly
 64 ASCII hex characters for a raw PSK. The atomic config keeps the previous credentials for one
