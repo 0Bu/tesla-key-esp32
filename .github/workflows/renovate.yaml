@@ -19,13 +19,13 @@ jobs:
           token: ${{ secrets.RENOVATE_TOKEN }}
         env:
           RENOVATE_PLATFORM: github
-          RENOVATE_PLATFORM_COMMIT: true
+          RENOVATE_PLATFORM_COMMIT: enabled
           RENOVATE_GIT_AUTHOR: 'Oleg Burau <4757856+0Bu@users.noreply.github.com>'
           RENOVATE_EXTENDS: config:best-practices,helpers:pinGitHubActionDigests
           RENOVATE_AUTODISCOVER: true
           RENOVATE_AUTODISCOVER_FILTER: ${{ github.repository }}
           RENOVATE_CONFIG_MIGRATION: true
-          # A maintainer runs the local pre-push verification before submitting its record.
+          # Default-deny automerge; only explicit maintenance rules in .github/renovate.json opt in.
           RENOVATE_AUTOMERGE: false
           RENOVATE_IGNORE_TESTS: false
           # 'auto' lets Renovate refresh/rebase its PR branches so they pick up

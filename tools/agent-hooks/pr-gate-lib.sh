@@ -93,6 +93,157 @@ gate_is_renovate_maintenance() {
   return 0
 }
 
+_gate_browser_dockerfile_check() {
+  local mode="$1" target="${2:-}"
+  python3 -c '
+import json, os, re, stat, sys
+
+mode = sys.argv[1]
+target = sys.argv[2]
+
+def valid_patch(text):
+    if not isinstance(text, str) or not text or len(text) > 65536 or "\x00" in text or "\r" in text:
+        return False
+    lines = (text[:-1] if text.endswith("\n") else text).split("\n")
+    if len(lines) < 3:
+        return False
+    hunk = re.fullmatch(r"@@ -1(?:,([1-9][0-9]*))? \+1(?:,([1-9][0-9]*))? @@(?: .*)?", lines[0])
+    if not hunk:
+        return False
+    old_count = int(hunk.group(1) or 1)
+    new_count = int(hunk.group(2) or 1)
+    if old_count != new_count:
+        return False
+    old_from = re.fullmatch(r"-FROM (python:[0-9]+(?:\.[0-9]+)*-slim)@sha256:([0-9a-f]{64})", lines[1])
+    new_from = re.fullmatch(r"\+FROM (python:[0-9]+(?:\.[0-9]+)*-slim)@sha256:([0-9a-f]{64})", lines[2])
+    if not old_from or not new_from:
+        return False
+    if old_from.group(1) != new_from.group(1) or old_from.group(2) == new_from.group(2):
+        return False
+    ctx = lines[3:]
+    if 1 + len(ctx) != old_count:
+        return False
+    if any(not line.startswith(" ") for line in ctx):
+        return False
+    return True
+
+if mode == "patch":
+    raise SystemExit(0 if valid_patch(sys.stdin.read()) else 1)
+
+if mode == "git-diff":
+    text = sys.stdin.read()
+    if not text or len(text) > 65536 or "\x00" in text or "\r" in text:
+        raise SystemExit(1)
+    lines = (text[:-1] if text.endswith("\n") else text).split("\n")
+    if len(lines) < 7:
+        raise SystemExit(1)
+    if lines[0] != "diff --git a/tools/browser/Dockerfile b/tools/browser/Dockerfile":
+        raise SystemExit(1)
+    if not re.fullmatch(r"index [0-9a-f]{7,64}\.\.[0-9a-f]{7,64} 100644", lines[1]):
+        raise SystemExit(1)
+    if lines[2] != "--- a/tools/browser/Dockerfile" or lines[3] != "+++ b/tools/browser/Dockerfile":
+        raise SystemExit(1)
+    raise SystemExit(0 if valid_patch("\n".join(lines[4:])) else 1)
+
+if mode == "pages":
+    try:
+        fd = os.open(target, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise SystemExit(1)
+            chunks = []
+            total = 0
+            while True:
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > 1048576:
+                    raise SystemExit(1)
+                chunks.append(chunk)
+            raw = b"".join(chunks).decode("utf-8")
+        finally:
+            os.close(fd)
+        envelope = json.loads(raw)
+    except Exception:
+        raise SystemExit(1)
+    if not isinstance(envelope, dict):
+        raise SystemExit(1)
+    expected = envelope.get("expected")
+    pages = envelope.get("pages")
+    if not isinstance(expected, int) or isinstance(expected, bool) or expected != 1:
+        raise SystemExit(1)
+    if not isinstance(pages, list):
+        raise SystemExit(1)
+    if pages and all(isinstance(x, dict) for x in pages):
+        pages = [pages]
+    records = []
+    for page in pages:
+        if not isinstance(page, list) or len(page) > 100:
+            raise SystemExit(1)
+        records.extend(page)
+    if len(records) != 1 or not isinstance(records[0], dict):
+        raise SystemExit(1)
+    record = records[0]
+    if record.get("filename") != "tools/browser/Dockerfile":
+        raise SystemExit(1)
+    if record.get("previous_filename") is not None:
+        raise SystemExit(1)
+    if record.get("status") != "modified":
+        raise SystemExit(1)
+    for field, want in (("additions", 1), ("deletions", 1), ("changes", 2)):
+        val = record.get(field)
+        if not isinstance(val, int) or isinstance(val, bool) or val != want:
+            raise SystemExit(1)
+    raise SystemExit(0 if valid_patch(record.get("patch")) else 1)
+
+raise SystemExit(1)
+' "$mode" "$target"
+}
+
+# gate_is_browser_dockerfile_digest_patch
+#   Reads a unified diff hunk from stdin and succeeds (rc=0) only when it strictly changes
+#   the line-1 `FROM python:<tag>-slim@sha256:<64-hex>` digest without changing tag or other lines.
+gate_is_browser_dockerfile_digest_patch() {
+  _gate_browser_dockerfile_check patch
+}
+
+# gate_is_browser_dockerfile_git_diff
+#   Reads `git diff --no-renames --no-ext-diff -U0` output from stdin and succeeds (rc=0)
+#   only for a regular-file (100644) digest-only update to tools/browser/Dockerfile.
+gate_is_browser_dockerfile_git_diff() {
+  _gate_browser_dockerfile_check git-diff
+}
+
+# gate_is_browser_dockerfile_digest_pages <pages_file>
+#   Succeeds (rc=0) only when the paginated GitHub files envelope proves the PR touches
+#   exclusively tools/browser/Dockerfile as a modified file with a digest-only line-1 patch.
+gate_is_browser_dockerfile_digest_pages() {
+  local pages_file="${1:-}"
+  [ -n "$pages_file" ] && [ -f "$pages_file" ] && [ -r "$pages_file" ] && [ ! -L "$pages_file" ] || return 1
+  _gate_browser_dockerfile_check pages "$pages_file"
+}
+
+# gate_is_renovate_maintenance_pr <files_file> [pages_file]
+#   Succeeds (rc=0) for strict Renovate maintenance files or a diff-verified digest-only
+#   update to tools/browser/Dockerfile. Mixed diffs or missing diff proof fail closed (rc=1).
+gate_is_renovate_maintenance_pr() {
+  local files_file="${1:-}" pages_file="${2:-}" count=0 line only_path=""
+  [ -n "$files_file" ] && [ -f "$files_file" ] && [ -r "$files_file" ] && [ ! -L "$files_file" ] || return 1
+  if gate_is_renovate_maintenance "$files_file"; then
+    return 0
+  fi
+  [ -n "$pages_file" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -n "$line" ] || continue
+    count=$((count + 1))
+    only_path="$line"
+    [ "$count" -eq 1 ] || return 1
+  done < "$files_file"
+  [ "$count" -eq 1 ] && [ "$only_path" = "tools/browser/Dockerfile" ] || return 1
+  gate_is_browser_dockerfile_digest_pages "$pages_file"
+}
+
 # gate_vehicle_command_relevant
 #   Reads repo-relative changed paths on stdin and succeeds when vehicle command dispatch,
 #   BLE protocol client, command registry, pinned tesla-ble dependencies, or the BLE stack
@@ -1687,10 +1838,28 @@ sys.stdout.write("\n".join(paths))
 ' "$expected"
 }
 
+gate_write_changed_pages_envelope() {
+  local expected="$1" out_file="$2"
+  [ -n "$out_file" ] && [ ! -L "$out_file" ] || return 1
+  python3 -c '
+import json, pathlib, sys
+expected = int(sys.argv[1])
+if expected < 0 or expected > 3000:
+    raise SystemExit(1)
+pages = json.load(sys.stdin)
+if not isinstance(pages, list):
+    raise SystemExit(1)
+out = pathlib.Path(sys.argv[2])
+if out.is_symlink():
+    raise SystemExit(1)
+out.write_text(json.dumps({"expected": expected, "pages": pages}), encoding="utf-8")
+' "$expected" "$out_file"
+}
+
 # Print current and previous rename names. Count mismatch, malformed/truncated pages, and the
 # 3000-record API ceiling fail closed. Authentication reaches curl only through stdin.
 gate_pr_changed_files() {
-  local sel="$1" slug meta number expected pages tok page page_json page_count retrieved separator deadline
+  local sel="$1" pages_out="${2:-}" slug meta number expected pages tok page page_json page_count retrieved separator deadline
   slug="$(gate_repo_slug)" || return 2
   [ -n "$slug" ] || return 2
   if command -v gh >/dev/null 2>&1; then
@@ -1711,6 +1880,9 @@ print(n,c)
 EOF
     [ -n "$number" ] && [ -n "$expected" ] || return 2
     pages="$(agent_gate_run_bounded 60 env GH_HOST=github.com GH_REPO="github.com/$slug" gh api --hostname github.com --paginate --slurp "repos/$slug/pulls/$number/files?per_page=100" 2>/dev/null)" || return 2
+    if [ -n "$pages_out" ]; then
+      printf '%s' "$pages" | gate_write_changed_pages_envelope "$expected" "$pages_out" || return 2
+    fi
     printf '%s' "$pages" | gate_extract_changed_pages "$expected" || return 2
     return 0
   fi
@@ -1745,6 +1917,9 @@ print(len(v))
     page=$((page + 1)); [ "$page" -le 30 ] || return 2
   done
   pages="${pages}]"
+  if [ -n "$pages_out" ]; then
+    printf '%s' "$pages" | gate_write_changed_pages_envelope "$expected" "$pages_out" || return 2
+  fi
   printf '%s' "$pages" | gate_extract_changed_pages "$expected" || return 2
   return 0
 }

@@ -1,5 +1,7 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "platformAutomerge": true,
+  "automergeStrategy": "squash",
   "customManagers": [
     {
       "customType": "regex",
@@ -34,7 +36,7 @@
   ],
   "packageRules": [
     {
-      "description": "Tracked firmware and installer dependencies require manual review, relevant protocol/runtime tests and separately authorized physical acceptance. Among GitHub Actions, only renovatebot/github-action is managed. A maintainer verifies changes locally before merging.",
+      "description": "Tracked firmware and installer dependencies require manual review, relevant protocol/runtime tests and separately authorized physical acceptance. Among GitHub Actions, only renovatebot/github-action is managed; only explicit maintenance rules below opt into automerge.",
       "matchDepNames": [
         "yoziru/tesla-ble",
         "espressif/idf",
@@ -57,6 +59,22 @@
       "matchDepNames": [
         "!renovatebot/github-action"
       ]
+    },
+    {
+      "description": "Auto-merge non-major updates to the Renovate GitHub Action pin once the required pr-policy check passes; major updates remain manual.",
+      "matchManagers": ["github-actions"],
+      "matchFileNames": [".github/workflows/renovate.yaml"],
+      "matchDepNames": ["renovatebot/github-action"],
+      "matchUpdateTypes": ["digest", "patch", "minor"],
+      "automerge": true
+    },
+    {
+      "description": "Auto-merge digest-only refreshes of the pinned Python slim base image used by the local Linux browser test container once pr-policy verifies the digest-only diff; tag, minor and major upgrades remain manual.",
+      "matchManagers": ["dockerfile"],
+      "matchFileNames": ["tools/browser/Dockerfile"],
+      "matchDepNames": ["python"],
+      "matchUpdateTypes": ["digest"],
+      "automerge": true
     }
   ]
 }

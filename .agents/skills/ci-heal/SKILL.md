@@ -62,12 +62,12 @@ where the evidence names the local check or independent review completed for the
   attest the independently reviewed local fix commit before it has green remote CI.
 - **Relevance matches the merge hook.** The gates a PR needs come from the same GitHub-side
   changed-file list and the same shared predicates (`gate_feature_docs_relevant`,
-  `gate_vehicle_command_relevant`, `gate_is_renovate_maintenance`) as
-  `tools/agent-hooks/require-pr-gates.sh`. Strict Renovate-only maintenance needs no manual records
-  at merge/check, including local checks: readiness requires the existing policy check to pass,
-  without stamping or waiting for a body-triggered rerun. Human pushes still require attested
-  `$skill-audit` and `$pr-hygiene` records. If that list cannot be read, no merge-readiness record
-  is stamped.
+  `gate_vehicle_command_relevant`, `gate_is_renovate_maintenance_pr`) as
+  `tools/agent-hooks/require-pr-gates.sh`. Strict Renovate maintenance and diff-verified
+  digest-only `tools/browser/Dockerfile` updates need no manual records at merge/check, including
+  local checks: readiness requires the existing policy check to pass, without stamping or waiting
+  for a body-triggered rerun. Human pushes still require attested `$skill-audit` and
+  `$pr-hygiene` records. If that list cannot be read, no merge-readiness record is stamped.
 - **It fails closed on its own inputs.** A missing or incomplete `tools/agent-hooks/pr-gate-lib.sh`,
   an unknown gate name, a non-numeric PR number or a non-40-hex head is a hard stop. The merge
   runs as a direct `gh` invocation with validated arguments, never through `eval`.

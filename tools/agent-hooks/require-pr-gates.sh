@@ -7,7 +7,8 @@
 #                                                    plus the conditional $feature-docs and
 #                                                    $vehicle-command-audit records
 #   * --check (the CI current-head-records job)  -> local verification and all applicable reviews
-#   Strict Renovate maintenance is exempt from all manual records at merge/check only.
+#   Strict Renovate maintenance and diff-verified digest-only updates to tools/browser/Dockerfile
+#   are exempt from all manual records at merge/check only.
 # MCP merges, auto-merge/queue activation, direct REST/GraphQL merges, ambiguous payloads, and
 # unverifiable network state fail closed. This lexical hook is defense in depth; branch protection
 # and human review remain authoritative.
@@ -21,9 +22,11 @@ if ! . "$here/pr-gate-lib.sh" 2>/dev/null; then
   exit 2
 fi
 for fn in gate_bash_actions gate_pr_create_body gate_push_head_sha gate_push_is_branch_delete gate_fetch_pr \
-          gate_pr_changed_files gate_checkbox_status gate_sha_matches gate_full_head_sha \
+          gate_pr_changed_files gate_write_changed_pages_envelope gate_checkbox_status gate_sha_matches gate_full_head_sha \
           gate_branch gate_repo_slug gate_origin_is_github agent_gate_workdir_matches \
-          agent_gate_run_bounded gate_is_renovate_maintenance gate_feature_docs_relevant gate_vehicle_command_relevant; do
+          agent_gate_run_bounded gate_is_renovate_maintenance gate_is_browser_dockerfile_digest_patch \
+          gate_is_browser_dockerfile_git_diff gate_is_browser_dockerfile_digest_pages \
+          gate_is_renovate_maintenance_pr gate_feature_docs_relevant gate_vehicle_command_relevant; do
 
   if [ "${GATE_PR_LIB_API:-}" != 3 ] || ! declare -F "$fn" >/dev/null 2>&1; then
     echo "BLOCKED: runner-neutral PR gate library is incomplete ($fn)." >&2
@@ -34,6 +37,7 @@ done
 body_file="${AGENT_PR_BODY_FILE:-}"
 head_sha="${AGENT_PR_HEAD_SHA:-}"
 files_file="${AGENT_CHANGED_FILES_FILE:-}"
+pages_file="${AGENT_CHANGED_FILES_PAGES_FILE:-}"
 selector="${AGENT_PR_SELECTOR:-}"
 requested_root="${AGENT_PROJECT_DIR:-${PROJECT_DIR:-$canonical_root}}"
 payload_file=""
@@ -49,6 +53,7 @@ while [ "$#" -gt 0 ]; do
     --body-file) [ "$#" -ge 2 ] || exit 2; body_file="$2"; shift 2 ;;
     --head-sha) [ "$#" -ge 2 ] || exit 2; head_sha="$2"; shift 2 ;;
     --changed-files-file) [ "$#" -ge 2 ] || exit 2; files_file="$2"; shift 2 ;;
+    --changed-files-pages-file) [ "$#" -ge 2 ] || exit 2; pages_file="$2"; shift 2 ;;
     --pr) [ "$#" -ge 2 ] || exit 2; selector="$2"; force_check=1; shift 2 ;;
     --project-dir) [ "$#" -ge 2 ] || exit 2; requested_root="$2"; shift 2 ;;
     --payload-file) [ "$#" -ge 2 ] || exit 2; payload_file="$2"; shift 2 ;;
@@ -84,7 +89,7 @@ if [ -n "$payload_file" ]; then
     echo "BLOCKED: hook payload file is missing, unreadable, or a symlink." >&2; exit 2;
   }
   payload="$(cat "$payload_file")" || exit 2
-elif [ "$force_check" != 1 ] && [ -z "$body_file$head_sha$files_file" ]; then
+elif [ "$force_check" != 1 ] && [ -z "$body_file$head_sha$files_file$pages_file" ]; then
   payload_expected=1
   payload="$(cat 2>/dev/null)" || exit 2
 fi
@@ -237,7 +242,7 @@ if [ -n "$payload" ]; then
   fi
 fi
 
-if [ -n "$body_file$head_sha$files_file" ]; then
+if [ -n "$body_file$head_sha$files_file$pages_file" ]; then
   force_check=1
   [ -n "$body_file" ] && [ -f "$body_file" ] && [ -r "$body_file" ] && [ ! -L "$body_file" ] || {
     echo "BLOCKED: AGENT_PR_BODY_FILE is missing, unreadable, or a symlink." >&2; exit 2;
@@ -245,6 +250,11 @@ if [ -n "$body_file$head_sha$files_file" ]; then
   [ -n "$files_file" ] && [ -f "$files_file" ] && [ -r "$files_file" ] && [ ! -L "$files_file" ] || {
     echo "BLOCKED: AGENT_CHANGED_FILES_FILE is missing, unreadable, or a symlink." >&2; exit 2;
   }
+  if [ -n "$pages_file" ]; then
+    [ -f "$pages_file" ] && [ -r "$pages_file" ] && [ ! -L "$pages_file" ] || {
+      echo "BLOCKED: AGENT_CHANGED_FILES_PAGES_FILE is missing, unreadable, or a symlink." >&2; exit 2;
+    }
+  fi
   printf '%s' "$head_sha" | grep -Eq '^[0-9a-fA-F]{40}$' || {
     echo "BLOCKED: AGENT_PR_HEAD_SHA must be one full 40-hex SHA." >&2; exit 2;
   }
@@ -339,7 +349,8 @@ case "$kind" in
       [ "$rc" = 0 ] || { echo "BLOCKED: PR body/head discovery failed closed." >&2; exit 2; }
       head_sha="$(printf '%s' "$pr" | head -n 1)"
       body="$(printf '%s' "$pr" | tail -n +2)"
-      changed="$(gate_pr_changed_files "$selector")" || {
+      pages_file="$tmp/files-pages.json"
+      changed="$(gate_pr_changed_files "$selector" "$pages_file")" || {
         echo "BLOCKED: paginated changed-file discovery failed or was truncated." >&2; exit 2;
       }
       body_file="$tmp/body.md"; files_file="$tmp/files.txt"
@@ -374,7 +385,7 @@ PY
       exit 2
     fi
     body="$(cat "$body_file")" || exit 2
-    if ! gate_is_renovate_maintenance "$files_file"; then
+    if ! gate_is_renovate_maintenance_pr "$files_file" "$pages_file"; then
       record_ok "$body" local-checks "$head_sha" || {
         echo "BLOCKED: merge/check requires one current top-level \$local-checks record for $head_sha." >&2
         exit 2

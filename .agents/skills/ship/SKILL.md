@@ -44,7 +44,8 @@ gh pr view "$PR" --json number,state,mergeable,headRefOid,body
 - The user explicitly authorized merging this exact numeric PR/head and, if firmware-relevant,
   acknowledged the protected signing/release side effect of the main build.
 - **Merge gate:** [`tools/agent-hooks/require-pr-gates.sh`](../../../tools/agent-hooks/require-pr-gates.sh)
-  exempts strict Renovate-only maintenance from manual records at merge/check, as defined in
+  exempts strict Renovate maintenance and diff-verified digest-only `tools/browser/Dockerfile`
+  updates from manual records at merge/check, as defined in
   [AGENTS.md](../../../AGENTS.md#pr-and-review). Ordinary changes require the SHA-bound
   `$local-checks` record for the complete pre-push verification. They also require the PR body's
   `- [x] $project-review clean — merge gate @ <sha>` and
