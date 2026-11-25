@@ -117,11 +117,14 @@ The `Superseded Dev work` notice in a job log identifies the head change that st
 Check the newer run's `publish` and `deploy` results, then verify the served Dev manifest and
 artifact bytes against that run's source SHA.
 
-PRs changing only `.github/workflows/renovate.yaml` and/or `.github/renovate.json` need no manual
-check or review records at merge/check. This lets Renovate maintain its own action pin without a
-firmware handoff. The complete changed-file list determines the exception, including both sides
-of renames; any other path restores the normal gates. Human PR creation/push gates and explicit
-merge authorization still apply.
+PRs changing only `.github/workflows/renovate.yaml` and/or `.github/renovate.json`, as well as
+diff-verified `FROM python:<ver>-slim@sha256:<64-hex>` digest-only updates to
+`tools/browser/Dockerfile`, need no manual check or review records at merge/check. This lets
+Renovate maintain and auto-merge (`platformAutomerge`, `squash`) those allowlisted pins via
+[`.github/renovate.json`](../.github/renovate.json) without a firmware handoff, while tracked
+firmware/installer bumps stay manual. The complete changed-file list and unified diff determine
+the exception, including both sides of renames; any tag, instruction or multi-file change restores
+the normal gates. Human PR creation/push gates and explicit merge authorization still apply.
 
 For repeated local host runs:
 
