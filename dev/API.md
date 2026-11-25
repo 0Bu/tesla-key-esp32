@@ -41,7 +41,9 @@ dispatch; the same rule applies to vehicle-data routes.
 - **No-ops.** Exact `already_set` is success. An authenticated current Infotainment rejection
   with `is_charging` or `complete` satisfies `charge_start`. `not_charging` satisfies `charge_stop`.
   Inverse pairs, `requested` and uncertain results remain failures. A complete successful no-op
-  for start/stop carries `response.noop` and a reason. It asserts neither a physical transition
+  carries `response.noop` (`already_set` on any command; `complete`, `is_charging` or
+  `not_charging` on the matching `charge_start`/`charge_stop` pair) and a reason. It asserts
+  neither a physical transition
   nor new telemetry. [Status and degraded replies](#response-classes)
 - **Uncertain execution.** Possible payload submission without confirmation reports
   `command outcome unknown; command may have executed`. Check state before another command.
