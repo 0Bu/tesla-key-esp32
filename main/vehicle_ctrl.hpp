@@ -78,8 +78,8 @@ public:
     bool climate_stop(int timeout_ms = 20000);
     // Scheduled charging: enable/disable a daily start time. start_minutes is minutes
     // after local midnight (0–1439; e.g. 23:00 → 1380), ignored when enable is false.
-    // (Scheduled *departure* is not exposed: the tesla-ble version in use registers no
-    // builder for scheduledDepartureAction, so it cannot be sent.)
+    // (Scheduled *departure* is deliberately not exposed by the firmware command registry,
+    // even though pinned yoziru/tesla-ble v6.4.0 registers scheduledDepartureAction.)
     bool set_scheduled_charging(bool enable, int start_minutes, int timeout_ms = 20000);
 
     bool get_charge_state(ChargeStateResult& out, int timeout_ms = 20000);

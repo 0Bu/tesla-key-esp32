@@ -1,8 +1,8 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
-#include <functional>
 
 // In-memory diagnostic log. Installs an esp_log hook so everything the device
 // prints to the serial console is also captured into a fixed buffer, retrievable
@@ -38,9 +38,24 @@ enum class DiagDumpResult {
 // after its line marker was overwritten. Redacted exports must request AfterWrappedLineBoundary:
 // it suppresses bytes through the first retained '\n' before invoking the sink. Unwrapped rings
 // start at the capture epoch and retain their first line.
+using DiagDumpSinkFn = bool (*)(void* ctx, const char* data, size_t len);
+
 DiagDumpResult diag_log_dump_chunks(
-    const std::function<bool(const char*, size_t)>& sink,
+    DiagDumpSinkFn sink,
+    void* ctx,
     DiagDumpStart start = DiagDumpStart::IncludeSnapshotStart);
+
+template <typename Fn>
+inline DiagDumpResult diag_log_dump_chunks(
+    Fn&& sink,
+    DiagDumpStart start = DiagDumpStart::IncludeSnapshotStart) {
+    auto* fn = &sink;
+    return diag_log_dump_chunks(
+        [](void* ctx, const char* data, size_t len) -> bool {
+            return (*static_cast<decltype(fn)>(ctx))(data, len);
+        },
+        const_cast<void*>(static_cast<const void*>(fn)), start);
+}
 void        diag_log_clear();
 
 // Verbose mode gates extra-noisy diagnostics (e.g. the raw BLE RX hex dump) that

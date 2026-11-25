@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""UNTESTED DRAFT. Generate complete actual F137 task adapters, never run a compiler.
+"""Generate complete actual F137 task adapters for host compilation (test/test_f137_host.py), never run a compiler.
 
 Only whole uniquely delimited production regions are inserted. No task-loop rewrite,
 catch rewrite or decision replacement is allowed. Passive platform declarations live
@@ -40,7 +40,7 @@ def generate(source, output, kind):
     if template.count('// ACTUAL_COMPLETE_BODIES')!=1: raise ValueError('template marker')
     result=template.replace('// ACTUAL_COMPLETE_BODIES','\n\n'.join(bodies))
     with output.open('x') as stream: stream.write(result)
-    metadata={'scope':'UNTESTED_GENERATION_ONLY_ACTUAL_COMPLETE_BODIES',
+    metadata={'scope':'GENERATION_ONLY_ACTUAL_COMPLETE_BODIES',
               'sourceFile':str(source/'main'/filename),'sourceSha256':hashlib.sha256(text.encode()).hexdigest(),
               'kind':kind,'wholeRegions':[{'sha256':hashlib.sha256(b.encode()).hexdigest(),'bytes':len(b.encode())}for b in bodies],
               'generatedSha256':hashlib.sha256(result.encode()).hexdigest(),

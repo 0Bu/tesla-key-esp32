@@ -74,7 +74,13 @@ struct CompiledCoredumpAbi {
 // EXTRA contains the crashed TCB first and ISR flag last; no private SDK unwinder is called.
 static constexpr uint32_t kVersion = (uint32_t{CONFIG_IDF_FIRMWARE_CHIP_ID} << 16) | 0x0104;
 enum Admission : uint32_t { NoArtifact, Quarantined, Foreign, Current };
-static constexpr uint32_t kStateMask = 7, kGeneration = 8;
+static constexpr uint32_t kStateMask = 3;
+static constexpr uint32_t kQueryErrorBit = 4;
+static constexpr uint32_t kPayloadMask = kStateMask | kQueryErrorBit;
+static constexpr uint32_t kGeneration = 8;
+enum class QueryErrorMode : uint8_t { Preserve, Set, Clear };
+static_assert(Current <= kStateMask && (kStateMask & kQueryErrorBit) == 0 &&
+              (kPayloadMask + 1) == kGeneration, "admission bit layout");
 // Capture is completed before service tasks. This payload never changes afterward;
 // erase revokes atomic admission only, so borrowed views remain memory-safe.
 struct BootCrashInfo : CrashFacts {
@@ -102,19 +108,29 @@ static CrashResetInfo s_reset{0, false};
 static CoredumpHeader s_header;
 static std::atomic<uint32_t> s_admission{NoArtifact};
 static std::atomic<bool> s_dismissed{false};
-static std::atomic<bool> s_query_error{false};
 static std::atomic<bool> s_erasing{false};
 static std::atomic_flag s_dump_owner = ATOMIC_FLAG_INIT;
 
 static Admission state(uint32_t value) { return static_cast<Admission>(value & kStateMask); }
-static void invalidate(Admission next) noexcept {
-    uint32_t previous = s_admission.load(std::memory_order_acquire);
-    while (!s_admission.compare_exchange_weak(previous,
-              ((previous + kGeneration) & ~kStateMask) | next,
-              std::memory_order_acq_rel, std::memory_order_acquire)) {}
+static bool has_query_error(uint32_t value) noexcept { return (value & kQueryErrorBit) != 0; }
+static uint32_t next_admission_word(uint32_t previous, Admission next,
+                                    QueryErrorMode error_mode) noexcept {
+    const uint32_t flags = static_cast<uint32_t>(next) |
+        ((error_mode == QueryErrorMode::Set ||
+          (error_mode == QueryErrorMode::Preserve && has_query_error(previous)))
+             ? kQueryErrorBit : 0u);
+    return ((previous + kGeneration) & ~kPayloadMask) | flags;
 }
-static bool invalidate_if_unchanged(uint32_t expected, Admission next) noexcept {
-    const uint32_t updated = ((expected + kGeneration) & ~kStateMask) | next;
+static void invalidate(Admission next,
+                       QueryErrorMode error_mode = QueryErrorMode::Preserve) noexcept {
+    uint32_t previous = s_admission.load(std::memory_order_acquire);
+    while (!s_admission.compare_exchange_weak(
+        previous, next_admission_word(previous, next, error_mode),
+        std::memory_order_acq_rel, std::memory_order_acquire)) {}
+}
+static bool invalidate_if_unchanged(uint32_t expected, Admission next,
+                                    QueryErrorMode error_mode = QueryErrorMode::Preserve) noexcept {
+    const uint32_t updated = next_admission_word(expected, next, error_mode);
     return s_admission.compare_exchange_strong(
         expected, updated, std::memory_order_acq_rel, std::memory_order_acquire);
 }
@@ -177,12 +193,7 @@ CrashInfoView diag_crash_info_live() {
     try { query = query_header(); } catch (...) { query.error = true; }
     if (!s_erasing.load(std::memory_order_acquire)) {
         if (query.error) {
-            const uint32_t expected_next = ((before + kGeneration) & ~kStateMask) | Quarantined;
-            if (invalidate_if_unchanged(before, Quarantined) &&
-                !s_erasing.load(std::memory_order_acquire) &&
-                s_admission.load(std::memory_order_acquire) == expected_next) {
-                s_query_error.store(true, std::memory_order_release);
-            }
+            (void)invalidate_if_unchanged(before, Quarantined, QueryErrorMode::Set);
         } else if (!query.header.present) {
             if (state(before) != NoArtifact) (void)invalidate_if_unchanged(before, NoArtifact);
         } else if ((state(before) == Current || state(before) == Foreign) &&
@@ -193,9 +204,9 @@ CrashInfoView diag_crash_info_live() {
     CrashInfoView info = crash_borrow(s_boot); // static immutable payload; no copy/allocation/leaf lock
     info.dismissed = s_dismissed.load(std::memory_order_acquire);
     info.artifact_present = query.header.present;
-    info.query_error = query.error || s_query_error.load(std::memory_order_acquire);
     info.raw_available = query.header.readable && !query.error;
     const uint32_t after = s_admission.load(std::memory_order_acquire);
+    info.query_error = query.error || has_query_error(after);
     crash_finish_snapshot(info, {before, after, same_header(query.header, s_header),
         query.error, query.header.readable, state(after) == Current, state(after) == Foreign,
         state(after) == NoArtifact});
@@ -265,11 +276,12 @@ void diag_crash_capture() noexcept {
         esp_app_get_elf_sha256(captured.elf_sha256.data(), captured.elf_sha256.size());
         capture_artifact(captured, captured.elf_sha256.data());
         s_boot = captured; // publish only a complete fixed boot-owned object
-        s_query_error.store(s_boot.query_error, std::memory_order_release);
+        const uint32_t current = s_admission.load(std::memory_order_acquire);
+        const uint32_t updated = (current & ~kQueryErrorBit) | (s_boot.query_error ? kQueryErrorBit : 0u);
+        s_admission.store(updated, std::memory_order_release);
     } catch (...) {
         s_boot.query_error = true;
-        s_query_error.store(true, std::memory_order_release);
-        invalidate(Quarantined);
+        invalidate(Quarantined, QueryErrorMode::Set);
     }
     log_boot_crash(crash_borrow(s_boot));
 }
@@ -281,7 +293,7 @@ CoredumpOpenResult diag_crash_open_dump(const CoredumpLease& lease, bool raw, Co
     HeaderQuery query;
     try { query = query_header(); } catch (...) { query.error = true; }
     if (query.error) {
-        s_query_error.store(true, std::memory_order_release); invalidate(Quarantined);
+        invalidate(Quarantined, QueryErrorMode::Set);
         return CoredumpOpenResult::Error;
     }
     if (!query.header.present) { invalidate(NoArtifact); return CoredumpOpenResult::Absent; }
@@ -306,27 +318,30 @@ CrashEraseResult diag_crash_erase(bool dismiss, EffectReplyState& reply) noexcep
     try {
         const auto query = locate_partition();
         if (!query.error && !query.part) {
-            invalidate(NoArtifact); s_query_error.store(false, std::memory_order_release);
+            invalidate(NoArtifact, QueryErrorMode::Clear);
             if (dismiss) s_dismissed.store(true, std::memory_order_release);
             reply.succeeded(); return CrashEraseResult::Absent;
         }
         // Conservative before any possible erase/exception; never restore Current during this boot.
         reply.attempting(RequestEffect::CoredumpErase); invalidate(Quarantined);
-        if (query.error) { s_query_error.store(true, std::memory_order_release); return CrashEraseResult::Unconfirmed; }
-#if defined(CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH)
-        if (esp_core_dump_image_erase() != ESP_OK) {
-            invalidate(Quarantined); s_query_error.store(true, std::memory_order_release);
+        if (query.error) {
+            invalidate(Quarantined, QueryErrorMode::Set);
             return CrashEraseResult::Unconfirmed;
         }
-        invalidate(NoArtifact); s_query_error.store(false, std::memory_order_release);
+#if defined(CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH)
+        if (esp_core_dump_image_erase() != ESP_OK) {
+            invalidate(Quarantined, QueryErrorMode::Set);
+            return CrashEraseResult::Unconfirmed;
+        }
+        invalidate(NoArtifact, QueryErrorMode::Clear);
         if (dismiss) s_dismissed.store(true, std::memory_order_release);
         reply.succeeded(); return CrashEraseResult::Erased;
 #else
         return CrashEraseResult::Unconfirmed;
 #endif
     } catch (...) {
-        reply.attempting(RequestEffect::CoredumpErase); invalidate(Quarantined);
-        s_query_error.store(true, std::memory_order_release);
+        reply.attempting(RequestEffect::CoredumpErase);
+        invalidate(Quarantined, QueryErrorMode::Set);
         return CrashEraseResult::Unconfirmed;
     }
 }

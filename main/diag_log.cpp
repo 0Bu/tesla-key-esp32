@@ -179,10 +179,11 @@ void diag_log_init() {
     s_mtx.store(mtx, std::memory_order_release);
 }
 
-DiagDumpResult diag_log_dump_chunks(const std::function<bool(const char*, size_t)>& sink,
+DiagDumpResult diag_log_dump_chunks(DiagDumpSinkFn sink, void* ctx,
                                     DiagDumpStart start_mode) {
     const auto mtx = s_mtx.load(std::memory_order_acquire);
     if (!mtx) return DiagDumpResult::SnapshotInvalidated;
+    if (!sink) return DiagDumpResult::SinkFailed;
     // Snapshot the logical spans, then copy each bounded piece under the mutex and invoke the sink
     // only AFTER releasing it.  The sink is HTTP/network I/O and may block or throw; doing either
     // while holding the shared log mutex stalls every producer and violates the firmware lock
@@ -237,7 +238,7 @@ DiagDumpResult diag_log_dump_chunks(const std::function<bool(const char*, size_t
                 delivered += skipped;
                 delivered_size -= skipped;
             }
-            if (delivered_size != 0 && !sink(delivered, delivered_size)) {
+            if (delivered_size != 0 && !sink(ctx, delivered, delivered_size)) {
                 return DiagDumpResult::SinkFailed;
             }
             offset += n;

@@ -1266,6 +1266,37 @@ int main() {
     CHECK(dump == "first 1\n");
     CHECK(!last_mutex->held);
 
+    // Zero-alloc sink dispatch: large captures (> 32 B) must not allocate via std::function.
+    {
+        std::uint64_t a = 1, b = 2, c = 3, d = 4, e = 5, f = 6;
+        char buf[32]{};
+        std::size_t pos = 0;
+        auto large_sink = [&](const char* data, std::size_t len) noexcept {
+            CHECK(!last_mutex->held);
+            if (pos + len > sizeof(buf)) return false;
+            std::memcpy(buf + pos, data, len);
+            pos += len;
+            a += len; b += len; c += len; d += len; e += len; f += len;
+            return true;
+        };
+        static_assert(sizeof(large_sink) > 32, "must exceed std::function SBO");
+        fail_global_allocation = true;
+        const DiagDumpResult large_res = diag_log_dump_chunks(large_sink);
+        fail_global_allocation = false;
+        CHECK(large_res == DiagDumpResult::Complete);
+        CHECK(pos == 8 && std::memcmp(buf, "first 1\n", 8) == 0);
+        CHECK(a == 9 && b == 10 && c == 11 && d == 12 && e == 13 && f == 14);
+        CHECK(diag_log_dump_chunks(nullptr, nullptr) == DiagDumpResult::SinkFailed);
+
+        auto raw_sink = +[](void* ctx, const char* data, std::size_t len) -> bool {
+            static_cast<std::string*>(ctx)->append(data, len);
+            return true;
+        };
+        std::string raw_out;
+        CHECK(diag_log_dump_chunks(raw_sink, &raw_out) == DiagDumpResult::Complete);
+        CHECK(raw_out == "first 1\n");
+    }
+
     bool threw = false;
     try {
         diag_log_dump_chunks([&](const char*, size_t) -> bool {

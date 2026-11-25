@@ -245,7 +245,7 @@ esp_err_t handle_status(GuardedReq rq) {
         return send_json(req, 400, make_response(false, "status", "", "invalid query string"));
     }
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-    // ?redact=1 is the BUG-REPORT form: the six reporter-identifying values read "<redacted>"
+    // ?redact=1 is the BUG-REPORT form: the seven reporter-identifying values read "<redacted>"
     // (logic/status_model.hpp). Opt-in per request, never the default — the dashboard legitimately
     // shows the SSID, the broker and the VIN, and this is the same payload it polls.
     const bool redact = query_param_is(req, "redact", "1");

@@ -800,9 +800,11 @@ extern "C" void app_main() {
                 // remain armed if the new image cannot establish a healthy runtime.
                 static_assert(!tk::ota_reboot_confirms_pending_image(
                     tk::OtaRebootClass::AutomaticIdentityRecovery));
+                identity_guard.seal();
                 vTaskDelay(pdMS_TO_TICKS(300));
                 tk::stack_watch_sample(tk::StackWatch::Main); // before terminal effect
                 esp_restart();
+                for (;;) vTaskDelay(pdMS_TO_TICKS(10000));
             } else {
                 ESP_LOGE(TAG, "initial key generation incomplete (state=%d) — runtime remains fail-closed",
                          static_cast<int>(generated.rotation));

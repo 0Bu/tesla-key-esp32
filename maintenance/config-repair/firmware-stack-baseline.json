@@ -35,7 +35,7 @@
           "/COMPONENT_MAIN_DIR/logic/coredump_image.hpp :: bool tk::fill_coredump_metadata(Input&, const CoredumpHeader&, uint16_t, uint32_t, const char*, size_t, bool, CoredumpMetadata&) [with Input = CoredumpInput<PartitionReader>]": 304
         },
         "CMakeFiles/__idf_main.dir/diag_log.cpp.su": {
-          "/COMPONENT_MAIN_DIR/diag_log.cpp :: DiagDumpResult diag_log_dump_chunks(const std::function<bool(const char*, unsigned int)>&, DiagDumpStart)": 336,
+          "/COMPONENT_MAIN_DIR/diag_log.cpp :: DiagDumpResult diag_log_dump_chunks(DiagDumpSinkFn, void*, DiagDumpStart)": 368,
           "/COMPONENT_MAIN_DIR/diag_log.cpp :: int diag_vprintf_(const char*, va_list)": 320
         },
         "CMakeFiles/__idf_main.dir/heap_supervisor.cpp.su": {},
@@ -158,7 +158,7 @@
           "/COMPONENT_MAIN_DIR/logic/coredump_image.hpp :: bool tk::fill_coredump_metadata(Input&, const CoredumpHeader&, uint16_t, uint32_t, const char*, size_t, bool, CoredumpMetadata&) [with Input = CoredumpInput<PartitionReader>]": 304
         },
         "CMakeFiles/__idf_main.dir/diag_log.cpp.su": {
-          "/COMPONENT_MAIN_DIR/diag_log.cpp :: DiagDumpResult diag_log_dump_chunks(const std::function<bool(const char*, unsigned int)>&, DiagDumpStart)": 336,
+          "/COMPONENT_MAIN_DIR/diag_log.cpp :: DiagDumpResult diag_log_dump_chunks(DiagDumpSinkFn, void*, DiagDumpStart)": 368,
           "/COMPONENT_MAIN_DIR/diag_log.cpp :: int diag_vprintf_(const char*, va_list)": 320
         },
         "CMakeFiles/__idf_main.dir/heap_supervisor.cpp.su": {},
@@ -280,7 +280,7 @@
           "/COMPONENT_MAIN_DIR/logic/coredump_image.hpp :: bool tk::fill_coredump_metadata(Input&, const CoredumpHeader&, uint16_t, uint32_t, const char*, size_t, bool, CoredumpMetadata&) [with Input = CoredumpInput<PartitionReader>]": 304
         },
         "CMakeFiles/__idf_main.dir/diag_log.cpp.su": {
-          "/COMPONENT_MAIN_DIR/diag_log.cpp :: DiagDumpResult diag_log_dump_chunks(const std::function<bool(const char*, unsigned int)>&, DiagDumpStart)": 336,
+          "/COMPONENT_MAIN_DIR/diag_log.cpp :: DiagDumpResult diag_log_dump_chunks(DiagDumpSinkFn, void*, DiagDumpStart)": 368,
           "/COMPONENT_MAIN_DIR/diag_log.cpp :: int diag_vprintf_(const char*, va_list)": 288
         },
         "CMakeFiles/__idf_main.dir/heap_supervisor.cpp.su": {},
@@ -398,7 +398,7 @@
           "/COMPONENT_MAIN_DIR/logic/coredump_image.hpp :: bool tk::fill_coredump_metadata(Input&, const CoredumpHeader&, uint16_t, uint32_t, const char*, size_t, bool, CoredumpMetadata&) [with Input = CoredumpInput<PartitionReader>]": 304
         },
         "CMakeFiles/__idf_main.dir/diag_log.cpp.su": {
-          "/COMPONENT_MAIN_DIR/diag_log.cpp :: DiagDumpResult diag_log_dump_chunks(const std::function<bool(const char*, unsigned int)>&, DiagDumpStart)": 336,
+          "/COMPONENT_MAIN_DIR/diag_log.cpp :: DiagDumpResult diag_log_dump_chunks(DiagDumpSinkFn, void*, DiagDumpStart)": 368,
           "/COMPONENT_MAIN_DIR/diag_log.cpp :: int diag_vprintf_(const char*, va_list)": 288
         },
         "CMakeFiles/__idf_main.dir/heap_supervisor.cpp.su": {},

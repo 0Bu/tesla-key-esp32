@@ -1,5 +1,5 @@
 # Target is selected per build: `idf.py set-target <esp32|esp32s3|esp32c3|esp32c6>`
-# (exactly the chips yoziru/tesla-ble declares support for — see main/idf_component.yml).
+# (the four targets supported by this project; see AGENTS.md and main/idf_component.yml).
 # Intentionally NOT pinned here so the one
 # source tree builds for every supported target; CI builds all of them.
 
@@ -199,7 +199,7 @@ CONFIG_MBEDTLS_FS_IO=n
 # on those library targets only. Pinned deliberately rather than inherited: built at the global `-Og`
 # instead (as ESP-IDF 5.5 did), the esp32c6 app grows to an unsigned 0x1f0000 and a projected signed
 # 0x1f1000, past both the 0x1e8000 policy and the 0x1f0000 OTA slot. This is not the rejected
-# whole-build `-Os` (docs/ARCHITECTURE.md, ADR-0004): main/ and every other component stay at `-Og`.
+# whole-build `-Os` (docs/ARCHITECTURE.md, ADR-0004): main/ (except the six reviewed OTA units in main/CMakeLists.txt) and every other component stay at `-Og`.
 # scripts/check-build-semantics.py fails closed if the effective value ever differs.
 CONFIG_MBEDTLS_COMPILER_OPTIMIZATION_SIZE=y
 

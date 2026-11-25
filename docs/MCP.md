@@ -47,9 +47,10 @@ Integer arguments accept integral JSON numbers and canonical decimal strings. Bo
 accept numeric `0`/`1`. Missing required, malformed or out-of-range arguments return `-32602`.
 [Canonical integer syntax](API.md#commands)
 
-Command failures return `isError:true` with reason text. Successful charge-start/stop no-ops
-return `isError:false` and `structuredContent.noop` (`complete`, `is_charging`, `not_charging`
-or `already_set`). Check vehicle state before repeating an uncertain command.
+Command failures return `isError:true` with reason text. Successful no-ops return `isError:false`
+and `structuredContent.noop` (`already_set` on any command; `complete`, `is_charging` or
+`not_charging` on the matching `charge_start`/`charge_stop` pair). Check vehicle state before
+repeating an uncertain command.
 [Shared command policy](API.md#commands)
 
 `get_vehicle_state` reports `vin`, `paired` (stored VCSEC session), `session_available` (usable

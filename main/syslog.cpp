@@ -100,17 +100,20 @@ static void set_status(bool resolved, bool reachable, const std::string& error) 
 }
 
 SyslogStatus syslog_status() {
-    SyslogStatus copy;
-    copy.configured = s_configured;
+    SyslogStatus copy{};
+    const bool configured = s_configured.load(std::memory_order_acquire);
+    copy.configured = configured;
     copy.dropped_lines = s_dropped_lines.load(std::memory_order_relaxed);
-    copy.host        = s_cfg_host;
-    copy.port        = s_cfg_port;
     copy.resolved    = false;
     copy.reachable   = false;
-    if (s_config_error.load()) {
+    copy.port        = 514;
+    if (s_config_error.load(std::memory_order_acquire)) {
         copy.error = "stored configuration is unreadable";
         return copy;
     }
+    if (!configured) return copy;
+    copy.host        = s_cfg_host;
+    copy.port        = s_cfg_port;
     // RAII give — the std::string copies below can throw.
     tk::SemGuard g(s_status_mtx);
     if (g) {
