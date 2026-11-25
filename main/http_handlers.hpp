@@ -126,7 +126,7 @@ esp_err_t handle_crash_dismiss(GuardedReq rq);    // POST /crash/dismiss
 esp_err_t handle_heap(GuardedReq rq);             // GET  /heap
 
 // http_ota.cpp — OTA self-update endpoints
-esp_err_t handle_ota_check(GuardedReq rq);        // GET  /ota/check[?ms=<epoch>]
+esp_err_t handle_ota_check(GuardedReq rq);        // GET/POST /ota/check[?ms=<epoch>]
 esp_err_t handle_ota_update(GuardedReq rq);       // POST /ota/update
 esp_err_t handle_ota_upload(GuardedReq rq);       // POST /ota/upload (dev only)
 esp_err_t handle_ota_status(GuardedReq rq);       // GET  /ota/status

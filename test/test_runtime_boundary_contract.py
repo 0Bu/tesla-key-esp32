@@ -2109,10 +2109,13 @@ def require_diag_dump_completion_contract(handler: str, diag_header: str,
     ):
         if token not in diag_header:
             raise AssertionError(f"typed /diag dump result contract missing {token!r}")
+    if "std::function" in scrub_cpp(diag_header) or "std::function" in scrub_cpp(diag_source):
+        raise AssertionError("diagnostic dump API must not allocate/type-erase via std::function")
 
     dump = function_body_in(diag_source, "diag_log_dump_chunks")
     for token in (
         "if (!mtx) return DiagDumpResult::SnapshotInvalidated;",
+        "if (!sink) return DiagDumpResult::SinkFailed;",
         "if (!g) return DiagDumpResult::SnapshotInvalidated;",
         "s_epoch != snapshot_epoch",
         "return DiagDumpResult::SnapshotInvalidated;",
@@ -3676,6 +3679,19 @@ def require_syslog_start_lifetime_contract(syslog_source: str, gate_header: str,
                                  function_body_in(syslog_source, "syslog_arp_lookup_cb"),
                                  {"etharp_find_addr"}, delegated=True)
 
+    status_fn = scrub_cpp(function_body_in(syslog_source, "syslog_status"))
+    for token in (
+        "const bool configured = s_configured.load(std::memory_order_acquire);",
+        "if (s_config_error.load(std::memory_order_acquire))",
+        "if (!configured) return copy;",
+    ):
+        if token not in status_fn:
+            raise AssertionError(f"syslog_status missing configuration guard {token!r}")
+    require_before("syslog_status guards host behind configured", status_fn,
+                   "if (!configured) return copy;", "s_cfg_host")
+    require_before("syslog_status guards port behind configured", status_fn,
+                   "if (!configured) return copy;", "s_cfg_port")
+
     for token in (
         "test_syslog_start_gate", "task_create_failure", "Action::Cancel",
         "!task_create_failure.commit()",
@@ -4648,6 +4664,8 @@ def require_crash_dismiss_atomic_contract(crash_source: str) -> None:
     code = scrub_cpp(crash_source)
     if "s_ci.dismissed =" in code or re.search(r"static\s+bool\s+s_dismissed", code):
         raise AssertionError("crash dismissal reintroduced a racy shared bool/string snapshot")
+    if re.search(r"\bs_query_error\b", code):
+        raise AssertionError("crash query error must live atomically inside s_admission")
     erase = function_body_in(crash_source, "diag_crash_erase")
     require_before("crash erase ownership", erase,
                    "if (!lease.held()) return CrashEraseResult::Busy;", "locate_partition()")
@@ -4666,7 +4684,7 @@ def require_crash_dismiss_atomic_contract(crash_source: str) -> None:
     if "s_dismissed.store(true" in erase[opening:closing]:
         raise AssertionError("failed erase publishes dismissal")
     require_before("crash erase success before atomic dismissal", erase[closing:],
-                   "invalidate(NoArtifact)", "s_dismissed.store(true")
+                   "invalidate(NoArtifact, QueryErrorMode::Clear)", "s_dismissed.store(true")
     if "esp_core_dump_image_erase" in function_body_in(crash_source, "capture_artifact"):
         raise AssertionError("boot capture may erase crash evidence")
 
@@ -7415,6 +7433,15 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
                 1,
             ),
         ),
+        (
+            "Syslog status reads target before configured guard",
+            syslog_source.replace(
+                "    if (!configured) return copy;\n    copy.host        = s_cfg_host;\n    copy.port        = s_cfg_port;",
+                "    copy.host        = s_cfg_host;\n    copy.port        = s_cfg_port;\n    if (!configured) return copy;",
+                1,
+            ),
+            syslog_gate, logic_tests, runtime_tests,
+        ),
     ):
         require_mutation_rejected(
             label,
@@ -7712,6 +7739,24 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
             diag_source.replace(
                 "return DiagDumpResult::SinkFailed;",
                 "return DiagDumpResult::Complete;",
+            ),
+        ),
+        (
+            "/diag std::function header reintroduction",
+            diag_handler,
+            diag_header.replace(
+                "DiagDumpSinkFn sink,",
+                "const std::function<bool(const char*, size_t)>& sink,",
+                1,
+            ),
+            diag_source,
+        ),
+        (
+            "/diag std::function source reintroduction",
+            diag_handler, diag_header,
+            diag_source.replace(
+                "DiagDumpSinkFn sink, void* ctx,",
+                "const std::function<bool(const char*, size_t)>& sink,",
                 1,
             ),
         ),
@@ -8096,6 +8141,21 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
                 "s_dismissed.store(true, std::memory_order_release);",
                 "s_ci.dismissed = true;",
                 1,
+            ),
+        ),
+        (
+            "crash separate s_query_error atomic",
+            crash_source.replace(
+                "static std::atomic<bool> s_dismissed{false};",
+                "static std::atomic<bool> s_dismissed{false};\nstatic std::atomic<bool> s_query_error{false};",
+                1,
+            ),
+        ),
+        (
+            "crash erase omits QueryErrorMode::Clear",
+            crash_source.replace(
+                "invalidate(NoArtifact, QueryErrorMode::Clear);",
+                "invalidate(NoArtifact);",
             ),
         ),
     ):

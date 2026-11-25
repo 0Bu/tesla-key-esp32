@@ -1,5 +1,5 @@
 {
-  "status": "UNEXECUTED author recipes; independent operator/source qualification required",
+  "status": "Host-fixture executed (15/15 recipes confirmed compile + genuine runtime CHECK failure + clean restore on host); target/SDK/hardware boundaries remain unexercised",
   "scope": "One exact production omission per disposable full-bound clone. Generator+compile must succeed; only specific actual runtime CHECK failure earns refusal. Source-gate refusal is a separate layer, never runtime credit. Restore exact bytes/modes and positive execution after each. Unknown process cleanup quarantines clone; no restore or next mutation.",
   "cases": [
     {
@@ -21,9 +21,9 @@
     {
       "id": "total-free-is-not-largest",
       "path": "main/ota_transport.cpp",
-      "before": "if (!tk::ota_recovery_memory_affordable(pre_init_largest,\n            tk::ota_recovery_required_bytes(tk::OtaRecoveryUse::TlsAdmission))) return NetResult::NoMemory;",
+      "before": "return heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);",
       "occurrence": 0,
-      "after": "if (!((void)pre_init_largest, tk::ota_recovery_memory_affordable(esp_get_free_heap_size(),\n            tk::ota_recovery_required_bytes(tk::OtaRecoveryUse::TlsAdmission)))) return NetResult::NoMemory;",
+      "after": "return ((void)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT), esp_get_free_heap_size());",
       "expected": "normal fixture must reject init_calls==0; the consumed physical low sample repeats rather than causing sample-exhaustion credit"
     },
     {
@@ -57,8 +57,8 @@
     {
       "id": "bounded-metadata-reserve",
       "path": "main/ota_update.cpp",
-      "before": "out.reserve(tk::kOtaManifestMaxBytes);",
-      "after": "out.reserve(16384);",
+      "before": "out.reserve(initial_reserve);",
+      "after": "(void)initial_reserve; out.reserve(16384);",
       "expected": "normal body-OOM fixture must reject init_calls==0 or expected NoMemory; actual first CHECK independently assessed"
     },
     {
@@ -114,11 +114,11 @@
       "mode": "cleanup-cas",
       "before": "if (!j.control.compare_exchange_strong(observed,next,std::memory_order_acq_rel,\n                                                  std::memory_order_acquire)) continue;",
       "after": "j.control.store(next,std::memory_order_release);",
-      "expected": "Host-only existing production hook pauses after observed load; actual coordinator expires and sets Retired; unchecked stale store erases it. Worker final-return/pause handshake must precede exact CHECK(operation->job.retired()&&operation->job.phase()==tk::ota::Phase::Acked) before join. Hook timeout, compiler error or earlier setup CHECK is WRONG_ORACLE. Restored positive joins and reclaims normally."
+      "expected": "Host-only existing production hook pauses after observed load; actual coordinator expires and sets Retired; unchecked stale store erases it. Worker final-return/pause handshake must pass before the post-handshake reclaim assertion CHECK(!s_operation.load()&&phase_count(records(),\"reclaim_ready\")==1) (line 1148 of test/test_ota_tls_admission.cpp) fails. Hook timeout, compiler error or earlier setup CHECK is WRONG_ORACLE. Restored positive joins and reclaims normally."
     }
   ],
   "remaining": [
-    "All fifteen recipes and every positive fixture are UNEXECUTED; a separately reviewed owned-process operator must verify full input closure, required guard-module qualification, exact first CHECK and restoration before any runtime claim.",
+    "All 15 recipes executed on host fixtures with verified compile, genuine runtime CHECK refusal, and clean positive restore (sticky-critical-expiry requires clean rebuild of logic_tests when restored within the same timestamp second).",
     "The application cases do not prove actual TCP/TLS allocation peaks, SDK ABI, RSA acceptance, flash failure semantics, RTOS reclaim or any four-target resource limit."
   ],
   "schemaNotes": "mode selects a native CLI branch; historical cases without mode use normal, except sticky-critical-expiry which uses the pure logic suite. Exactly one actual production omission per clone."

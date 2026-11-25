@@ -191,11 +191,12 @@ struct Inputs {
     std::string           crash_elf_sha256;        // the RUNNING build — matches a dump to its .elf
 
     // ── redaction ─────────────────────────────────────────────────────────────────────────────
-    // GET /status?redact=1 — the bug-report form of this payload. Six values identify the reporter
+    // GET /status?redact=1 — the bug-report form of this payload. Seven values identify the reporter
     // or their car and are substituted with "<redacted>": the VIN (the single most identifying
     // value this device holds — it names one specific car and is an input to Tesla's own APIs), the
     // device IP, the WiFi SSID, the vehicle's BLE MAC (and every scanned neighbour's, which are
-    // other people's devices in the reporter's home), the MQTT broker and the syslog host.
+    // other people's devices in the reporter's home), scanned BLE advert names
+    // (`ble.devices[].name`, derived from the VIN), the MQTT broker and the syslog host.
     // `sys.board_mac` deliberately remains visible: it identifies the replaceable hardware and
     // is the evidence that lets a board-swap diagnosis distinguish old board from new.
     //

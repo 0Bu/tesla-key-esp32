@@ -100,8 +100,8 @@ endif()
 # PRIVATE on ${COMPONENT_LIB} rather than a CONFIG_COMPILER_* key in sdkconfig.defaults, for two
 # independent reasons: a Kconfig key is global, so it would hold ESP-IDF itself and the managed
 # components (tesla-ble, mdns, mqtt) to a contract that is not ours to demand and that breaks on
-# any bump; and sdkconfig.defaults is part of CI's ccache key, so a diagnostic-only change there
-# would discard every cached object it cannot possibly invalidate.
+# any bump; and editing sdkconfig.defaults triggers a full four-target IDF reconfigure and rebuild
+# (authoritative CI builds also disable ccache, so every object is rebuilt from scratch).
 target_compile_options(${COMPONENT_LIB} PRIVATE
     -std=gnu++17
     -Werror=format

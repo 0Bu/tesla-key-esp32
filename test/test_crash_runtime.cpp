@@ -45,7 +45,7 @@ void cold_boot() {
     allocation_at = -1; allocation_hit = false;
     tk::s_boot = {}; tk::s_reset = {}; tk::s_header = {};
     tk::s_admission.store(tk::NoArtifact); tk::s_dismissed.store(false);
-    tk::s_query_error.store(false); tk::s_erasing.store(false); tk::s_dump_owner.clear();
+    tk::s_erasing.store(false); tk::s_dump_owner.clear();
     fake = Fixture{};
     fake.image = dump_test_summary_image(xtensa, version, 2);
 }
@@ -137,7 +137,7 @@ esp_err_t esp_core_dump_image_erase() {
         fake.fail_read = 0;
         CHECK(during.query_error && !during.coredump && !during.raw_available);
         CHECK(tk::s_admission.load(std::memory_order_acquire) == during_before);
-        CHECK(!tk::s_query_error.load(std::memory_order_acquire));
+        CHECK(!tk::has_query_error(tk::s_admission.load(std::memory_order_acquire)));
     }
     if (fake.throw_erase) throw std::bad_alloc();
     if (fake.erase == ESP_OK || fake.erase_then_fail) fake.image.clear();
@@ -336,7 +336,7 @@ int main() {
         cold_boot(); tk::diag_crash_capture(); fake.erase = error; reply = {};
         CHECK(tk::diag_crash_erase(true, reply) == tk::CrashEraseResult::Unconfirmed);
         CHECK(tk::state(tk::s_admission.load()) == tk::Quarantined &&
-              tk::s_query_error.load() && !tk::s_erasing.load());
+              tk::has_query_error(tk::s_admission.load()) && !tk::s_erasing.load());
         CHECK(fake.erases == 1 && !tk::s_dismissed.load() && !reply.success());
         CHECK(!tk::diag_crash_info_live().summary_available && open() == tk::CoredumpOpenResult::Unverified);
         CHECK(open(true) == tk::CoredumpOpenResult::Ready);
@@ -344,12 +344,12 @@ int main() {
     cold_boot(); tk::diag_crash_capture(); fake.throw_erase = true; reply = {};
     CHECK(tk::diag_crash_erase(true, reply) == tk::CrashEraseResult::Unconfirmed);
     CHECK(tk::state(tk::s_admission.load()) == tk::Quarantined &&
-          tk::s_query_error.load() && !tk::s_erasing.load());
+          tk::has_query_error(tk::s_admission.load()) && !tk::s_erasing.load());
     CHECK(!reply.success() && fake.erases == 1 && !tk::s_dismissed.load());
     cold_boot(); tk::diag_crash_capture(); fake.erase_then_fail = true; fake.erase = ESP_FAIL; reply = {};
     CHECK(tk::diag_crash_erase(true, reply) == tk::CrashEraseResult::Unconfirmed);
     CHECK(tk::state(tk::s_admission.load()) == tk::Quarantined &&
-          tk::s_query_error.load() && !tk::s_erasing.load());
+          tk::has_query_error(tk::s_admission.load()) && !tk::s_erasing.load());
     CHECK(!reply.success() && !tk::s_dismissed.load());
     CHECK(open() == tk::CoredumpOpenResult::Absent && tk::diag_crash_info_live().query_error);
     for (bool dismiss : {false, true}) {
@@ -367,25 +367,25 @@ int main() {
     fake.race_erase = true; info = tk::diag_crash_info_live();
     CHECK(!info.coredump && !info.summary_available && !info.raw_available && fake.erases == 1);
 
-    // [F-21] Stale query.error after concurrent erase cannot revert NoArtifact or set s_query_error.
+    // [F-21] Stale query.error after concurrent erase cannot revert NoArtifact or set query-error bit.
     cold_boot(); tk::diag_crash_capture();
     fake.race_erase = true;
     fake.race_erase_then_fail_read = true;
     info = tk::diag_crash_info_live();
     CHECK(!info.coredump && !info.summary_available && !info.raw_available && !info.artifact_present);
     CHECK(fake.erases == 1 && tk::state(tk::s_admission.load()) == tk::NoArtifact);
-    CHECK(!tk::s_query_error.load() && !tk::s_erasing.load());
+    CHECK(!tk::has_query_error(tk::s_admission.load()) && !tk::s_erasing.load());
     info = tk::diag_crash_info_live();
     CHECK(!info.query_error && !info.artifact_present && !info.coredump);
 
-    // [F-21] Query error observed mid-erase (s_erasing=true) cannot mutate s_admission or s_query_error.
+    // [F-21] Query error observed mid-erase (s_erasing=true) cannot mutate s_admission or query-error bit.
     cold_boot(); tk::diag_crash_capture();
     fake.live_query_error_during_erase = true;
     reply = {};
     CHECK(tk::diag_crash_erase(true, reply) == tk::CrashEraseResult::Erased);
     CHECK(reply.success() && tk::s_dismissed.load() && fake.erases == 1);
     CHECK(tk::state(tk::s_admission.load()) == tk::NoArtifact &&
-          !tk::s_query_error.load() && !tk::s_erasing.load());
+          !tk::has_query_error(tk::s_admission.load()) && !tk::s_erasing.load());
     info = tk::diag_crash_info_live();
     CHECK(!info.query_error && !info.artifact_present && !info.coredump && info.dismissed);
 
@@ -454,7 +454,7 @@ int main() {
         cold_boot(); allocation_at = at; tk::diag_crash_capture(); allocation_at = -1;
         CHECK(tk::diag_crash_reset_info().fault && fake.erases == 0);
         if (allocation_hit) ++failures;
-        if (tk::s_query_error.load()) CHECK(!tk::diag_crash_info_live().coredump);
+        if (tk::has_query_error(tk::s_admission.load())) CHECK(!tk::diag_crash_info_live().coredump);
         else CHECK(tk::diag_crash_info_live().summary_available);
     }
     CHECK(failures >= 3);

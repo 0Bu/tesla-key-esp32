@@ -1,5 +1,5 @@
 // OTA self-update endpoints:
-//   GET  /ota/check[?ms=<epoch>]  (start a background manifest check)
+//   GET/POST /ota/check[?ms=<epoch>]  (start a background manifest check)
 //   POST /ota/update              (start the background download+install)
 //   POST /ota/upload              (dev-only signed app binary upload)
 //   GET  /ota/status              (poll progress)
@@ -83,7 +83,7 @@ static esp_err_t send_ota_error_(httpd_req_t* req, int status, const char* reaso
     return send_json(req, status, json.release());
 }
 
-// GET /ota/check[?ms=<epoch>][&pr=<N>] — start a background version check, return at once.
+// GET/POST /ota/check[?ms=<epoch>][&pr=<N>] — start a background version check, return at once.
 // Accept one reserved check; memory admission runs after this request's SDK scratch is freed.
 // The slow HTTPS fetch runs in its own task; the UI polls /ota/status for admission/result.
 esp_err_t handle_ota_check(GuardedReq rq) {

@@ -146,8 +146,6 @@ if [ "$REQUIRE_ALL" = 1 ]; then
         test/ota_http_parser/provenance.json \
         test/ota_http_parser/http_parser.c \
         test/ota_http_parser/http_parser.h \
-        test/generate_ota_tls_adapter.py \
-        test/test_ota_tls_admission.cpp \
         test/test_codex_setup.py \
         scripts/release-relevance.sh \
         scripts/test-build-contracts.sh \

@@ -420,10 +420,10 @@ static bool publish_state() {
             strftime(boot_time, sizeof(boot_time), "%Y-%m-%dT%H:%M:%S+00:00", &tmv);
             payload.boot_time = boot_time;
         }
-        payload.free_heap = (double)esp_get_free_heap_size();
+        payload.free_heap = (double)heap_caps_get_free_size(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
         payload.version = esp_app_get_description()->version;
 
-        // INTERNAL caps for both, matching the heap watchdog and the /heap trend exactly: plain
+        // INTERNAL caps for all three, matching the heap watchdog and the /heap trend exactly: plain
         // 8BIT would report any PSRAM too and make such a board look permanently healthy.
         payload.largest_block =
             (double)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
