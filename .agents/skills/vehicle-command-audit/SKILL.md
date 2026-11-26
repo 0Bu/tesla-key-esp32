@@ -121,15 +121,10 @@ Verify every dimension against the reviewed revisions; previous audit results ar
    (lights/horn/sentry/**climate**/locks) is role-rejected.
 3. **Session / signing / clock** — `expires_at` = **vehicle's `SessionInfo.ClockTime` + a
    monotonic `steady_clock` delta** (`src/peer.cpp` `generate_expires_at`), per-domain counter +
-   16-byte epoch, separate VCSEC/Infotainment sessions. **The device wall clock does NOT enter
-   per-command signing/expiry** — a wrong RTC cannot make an already-loaded command stale or
-   replayable. It **does** gate persisted-session loading: `load_nvs_sessions_()` (inheriting
-   upstream `vehicle.cpp`'s `system_clock - SessionInfo.ClockTime` check, see ADR-0005 §2). Because
-   `SessionInfo.ClockTime` counts seconds in vehicle epoch rather than Unix epoch, restoring the
-   clock successfully to Unix time rejects stored sessions (> 3600 s), rather than implementing a
-   real-time 1-hour reuse window. Restore is attempted before controller init; absent/unreadable
-   `last_time` or a failed clock set can leave the inherited negative-age acceptance path. Do not
-   claim guaranteed expiry from this restore.
+   16-byte epoch, separate VCSEC/Infotainment sessions. The device wall clock is independent of
+   command signing and expiry. `SessionInfo.ClockTime` counts seconds in the vehicle epoch.
+   Persisted raw SessionInfo remains pairing evidence. Live session state starts empty after boot
+   and requires authenticated SessionInfo. See [ADR-0005](../../../docs/adr/0005-tesla-ble-seam.md).
 3a. **Existing SessionInfo continuity** — a refresh must use the selected domain's retained secret
    and match its stored vehicle public key before peer, availability or storage changes. Temporary
    invalidity is not absence of material. Check native and library callers and direct/force updates.

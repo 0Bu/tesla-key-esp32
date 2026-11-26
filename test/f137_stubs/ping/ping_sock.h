@@ -15,6 +15,7 @@ struct esp_ping_callbacks_t {
     void* cb_args{};
 };
 inline constexpr int ESP_PING_PROF_REPLY=1;
+inline constexpr int ESP_PING_PROF_REQUEST=2;
 #define ESP_PING_DEFAULT_CONFIG() esp_ping_config_t{}
 extern "C" {
 esp_err_t esp_ping_new_session(const esp_ping_config_t*,const esp_ping_callbacks_t*,esp_ping_handle_t*);

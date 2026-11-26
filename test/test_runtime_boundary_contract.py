@@ -393,10 +393,14 @@ REVIEWED_ALLOWED_CALLS = {
 
 REVIEWED_DELEGATED_HELPERS = {
     "ping_net_on_end": {
-        "ping_probe_on_end": {"esp_ping_get_profile", "complete", "xSemaphoreGive"},
+        "ping_probe_on_end": {
+            "esp_ping_get_profile", "ping_probe_measurement_valid", "complete", "xSemaphoreGive",
+        },
     },
     "ping_syslog_on_end": {
-        "ping_probe_on_end": {"esp_ping_get_profile", "complete", "xSemaphoreGive"},
+        "ping_probe_on_end": {
+            "esp_ping_get_profile", "ping_probe_measurement_valid", "complete", "xSemaphoreGive",
+        },
     },
     "diag_vprintf_": {
         "diag_mqtt_uri_error_": {"diag_mqtt_uri_error"},
@@ -3166,7 +3170,7 @@ def require_ping_probe_contract(header: str, generation_header: str,
     control = header[control_start:control_end]
     for token in ("SemaphoreHandle_t done", "PingProbeGeneration generation",
                   "PingProbeCallbackArgs callback_args", "esp_ping_handle_t session",
-                  "std::uint32_t session_generation", "bool session_started"):
+                  "bool session_started"):
         if token not in control:
             raise AssertionError(f"persistent ping owner missing {token!r}")
 
@@ -3174,6 +3178,8 @@ def require_ping_probe_contract(header: str, generation_header: str,
     for token in (
         "const bool measurement_valid =",
         "esp_ping_get_profile(handle, ESP_PING_PROF_REPLY",
+        "esp_ping_get_profile(handle, ESP_PING_PROF_REQUEST",
+        "ping_probe_measurement_valid(args->expected_requests, sent, replies)",
         "control.generation.complete(args->generation, replies, measurement_valid)",
     ):
         if token not in callback:
@@ -3183,11 +3189,12 @@ def require_ping_probe_contract(header: str, generation_header: str,
                    "xSemaphoreGive(control.done)")
     cleanup = function_body_in(header, "ping_probe_cleanup_completed")
     for token in (
+        "const std::uint32_t generation = control.callback_args.generation",
         "if (!control.session_started)",
-        "control.generation.abandon_unstarted(control.session_generation)",
-        "control.generation.ended(control.session_generation)",
+        "control.generation.abandon_unstarted(generation)",
+        "control.generation.ended(generation)",
         "esp_ping_delete_session(control.session)",
-        "control.generation.retire(control.session_generation)",
+        "control.generation.retire(generation)",
         "control.session = nullptr",
         "control.callback_args = {}",
     ):
@@ -3195,7 +3202,7 @@ def require_ping_probe_contract(header: str, generation_header: str,
             raise AssertionError(f"ping exact-end cleanup missing {token!r}")
     unstarted_at = cleanup.find("if (!control.session_started)")
     started_at = cleanup.find(
-        "if (!control.generation.ended(control.session_generation))", unstarted_at
+        "if (!control.generation.ended(generation))", unstarted_at
     )
     if unstarted_at < 0 or started_at < 0:
         raise AssertionError("ping started/unstarted cleanup ownership branches are missing")
@@ -3203,7 +3210,7 @@ def require_ping_probe_contract(header: str, generation_header: str,
     started_cleanup = cleanup[started_at:]
     for token in (
         "if (esp_ping_delete_session(control.session) != ESP_OK) return false;",
-        "control.generation.abandon_unstarted(control.session_generation)",
+        "control.generation.abandon_unstarted(generation)",
         "control.session = nullptr",
         "control.callback_args = {}",
     ):
@@ -3211,18 +3218,18 @@ def require_ping_probe_contract(header: str, generation_header: str,
             raise AssertionError(f"ping failed-start delete retry missing {token!r}")
     require_before("ping unstarted delete before generation release", unstarted_cleanup,
                    "esp_ping_delete_session(control.session)",
-                   "control.generation.abandon_unstarted(control.session_generation)")
+                   "control.generation.abandon_unstarted(generation)")
     require_before("ping unstarted release before callback storage reuse", unstarted_cleanup,
-                   "control.generation.abandon_unstarted(control.session_generation)",
+                   "control.generation.abandon_unstarted(generation)",
                    "control.callback_args = {}")
     require_before("ping exact end before started delete", started_cleanup,
-                   "control.generation.ended(control.session_generation)",
+                   "control.generation.ended(generation)",
                    "esp_ping_delete_session(control.session)")
     require_before("ping started delete before generation retire", started_cleanup,
                    "esp_ping_delete_session(control.session)",
-                   "control.generation.retire(control.session_generation)")
+                   "control.generation.retire(generation)")
     require_before("ping retire before callback storage reuse", started_cleanup,
-                   "control.generation.retire(control.session_generation)",
+                   "control.generation.retire(generation)",
                    "control.callback_args = {}")
 
     run = function_body_in(header, "ping_probe_run")
@@ -3232,7 +3239,6 @@ def require_ping_probe_contract(header: str, generation_header: str,
         "callbacks.cb_args = &control.callback_args;",
         "callbacks.on_ping_end = on_end;",
         "control.session = session;",
-        "control.session_generation = generation;",
         "control.session_started = false;",
         "if (esp_ping_delete_session(session) == ESP_OK)",
         "control.session_started = true;",
@@ -3247,7 +3253,7 @@ def require_ping_probe_contract(header: str, generation_header: str,
     require_before("ping quarantine cleanup before generation begin", run,
                    "ping_probe_cleanup_completed(control)", "control.generation.begin()")
     require_before("ping callback storage before session creation", run,
-                   "control.callback_args = {&control, generation};",
+                   "control.callback_args = {&control, generation, config.count};",
                    "esp_ping_new_session")
     require_before("ping retain handle before start", run,
                    "control.session = session;", "esp_ping_start(session)")
@@ -3297,7 +3303,11 @@ def require_ping_probe_contract(header: str, generation_header: str,
         "PingScenario::StartFail",
         "PingScenario::Reply",
         "PingScenario::NoReply",
+        "PingScenario::PartialSend",
+        "PingScenario::NoSend",
+        "PingScenario::PartialReply",
         "PingScenario::ProfileFail",
+        "PingScenario::RequestProfileFail",
         "PingScenario::TimeoutLateEnd",
         "stale_generation",
         "pending_session->callbacks.on_ping_end",
@@ -7264,7 +7274,7 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
         (
             "ping exact-end-before-delete bypass",
             ping_header.replace(
-                "if (!control.generation.ended(control.session_generation)) return false;",
+                "if (!control.generation.ended(generation)) return false;",
                 "if (false) return false;",
                 1,
             ),
@@ -8443,6 +8453,11 @@ def require_vehicle_recovery_contract(pairing: str, boot: str, telemetry: str,
         raise AssertionError("boot key-rotation recovery must erase only through "
                              "tk::run_key_rotation_boot_cleanup")
 
+    init = scrub_cpp(function_body_in(boot, "init"))
+    for token in ("load_nvs_sessions_", "kSessionVcsec", "kSessionInfotainment", "get_peer("):
+        if token in init:
+            raise AssertionError(f"controller init must leave BLE sessions to authenticated exchange: {token!r}")
+
     finish = function_body_in(pairing, "finish_key_rotation_cleanup_")
     for token in ("tk::retire_key_rotation_journal(*storage_, date_untrusted)",
                   "tk::KeyRotationJournalRetire::DatePending",
@@ -8521,6 +8536,9 @@ def self_test_vehicle_recovery_canaries(sources: dict[str, str]) -> None:
          mutate("boot", "tk::run_key_rotation_boot_cleanup(*storage_)", "fixture_cleanup(*storage_)")),
         ("boot recovery ignores the cleanup verdict",
          mutate("boot", "cleanup.state() != tk::KeyRotationBootState::Ready", "false")),
+        ("controller init imports the persisted SessionInfo again",
+         mutate("boot", "ble_->set_connected_cb(&VehicleController::ble_link_event_cb_, this);",
+                "load_nvs_sessions_();\n    ble_->set_connected_cb(&VehicleController::ble_link_event_cb_, this);")),
         ("boot recovery grows its own erase",
          mutate("boot", "if (cleanup.state() != tk::KeyRotationBootState::Ready) {",
                 "storage_->remove(tk::nvs_contract::kKeyCreated);\n"

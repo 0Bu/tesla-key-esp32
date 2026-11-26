@@ -3,10 +3,17 @@
 #include <atomic>
 #include <cstdint>
 
-// Generation ownership for asynchronous esp_ping completion. Hardware-free so late and
-// out-of-order callback cases are fault-injected by the host mock suite.
 namespace tk {
 
+// A reply proves reachability even after a partial batch. No reply is meaningful only
+// after every request in the finite batch was sent. An SDK count of zero means unbounded.
+constexpr bool ping_probe_measurement_valid(std::uint32_t expected, std::uint32_t sent,
+                                            std::uint32_t replies) {
+    return replies != 0 || (expected != 0 && sent == expected);
+}
+
+// Generation ownership for asynchronous esp_ping completion. Hardware-free so late and
+// out-of-order callback cases are fault-injected by the host mock suite.
 class PingProbeGeneration {
 public:
     // Returns zero while another generation is still live.

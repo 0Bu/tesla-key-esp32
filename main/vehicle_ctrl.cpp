@@ -136,8 +136,7 @@ bool VehicleController::recover_pending_key_rotation_at_boot_() {
         return true;
     }
 
-    // Do not initialize client while this marker exists: key loading and persisted peers
-    // with a torn rotation make that combination ambiguous.
+    // Resolve an interrupted rotation before loading a key or using durable pairing evidence.
     key_runtime_safe_.store(false);
     pairing_cleanup_pending_.store(true);
     ESP_LOGW(TAG, "interrupted key rotation detected — cleaning persisted peer state before key load");
@@ -228,7 +227,8 @@ bool VehicleController::init(const std::string& vin,
         key_fingerprint_cache_ = std::move(fp);
     }
 
-    load_nvs_sessions_();
+    // Persisted SessionInfo provides pairing evidence. The existing key establishes each
+    // runtime peer on demand through an authenticated SessionInfo exchange after boot.
 
     // Exact named adapters are mechanically audited as fixed POD/atomic/queue-only callbacks.
     // The NimBLE host never calls Client, allocates, waits on a shared mutex, logs or touches NVS.

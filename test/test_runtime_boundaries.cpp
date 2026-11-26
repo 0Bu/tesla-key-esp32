@@ -40,6 +40,7 @@ int test_background_poll();
 
 struct HostPingSession {
     esp_ping_callbacks_t callbacks{};
+    std::uint32_t sent{0};
     std::uint32_t replies{0};
 };
 
@@ -102,7 +103,11 @@ enum class PingScenario {
     StartDeleteFail,
     Reply,
     NoReply,
+    PartialSend,
+    NoSend,
+    PartialReply,
     ProfileFail,
+    RequestProfileFail,
     TimeoutLateEnd,
 };
 
@@ -340,17 +345,33 @@ extern "C" void vTaskDelay(TickType_t ticks) {
 extern "C" void vTaskDelete(TaskHandle_t) { ++deleted_tasks; }
 extern "C" TickType_t xTaskGetTickCount() { return fake_ticks; }
 
-extern "C" esp_err_t esp_ping_new_session(const esp_ping_config_t*,
+extern "C" esp_err_t esp_ping_new_session(const esp_ping_config_t* config,
                                             const esp_ping_callbacks_t* callbacks,
                                             esp_ping_handle_t* out_session) {
     ++ping_new_calls;
-    if (ping_scenario == PingScenario::SetupFail || !callbacks || !out_session) {
+    if (ping_scenario == PingScenario::SetupFail || !config || !callbacks || !out_session) {
         if (out_session) *out_session = nullptr;
         return ESP_FAIL;
     }
     auto* session = new HostPingSession();
     session->callbacks = *callbacks;
-    session->replies = ping_scenario == PingScenario::Reply ? 2u : 0u;
+    session->sent = config->count;
+    switch (ping_scenario) {
+        case PingScenario::Reply:
+            session->replies = 2;
+            break;
+        case PingScenario::PartialReply:
+            session->replies = 1;
+            [[fallthrough]];
+        case PingScenario::PartialSend:
+            session->sent = 1;
+            break;
+        case PingScenario::NoSend:
+            session->sent = 0;
+            break;
+        default:
+            break;
+    }
     last_ping_session = session;
     if (callbacks->cb_args) {
         captured_ping_args =
@@ -364,9 +385,7 @@ extern "C" esp_err_t esp_ping_start(esp_ping_handle_t session) {
     ++ping_start_calls;
     if (!session || ping_scenario == PingScenario::StartFail ||
         ping_scenario == PingScenario::StartDeleteFail) return ESP_FAIL;
-    if ((ping_scenario == PingScenario::Reply || ping_scenario == PingScenario::NoReply ||
-         ping_scenario == PingScenario::ProfileFail) &&
-        session->callbacks.on_ping_end) {
+    if (ping_scenario != PingScenario::TimeoutLateEnd && session->callbacks.on_ping_end) {
         session->callbacks.on_ping_end(session, session->callbacks.cb_args);
     }
     return ESP_OK;
@@ -391,13 +410,21 @@ extern "C" esp_err_t esp_ping_delete_session(esp_ping_handle_t session) {
 
 extern "C" esp_err_t esp_ping_get_profile(esp_ping_handle_t session, int profile,
                                            void* value, std::size_t value_size) {
-    if (ping_scenario == PingScenario::ProfileFail) return ESP_FAIL;
-    if (!session || profile != ESP_PING_PROF_REPLY || !value ||
-        value_size != sizeof(session->replies)) {
+    if (!session || !value || value_size != sizeof(std::uint32_t) ||
+        ping_scenario == PingScenario::ProfileFail) {
         return ESP_FAIL;
     }
-    std::memcpy(value, &session->replies, sizeof(session->replies));
-    return ESP_OK;
+    switch (profile) {
+        case ESP_PING_PROF_REPLY:
+            std::memcpy(value, &session->replies, sizeof(session->replies));
+            return ESP_OK;
+        case ESP_PING_PROF_REQUEST:
+            if (ping_scenario == PingScenario::RequestProfileFail) return ESP_FAIL;
+            std::memcpy(value, &session->sent, sizeof(session->sent));
+            return ESP_OK;
+        default:
+            return ESP_FAIL;
+    }
 }
 
 extern "C" vprintf_like_t esp_log_set_vprintf(vprintf_like_t replacement) {
@@ -914,7 +941,7 @@ static void test_dynamic_ble_host_health_blocks_ota_commit() {
 }
 
 static void test_ping_probe_lifecycle() {
-    const esp_ping_config_t config{};
+    const esp_ping_config_t config{3};
 
     {
         tk::PingProbeControl control{};
@@ -948,6 +975,7 @@ static void test_ping_probe_lifecycle() {
         HostPingSession* const retained_session = control.session;
         const std::uint32_t retained_generation = control.generation.active();
         CHECK(retained_generation != 0);
+        CHECK(control.callback_args.generation == retained_generation);
 
         ping_scenario = PingScenario::Reply;
         CHECK(tk::ping_probe_run(control, config, 20, 5) ==
@@ -957,6 +985,7 @@ static void test_ping_probe_lifecycle() {
         CHECK(ping_delete_calls == 2);
         CHECK(control.session == retained_session);
         CHECK(control.generation.active() == retained_generation);
+        CHECK(control.callback_args.generation == retained_generation);
 
         // The third delete attempt releases the retained unstarted generation; only then may
         // this same serial invocation allocate, run and retire a replacement generation.
@@ -966,6 +995,7 @@ static void test_ping_probe_lifecycle() {
         CHECK(ping_delete_calls == 4);
         CHECK(control.session == nullptr);
         CHECK(control.generation.active() == 0);
+        CHECK(control.callback_args.generation == 0);
         vSemaphoreDelete(control.done);
     }
 
@@ -997,13 +1027,24 @@ static void test_ping_probe_lifecycle() {
         vSemaphoreDelete(control.done);
     }
 
-    {
+    const struct {
+        PingScenario scenario;
+        tk::PingProbeResult expected;
+    } measurement_cases[] = {
+        {PingScenario::NoReply, tk::PingProbeResult::NoReply},
+        {PingScenario::PartialSend, tk::PingProbeResult::Unavailable},
+        {PingScenario::NoSend, tk::PingProbeResult::Unavailable},
+        {PingScenario::PartialReply, tk::PingProbeResult::Reply},
+        {PingScenario::RequestProfileFail, tk::PingProbeResult::Unavailable},
+    };
+    for (const auto& test : measurement_cases) {
         tk::PingProbeControl control{};
         control.done = xSemaphoreCreateBinary();
-        reset_ping_capture(PingScenario::NoReply);
-        CHECK(tk::ping_probe_run(control, config, 20, 5) ==
-              tk::PingProbeResult::NoReply);
+        reset_ping_capture(test.scenario);
+        CHECK(tk::ping_probe_run(control, config, 20, 5) == test.expected);
         CHECK(ping_delete_calls == 1);
+        CHECK(control.session == nullptr);
+        CHECK(control.generation.active() == 0);
         vSemaphoreDelete(control.done);
     }
 

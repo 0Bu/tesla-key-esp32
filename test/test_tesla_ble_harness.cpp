@@ -160,15 +160,7 @@ struct NativeSessionStorage {
         records[key] = data;
         return true;
     }
-    bool load(const std::string& key, std::vector<uint8_t>& data) {
-        native_require_unlocked();
-        const auto found = records.find(key);
-        if (found == records.end()) return false;
-        data = found->second; return true;
-    }
 };
-static time_t native_session_wall_seconds = 1234;
-static time_t native_session_time(time_t*) { return native_session_wall_seconds; }
 
 // The real firmware method below owns authentication/counter classification and callback order.
 // Hardware/clock/logging and storage/cache/hint sinks are substituted; protocol decisions are not.
@@ -225,7 +217,6 @@ public:
         const UniversalMessage_RoutableMessage_session_info_t&, uint32_t) noexcept;
     void establish_verified_session_locked_(UniversalMessage_Domain, Signatures_SessionInfo&,
         const UniversalMessage_RoutableMessage_session_info_t&);
-    bool load_nvs_sessions_();
     tk::SessionRuntimeState runtime_session_observation_locked_(UniversalMessage_Domain) noexcept;
     void publish_session_runtime_locked_(UniversalMessage_Domain, tk::SessionSaveState, uint32_t) noexcept;
     void invalidate_session_runtime_locked_(UniversalMessage_Domain) noexcept;
@@ -274,14 +265,12 @@ struct NativeRoutingRandom {
 };
 }
 #define CryptoUtils NativeRoutingRandom
-#define time native_session_time
 #include "vcsec-native.inc"
 #define portENTER_CRITICAL(mux) native_mailbox_enter(mux)
 #define portEXIT_CRITICAL(mux) native_mailbox_exit(mux)
 #include "ble-deferred-native.inc"
 #undef portEXIT_CRITICAL
 #undef portENTER_CRITICAL
-#undef time
 #undef CryptoUtils
 #undef pdTICKS_TO_MS
 #undef xTaskGetTickCount
@@ -1469,18 +1458,30 @@ static void check_native_session_availability() {
     {
         Fixture f;
         const auto bytes = kat::unhex(kat::kSessionInfo);
-        f.controller.session_storage.records[tk::nvs_contract::kSessionVcsec] = bytes;
-        UniversalMessage_RoutableMessage_session_info_t payload{};
-        std::memcpy(payload.bytes, bytes.data(), bytes.size()); payload.size = bytes.size();
-        Signatures_SessionInfo parsed = Signatures_SessionInfo_init_default;
-        expect(f.client.parse_payload_session_info(&payload, &parsed) == 0,
-               "stored public test session parses for restore control", "restore fixture could not parse");
-        native_session_wall_seconds = parsed.clock_time + 1;
-        f.controller.command_runner_.vcsec_session().reset(); f.client.get_peer(security)->reset();
-        expect(f.controller.load_nvs_sessions_() && f.controller.session_available() &&
-               f.controller.session_availability().vcsec.save == Save::Confirmed && f.controller.session_persists == 0,
-               "actual existing session restore publishes usable current blob without a new save",
-               "restored session did not publish truthful RAM metadata");
+        auto& records = f.controller.session_storage.records;
+        records[tk::nvs_contract::kSessionVcsec] = bytes;
+        records[tk::nvs_contract::kSessionInfotainment] = bytes;
+        // Boot retains pairing evidence and starts with fresh peers and trackers.
+        f.client.get_peer(security)->reset();
+        f.client.get_peer(info)->reset();
+        f.controller.command_runner_.vcsec_session().reset();
+        f.controller.command_runner_.info_session().reset();
+        f.enqueue();
+        f.controller.drive_command_runner_();
+        const auto auth = f.request();
+        expect(auth.payload == tk::VcsecRequestPayload::SessionInfoRequest &&
+               !f.controller.session_available() && f.controller.session_persists == 0 &&
+               records.at(tk::nvs_contract::kSessionVcsec) == bytes &&
+               records.at(tk::nvs_contract::kSessionInfotainment) == bytes,
+               "retained pairing evidence and fresh peers require a current SessionInfo request",
+               "fresh session request bypassed authentication or changed pairing evidence");
+        send(f.controller, session_info(envelope(auth), auth.uuid));
+        const auto available = f.controller.session_availability();
+        expect(available.vcsec.usable && available.vcsec.save == Save::Confirmed &&
+               !available.infotainment.known && f.controller.session_persists == 1 &&
+               records.at(tk::nvs_contract::kSessionInfotainment) == bytes,
+               "authenticated SessionInfo establishes and persists only its own domain",
+               "fresh VCSEC authentication lost pairing metadata or changed another domain");
     }
 }
 

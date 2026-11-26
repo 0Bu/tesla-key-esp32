@@ -1825,6 +1825,12 @@ static void test_ble_host_health_ota_matrix() {
 
 // ─── asynchronous ping generation / late callback ownership ─────────────────
 static void test_ping_probe_generation() {
+    CHECK(!tk::ping_probe_measurement_valid(3, 0, 0));
+    CHECK(!tk::ping_probe_measurement_valid(3, 2, 0));
+    CHECK(tk::ping_probe_measurement_valid(3, 3, 0));
+    CHECK(tk::ping_probe_measurement_valid(3, 1, 1));
+    CHECK(!tk::ping_probe_measurement_valid(0, 0, 0));
+
     tk::PingProbeGeneration probe;
     std::uint32_t replies = 99;
 
@@ -5727,6 +5733,20 @@ static void test_http_route() {
           HttpRoute::NotFound);
     CHECK(tk::classify_http_route(HttpVerb::Get, "/unknown") == HttpRoute::NotFound);
 
+    const auto logged_path = [](HttpVerb verb, std::string_view uri) {
+        const HttpRoute route = tk::classify_http_route(verb, tk::http_path_only(uri));
+        return std::string_view(tk::http_request_log_path(route));
+    };
+    CHECK(logged_path(HttpVerb::Get, base + "/vehicle_data?endpoints=charge_state") ==
+          "/api/1/vehicles/<redacted>/vehicle_data");
+    CHECK(logged_path(HttpVerb::Get, base + "/body_controller_state") ==
+          "/api/1/vehicles/<redacted>/body_controller_state");
+    CHECK(logged_path(HttpVerb::Post, base + "/command/charge_start") ==
+          "/api/1/vehicles/<redacted>/command/<command>");
+    CHECK(logged_path(HttpVerb::Post, "/ota/update?offer=synthetic-value") == "/ota/update");
+    CHECK(logged_path(HttpVerb::Get, base + "/vehicle_data/extra") == "<unrecognized route>");
+    CHECK(logged_path(HttpVerb::Get, "/status") == "/status");
+
     // Exact fail-closed admission map. The seven vehicle-touching wildcard routes must return 503
     // during Booting, SafeMode and Fatal; recovery/status/config/OTA routes stay available.
     constexpr std::array<HttpRoute, 7> gated{{
@@ -7374,7 +7394,7 @@ static void test_redact() {
     const std::string plain = "I (1234) main: HEAP free=40000 largest_block=20000\n";
     CHECK(tk::redact_diag_line(plain) == plain);
 
-    // The REQUEST-LOG line (http_server.cpp "REQ: %s %s"). Every evcc REST route carries the VIN
+    // Legacy request-log records. Older evcc REST request lines carry the VIN
     // in its path and evcc polls on a loop, so on a working device this is the most FREQUENT VIN
     // sink in the ring — measured at 31 of 286 lines on a live board eleven minutes after boot,
     // and it was the one sink the table missed. The route must survive; only the VIN segment goes.

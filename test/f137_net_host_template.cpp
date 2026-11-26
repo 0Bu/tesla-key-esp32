@@ -21,7 +21,7 @@
 static unsigned checks;
 #define CHECK(x) do{++checks;if(!(x)){std::fprintf(stderr,"FAIL line %d: %s\n",__LINE__,#x);std::exit(42);}}while(false)
 struct HostSemaphore{unsigned tokens{};};
-struct HostPingSession{esp_ping_callbacks_t callbacks{};unsigned replies{};bool ended{};};
+struct HostPingSession{esp_ping_callbacks_t callbacks{};unsigned sent{},replies{};bool ended{};};
 struct esp_netif_t{unsigned identity{};};
 struct esp_ip4_addr_t{std::uint32_t addr{};};
 struct esp_netif_ip_info_t{esp_ip4_addr_t gw{};};
@@ -82,6 +82,9 @@ extern "C" void vTaskDelete(TaskHandle_t task){CHECK(task==nullptr);CHECK(false)
 extern "C" esp_err_t esp_ping_new_session(const esp_ping_config_t* cfg,const esp_ping_callbacks_t* cb,esp_ping_handle_t* out){
     CHECK(cfg && cb && out);CHECK(cfg->count==3 && cfg->timeout_ms==1000 && cfg->interface!=0);
     ++fixture::new_calls;auto* s=new HostPingSession;s->callbacks=*cb;s->replies=fixture::current_replies();
+    // Interrupt the first streak with a local send failure. Recovery still needs two
+    // completed, unanswered batches after that incomplete measurement.
+    s->sent=fixture::mode=="normal" && fixture::step==3?cfg->count-1:cfg->count;
     fixture::last_session=s;*out=s;return ESP_OK;
 }
 extern "C" esp_err_t esp_ping_start(esp_ping_handle_t s){
@@ -94,7 +97,11 @@ extern "C" esp_err_t esp_ping_delete_session(esp_ping_handle_t s){
     delete s;return ESP_OK;
 }
 extern "C" esp_err_t esp_ping_get_profile(esp_ping_handle_t s,int profile,void* value,std::size_t size){
-    CHECK(s && profile==ESP_PING_PROF_REPLY && size==sizeof(unsigned));++fixture::profile_calls;*static_cast<unsigned*>(value)=s->replies;return ESP_OK;
+    CHECK(s && value && size==sizeof(unsigned));
+    CHECK(profile==ESP_PING_PROF_REQUEST || profile==ESP_PING_PROF_REPLY);
+    ++fixture::profile_calls;
+    *static_cast<unsigned*>(value)=profile==ESP_PING_PROF_REQUEST?s->sent:s->replies;
+    return ESP_OK;
 }
 static esp_err_t esp_netif_get_ip_info(esp_netif_t* netif,esp_netif_ip_info_t* ip){CHECK(netif && ip);ip->gw.addr=netif->identity;return ESP_OK;}
 static const char* esp_ip4addr_ntoa(const esp_ip4_addr_t* ip,char* out,std::size_t size){std::snprintf(out,size,"%u",ip->addr);return out;}
@@ -142,16 +149,16 @@ void before_observe(){
         if(step==2){
             esp_ping_config_t config{};config.count=3;config.timeout_ms=1000;config.interface=1;
             CHECK(tk::ping_probe_run(tk::s_wd,config,20,5)==tk::PingProbeResult::PendingEnd);
-            pending=tk::s_wd.session;pending_generation=tk::s_wd.session_generation;
+            pending=tk::s_wd.session;pending_generation=tk::s_wd.callback_args.generation;
             CHECK(pending && !pending->ended && pending_generation!=0);
             throw std::runtime_error("observation with a live quarantined ping");
         }
         if(step==3){
-            CHECK(tk::s_wd.session==pending && tk::s_wd.session_generation==pending_generation);
+            CHECK(tk::s_wd.session==pending && tk::s_wd.callback_args.generation==pending_generation);
             CHECK(tk::s_wd.generation.active()==pending_generation && tk::s_wd.callback_args.control==&tk::s_wd);
             CHECK(tk::s_wd.done==&semaphore && tk::s_wd.session_started && new_calls==2 && delete_calls==1);
             const unsigned gives=give_calls;
-            tk::PingProbeCallbackArgs stale{&tk::s_wd,pending_generation+1};
+            tk::PingProbeCallbackArgs stale{&tk::s_wd,pending_generation+1,3};
             tk::ping_probe_on_end(pending,&stale);CHECK(give_calls==gives);
             CHECK(!tk::s_wd.generation.ended(pending_generation));
         }
@@ -169,9 +176,9 @@ void before_observe(){
     CHECK(recoveries==expected_recoveries);
     for(auto d:delays)CHECK(d==30000 || d==200); // No immediate recovery loop.
     CHECK(tk::s_wd.done==&semaphore);
-    CHECK(tk::s_wd.session==nullptr && tk::s_wd.session_generation==0 && tk::s_wd.generation.active()==0);
+    CHECK(tk::s_wd.session==nullptr && tk::s_wd.callback_args.generation==0 && tk::s_wd.generation.active()==0);
     CHECK(new_calls==delete_calls); // Exact late completion allows retirement, not abandonment.
-    if(mode=="normal")CHECK(recovery_steps.size()==1 && recovery_steps[0]==3);
+    if(mode=="normal")CHECK(recovery_steps.size()==1 && recovery_steps[0]==5);
     if(mode=="partial-recovery")CHECK(recovery_steps.size()==2 && recovery_steps[0]==3 && recovery_steps[1]==8);
     if(mode=="both-baselines")CHECK(recovery_steps.size()==1 && recovery_steps[0]==10);
     if(mode=="pending-preserved")CHECK(recovery_steps.size()==1 && recovery_steps[0]==8 && stop_calls>0);
@@ -186,7 +193,7 @@ void before_observe(){
 }
 int main(int argc,char**argv){
     CHECK(argc==2);fixture::mode=argv[1];tk::s_wd.done=&fixture::semaphore;
-    if(fixture::mode=="normal"){fixture::end_step=3;fixture::expected_recoveries=1;}
+    if(fixture::mode=="normal"){fixture::end_step=5;fixture::expected_recoveries=1;}
     else if(fixture::mode=="partial-recovery"){fixture::end_step=8;fixture::expected_recoveries=2;fixture::throw_recover_once=true;}
     else if(fixture::mode=="both-baselines"){fixture::end_step=10;fixture::expected_recoveries=1;}
     else if(fixture::mode=="pending-preserved"){fixture::end_step=8;fixture::expected_recoveries=1;}

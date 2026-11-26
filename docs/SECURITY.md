@@ -109,8 +109,10 @@ that actually grants a lease.
 
 ## Syslog and diagnostic export
 
-Syslog sends unredacted console logs over cleartext, unauthenticated UDP. VIN, SSID and MACs may
-appear; keep raw logs private and use trusted collectors. Known MQTT URI parse-error records
+Syslog sends console logs over cleartext, unauthenticated UDP. HTTP request logs use fixed route
+names and omit VINs, query strings and request headers. Command logs use registered command names.
+Other logs can contain VINs, SSIDs and MACs. Keep raw logs private and use trusted collectors.
+Known MQTT URI parse-error records
 are replaced before Serial, RAM and Syslog, including when the optional RAM-ring mutex fails.
 This narrow guard does not sanitize arbitrary library or fragmented driver output. `/status?redact=1` and `/diag?redact=1` redact known identifiers,
 but retain the physical board MAC. The ring flattens embedded line breaks in recognized

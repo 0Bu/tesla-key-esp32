@@ -1073,8 +1073,8 @@ static GatewaySample gateway_reachable() {
     if (esp_netif_get_ip_info(netif, &current_ip) != ESP_OK ||
         current_ip.gw.addr != out.identity.address) return out;
     out.usable = true;
-    // Only an exact completed generation with zero replies is evidence of failure. Setup failure
-    // or a quarantined late callback remains "unknown", so the watchdog cannot false-alarm.
+    // Only a fully transmitted probe with zero replies is evidence of failure. Setup errors,
+    // incomplete transmissions and quarantined generations provide no negative evidence.
     out.reachable = result != PingProbeResult::NoReply;
     out.replied = result == PingProbeResult::Reply;
     return out;

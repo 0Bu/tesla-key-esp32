@@ -535,7 +535,6 @@ private:
 
     void drive_command_runner_();
     void process_rx_frame_(const uint8_t* frame, size_t len);
-    bool load_nvs_sessions_();
     tk::SessionRuntimeState runtime_session_observation_locked_(UniversalMessage_Domain domain) noexcept;
     void publish_session_runtime_locked_(UniversalMessage_Domain domain, tk::SessionSaveState save,
                                          uint32_t identity_epoch) noexcept;

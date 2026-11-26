@@ -106,21 +106,10 @@ inline constexpr DiagRedaction kDiagRedactions[] = {
     {"interrupted VIN change detected before key commit — restoring ", ""},
     // vehicle_ctrl.cpp "VehicleController ready for VIN %s"
     {"VehicleController ready for VIN ", ""},
-    // http_api.cpp "CMD %s on VIN %s" — the marker starts AFTER the command name, so which
-    // command ran survives. That half is the diagnostic content; the VIN is only routing.
+    // Older command logs included the VIN after the registered command name.
     {" on VIN ", ""},
-    // http_server.cpp "REQ: %s %s" — the request LOG line, whose second value is the raw URI.
-    // Every evcc REST route embeds the VIN in its path (/api/1/vehicles/<VIN>/vehicle_data,
-    // /api/1/vehicles/<VIN>/command/<cmd>), and evcc polls on a loop, so on a device doing its
-    // job this is the single most FREQUENT line in the ring — measured at 31 of 286 lines on a
-    // board eleven minutes after boot. It was the one VIN sink not covered here, which made the
-    // whole `?redact=1` promise false for its primary user: the reader pastes a log they believe
-    // is scrubbed and it names their car dozens of times.
-    //
-    // The end token is "/", so only the path segment holding the VIN is replaced and the route
-    // that was called survives — which command or endpoint ran is the diagnostic content, the
-    // VIN is only addressing. A truncated line with no closing "/" fails closed to the end of
-    // the line, like every other rule here.
+    // Older request logs used raw vehicle URIs. Replace the VIN segment and keep the route.
+    // A truncated line with no closing slash is scrubbed to the end of the line.
     {"/api/1/vehicles/", "/"},
     // vehicle_telemetry.cpp "Tesla MAC saved: %s"
     {"Tesla MAC saved: ", ""},

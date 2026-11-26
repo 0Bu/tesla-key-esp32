@@ -119,6 +119,20 @@ inline constexpr HttpRoute classify_http_route(HttpVerb verb,
     return HttpRoute::NotFound;
 }
 
+// Only firmware-owned labels reach the logs, including for malformed or unknown requests.
+inline constexpr const char* http_request_log_path(HttpRoute route) noexcept {
+    switch (route) {
+        case HttpRoute::Command:        return "/api/1/vehicles/<redacted>/command/<command>";
+        case HttpRoute::VehicleData:    return "/api/1/vehicles/<redacted>/vehicle_data";
+        case HttpRoute::BodyController: return "/api/1/vehicles/<redacted>/body_controller_state";
+        default: break;
+    }
+    for (const FixedHttpRoute& fixed : kFixedHttpRoutes) {
+        if (fixed.route == route) return fixed.path.data();
+    }
+    return "<unrecognized route>";
+}
+
 // Diagnostic GETs expose device state without the evcc compatibility contract. Bind their Host
 // to an owned name/address even when browser provenance headers are absent.
 inline constexpr bool http_route_requires_owned_host(HttpVerb verb, HttpRoute route) noexcept {

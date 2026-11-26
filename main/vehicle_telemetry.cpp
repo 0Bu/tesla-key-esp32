@@ -804,67 +804,6 @@ bool VehicleController::save_session_runtime_locked_(UniversalMessage_Domain dom
     return saved;
 }
 
-bool VehicleController::load_nvs_sessions_() {
-    if (!storage_ || !client_) return false;
-    bool any_loaded = false;
-
-    auto load_domain = [&](UniversalMessage_Domain domain, const char* key, tk::BleDomain tk_domain) {
-        std::vector<uint8_t> session_data;
-        if (!storage_->load(key, session_data) || session_data.empty()) {
-            return;
-        }
-        if (session_data.size() > sizeof(UniversalMessage_RoutableMessage_session_info_t::bytes)) {
-            ESP_LOGW(TAG, "Stored session data too large for %s: %zu", key, session_data.size());
-            return;
-        }
-
-        UniversalMessage_RoutableMessage_session_info_t buf{};
-        std::memcpy(buf.bytes, session_data.data(), session_data.size());
-        buf.size = session_data.size();
-
-        Signatures_SessionInfo session_info = Signatures_SessionInfo_init_default;
-        if (client_->parse_payload_session_info(&buf, &session_info) != 0) {
-            ESP_LOGW(TAG, "Failed to parse stored session for %s", key);
-            return;
-        }
-
-        if (session_info.status != Signatures_Session_Info_Status_SESSION_INFO_STATUS_OK) {
-            ESP_LOGW(TAG, "Stored session for %s has non-OK status: %d", key, static_cast<int>(session_info.status));
-            return;
-        }
-
-        const uint32_t current_time = static_cast<uint32_t>(time(nullptr));
-        const uint32_t session_time = session_info.clock_time;
-        if (session_time == 0) {
-            ESP_LOGW(TAG, "Stored session for %s has no timestamp; rejecting", key);
-            return;
-        }
-        const int64_t session_age_seconds = static_cast<int64_t>(current_time) - static_cast<int64_t>(session_time);
-        if (session_age_seconds >= 0 && session_age_seconds > 3600) {
-            ESP_LOGW(TAG, "Stored session for %s is expired (%lld s old); rejecting", key, (long long)session_age_seconds);
-            return;
-        }
-
-        auto* peer = client_->get_peer(domain);
-        if (peer && peer->update_session(&session_info) == 0 && peer->is_initialized()) {
-            ESP_LOGI(TAG, "Loaded session from NVS for %s (counter: %lu)", key, (unsigned long)session_info.counter);
-            auto& tracker = (tk_domain == tk::BleDomain::VehicleSecurity)
-                ? command_runner_.vcsec_session() : command_runner_.info_session();
-            std::array<uint8_t, 16> epoch_arr{};
-            std::memcpy(epoch_arr.data(), session_info.epoch, 16);
-            tracker.set_established(epoch_arr, session_info.counter, session_info.clock_time);
-            publish_session_runtime_locked_(domain, tk::SessionSaveState::Confirmed,
-                                           identity_epoch_.load(std::memory_order_acquire));
-            any_loaded = true;
-        }
-    };
-
-    load_domain(UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY, tk::nvs_contract::kSessionVcsec, tk::BleDomain::VehicleSecurity);
-    load_domain(UniversalMessage_Domain_DOMAIN_INFOTAINMENT, tk::nvs_contract::kSessionInfotainment, tk::BleDomain::Infotainment);
-
-    return any_loaded;
-}
-
 bool VehicleController::response_matches_current_(const UniversalMessage_RoutableMessage& msg) {
     if (!msg.has_from_destination || !msg.has_to_destination ||
         msg.from_destination.which_sub_destination != UniversalMessage_Destination_domain_tag) return false;
