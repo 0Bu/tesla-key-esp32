@@ -269,7 +269,7 @@ pair uniformly with `409`; unchanged admitted WiFi remains write/restart-free. S
 
 Before NTP has committed, `/set_time` accepts only finite milliseconds in the interval from
 1700000000000 (inclusive) to the boot-time plausibility ceiling (exclusive). Normal reproducible
-builds omit the app date and use **2033-01-01** as that ceiling; the [clock contract](ARCHITECTURE.md#clock-authority-and-session-restore)
+builds omit the app date and use **2033-01-01** as that ceiling; the [clock contract](ARCHITECTURE.md#clock-authority-and-session-establishment)
 describes the limit. Clock admission can return
 `503` when busy or `500` when the clock syscall fails; neither response claims successful application.
 `/ota/check?ms=` accepts canonical unsigned integer milliseconds in the same interval, including
