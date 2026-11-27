@@ -155,7 +155,7 @@ static esp_err_t handle_tools_call_(GuardedReq rq, const tk::mcp_json::RpcId& id
         request.reset();
         return send_rpc_error_(req, id, tk::kJsonRpcInvalidParams, "unknown tool");
     }
-    ESP_LOGI(TAG, "tools/call %s", name);
+    ESP_LOGI(TAG, "tools/call %s", info->mcp_name);
     const cJSON* args = cJSON_GetObjectItemCaseSensitive(params, "arguments");
 
     // Validate + extract the arguments against the spec table (logic/mcp.hpp), keeping
