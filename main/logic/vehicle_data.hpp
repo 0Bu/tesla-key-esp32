@@ -118,38 +118,53 @@ inline double vehicle_data_number(double value) noexcept {
 // charging_state is the field evcc reads as the car's plugged-in status. The cache is never
 // invalidated on a link loss, so a car that drove off would stay "Complete" (evcc B) or "Charging"
 // (C) until it returned. Once the link is Unreachable the state is unknown; the jq mapping turns
-// that into A. The numeric fields stay last-known, because an HTTP 503 would stop evcc's loadpoint
-// cycle on some chargers. docs/API.md (Vehicle data) owns the conditions and the trade-off.
+// that into A, while HTTP 200 stays intact outside the active window so vehicle-api/twc3 chargers
+// reading status do not abort loadpoint cycles on a 503. emit_vehicle_charge_state() pairs that
+// with null/zero sanitization so stale cache readings never pose as current while Unreachable.
+// docs/API.md (Vehicle data) owns the conditions and the trade-off.
 inline const char* vehicle_charging_state(const ChargeStateResult& cs, LinkState link) noexcept {
     if (link == LinkState::Unreachable) return "Unknown";
     return cs.charging_state.empty() ? "Unknown" : cs.charging_state.c_str();
 }
 
 // Serialize charge_state for GET /api/1/vehicles/{VIN}/vehicle_data. Keep every key.
-// The stock evcc template reads the three control numbers independently. JSON null makes
-// that getter fail without replacing real zero readings or hiding other known fields.
-// The zero-initialized generic error envelope still has its legacy numeric placeholders.
+// On a reachable car, unreported or invalid control values emit JSON null so evcc's numeric
+// getters reject them without replacing real zero readings or hiding other known fields, and
+// parked/sleeping cars continue serving last-known cached values without waking.
+// When cs.valid && link == LinkState::Unreachable, stale vehicle readings (battery_level,
+// usable_battery_level, charge_limit_soc, charge_amps, battery_range) emit JSON null and
+// active-session counters (charger_power, charge_rate, charge_energy_added,
+// minutes_to_full_charge) emit 0 so an absent car neither extrapolates an old SoC nor reports
+// stale live power, rate or session energy.
+// The zero-initialized (!cs.valid) 503 error envelope keeps its legacy 0 numeric placeholders.
 template <typename Emitter>
 void emit_vehicle_charge_state(const ChargeStateResult& cs, LinkState link, Emitter& e) {
+    const bool unreachable_cache = cs.valid && link == LinkState::Unreachable;
     e.str("charging_state", vehicle_charging_state(cs, link));
-    if (!cs.valid || (cs.has_battery_level && cs.battery_level >= 0 && cs.battery_level <= 100))
+    if (!unreachable_cache && (!cs.valid || (cs.has_battery_level && cs.battery_level >= 0 && cs.battery_level <= 100)))
         e.num("battery_level", vehicle_data_number(cs.battery_level));
     else
         e.null("battery_level");
-    e.num("usable_battery_level",   vehicle_data_number(cs.has_usable_battery_level ? cs.usable_battery_level : cs.battery_level));
-    if (!cs.valid || (cs.has_charge_limit_soc && cs.charge_limit_soc > 0 && cs.charge_limit_soc <= 100))
+    if (unreachable_cache)
+        e.null("usable_battery_level");
+    else
+        e.num("usable_battery_level", vehicle_data_number(cs.has_usable_battery_level ? cs.usable_battery_level : cs.battery_level));
+    if (!unreachable_cache && (!cs.valid || (cs.has_charge_limit_soc && cs.charge_limit_soc > 0 && cs.charge_limit_soc <= 100)))
         e.num("charge_limit_soc", vehicle_data_number(cs.charge_limit_soc));
     else
         e.null("charge_limit_soc");
-    e.num("charger_power",          vehicle_data_number(cs.charger_power));
-    e.num("charge_rate",            vehicle_data_number(cs.charge_rate));
-    if (!cs.valid || (cs.has_charging_amps && cs.charging_amps >= 0))
+    e.num("charger_power",          unreachable_cache ? 0.0 : vehicle_data_number(cs.charger_power));
+    e.num("charge_rate",            unreachable_cache ? 0.0 : vehicle_data_number(cs.charge_rate));
+    if (!unreachable_cache && (!cs.valid || (cs.has_charging_amps && cs.charging_amps >= 0)))
         e.num("charge_amps", cs.charging_amps);
     else
         e.null("charge_amps");
-    e.num("charge_energy_added",    vehicle_data_number(cs.charge_energy_added));
-    e.num("battery_range",          vehicle_data_number(cs.battery_range));
-    e.num("minutes_to_full_charge", cs.minutes_to_full_charge);
+    e.num("charge_energy_added",    unreachable_cache ? 0.0 : vehicle_data_number(cs.charge_energy_added));
+    if (unreachable_cache)
+        e.null("battery_range");
+    else
+        e.num("battery_range", vehicle_data_number(cs.battery_range));
+    e.num("minutes_to_full_charge", unreachable_cache ? 0 : cs.minutes_to_full_charge);
 }
 
 // Fixed snapshot for the five evcc climate fields; the API never copies unrelated cache strings.

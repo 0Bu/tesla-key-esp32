@@ -315,15 +315,18 @@ void BleClient::on_reset() {
            !host_reset_count_.compare_exchange_weak(
                resets, resets + 1, std::memory_order_acq_rel, std::memory_order_acquire)) {
     }
+    uint32_t published_generation = 0;
     {
         // Host-reset publication is fail-closed and must never wedge the NimBLE host behind a
         // task-owned lifecycle transaction. If contended, cancel the old intent rather than
-        // guessing that a multi-step task mutation is safe to preserve.
+        // guessing that a multi-step task mutation is safe to preserve. link_mux_ serializes
+        // handle/generation retirement against concurrent zombie-handle cleanup in service_pending().
         tk::SemGuard intent(intent_mutex_, 0);
         if (!intent) want_connect_.store(false);
-        disconnecting_.store(true);
         const tk::ble::ConnectLifecycle lifecycle =
             tk::ble::connect_lifecycle_after_host_reset(want_connect_.load());
+        portENTER_CRITICAL(&link_mux_);
+        disconnecting_.store(true);
         // Odd generation means "handles changing". Publish that before any other host-reset
         // bookkeeping so a command task cannot snapshot the old handles as a new stable link.
         connection_generation_.fetch_add(1);
@@ -331,18 +334,26 @@ void BleClient::on_reset() {
         host_synced_ = false;
         scanning_    = false;
         connecting_.store(lifecycle.connecting);
+        connect_started_us_.store(0);
+        cancel_connect_pending_.store(false);
+        terminate_enotconn_streak_.store(0);
+        last_scan_err_rc_.store(0);
+        last_scan_err_log_us_.store(0);
         conn_handle_.store(BLE_HS_CONN_HANDLE_NONE);
         pending_terminate_handle_.store(BLE_HS_CONN_HANDLE_NONE);
         write_handle_.store(0);
         ready_generation_.store(tk::ble::kNoReadyGeneration);
         write_payload_size_.store(tk::kBleDefaultWritePayload);
+        notify_val_handle_.store(0);
+        cccd_handle_.store(0);
         conn_rssi_valid_.store(false);
         disconnecting_.store(false);
-        connection_generation_.fetch_add(1);  // even: disconnected snapshot is stable
+        published_generation = connection_generation_.fetch_add(1) + 1;  // even: stable
+        portEXIT_CRITICAL(&link_mux_);
     }
     if (on_connected_) {
         (void)on_connected_(connected_context_, false, BLE_HS_CONN_HANDLE_NONE,
-                            connection_generation_.load());
+                            published_generation);
     }
 }
 
@@ -373,12 +384,25 @@ bool BleClient::start_scan_locked_() {
     const bool running = tk::ble::scan_running_after_start(was_running, result);
     scanning_.store(running);
     if (result == tk::ble::ScanStartResult::Failed) {
-        ESP_LOGD(TAG, "scan start failed: %d", rc);
+        if (rc == BLE_HS_EBUSY) {
+            cancel_connect_pending_.store(true);
+        }
+        const int64_t now_us = esp_timer_get_time();
+        if (tk::ble::scan_error_log_due(rc, last_scan_err_rc_.load(),
+                                        last_scan_err_log_us_.load(), now_us)) {
+            last_scan_err_rc_.store(rc);
+            last_scan_err_log_us_.store(now_us);
+            ESP_LOGW(TAG, "BLE scan start failed (rc=%d)", rc);
+        } else {
+            ESP_LOGD(TAG, "scan start failed: %d", rc);
+        }
     } else if (result == tk::ble::ScanStartResult::Started) {
+        last_scan_err_rc_.store(0);
         ESP_LOGD(TAG, "scanning for Tesla BLE...");
     } else {
         // EALREADY is not a failure: NimBLE returns it only when discovery is already active.
         // Publishing true repairs a stale local snapshot instead of orphaning the live scan.
+        last_scan_err_rc_.store(0);
         ESP_LOGD(TAG, "Tesla BLE scan already active");
     }
     return running;
@@ -403,6 +427,26 @@ bool BleClient::cancel_scan_locked_() {
     return !running;
 }
 
+bool BleClient::cancel_connect_locked_() {
+    const bool was_connecting = connecting_.load();
+    const int rc = ble_gap_conn_cancel();
+    const tk::ble::ConnectCancelResult result =
+        rc == 0 ? tk::ble::ConnectCancelResult::Canceled
+                : ((rc == BLE_HS_EALREADY || rc == BLE_HS_ENOTCONN)
+                       ? tk::ble::ConnectCancelResult::AlreadyStopped
+                       : tk::ble::ConnectCancelResult::Failed);
+    connecting_.store(tk::ble::connecting_after_cancel(was_connecting, result));
+    if (!connecting_.load()) {
+        connect_started_us_.store(0);
+        cancel_connect_pending_.store(false);
+    } else if (!cancel_connect_pending_.exchange(true)) {
+        ESP_LOGW(TAG, "BLE connect cancel failed (rc=%d)", rc);
+    } else {
+        ESP_LOGD(TAG, "BLE connect cancel failed (rc=%d)", rc);
+    }
+    return !connecting_.load();
+}
+
 // Start a discovery scan if we are idle (not connected and not mid-connect).
 void BleClient::ensure_scanning_(TickType_t timeout) {
     if (!intent_mutex_) return;
@@ -425,16 +469,85 @@ void BleClient::service_pending() {
     }
     const uint32_t pending = terminate_pending_generation_.exchange(tk::ble::kNoReadyGeneration);
     if (pending != tk::ble::kNoReadyGeneration) terminate_published_link_(pending);
+    if (disconnecting_.load() && conn_handle_.load() != BLE_HS_CONN_HANDLE_NONE &&
+        tk::ble::zombie_terminate_should_retire(terminate_enotconn_streak_.load())) {
+        bool retired = false;
+        uint32_t retired_generation = 0;
+        {
+            tk::SemGuard intent(intent_mutex_, 0);
+            if (intent) {
+                portENTER_CRITICAL(&link_mux_);
+                const uint32_t generation = connection_generation_.load();
+                if (disconnecting_.load() && !(generation & 1U) &&
+                    conn_handle_.load() != BLE_HS_CONN_HANDLE_NONE &&
+                    tk::ble::zombie_terminate_should_retire(terminate_enotconn_streak_.load())) {
+                    connection_generation_.fetch_add(1);
+                    conn_handle_.store(BLE_HS_CONN_HANDLE_NONE);
+                    write_handle_.store(0);
+                    ready_generation_.store(tk::ble::kNoReadyGeneration);
+                    write_payload_size_.store(tk::kBleDefaultWritePayload);
+                    notify_val_handle_.store(0);
+                    cccd_handle_.store(0);
+                    connecting_.store(false);
+                    connect_started_us_.store(0);
+                    cancel_connect_pending_.store(false);
+                    scanning_.store(false);
+                    conn_rssi_valid_.store(false);
+                    disconnecting_.store(false);
+                    terminate_enotconn_streak_.store(0);
+                    terminate_pending_generation_.store(tk::ble::kNoReadyGeneration);
+                    retired_generation = connection_generation_.fetch_add(1) + 1;
+                    retired = true;
+                }
+                portEXIT_CRITICAL(&link_mux_);
+            }
+        }
+        if (retired) {
+            ESP_LOGW(TAG, "retiring stale BLE handle after repeated ENOTCONN");
+            if (on_connected_) {
+                (void)on_connected_(connected_context_, false, BLE_HS_CONN_HANDLE_NONE,
+                                    retired_generation);
+            }
+            if (want_connect_.load()) ensure_scanning_(0);
+        }
+    }
+    const bool timed_out = tk::ble::connecting_timed_out(
+        connecting_.load(), connect_started_us_.load(), esp_timer_get_time());
+    if (cancel_connect_pending_.load() || timed_out) {
+        tk::SemGuard intent(intent_mutex_, 0);
+        if (intent) {
+            const bool timed_out_locked = tk::ble::connecting_timed_out(
+                connecting_.load(), connect_started_us_.load(), esp_timer_get_time());
+            if (cancel_connect_pending_.load() || timed_out_locked) {
+                if (timed_out_locked) {
+                    ESP_LOGW(TAG, "BLE connect timed out without GAP completion — canceling");
+                }
+                (void)cancel_connect_locked_();
+                if (timed_out_locked && connecting_.load()) {
+                    connecting_.store(false);
+                    connect_started_us_.store(0);
+                    cancel_connect_pending_.store(false);
+                }
+                if (want_connect_.load()) ensure_scanning_locked_();
+            }
+        }
+    }
     if (scan_pending_.exchange(false) && want_connect_.load()) ensure_scanning_(0);
     if (disconnecting_.load() && !has_gap_link_()) {
         tk::SemGuard intent(intent_mutex_, 0);
-        const uint32_t generation = connection_generation_.load();
-        if (intent && !(generation & 1U) && conn_handle_.load() == BLE_HS_CONN_HANDLE_NONE &&
-            connection_generation_.load() == generation) {
-            // A retirement may have bypassed a task-held lifecycle lock. Repair its stale flag
-            // only with no live handle, then service any newer intent that arrived in that gap.
-            disconnecting_.store(false);
-            ensure_scanning_locked_();
+        if (intent) {
+            bool repaired = false;
+            portENTER_CRITICAL(&link_mux_);
+            const uint32_t generation = connection_generation_.load();
+            if (disconnecting_.load() && !(generation & 1U) &&
+                conn_handle_.load() == BLE_HS_CONN_HANDLE_NONE) {
+                // A retirement may have bypassed a task-held lifecycle lock. Repair its stale flag
+                // only with no live handle, then service any newer intent that arrived in that gap.
+                disconnecting_.store(false);
+                repaired = true;
+            }
+            portEXIT_CRITICAL(&link_mux_);
+            if (repaired) ensure_scanning_locked_();
         }
     }
 }
@@ -729,6 +842,8 @@ void BleClient::stop_connecting() {
             // delayed callbacks cannot call on_connected(true) or publish a ready generation.
             disconnecting_.store(true);
             ready_generation_.store(tk::ble::kNoReadyGeneration);
+        } else if (connecting_.load()) {
+            (void)cancel_connect_locked_();
         } else if (scanning_.load()) {
             // No idle scanning: cancel the connect scan if it is still running.
             cancel_scan_locked_();
@@ -792,8 +907,18 @@ void BleClient::terminate_published_link_(uint32_t expected_generation) {
         // a concurrent retirement cleared it, even if that event bypassed the zero-wait lock.
         if (connection_generation_.load() != generation) continue;
         if (conn_handle != BLE_HS_CONN_HANDLE_NONE) {
-            if (ble_gap_terminate(conn_handle, BLE_ERR_REM_USER_CONN_TERM) != 0) return;
+            const int rc = ble_gap_terminate(conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+            if (rc != 0) {
+                if (rc == BLE_HS_ENOTCONN) {
+                    terminate_enotconn_streak_.fetch_add(1);
+                } else {
+                    terminate_enotconn_streak_.store(0);
+                }
+                return;
+            }
+            terminate_enotconn_streak_.store(0);
         } else {
+            terminate_enotconn_streak_.store(0);
             disconnecting_.store(false);
         }
         terminate_pending_generation_.compare_exchange_strong(expected_generation,
@@ -974,8 +1099,12 @@ int BleClient::on_gap_event(ble_gap_event* event) {
                                  &event->disc.addr,
                                  10000, nullptr,
                                  gap_event_cb, this);
-            if (rc != 0) {
+            if (rc == 0) {
+                connect_started_us_.store(esp_timer_get_time());
+                cancel_connect_pending_.store(false);
+            } else {
                 ESP_LOGD(TAG, "connect failed: %d", rc);
+                connect_started_us_.store(0);
                 ready_generation_.store(tk::ble::kNoReadyGeneration);
                 connect_fail_count_.fetch_add(1);
                 const tk::ble::ConnectLifecycle lifecycle =
@@ -990,6 +1119,8 @@ int BleClient::on_gap_event(ble_gap_event* event) {
     case BLE_GAP_EVENT_CONNECT: {
         if (event->connect.status != 0) {
             ESP_LOGD(TAG, "connect error: %d", event->connect.status);
+            connect_started_us_.store(0);
+            cancel_connect_pending_.store(false);
             ready_generation_.store(tk::ble::kNoReadyGeneration);
             connect_fail_count_.fetch_add(1);   // advert was heard but the link never came up
             // No link was published, so preserve runtime session state.
@@ -1010,6 +1141,9 @@ int BleClient::on_gap_event(ble_gap_event* event) {
             tk::SemGuard intent(intent_mutex_, 0);
             if (!intent) {
                 connecting_.store(false);
+                connect_started_us_.store(0);
+                cancel_connect_pending_.store(false);
+                terminate_enotconn_streak_.store(0);
                 scan_pending_.store(true);
                 const int term_rc = ble_gap_terminate(event->connect.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
                 if (term_rc != 0 && term_rc != BLE_HS_ENOTCONN && term_rc != BLE_HS_EALREADY) {
@@ -1020,8 +1154,12 @@ int BleClient::on_gap_event(ble_gap_event* event) {
             const tk::ble::ConnectLifecycle discovering =
                 tk::ble::connect_lifecycle_after_gap_connected(want_connect_.load());
             connecting_.store(discovering.connecting);
+            connect_started_us_.store(0);
+            cancel_connect_pending_.store(false);
+            terminate_enotconn_streak_.store(0);
             // Publish a fresh, internally consistent handle generation. Odd means the host is
             // changing the snapshot; command tasks reject it until the final even generation.
+            portENTER_CRITICAL(&link_mux_);
             connection_generation_.fetch_add(1);
             write_handle_.store(0);
             ready_generation_.store(tk::ble::kNoReadyGeneration);
@@ -1037,8 +1175,8 @@ int BleClient::on_gap_event(ble_gap_event* event) {
             svc_start_handle_  = 0;
             svc_end_handle_    = 0;
             write_handle_.store(0);
-            notify_val_handle_ = 0;
-            cccd_handle_       = 0;
+            notify_val_handle_.store(0);
+            cccd_handle_.store(0);
 
             const uint32_t generation = connection_generation_.load();
             if (!tk::ble::connect_attempt_may_advance(
@@ -1048,7 +1186,9 @@ int BleClient::on_gap_event(ble_gap_event* event) {
                 ready_generation_.store(tk::ble::kNoReadyGeneration);
                 canceled = true;
                 canceled_generation = generation;
-            } else {
+            }
+            portEXIT_CRITICAL(&link_mux_);
+            if (!canceled) {
                 // Queue service discovery while cancellation is excluded. Once queued, a later
                 // stop marks disconnecting before any callback can pass its snapshot gate.
                 void* generation_arg =
@@ -1076,36 +1216,49 @@ int BleClient::on_gap_event(ble_gap_event* event) {
         const uint16_t disconnected_handle = event->disconnect.conn.conn_handle;
         uint16_t expected_orphan = disconnected_handle;
         pending_terminate_handle_.compare_exchange_strong(expected_orphan, BLE_HS_CONN_HANDLE_NONE);
-        if (disconnected_handle == BLE_HS_CONN_HANDLE_NONE ||
-            conn_handle_.load() != disconnected_handle) {
+        if (disconnected_handle == BLE_HS_CONN_HANDLE_NONE) {
             if (want_connect_.load()) scan_pending_.store(true);
             break;
         }
+        bool retired_here = false;
         bool reconnect = false;
+        uint32_t published_generation = 0;
         {
             tk::SemGuard intent(intent_mutex_, 0);
             const tk::ble::DisconnectFollowup followup =
                 tk::ble::disconnect_followup(static_cast<bool>(intent), want_connect_.load());
-            if (followup.defer_reconcile) scan_pending_.store(true);
-            // Invalidate first: connection state transitions and command tasks can run synchronously from
-            // the callbacks below, and none may adopt the old handles under a fresh generation.
-            disconnecting_.store(true);
-            connection_generation_.fetch_add(1);
-            conn_handle_.store(BLE_HS_CONN_HANDLE_NONE);
-            write_handle_.store(0);
-            ready_generation_.store(tk::ble::kNoReadyGeneration);
-            write_payload_size_.store(tk::kBleDefaultWritePayload);
-            notify_val_handle_ = 0;
-            cccd_handle_       = 0;
-            connecting_        = false;
-            // A new command may have called connect() after disconnect() initiated termination but
-            // before this delayed event arrived. Preserve that fresh intent and restart its scan
-            // after the old link snapshot has been retired.
-            reconnect = followup.restart_scan_now;
-            scanning_ = false;
-            conn_rssi_valid_.store(false);   // stale once the link is gone
-            disconnecting_.store(false);
-            connection_generation_.fetch_add(1);  // even: disconnected snapshot is stable
+            portENTER_CRITICAL(&link_mux_);
+            if (conn_handle_.load() == disconnected_handle) {
+                if (followup.defer_reconcile) scan_pending_.store(true);
+                // Invalidate first: connection state transitions and command tasks can run synchronously from
+                // the callbacks below, and none may adopt the old handles under a fresh generation.
+                disconnecting_.store(true);
+                connection_generation_.fetch_add(1);
+                conn_handle_.store(BLE_HS_CONN_HANDLE_NONE);
+                write_handle_.store(0);
+                ready_generation_.store(tk::ble::kNoReadyGeneration);
+                write_payload_size_.store(tk::kBleDefaultWritePayload);
+                notify_val_handle_.store(0);
+                cccd_handle_.store(0);
+                connecting_        = false;
+                connect_started_us_.store(0);
+                cancel_connect_pending_.store(false);
+                terminate_enotconn_streak_.store(0);
+                // A new command may have called connect() after disconnect() initiated termination but
+                // before this delayed event arrived. Preserve that fresh intent and restart its scan
+                // after the old link snapshot has been retired.
+                reconnect = followup.restart_scan_now;
+                scanning_ = false;
+                conn_rssi_valid_.store(false);   // stale once the link is gone
+                disconnecting_.store(false);
+                published_generation = connection_generation_.fetch_add(1) + 1;  // even: stable
+                retired_here = true;
+            }
+            portEXIT_CRITICAL(&link_mux_);
+        }
+        if (!retired_here) {
+            if (want_connect_.load()) scan_pending_.store(true);
+            break;
         }
         {
             tk::SemGuard g(client_mutex_, 0);
@@ -1113,7 +1266,7 @@ int BleClient::on_gap_event(ble_gap_event* event) {
         }
         if (on_connected_) {
             (void)on_connected_(connected_context_, false, BLE_HS_CONN_HANDLE_NONE,
-                                connection_generation_.load());
+                                published_generation);
         }
         if (reconnect) ensure_scanning_(0);
         // Otherwise stay idle (no auto-scan); discovery is manual, connect is on demand.
@@ -1122,7 +1275,7 @@ int BleClient::on_gap_event(ble_gap_event* event) {
 
     case BLE_GAP_EVENT_NOTIFY_RX: {
         const uint32_t generation = connection_generation_.load();
-        if (event->notify_rx.attr_handle != notify_val_handle_) break;
+        if (event->notify_rx.attr_handle != notify_val_handle_.load()) break;
         struct os_mbuf* om = event->notify_rx.om;
         if (!om) break;
         const uint16_t pkt_len = OS_MBUF_PKTLEN(om);
@@ -1162,6 +1315,22 @@ int BleClient::on_gap_event(ble_gap_event* event) {
                 tk::ble_write_payload_for_mtu(event->mtu.value)));
         }
         break;
+
+    case BLE_GAP_EVENT_DISC_COMPLETE: {
+        ESP_LOGD(TAG, "scan complete, reason=%d", event->disc_complete.reason);
+        tk::SemGuard intent(intent_mutex_, 0);
+        scanning_.store(false);
+        if (tk::ble::disc_complete_should_restart(
+                want_connect_.load(), disconnecting_.load(), has_gap_link_(),
+                connecting_.load())) {
+            if (intent) {
+                ensure_scanning_locked_();
+            } else {
+                scan_pending_.store(true);
+            }
+        }
+        break;
+    }
 
     default:
         break;
@@ -1253,14 +1422,15 @@ int BleClient::on_chr_disc(uint16_t conn_handle, uint32_t generation,
     if (!connection_snapshot_matches_(conn_handle, generation)) return 0;
     if (error->status == BLE_HS_EDONE) {
         const uint16_t write_handle = write_handle_.load();
-        if (write_handle == 0 || notify_val_handle_ == 0) {
+        const uint16_t notify_handle = notify_val_handle_.load();
+        if (write_handle == 0 || notify_handle == 0) {
             ESP_LOGD(TAG, "required characteristics not found (write=%d notify=%d)",
-                     write_handle, notify_val_handle_);
+                     write_handle, notify_handle);
             disconnect_from_callback_();
             return 0;
         }
         ESP_LOGD(TAG, "BLE characteristics ready (write=%d notify=%d)",
-                 write_handle, notify_val_handle_);
+                 write_handle, notify_handle);
         // Subscribe to notifications
         subscribe_notify_(conn_handle, generation);
         return 0;
@@ -1276,8 +1446,8 @@ int BleClient::on_chr_disc(uint16_t conn_handle, uint32_t generation,
         write_handle_.store(chr->val_handle);
         ESP_LOGD(TAG, "write chr: %d", chr->val_handle);
     } else if (ble_uuid_cmp(&chr->uuid.u, &TESLA_NOTIFY_UUID.u) == 0) {
-        notify_val_handle_ = chr->val_handle;
-        ESP_LOGD(TAG, "notify chr: val=%d", notify_val_handle_);
+        notify_val_handle_.store(chr->val_handle);
+        ESP_LOGD(TAG, "notify chr: val=%d", chr->val_handle);
     }
     return 0;
     } catch (const std::exception& e) {
@@ -1300,9 +1470,9 @@ void BleClient::subscribe_notify_(uint16_t conn_handle, uint32_t generation) {
     // the device's ONLY receive channel: notifications never arrive, so every command then times
     // out as "vehicle not reachable" with no other symptom. Discover, then enable in on_dsc_disc().
     if (!connection_snapshot_matches_(conn_handle, generation)) return;
-    cccd_handle_ = 0;
+    cccd_handle_.store(0);
     void* generation_arg = reinterpret_cast<void*>(static_cast<uintptr_t>(generation));
-    int rc = ble_gattc_disc_all_dscs(conn_handle, notify_val_handle_, svc_end_handle_,
+    int rc = ble_gattc_disc_all_dscs(conn_handle, notify_val_handle_.load(), svc_end_handle_,
                                      dsc_disc_cb, generation_arg);
     if (rc != 0) {
         ESP_LOGD(TAG, "CCCD discovery start failed: %d", rc);
@@ -1315,16 +1485,17 @@ int BleClient::on_dsc_disc(uint16_t conn_handle, const ble_gatt_error* error,
                            uint32_t generation) {
     try {
     if (!connection_snapshot_matches_(conn_handle, generation) ||
-        chr_val_handle != notify_val_handle_) return 0;
+        chr_val_handle != notify_val_handle_.load()) return 0;
     if (error->status == BLE_HS_EDONE) {
-        if (cccd_handle_ == 0) {
+        const uint16_t cccd = cccd_handle_.load();
+        if (cccd == 0) {
             ESP_LOGD(TAG, "CCCD (0x2902) not found for notify chr — cannot subscribe");
             disconnect_from_callback_();
             return 0;
         }
         uint8_t value[2] = {0x01, 0x00};   // 0x0001 = enable notifications (BLE_GATT_SUB_NOTIFY)
         void* generation_arg = reinterpret_cast<void*>(static_cast<uintptr_t>(generation));
-        int rc = ble_gattc_write_flat(conn_handle, cccd_handle_,
+        int rc = ble_gattc_write_flat(conn_handle, cccd,
                                        value, sizeof(value), subscribe_write_cb,
                                        generation_arg);
         if (rc != 0) {
@@ -1332,7 +1503,7 @@ int BleClient::on_dsc_disc(uint16_t conn_handle, const ble_gatt_error* error,
             disconnect_from_callback_();
             return 0;
         }
-        ESP_LOGD(TAG, "CCCD subscription write queued (handle %d)", cccd_handle_);
+        ESP_LOGD(TAG, "CCCD subscription write queued (handle %d)", cccd);
         return 0;
     }
     if (error->status != 0) {
@@ -1342,9 +1513,9 @@ int BleClient::on_dsc_disc(uint16_t conn_handle, const ble_gatt_error* error,
     }
     if (!dsc) return 0;
     // First 0x2902 at/after the notify value handle is that characteristic's CCCD.
-    if (cccd_handle_ == 0 && ble_uuid_cmp(&dsc->uuid.u, &CCCD_UUID.u) == 0) {
-        cccd_handle_ = dsc->handle;
-        ESP_LOGD(TAG, "found CCCD at handle %d", cccd_handle_);
+    if (cccd_handle_.load() == 0 && ble_uuid_cmp(&dsc->uuid.u, &CCCD_UUID.u) == 0) {
+        cccd_handle_.store(dsc->handle);
+        ESP_LOGD(TAG, "found CCCD at handle %d", dsc->handle);
     }
     return 0;
     } catch (const std::exception& e) {
@@ -1401,7 +1572,7 @@ int BleClient::on_subscribe_write(uint16_t conn_handle, const ble_gatt_error* er
             return 0;
         }
         ESP_LOGD(TAG, "BLE link deferred after CCCD (handle %d, generation %lu)",
-                 cccd_handle_, static_cast<unsigned long>(generation));
+                 cccd_handle_.load(), static_cast<unsigned long>(generation));
         // vehicle-command exchanges the ATT MTU right after subscribing (ble.go). At the default
         // MTU of 23 every vehicle response arrives as a run of 20-byte notifications, and a run cut
         // short desynchronizes the length-prefix framer (#437). Writes keep the 20-byte payload

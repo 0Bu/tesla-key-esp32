@@ -4255,7 +4255,7 @@ def require_ble_callback_lock_contract(ble_source: str) -> None:
         },
         "on_dsc_disc": {
             "ESP_LOGD", "ESP_LOGE", "ble_gattc_write_flat", "ble_uuid_cmp",
-            "connection_snapshot_matches_", "disconnect_from_callback_", "what",
+            "connection_snapshot_matches_", "disconnect_from_callback_", "load", "store", "what",
         },
         "on_gap_event": {
             "ESP_LOGD", "ESP_LOGE", "ESP_LOGI", "ESP_LOGW", "OS_MBUF_PKTLEN",
@@ -4264,12 +4264,13 @@ def require_ble_callback_lock_contract(ble_source: str) -> None:
             "compare_exchange_strong", "connect_attempt_may_advance",
             "connect_lifecycle_after_gap_connected",
             "connect_lifecycle_after_start_failure", "connect_lifecycle_during_gap_start",
-            "connection_snapshot_matches_", "data", "diag_verbose", "disconnect_followup",
-            "disconnect_from_callback_", "ensure_scanning_", "ensure_scanning_locked_",
-            "esp_timer_get_time", "fetch_add", "fill", "g", "intent",
-            "is_tesla_vehicle_name", "load", "memcpy", "note_connectable_", "note_scan_",
-            "on_connected_", "on_rx_data_", "os_mbuf_copydata", "size", "snprintf", "store",
-            "strcmp", "terminate_published_link_", "what",
+            "connection_snapshot_matches_", "data", "diag_verbose", "disc_complete_should_restart",
+            "disconnect_followup", "disconnect_from_callback_", "ensure_scanning_",
+            "ensure_scanning_locked_", "esp_timer_get_time", "fetch_add", "fill", "g",
+            "has_gap_link_", "intent", "is_tesla_vehicle_name", "load", "memcpy",
+            "note_connectable_", "note_scan_", "on_connected_", "on_rx_data_",
+            "os_mbuf_copydata", "portENTER_CRITICAL", "portEXIT_CRITICAL", "size", "snprintf",
+            "store", "strcmp", "terminate_published_link_", "what",
         },
         "on_mtu_exchange": {
             "ESP_LOGD", "ESP_LOGE", "ESP_LOGI", "ESP_LOGW", "connection_snapshot_matches_",
@@ -4277,7 +4278,7 @@ def require_ble_callback_lock_contract(ble_source: str) -> None:
         },
         "on_reset": {
             "compare_exchange_weak", "connect_lifecycle_after_host_reset", "fetch_add", "intent",
-            "load", "on_connected_", "store",
+            "load", "on_connected_", "portENTER_CRITICAL", "portEXIT_CRITICAL", "store",
         },
         "on_scan_timeout": {
             "ESP_LOGD", "cancel_scan_locked_", "esp_timer_start_once", "has_gap_link_", "intent",
@@ -4293,12 +4294,18 @@ def require_ble_callback_lock_contract(ble_source: str) -> None:
             "connection_snapshot_matches_", "disconnect_from_callback_", "what",
         },
         "on_sync": {"ESP_LOGI", "ESP_LOGW", "acknowledge_sync", "ensure_scanning_", "load", "state"},
-        "start_scan_locked_": {"ESP_LOGD", "ble_gap_disc", "load", "scan_running_after_start", "store"},
+        "start_scan_locked_": {
+            "ESP_LOGD", "ESP_LOGW", "ble_gap_disc", "esp_timer_get_time", "load",
+            "scan_error_log_due", "scan_running_after_start", "store",
+        },
         "subscribe_notify_": {
             "ESP_LOGD", "ble_gattc_disc_all_dscs", "connection_snapshot_matches_",
-            "disconnect_from_callback_",
+            "disconnect_from_callback_", "load", "store",
         },
-        "terminate_published_link_": {"ble_gap_terminate", "compare_exchange_strong", "compare_exchange_weak", "intent", "load", "store", "taskYIELD"},
+        "terminate_published_link_": {
+            "ble_gap_terminate", "compare_exchange_strong", "compare_exchange_weak",
+            "fetch_add", "intent", "load", "store", "taskYIELD",
+        },
     }
     require_exact("BLE callback call-allowlist owners", set(allowed_calls), callback_reachable)
 
@@ -4316,18 +4323,18 @@ def require_ble_callback_lock_contract(ble_source: str) -> None:
         "has_gap_link_": "87be523038b9d7843373203c7d307a6946e2bad88340360a926cfaef0caf3508",
         "note_connectable_": "f22081647b1c6b17e884c21a5173fb45ba567dbefa0a3dbdc8cfdec519e6931a",
         "note_scan_": "0bc069b1372559facfd9e3e2adb29a307f1332d2de58d80c7f60042cf57e44b3",
-        "on_chr_disc": "02ae0d160e0c2e143672a61f53d687abb98b8f9268aa0af3cd925ed0a5f162f3",
-        "on_dsc_disc": "5cb6705aca81956c2e1d6a493d3915dd89ed893f305b5f73b7c133e329d7f618",
-        "on_gap_event": "60f7e4887e765761a813f4a7a690c5b8e50d286a78461b5fba4be18101cce6dc",
+        "on_chr_disc": "7fa70d6336a92095a0f87b939d52abd8c9503255af4e63bf9c8ca7164dce7f1e",
+        "on_dsc_disc": "dd3ef49c2981c910aa390a91ce1b3ccd2c1743d27ccf7a3436aa3c9b0d20ba21",
+        "on_gap_event": "d5c681cb957087f40c062b3df6ff808f70358f0a316941fabbaa0c22c8f0bd56",
         "on_mtu_exchange": "28a7ad2c78f9efd5f6f9a53b31c53ec7a51c79b0c6e2431837c79f752c4dc520",
-        "on_reset": "363ed19eb14f6970e1d23580369b3c4c9ae67fe227ba47209ffdf48e09e2ac28",
+        "on_reset": "3f02e13ba5fa83ab0b03536e060f2d87f35cb85e86ea2a9c6b8d1c1c4c5c8ca8",
         "on_scan_timeout": "7611bc6220fd5cc504a1f6b3b0503645a304f5ee97d32c47b91b22486f1fce95",
-        "on_subscribe_write": "a369a89bd9bbdb4530995e36d99a966033f6e83cb018d1db625f941df7aad4b1",
+        "on_subscribe_write": "f84fe37b173118e86bdc581d914408b15d6bd19c567a786cf29358f622596e07",
         "on_svc_disc": "77cd5b3c710eddaba67c822084dca5bee1a39de1028fd5d330b30823d0dae50f",
         "on_sync": "7c8b104bd654a1ac3a460c0764aa100d2ef356eead442851ae6729ad4b9266bc",
-        "start_scan_locked_": "15d90a0dd3771816e41339b817f74ccf8c8068bc86d26b87f9077e173cc629ca",
-        "subscribe_notify_": "00365f0a70b509e1ae52003e893292d393066d8f10bdce97b87c32a3e6712091",
-        "terminate_published_link_": "464a36a5f245de427d2494b0f48467da7b9b8f68ad5b6c4d0770c20e69b538c6",
+        "start_scan_locked_": "dc77ea2efcace7cab37dac8b6db12eef2035190ccad8c9bd09c8b4293d049ce9",
+        "subscribe_notify_": "315c4be89167ac13b5f5edd5c845b9da41f255498fb81e9512d7377db0fa26d2",
+        "terminate_published_link_": "a1b9d947120794b86530945ee1f998942c35ff436ef9e8f1871aa0c26694ff62",
     }
     require_exact(
         "BLE callback program-fingerprint owners",

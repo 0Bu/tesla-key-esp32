@@ -603,7 +603,13 @@ Connection scheduling uses caller deadlines, a 15 s warm-up throttle and 30 s su
 after each health attempt. Automatic same-key enrollment additionally reserves its own bounded
 backoff. There is no global explicit-wake debounce or exponential reconnect gate; a synchronous
 GAP connect-start failure resumes scanning while connect intent remains. Foreground waiters impose
-their own deadline; the direct warm-up connect does not arm one.
+their own deadline; the direct warm-up connect does not arm one. Calling `stop_connecting()` cancels
+any in-flight GAP connect (`ble_gap_conn_cancel`), and `on_gap_event` immediately restarts scanning
+when `BLE_GAP_EVENT_DISC_COMPLETE` fires while connect intent remains (deferring via `scan_pending_`
+on lock contention). `service_pending()` recovers wedged connect attempts (`≥15 s` without GAP
+completion), `BLE_HS_EBUSY` scan-start collisions, zombie handles after repeated `BLE_HS_ENOTCONN`,
+and contested `scan_pending_` retries; repeated scan-start failures log at `WARN` at most once per
+60 s per error code.
 
 Ordinary telemetry readers use caches. `body_controller_state` is an explicit live foreground
 VCSEC query: it may connect, establish a session and send plaintext `GET_STATUS` without requesting
@@ -1006,6 +1012,7 @@ snapshots as leaves; do not call network, storage, logging or an external sink u
 |---|---|
 | `BleClient::scan_mutex_` | fixed nearby/primary-advertisement caches; host callbacks try with zero wait, task readers use bounded waits |
 | `BleClient::intent_mutex_` | connect/cancel, discovery and CCCD readiness transitions; host callbacks try with zero wait and fail/drop/retry on contention |
+| `BleClient::link_mux_` | `portMUX_TYPE` innermost leaf serializing `connection_generation_` odd/even snapshots and handle publication/retirement across `on_reset`, `BLE_GAP_EVENT_CONNECT`/`DISCONNECT`, and `service_pending()` without blocking, allocation, logging or callbacks |
 | `BleClient::write_mutex_` | outbound BLE chunk sequence; task-side bounded acquisition, including calls made under Vehicle ownership |
 | `BleClient::client_mutex_` | peer-address metadata; zero-wait callback publication and bounded task snapshots |
 | diagnostic `s_mtx` | ring bytes, append/clear generation and sink snapshots; capture uses zero wait and counts dropped lines, sinks run after unlock |

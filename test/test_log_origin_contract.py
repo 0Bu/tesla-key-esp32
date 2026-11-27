@@ -143,6 +143,11 @@ expected_production_ble_logs = {
     ("I", "ATT MTU %u negotiated"),
     ("E", "MTU exchange completion exception: %s"),
     ("E", "MTU exchange completion exception"),
+    # Rate-limited scan failure (60 s per rc) and terminal stuck-connect/handle recovery warnings.
+    ("W", "BLE scan start failed (rc=%d)"),
+    ("W", "BLE connect cancel failed (rc=%d)"),
+    ("W", "retiring stale BLE handle after repeated ENOTCONN"),
+    ("W", "BLE connect timed out without GAP completion — canceling"),
 }
 assert set(production_ble_logs) == expected_production_ble_logs
 assert len(production_ble_logs) == len(expected_production_ble_logs)
