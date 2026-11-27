@@ -204,7 +204,7 @@ for result, name in (
     ("void", "publish_session_runtime_locked_"), ("void", "invalidate_session_runtime_locked_"),
     ("bool", "invalidate_vcsec_ram_session_"),
     ("tk::SessionAvailability", "session_availability"), ("bool", "session_available"),
-    ("bool", "persist_session_"), ("bool", "save_session_runtime_locked_"), ("bool", "load_nvs_sessions_"),
+    ("bool", "persist_session_"), ("bool", "save_session_runtime_locked_"),
     ("void", "establish_verified_session_locked_"),
 ):
     marker = result + " VehicleController::" + name + "("

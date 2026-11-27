@@ -364,7 +364,7 @@ length framing has bounded buffering and inter-chunk timeout; TX preserves the b
 
 Patches 0001–0003 are retired. [ADR-0005](adr/0005-tesla-ble-seam.md#5-delivered-architecture-and-patch-retirement)
 owns the complete active patch series, including existing-session key continuity and the PSA seam.
-Peer admission requires an initialized shared secret, including restored sessions. Domain request
+Peer admission requires an initialized shared secret. Domain request
 hashes remain isolated. Encrypted VCSEC requires an initialized peer and non-empty request hash;
 missing context, failed tags or repeated carried counters (including zero) drop before protobuf,
 sleep updates or callbacks, never falling through to plaintext. Passive plaintext VehicleStatus
@@ -559,7 +559,9 @@ pauses redundant WiFi retries, and cable loss rearms an already-started station.
 trial consumes its backup only after that WiFi attempt succeeds, never after wired rescue or an
 unpersisted rollback. The 30 s gateway watchdog recovers after two failures only if the link
 claims up and that transport's gateway answered at least once. Never-answering ICMP is unusable
-evidence. Probe setup errors fail open; missing lease/gateway or unanswered probes are unreachable.
+evidence. Probe setup errors and incomplete transmissions without a reply do not count as failed
+checks. A missing lease or gateway, or a completed probe with every request sent and no replies,
+indicates unreachability.
 Recovery disconnects WiFi (the event handler reconnects) or restarts Ethernet; it never reboots.
 Repeated unchanged MQTT/gateway failures log on transitions and at most hourly thereafter.
 Configuration-read failures surface as service errors; valid legacy configuration remains supported.
@@ -712,13 +714,13 @@ and use a separate OtaParser entry-context aggregate, not the network-task lane.
 Retrospective minima and compiler frame baselines prove different things. Bench policy floors are described in the
 [test guide](../test/README.md#whats-not-covered-by-design).
 
-### Clock authority and session restore
+### Clock authority and session establishment
 
-Attempt Unix-clock restore **before** loading sessions. The inherited Unix-versus-vehicle-epoch
-comparison rejects persisted sessions after successful restore, but an absent/unreadable cache or
-failed clock set can leave negative-age acceptance. It is not a reliable 1-hour reuse window.
-True session reuse across reboot needs epoch/Unix alignment; [ADR-0005](adr/0005-tesla-ble-seam.md)
-records this limitation.
+At boot the firmware restores a validated Unix-clock estimate when available. BLE sessions are
+established in RAM through the normal authenticated SessionInfo exchange after startup. Stored
+SessionInfo records continue to supply durable pairing evidence. Resuming a session across
+reboots would require a trusted local capture time and the current counter for that vehicle epoch.
+[ADR-0005](adr/0005-tesla-ble-seam.md) records the session policy.
 
 Durable `key_created`, `paired_at` and MQTT `boot_time` require an acquired
 `clock_is_authoritative()` before sampling wall time (`time_sync.hpp`). Only a validated successful
@@ -752,8 +754,7 @@ first sync and after six hours since the last confirmed save, with at least five
 attempts. Existing SNTP callbacks publish checkpoint opportunities to `heap_supervisor`; there is
 no added task/timer or tight retry. The attempt is recorded before fallible work and save success
 only after storage confirms it. Checkpoint NVS/string/log work follows clock-gate release on
-`heap_supervisor`. This policy does not fix the inherited session-age epoch mismatch or prove RTC
-behavior on hardware.
+`heap_supervisor`.
 
 ## Pairing lifecycle / invalidation
 

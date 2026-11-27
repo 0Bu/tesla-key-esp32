@@ -19,6 +19,7 @@ struct esp_ping_callbacks_t {
 };
 
 inline constexpr int ESP_PING_PROF_REPLY = 1;
+inline constexpr int ESP_PING_PROF_REQUEST = 2;
 
 extern "C" {
 esp_err_t esp_ping_new_session(const esp_ping_config_t* config,

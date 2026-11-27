@@ -618,9 +618,8 @@ extern "C" void app_main() {
 
     log_heap("preinit");
 
-    // Restore a strictly validated estimate only if the warm clock is unset, before loading
-    // sessions. NTP alone permits durable new dates. Session clock epochs remain an independent
-    // limitation documented in ADR-0005; this checkpoint is not proof of session freshness.
+    // Restore a strictly validated estimate only if the warm clock is unset. NTP alone
+    // permits durable new dates.
     restore_clock_from_nvs(config_store);
 
     // ── Tesla BLE controller ─────────────────────────────────────────────────

@@ -16,7 +16,7 @@
 #include <lwip/inet.h>
 #include <lwip/sockets.h>
 #include <cstring>
-#include <exception>
+#include <new>
 
 #if defined(CONFIG_LWIP_IPV6) && CONFIG_LWIP_IPV6
 #error "HTTP owned-address checks require an IPv6 socket policy before enabling IPv6"
@@ -140,24 +140,16 @@ static esp_err_t handle_all_dispatch(GuardedReq rq) {
     uri_path(req, path, sizeof(path));
     const bool GET  = req->method == HTTP_GET;
     const bool POST = req->method == HTTP_POST;
-    ESP_LOGI(TAG, "REQ: %s %s", GET ? "GET" : (POST ? "POST" : "OTHER"), req->uri);
 
     if (tk::mutation_origin_required(POST, req->uri) && !browser_mutation_allowed(req)) {
         return reject_cross_origin_mutation(req);
     }
 
-    // Log all headers to see what evcc is sending
-    char header_val[128];
-    if (httpd_req_get_hdr_value_str(req, "User-Agent", header_val, sizeof(header_val)) == ESP_OK) {
-        ESP_LOGI(TAG, "  User-Agent: %s", header_val);
-    }
-    if (httpd_req_get_hdr_value_str(req, "Accept", header_val, sizeof(header_val)) == ESP_OK) {
-        ESP_LOGI(TAG, "  Accept: %s", header_val);
-    }
-
     const tk::HttpVerb verb = GET ? tk::HttpVerb::Get
                                   : (POST ? tk::HttpVerb::Post : tk::HttpVerb::Other);
     const tk::HttpRoute route = tk::classify_http_route(verb, path);
+    const char* log_path = tk::http_request_log_path(route);
+    ESP_LOGI(TAG, "REQ: %s %s", GET ? "GET" : (POST ? "POST" : "OTHER"), log_path);
     if (tk::http_route_requires_owned_host(verb, route) && !diagnostic_host_allowed(req)) {
         httpd_resp_set_status(req, "403 Forbidden");
         httpd_resp_set_type(req, "text/plain; charset=utf-8");
@@ -165,7 +157,7 @@ static esp_err_t handle_all_dispatch(GuardedReq rq) {
     }
     if (tk::http_route_requires_vehicle_runtime(route) &&
         !tk::runtime_admission_vehicle_ready()) {
-        ESP_LOGW(TAG, "vehicle-active route refused while runtime is not ready: %s", path);
+        ESP_LOGW(TAG, "vehicle-active route refused while runtime is not ready: %s", log_path);
         httpd_resp_set_status(req, "503 Service Unavailable");
         httpd_resp_set_type(req, "application/json");
         return httpd_resp_sendstr(
@@ -240,11 +232,11 @@ static esp_err_t handle_all(httpd_req_t* req) {
         // boundary so even a future throwing constructor cannot escape into the C httpd frame.
         // F135: outer noexcept scope now covers setup, all early returns and catches.
         result = handle_all_dispatch(rq);
-    } catch (const std::exception& e) {
-        ESP_LOGE(TAG, "handler for %s threw (%s) — containing reply failure", req->uri, e.what());
+    } catch (const std::bad_alloc&) {
+        ESP_LOGE(TAG, "request handler allocation failed — containing reply failure");
         result = send_effect_exception(rq);
     } catch (...) {
-        ESP_LOGE(TAG, "handler for %s threw (unknown) — containing reply failure", req->uri);
+        ESP_LOGE(TAG, "request handler threw — containing reply failure");
         result = send_effect_exception(rq);
     }
     run_effect_continuation(rq);

@@ -992,7 +992,7 @@ int BleClient::on_gap_event(ble_gap_event* event) {
             ESP_LOGD(TAG, "connect error: %d", event->connect.status);
             ready_generation_.store(tk::ble::kNoReadyGeneration);
             connect_fail_count_.fetch_add(1);   // advert was heard but the link never came up
-            // No link was published: do not invalidate sessions restored from NVS.
+            // No link was published, so preserve runtime session state.
             // Keep the intent so an in-flight command retries within its timeout
             // window; ensure_connected_() clears it via stop_connecting() on timeout.
             const tk::ble::ConnectLifecycle retry =

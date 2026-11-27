@@ -38,7 +38,7 @@ Implementation index. `logic/` paths are under `main/`. See the [ESP-IDF invento
 | `[[nodiscard]]` NVS writes | `main/nvs_storage.hpp` + `-Werror=unused-result` | Silently ignoring persistent write errors |
 | Exact fail-closed NVS registry | `logic/nvs_contract.hpp`, `main/nvs_storage.cpp`, `scripts/check-nvs-contract.py`, `test/test_nvs_storage.cpp` | Unknown keys, storage collisions and invalid persistence APIs |
 | Request-scoped VCSEC replies | `main/logic/vcsec_response.hpp`, `main/vehicle_telemetry.cpp`, `main/logic/command_runner.hpp` | Late or passive status completing an unrelated request |
-| Cached VCSEC session presence | `main/nvs_storage.{cpp,hpp}`, `main/vehicle_pairing.cpp` | Repeated flash-backed VCSEC presence queries |
+| Cached VCSEC pairing evidence and on-demand authentication after boot | `main/nvs_storage.{cpp,hpp}`, `main/vehicle_pairing.cpp`, `main/vehicle_ctrl.cpp`; [session policy](adr/0005-tesla-ble-seam.md#native-execution-framing-and-session-reuse) | Repeated flash-backed presence queries and reuse of outdated peer state after boot |
 | RAM session availability independent of persistence | `main/logic/session_availability.hpp`, `vehicle_telemetry.cpp`, `vehicle_pairing.cpp`, `logic/status_model.hpp`, `mqtt_payloads.hpp`, `mcp_json_payloads.hpp`; [runtime contract](ARCHITECTURE.md#pairing-lifecycle--invalidation) | Failed persistence disabling a usable live session |
 | WiFi credential rollback | `logic/wifi_rollback.hpp`, `main.cpp`, `main/config_blob.cpp`, `POST /set_wifi` | Invalid credentials or Ethernet rescue losing the backup |
 | Request-owned configuration restart and image result | `logic/config_commit.hpp`, `logic/effect_reply.hpp`, `main/ota_update.cpp`, HTTP config/common handlers, `main/provisioning.cpp` | Durable writes before admission or false OTA confirmation |
@@ -109,7 +109,7 @@ The device HTTP API has no authentication or TLS; use it only on a trusted LAN
 | One image, multiple boards | `main/board.{cpp,hpp}`, `logic/eth_board.hpp` | W5500 probes driving the T-Dongle display pin |
 | Transport seam | `main/net.hpp`, `net.cpp`, `logic/net_link.hpp` | Runtime paths assuming every lease is WiFi |
 | Gateway ICMP watchdog | `net.cpp` `net_watchdog_task`, `logic/net_link.hpp` `watch_step()` | A broken LAN link with no disconnect event |
-| Generation-owned ICMP probe | `logic/ping_probe.hpp`, `main/ping_probe.hpp`, `net.cpp`, `syslog.cpp` | Late callbacks touching freed or reused ping state |
+| Generation-owned ICMP probe | `logic/ping_probe.hpp`, `main/ping_probe.hpp`, `net.cpp`, `syslog.cpp` | Late callbacks using retired state and incomplete probes triggering recovery |
 | Endless runtime reconnect | `net.cpp` `wifi_event_handler` | Temporary outages forcing setup unnecessarily |
 | mDNS + DHCP hostname, privacy-bounded TXT | `main.cpp` | Manual discovery or broadcasting the VIN |
 | Firmware-started ATT MTU exchange, bounded writes | `logic/ble_chunk.hpp`, `main/ble_client.{cpp,hpp}`, `sdkconfig.defaults` (`BT_NIMBLE_ATT_PREFERRED_MTU`); [ADR-0005 §2](adr/0005-tesla-ble-seam.md#2-platform-forced-departures-and-reference-deviations) | Oversize ATT writes and truncated response fragments |
@@ -134,6 +134,7 @@ The device HTTP API has no authentication or TLS; use it only on a trusted LAN
 | 24-hour heap trend (`GET /heap`) | `logic/heap_history.hpp`, `logic/uptime.hpp`, `main/heap_trend.cpp`, `main/heap_supervisor.cpp` | Leaked or fragmented heap hidden by one sample |
 | Trend survives restart | `main/heap_trend.cpp` (`__NOINIT_ATTR`), `logic/heap_history.hpp` `HeapPersist` | Restart erasing the memory trend explaining it |
 | Observable best-effort log capture | `main/diag_log.cpp`, `syslog.cpp`, `logic/status_model.hpp`; `test/test_runtime_boundaries.cpp` | Blocking log producers and hiding dropped lines |
+| HTTP request logs with fixed route and command names | `main/logic/http_route.hpp`, `main/http_server.cpp`, `main/http_api.cpp`; [log privacy](SECURITY.md#syslog-and-diagnostic-export) | VINs and caller-supplied URL or header values entering request logs |
 | In-RAM diag ring (`GET /diag`) | `main/diag_log.cpp` (size `CONFIG_TESLA_DIAG_LOG_BYTES`, `main/Kconfig.projbuild`), `main/http_status.cpp` | Network log reads holding the ring lock |
 | MQTT device diagnostics | `main/mqtt_ha.cpp` | Missing reset, heap and stack fleet diagnostics |
 | Explicit web-feed availability and gauge actions | `main/www/app.js`, `index.html`, `style.css`; `test/web_ui_http.test.mjs`, `web_ui_browser_gate.py` | Failed polling presenting stale data as live |

@@ -168,12 +168,11 @@ esp_err_t handle_command(GuardedReq rq) {
     if (!request_vin_matches(vin)) {
         return send_json(req, 404, make_response(false, cmd, vin, "vehicle VIN mismatch"));
     }
-    ESP_LOGI(TAG, "CMD %s on VIN %s", cmd, vin);
-
     const tk::CmdInfo* info = tk::cmd_from_api_name(cmd);
     if (!info) {
         return send_json(req, 404, make_response(false, cmd, vin, "unknown command"));
     }
+    ESP_LOGI(TAG, "CMD %s", info->api_name);
 
     // Parse the body once. Empty is valid for no-argument and legacy-optional commands.
     // evcc's generic boolean setter sends the JSON scalar true for charge_start and wake_up

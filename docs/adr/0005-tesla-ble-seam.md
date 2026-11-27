@@ -94,8 +94,9 @@ The entries above were checked against [vehicle-command `83baa078`](https://gith
 
 #### Native execution, framing and session reuse
 
-- **Connection ownership**: Failed GAP connection attempts do not publish LinkDown or erase
-  restored runtime sessions; an established disconnect/reset still invalidates them. Contested
+- **Connection ownership**: Failed GAP connection attempts preserve link and runtime session state.
+  An established disconnect publishes LinkDown. An established disconnect or reset invalidates
+  runtime sessions. Contested
   `BLE_GAP_EVENT_DISCONNECT` preserves `want_connect_` and defers scan reconciliation via
   `scan_pending_`, foreign/orphan disconnect handles cannot retire the active link handle, and
   contested `BLE_GAP_EVENT_CONNECT` clears `connecting_`, retries failed `ble_gap_terminate`
@@ -111,7 +112,7 @@ The entries above were checked against [vehicle-command `83baa078`](https://gith
 - **Max frame length (2048 vs 1024 B)**: `ble.go:21` defines `maxBLEMessageSize = 1024`. tesla-ble's own reassembly used `Vehicle::MAX_MESSAGE_SIZE = 2048` (in the `Vehicle` class this firmware no longer calls), while a `UniversalMessage_RoutableMessage` is at most 741 B. `kMaxFrameLength = 2048` keeps that historical tesla-ble limit.
 - **Inter-chunk timeout (3000 ms vs 1 s)**: `ble.go` drops a partial frame when the next chunk arrives more than `rxTimeout` = 1 s later. `tk::CommandRunner` configures `tk::RxFramer` with `kDefaultRxInterChunkTimeoutMs = 3000` (#320); `tk::RxFramer` itself still defaults to 1000 ms. A partial frame therefore survives notification gaps of up to 3 s, at the cost of holding a torn frame for up to 3 s before the buffer is cleared.
 - **Length 0 rejected**: `tk::RxFramer` rejects incoming frames with decoded length 0 fail-closed (`CorruptLength`), preventing zero-byte framing lockups.
-- **Session-info latency (`maxLatency`) and persisted age**: `vehicle-command` limits live SessionInfo response latency to 4 s on BLE; this is separate from persisted-session age. The firmware's `load_nvs_sessions_()` (`main/vehicle_telemetry.cpp`) inherits a comparison of Unix time against vehicle epoch seconds (`SessionInfo.clock_time`). A successfully restored Unix clock rejects these persisted sessions; it does not implement a real-time 1-hour reuse window. Restore runs before controller initialization, but absent/unreadable `last_time` or an unsuccessful clock set can leave the inherited negative-age acceptance path. Session expiry is therefore not guaranteed by clock restore alone.
+- **SessionInfo at boot**. The reference [caches a capture time and exports the current counter](https://github.com/teslamotors/vehicle-command/blob/fc5a1910ad45c42921d541089e3e366d0b897f52/internal/authentication/signer.go#L62-L85) to reconstruct peer state. The firmware stores the authenticated wire reply. Its `clock_time` is relative to the vehicle epoch, and its counter reflects the time of the reply. Boot uses fresh authenticated SessionInfo on demand with the existing key. The persisted records retain their format and remain pairing evidence. This policy is independent of the reference's 4 s BLE limit for live SessionInfo responses.
 - **Request-scoped VCSEC routing**: As in `vehicle-command` (`dispatcher.go:400-409`), each newly serialized routable VCSEC attempt gets a fresh nonzero 16-byte reply address. `logic/vcsec_response.hpp` captures its actual frame metadata without allocating another message buffer and binds generation, command, attempt, kind and deadlines. Only a successful BLE write activates the context. Timeouts, failed builds/writes, retries, flushes and link loss retire it. Auth and the Infotainment wake prerequisite admit their correlated proactive SessionInfo/fault replies without allowing them to acknowledge the payload. Infotainment retains a stable ordinary address, restored after every temporary VCSEC builder scope. Raw WhitelistAdd remains a non-routable transmit-only request. This routing match is attribution, not authentication of plaintext replies.
 - **Charge-port command domain**: The reference uses Infotainment CarServer open/close actions; this firmware uses VCSEC `ClosureMoveRequest.chargePort`. Both builders exist at v6.4.0. This preserves the existing local policy; static conformance evidence does not establish role acceptance or hardware behavior.
 - **One-plaintext-response rule**: Unlike `vehicle-command` (which applies no replay check to plaintext, `dispatcher.go:301-308`), this firmware's `BleDispatcher` enforces a strict one-unauthenticated-response rule where foreign-UUID responses are dropped before reaching telemetry callbacks.
@@ -367,8 +368,8 @@ Upstream `CMakeLists.txt` lists `vehicle.cpp` and `tb_logging.cpp` in `TESLABLE_
 ## v5.3.0 migration (2026-10-11)
 
 Upstream isolates VCSEC/Infotainment request hashes, bounds builders and requires a shared
-secret before peer validity. Native admission checks `Peer::is_initialized()` after restore
-and update. The harness checks session admission, domain isolation and monotonic counters.
+secret before peer validity. Native admission checks `Peer::is_initialized()` after an update.
+The harness checks session admission, domain isolation and monotonic counters.
 Native retries keep rebuilding UUID/counter/signature bytes. Upstream identical-byte
 `Vehicle` retries are outside the direct `Client` path.
 
@@ -427,8 +428,8 @@ the same mandatory domain-aware API even though firmware owns orchestration.
 
 This is a peer-lifetime binding, not a durable VIN-to-vehicle-key pin. Existing explicit
 `clear_shared_secret/reset` discards the stored public key and secret. Native link-loss reset,
-authenticated domain repair and identity cleanup retain that behavior; initial NVS session loading
-also retains its existing trust/age limits above. No new key rotation or storage format is added.
+authenticated domain repair and identity cleanup retain that behavior. Boot starts a fresh peer
+using the existing key and the authenticated session path above.
 The ordinary real-library harness checks both domains, valid refresh, temporary invalidity and
 state-preserving refusal. Synthetic driver checks additionally pin secret selection and removed
 checks; they do not prove HMAC correctness or radio/vehicle behavior. No real compromise is inferred.

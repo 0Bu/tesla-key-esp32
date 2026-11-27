@@ -690,11 +690,8 @@ bool VehicleController::clear_session_and_cache_() {
 
     // Erase the persisted sessions so has_session() is false until a fresh handshake.
     if (storage_) {
-        // A failed erase here is the one worth shouting about: the in-RAM state says
-        // "unpaired" while flash still holds a session blob, so the NEXT boot loads a session
-        // that belongs to a key the car has already forgotten — and the symptom is a device
-        // that looks paired and fails every command. has_session() reads flash, so this is a
-        // real divergence rather than a cosmetic one.
+        // A failed erase leaves durable pairing evidence for the old key. The next boot can
+        // still report the device as paired even if fresh authentication fails.
         const bool v = storage_->remove(tk::nvs_contract::kSessionVcsec);
         const bool i = storage_->remove(tk::nvs_contract::kSessionInfotainment);
         const bool p = storage_->remove(tk::nvs_contract::kPairedAt);  // re-pair re-stamps date
