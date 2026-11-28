@@ -88,12 +88,15 @@ GET /api/1/vehicles/{VIN}/vehicle_data
 
 The doubled `response` and `charge_amps` match the Fleet API/TeslaBleHttpProxy shape.
 `battery_level` is nominal SOC; `usable_battery_level` matches the Tesla app. Charge fields form a
-fixed set of keys, including session `charge_energy_added` in kWh. When a charge sample exists,
-unreported or invalid `battery_level`, `charge_limit_soc` and `charge_amps` are JSON `null`.
-evcc's numeric getters reject those values and can still read the other fields. Reported zero SOC
-and zero amps remain numbers. Other numeric fields keep their typed zero fallback, including for
-non-finite values. `/status` and MQTT may omit unreported fields. Range/rate remain miles/mph here,
-and MQTT uses km/km/h.
+fixed set of keys, including session `charge_energy_added` in kWh. When a reachable charge sample
+exists, unreported or invalid `battery_level`, `charge_limit_soc` and `charge_amps` are JSON `null`,
+so evcc's numeric getters reject those fields while still reading the others; reported zero SOC and
+zero amps remain numbers. While `link` is `unreachable`, a valid cache instead emits `null` for
+`battery_level`, `usable_battery_level`, `charge_limit_soc`, `charge_amps` and `battery_range`, and
+`0` for `charger_power`, `charge_rate`, `charge_energy_added` and `minutes_to_full_charge` (see
+[evcc integration](#evcc-integration)). Other numeric fields and the zeroed `503` error envelope keep
+their typed zero fallback, including for non-finite values. `/status` and MQTT may omit unreported
+fields. Range/rate remain miles/mph here, and MQTT uses km/km/h.
 
 Optional `?endpoints=` selects `charge_state`, `climate_state` and/or `drive_state`. Omission selects
 charge and climate. Combine selectors with `;`, `,`, `%3B` or `%2C`. The exact query key is required;
@@ -145,12 +148,20 @@ charger maps `ErrAsleep` to status B and can subsequently issue a separate wake 
 evcc's charging policy. That charger's status check and custom charger status plugins may still
 stop a cycle for `ErrMustRetry` or a generic failure.
 
-While the link is `unreachable`, a valid cache and no command attempted in the last five minutes
-give `200` with `charging_state: Unknown` and last-known numbers. Failed command attempts count.
-The stock template maps `Unknown` to status A. Unmapped or absent vehicle states also emit
-`Unknown`. MCP and `/status` keep the last-known string beside `link`, and MQTT does so beside
-`sleep_status`. On return, the next ChargeState can refresh the cache after one round trip for an
-awake car, or after the 30–300 s bootstrap backoff on failed polls.
+While the link is `unreachable`, a valid idle cache with no command attempted (including failed
+attempts) in the last five minutes returns HTTP `200` with the nulled/zeroed unreachable
+`charge_state` shape specified under [Vehicle data](#vehicle-data).
+
+Because HTTP `200` stays intact instead of returning `503`, evcc `vehicle-api`/`twc3` chargers
+reading `status` map `Unknown` to status A without aborting loadpoint cycles. At the same time,
+`soc`, `limitsoc`, `getmaxcurrent` and `range` getters reject `null` rather than extrapolating from
+stale values, and active-session power, rate, energy and remaining-time fields stay `0`.
+
+Unmapped or absent car states likewise report `charging_state: "Unknown"` (and reachable parked or
+sleeping cars keep serving last-known cached numbers without waking). MCP `/mcp` and `/status`
+still expose the last-known string beside `link`, and MQTT keeps it beside `sleep_status`. On
+return, the next `ChargeState` poll refreshes the cache after one round trip for an awake car, or
+after the 30–300 s bootstrap backoff following failed polls.
 
 For chargers that read status from the vehicle, a BLE gap of 150 s on a plugged-in car ends the session
 and applies the loadpoint's default mode, if one is set. Without a default vehicle, evcc also does not
@@ -269,7 +280,7 @@ pair uniformly with `409`; unchanged admitted WiFi remains write/restart-free. S
 
 Before NTP has committed, `/set_time` accepts only finite milliseconds in the interval from
 1700000000000 (inclusive) to the boot-time plausibility ceiling (exclusive). Normal reproducible
-builds omit the app date and use **2033-01-01** as that ceiling; the [clock contract](ARCHITECTURE.md#clock-authority-and-session-restore)
+builds omit the app date and use **2033-01-01** as that ceiling; the [clock contract](ARCHITECTURE.md#clock-authority-and-session-establishment)
 describes the limit. Clock admission can return
 `503` when busy or `500` when the clock syscall fails; neither response claims successful application.
 `/ota/check?ms=` accepts canonical unsigned integer milliseconds in the same interval, including

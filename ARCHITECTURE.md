@@ -364,7 +364,7 @@ length framing has bounded buffering and inter-chunk timeout; TX preserves the b
 
 Patches 0001–0003 are retired. [ADR-0005](adr/0005-tesla-ble-seam.md#5-delivered-architecture-and-patch-retirement)
 owns the complete active patch series, including existing-session key continuity and the PSA seam.
-Peer admission requires an initialized shared secret, including restored sessions. Domain request
+Peer admission requires an initialized shared secret. Domain request
 hashes remain isolated. Encrypted VCSEC requires an initialized peer and non-empty request hash;
 missing context, failed tags or repeated carried counters (including zero) drop before protobuf,
 sleep updates or callbacks, never falling through to plaintext. Passive plaintext VehicleStatus
@@ -559,7 +559,9 @@ pauses redundant WiFi retries, and cable loss rearms an already-started station.
 trial consumes its backup only after that WiFi attempt succeeds, never after wired rescue or an
 unpersisted rollback. The 30 s gateway watchdog recovers after two failures only if the link
 claims up and that transport's gateway answered at least once. Never-answering ICMP is unusable
-evidence. Probe setup errors fail open; missing lease/gateway or unanswered probes are unreachable.
+evidence. Probe setup errors and incomplete transmissions without a reply do not count as failed
+checks. A missing lease or gateway, or a completed probe with every request sent and no replies,
+indicates unreachability.
 Recovery disconnects WiFi (the event handler reconnects) or restarts Ethernet; it never reboots.
 Repeated unchanged MQTT/gateway failures log on transitions and at most hourly thereafter.
 Configuration-read failures surface as service errors; valid legacy configuration remains supported.
@@ -601,7 +603,13 @@ Connection scheduling uses caller deadlines, a 15 s warm-up throttle and 30 s su
 after each health attempt. Automatic same-key enrollment additionally reserves its own bounded
 backoff. There is no global explicit-wake debounce or exponential reconnect gate; a synchronous
 GAP connect-start failure resumes scanning while connect intent remains. Foreground waiters impose
-their own deadline; the direct warm-up connect does not arm one.
+their own deadline; the direct warm-up connect does not arm one. Calling `stop_connecting()` cancels
+any in-flight GAP connect (`ble_gap_conn_cancel`), and `on_gap_event` immediately restarts scanning
+when `BLE_GAP_EVENT_DISC_COMPLETE` fires while connect intent remains (deferring via `scan_pending_`
+on lock contention). `service_pending()` recovers wedged connect attempts (`≥15 s` without GAP
+completion), `BLE_HS_EBUSY` scan-start collisions, zombie handles after repeated `BLE_HS_ENOTCONN`,
+and contested `scan_pending_` retries; repeated scan-start failures log at `WARN` at most once per
+60 s per error code.
 
 Ordinary telemetry readers use caches. `body_controller_state` is an explicit live foreground
 VCSEC query: it may connect, establish a session and send plaintext `GET_STATUS` without requesting
@@ -712,13 +720,13 @@ and use a separate OtaParser entry-context aggregate, not the network-task lane.
 Retrospective minima and compiler frame baselines prove different things. Bench policy floors are described in the
 [test guide](../test/README.md#whats-not-covered-by-design).
 
-### Clock authority and session restore
+### Clock authority and session establishment
 
-Attempt Unix-clock restore **before** loading sessions. The inherited Unix-versus-vehicle-epoch
-comparison rejects persisted sessions after successful restore, but an absent/unreadable cache or
-failed clock set can leave negative-age acceptance. It is not a reliable 1-hour reuse window.
-True session reuse across reboot needs epoch/Unix alignment; [ADR-0005](adr/0005-tesla-ble-seam.md)
-records this limitation.
+At boot the firmware restores a validated Unix-clock estimate when available. BLE sessions are
+established in RAM through the normal authenticated SessionInfo exchange after startup. Stored
+SessionInfo records continue to supply durable pairing evidence. Resuming a session across
+reboots would require a trusted local capture time and the current counter for that vehicle epoch.
+[ADR-0005](adr/0005-tesla-ble-seam.md) records the session policy.
 
 Durable `key_created`, `paired_at` and MQTT `boot_time` require an acquired
 `clock_is_authoritative()` before sampling wall time (`time_sync.hpp`). Only a validated successful
@@ -752,8 +760,7 @@ first sync and after six hours since the last confirmed save, with at least five
 attempts. Existing SNTP callbacks publish checkpoint opportunities to `heap_supervisor`; there is
 no added task/timer or tight retry. The attempt is recorded before fallible work and save success
 only after storage confirms it. Checkpoint NVS/string/log work follows clock-gate release on
-`heap_supervisor`. This policy does not fix the inherited session-age epoch mismatch or prove RTC
-behavior on hardware.
+`heap_supervisor`.
 
 ## Pairing lifecycle / invalidation
 
@@ -1005,6 +1012,7 @@ snapshots as leaves; do not call network, storage, logging or an external sink u
 |---|---|
 | `BleClient::scan_mutex_` | fixed nearby/primary-advertisement caches; host callbacks try with zero wait, task readers use bounded waits |
 | `BleClient::intent_mutex_` | connect/cancel, discovery and CCCD readiness transitions; host callbacks try with zero wait and fail/drop/retry on contention |
+| `BleClient::link_mux_` | `portMUX_TYPE` innermost leaf serializing `connection_generation_` odd/even snapshots and handle publication/retirement across `on_reset`, `BLE_GAP_EVENT_CONNECT`/`DISCONNECT`, and `service_pending()` without blocking, allocation, logging or callbacks |
 | `BleClient::write_mutex_` | outbound BLE chunk sequence; task-side bounded acquisition, including calls made under Vehicle ownership |
 | `BleClient::client_mutex_` | peer-address metadata; zero-wait callback publication and bounded task snapshots |
 | diagnostic `s_mtx` | ring bytes, append/clear generation and sink snapshots; capture uses zero wait and counts dropped lines, sinks run after unlock |

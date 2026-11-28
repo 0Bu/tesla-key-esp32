@@ -1,1 +1,1 @@
-{"version":"1.6.12","changelog":"Close crash query-error race, remove diag_log std::function, and polish audit follow-ups\nAlign MCP parity, OTA upload status, Web UI resilience, and contract hygiene\nHarden identity OOM containment, lwIP safety, MQTT TLS, and logging stack\nReclaim completed OTA operations and cut pre-TLS heap demand\nHarden BLE protocol admission, lifecycle races, and status callbacks"}
+{"version":"1.6.13","changelog":"Maintenance and reliability improvements."}
