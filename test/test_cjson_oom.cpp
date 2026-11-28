@@ -306,7 +306,8 @@ tk::VehicleDataEndpoints select_endpoints(std::string_view endpoints) {
 }
 
 tk::JsonOwner build_vehicle_data_fixture(std::string_view endpoints,
-                                         const VehicleDataFixture& in = {}) {
+                                         const VehicleDataFixture& in = {},
+                                         tk::LinkState link = tk::LinkState::Awake) {
     const auto selected = select_endpoints(endpoints);
     ChargeStateResult charge{};
     charge.valid = true;
@@ -334,7 +335,7 @@ tk::JsonOwner build_vehicle_data_fixture(std::string_view endpoints,
     e.obj_begin("response");
     if (selected.charge_state) {
         e.obj_begin("charge_state");
-        tk::emit_vehicle_charge_state(charge, tk::LinkState::Awake, e);
+        tk::emit_vehicle_charge_state(charge, link, e);
         e.obj_end();
     }
     bool climate_ok = false;
@@ -362,6 +363,9 @@ tk::JsonOwner build_vehicle_data_fixture(std::string_view endpoints,
 }
 
 tk::JsonOwner build_rest_fixture() { return build_vehicle_data_fixture("charge_state"); }
+tk::JsonOwner build_unreachable_rest_fixture() {
+    return build_vehicle_data_fixture("charge_state", {}, tk::LinkState::Unreachable);
+}
 tk::JsonOwner build_climate_fixture() { return build_vehicle_data_fixture("climate_state"); }
 tk::JsonOwner build_drive_fixture() { return build_vehicle_data_fixture("drive_state"); }
 tk::JsonOwner build_combined_fixture() {
@@ -1701,6 +1705,8 @@ int main() {
     CHECK(live_allocations == 0);
     exhaust_build_and_print("full /status production emitter", build_status_fixture, rest_oom);
     exhaust_build_and_print("evcc charge production reply", build_rest_fixture, rest_oom);
+    exhaust_build_and_print(
+        "evcc unreachable charge production reply", build_unreachable_rest_fixture, rest_oom);
     exhaust_build_and_print("evcc climate production reply", build_climate_fixture, rest_oom);
     exhaust_build_and_print("evcc drive production reply", build_drive_fixture, rest_oom);
     exhaust_build_and_print("evcc combined production reply", build_combined_fixture, rest_oom);

@@ -31,6 +31,12 @@ enum class ScanCancelResult : uint8_t {
     Failed,
 };
 
+enum class ConnectCancelResult : uint8_t {
+    Canceled,
+    AlreadyStopped,
+    Failed,
+};
+
 constexpr bool scan_running_after_start(bool was_running, ScanStartResult result) {
     return was_running || result == ScanStartResult::Started ||
            result == ScanStartResult::AlreadyRunning;
@@ -38,6 +44,39 @@ constexpr bool scan_running_after_start(bool was_running, ScanStartResult result
 
 constexpr bool scan_running_after_cancel(bool was_running, ScanCancelResult result) {
     return result == ScanCancelResult::Failed ? was_running : false;
+}
+
+constexpr bool connecting_after_cancel(bool was_connecting, ConnectCancelResult result) {
+    return result == ConnectCancelResult::Failed ? was_connecting : false;
+}
+
+// 15 s > 10 s ble_gap_connect timeout so any orphaned/wedged GAP connect procedure is
+// canceled and scanning can resume even if NimBLE drops BLE_GAP_EVENT_CONNECT.
+inline constexpr int64_t kStuckConnectingTimeoutUs = 15LL * 1000 * 1000;
+
+constexpr bool connecting_timed_out(bool connecting, int64_t started_us, int64_t now_us) {
+    return connecting && started_us > 0 && (now_us - started_us) >= kStuckConnectingTimeoutUs;
+}
+
+// ~1 s of 50 ms service_pending() polls returning BLE_HS_ENOTCONN before retiring a stale handle.
+inline constexpr uint32_t kZombieTerminateThreshold = 20u;
+
+constexpr bool zombie_terminate_should_retire(uint32_t enotconn_streak) {
+    return enotconn_streak >= kZombieTerminateThreshold;
+}
+
+inline constexpr int64_t kScanErrLogIntervalUs = 60LL * 1000 * 1000;
+
+constexpr bool scan_error_log_due(int rc, int last_rc, int64_t last_log_us, int64_t now_us) {
+    return rc != 0 &&
+           (rc != last_rc || last_log_us <= 0 || (now_us - last_log_us) >= kScanErrLogIntervalUs);
+}
+
+constexpr bool disc_complete_should_restart(bool want_connect,
+                                            bool disconnecting,
+                                            bool has_gap_link,
+                                            bool connecting) {
+    return want_connect && !disconnecting && !has_gap_link && !connecting;
 }
 
 // A host reset cancels NimBLE's pending GAP procedure. want_connect stays asserted from the

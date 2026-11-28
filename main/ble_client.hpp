@@ -192,6 +192,9 @@ private:
     // such as on_sync and GAP retry callbacks.
     bool start_scan_locked_();
     bool cancel_scan_locked_();
+    // Task-only: must NOT be called from NimBLE callbacks; only from stop_connecting() and
+    // service_pending().
+    bool cancel_connect_locked_();
     void ensure_scanning_locked_();
     void ensure_scanning_(TickType_t timeout = portMAX_DELAY);
     // NimBLE-host and esp_timer callbacks must never take the blocking lifecycle-lock path.
@@ -275,6 +278,7 @@ private:
     // prevents a multi-chunk write from continuing on a replacement connection.
     std::atomic<uint16_t> conn_handle_{BLE_HS_CONN_HANDLE_NONE};
     std::atomic<uint32_t> connection_generation_{0};
+    portMUX_TYPE link_mux_ = portMUX_INITIALIZER_UNLOCKED;
     // A GAP handle is not command-ready. This token is published only after Tesla GATT
     // discovery, a confirmed CCCD write, and vehicle_loop's successful completion ack for the
     // same generation.
@@ -296,6 +300,11 @@ private:
     std::atomic<uint32_t> terminate_pending_generation_{tk::ble::kNoReadyGeneration};
     std::atomic<uint16_t> pending_terminate_handle_{BLE_HS_CONN_HANDLE_NONE};
     std::atomic<bool> scan_pending_{false};
+    std::atomic<int64_t> connect_started_us_{0};
+    std::atomic<bool> cancel_connect_pending_{false};
+    std::atomic<uint32_t> terminate_enotconn_streak_{0};
+    std::atomic<int> last_scan_err_rc_{0};
+    std::atomic<int64_t> last_scan_err_log_us_{0};
     // Connect-failure tracking for the target car (see connect_fail_recent()). Stamped on
     // every connect attempt; the count climbs on each GAP connect error and resets on a
     // successful link. Written on the NimBLE host task, read by the status reader — atomic
@@ -303,8 +312,8 @@ private:
     std::atomic<uint32_t> connect_fail_count_{0};
     std::atomic<int64_t>  last_connect_attempt_us_{0};
     std::atomic<uint16_t> write_handle_{0};
-    uint16_t notify_val_handle_{0};
-    uint16_t cccd_handle_{0};   // discovered CCCD (0x2902) for the notify chr; 0 until found
+    std::atomic<uint16_t> notify_val_handle_{0};
+    std::atomic<uint16_t> cccd_handle_{0};   // discovered CCCD (0x2902) for the notify chr; 0 until found
 
     // Last-known link RSSI: seeded from the advert we connected to, then refreshed by
     // every successful live read in connected_rssi(). The live HCI "Read RSSI" can fail

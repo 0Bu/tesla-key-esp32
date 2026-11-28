@@ -3141,22 +3141,67 @@ static void test_vehicle_data() {
         CHECK(std::string(tk::vehicle_charging_state(ChargeStateResult{}, tk::LinkState::Idle)) == "Unknown");
         CHECK(std::string(tk::vehicle_charging_state(ChargeStateResult{}, tk::LinkState::Unreachable)) == "Unknown");
 
-        // Only the state changes: the last-known numbers stay on the wire for evcc's getters.
+        // On LinkState::Unreachable with a valid cache, charging_state becomes "Unknown", stale
+        // vehicle readings emit null (evcc getters reject them), and active-session counters zero out.
         ChargeStateResult away = cs1;
         away.charging_state = "Complete";
         CollectEmitter e_away;
         tk::emit_vehicle_charge_state(away, tk::LinkState::Unreachable, e_away);
         CHECK(golden_eq(e_away.out,
             "charging_state=\"Unknown\"\n"
-            "battery_level=72\n"
-            "usable_battery_level=72\n"
-            "charge_limit_soc=80\n"
-            "charger_power=11\n"
-            "charge_rate=58.25\n"
-            "charge_amps=16\n"
-            "charge_energy_added=12.5\n"
-            "battery_range=280.5\n"
-            "minutes_to_full_charge=45\n"));
+            "battery_level=null\n"
+            "usable_battery_level=null\n"
+            "charge_limit_soc=null\n"
+            "charger_power=0\n"
+            "charge_rate=0\n"
+            "charge_amps=null\n"
+            "charge_energy_added=0\n"
+            "battery_range=null\n"
+            "minutes_to_full_charge=0\n"));
+
+        // Explicit tag 115 usable_battery_level also nulls while unreachable, and returns when reachable.
+        auto away_usable = away;
+        away_usable.has_usable_battery_level = true;
+        away_usable.usable_battery_level = 70;
+        CollectEmitter e_away_usable;
+        tk::emit_vehicle_charge_state(away_usable, tk::LinkState::Unreachable, e_away_usable);
+        CHECK(e_away_usable.out.find("\nusable_battery_level=null\n") != std::string::npos);
+        CollectEmitter e_reach_usable;
+        tk::emit_vehicle_charge_state(away_usable, tk::LinkState::Awake, e_reach_usable);
+        CHECK(e_reach_usable.out.find("\nusable_battery_level=70\n") != std::string::npos);
+
+        // Reachable links (Awake, Idle, Asleep, Unknown) with a valid cache preserve all numbers.
+        for (const auto link : {tk::LinkState::Awake, tk::LinkState::Idle,
+                                tk::LinkState::Asleep, tk::LinkState::Unknown}) {
+            CollectEmitter e_reachable;
+            tk::emit_vehicle_charge_state(away, link, e_reachable);
+            CHECK(golden_eq(e_reachable.out,
+                "charging_state=\"Complete\"\n"
+                "battery_level=72\n"
+                "usable_battery_level=72\n"
+                "charge_limit_soc=80\n"
+                "charger_power=11\n"
+                "charge_rate=58.25\n"
+                "charge_amps=16\n"
+                "charge_energy_added=12.5\n"
+                "battery_range=280.5\n"
+                "minutes_to_full_charge=45\n"));
+        }
+
+        // An invalid cache (!cs.valid) on LinkState::Unreachable keeps the legacy zeroed 503 schema.
+        CollectEmitter e_invalid_unr;
+        tk::emit_vehicle_charge_state(ChargeStateResult{}, tk::LinkState::Unreachable, e_invalid_unr);
+        CHECK(golden_eq(e_invalid_unr.out,
+            "charging_state=\"Unknown\"\n"
+            "battery_level=0\n"
+            "usable_battery_level=0\n"
+            "charge_limit_soc=0\n"
+            "charger_power=0\n"
+            "charge_rate=0\n"
+            "charge_amps=0\n"
+            "charge_energy_added=0\n"
+            "battery_range=0\n"
+            "minutes_to_full_charge=0\n"));
     }
 
     // Scenario 2c — what a reader sees over one departure, composed from the shipped decisions:
@@ -5241,6 +5286,37 @@ static void test_ble_readiness() {
         const DisconnectFollowup d3 = disconnect_followup(true, false);
         CHECK(!d3.restart_scan_now && !d3.defer_reconcile);
     }
+
+    // Connect cancellation clears connecting_ on Canceled/AlreadyStopped and preserves on Failed.
+    CHECK(!connecting_after_cancel(true, ConnectCancelResult::Canceled));
+    CHECK(!connecting_after_cancel(true, ConnectCancelResult::AlreadyStopped));
+    CHECK(connecting_after_cancel(true, ConnectCancelResult::Failed));
+    CHECK(!connecting_after_cancel(false, ConnectCancelResult::Failed));
+
+    // Stuck-connect watchdog fires only when connecting_ is armed with a positive timestamp >= 15 s ago.
+    CHECK(!connecting_timed_out(false, 1, 1 + kStuckConnectingTimeoutUs));
+    CHECK(!connecting_timed_out(true, 0, kStuckConnectingTimeoutUs));
+    CHECK(!connecting_timed_out(true, 100, 100 + kStuckConnectingTimeoutUs - 1));
+    CHECK(connecting_timed_out(true, 100, 100 + kStuckConnectingTimeoutUs));
+
+    // Zombie handle retirement requires kZombieTerminateThreshold consecutive ENOTCONN errors.
+    CHECK(!zombie_terminate_should_retire(0));
+    CHECK(!zombie_terminate_should_retire(kZombieTerminateThreshold - 1));
+    CHECK(zombie_terminate_should_retire(kZombieTerminateThreshold));
+
+    // Rate-limited scan failure logging: immediate on first/changed rc, suppressed within 60 s for same rc.
+    CHECK(!scan_error_log_due(0, 0, 0, 1000));
+    CHECK(scan_error_log_due(14, 0, 0, 1000));
+    CHECK(!scan_error_log_due(14, 14, 1000, 1000 + kScanErrLogIntervalUs - 1));
+    CHECK(scan_error_log_due(14, 14, 1000, 1000 + kScanErrLogIntervalUs));
+    CHECK(scan_error_log_due(7, 14, 1000, 1001));
+
+    // BLE_GAP_EVENT_DISC_COMPLETE restarts scanning only when want_connect_ is armed and idle.
+    CHECK(disc_complete_should_restart(true, false, false, false));
+    CHECK(!disc_complete_should_restart(false, false, false, false));
+    CHECK(!disc_complete_should_restart(true, true, false, false));
+    CHECK(!disc_complete_should_restart(true, false, true, false));
+    CHECK(!disc_complete_should_restart(true, false, false, true));
 }
 
 // ── BLE phase countdown (logic/ble_phase.hpp) — what the Bluetooth row counts down ────────────

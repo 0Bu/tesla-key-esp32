@@ -42,6 +42,10 @@ void log(int level, const char*, const char* format, ...) {
 
 #define ESP_LOGW(tag, ...) fixture::log(2, tag, __VA_ARGS__)
 #define ESP_LOGD(tag, ...) fixture::log(0, tag, __VA_ARGS__)
+using portMUX_TYPE = int;
+#define portMUX_INITIALIZER_UNLOCKED 0
+static void portENTER_CRITICAL(portMUX_TYPE*) {}
+static void portEXIT_CRITICAL(portMUX_TYPE*) {}
 static const char* TAG = "ble_client";
 static std::int64_t esp_timer_get_time() { return fixture::now_us; }
 static constexpr std::uint16_t BLE_HS_CONN_HANDLE_NONE = 0xffff;
@@ -73,8 +77,15 @@ public:
     std::atomic<bool> host_synced_{true}, scanning_{true}, connecting_{true};
     std::atomic<bool> conn_rssi_valid_{true};
     std::atomic<std::uint16_t> conn_handle_{7}, write_handle_{9};
+    std::atomic<std::uint16_t> notify_val_handle_{11}, cccd_handle_{12};
+    portMUX_TYPE link_mux_ = portMUX_INITIALIZER_UNLOCKED;
     std::atomic<std::uint16_t> pending_terminate_handle_{42};
     std::atomic<std::size_t> write_payload_size_{244};
+    std::atomic<std::int64_t> connect_started_us_{123};
+    std::atomic<bool> cancel_connect_pending_{true};
+    std::atomic<std::uint32_t> terminate_enotconn_streak_{5};
+    std::atomic<int> last_scan_err_rc_{9};
+    std::atomic<std::int64_t> last_scan_err_log_us_{456};
     void* intent_mutex_{nullptr};
     using Connected = bool (*)(void*, bool, std::uint16_t, std::uint32_t);
     Connected on_connected_{[](void*, bool up, std::uint16_t handle, std::uint32_t generation) {
@@ -106,10 +117,14 @@ static void check_published(const BleClient& client) {
     CHECK(client.host_reset_count_ == 1);
     CHECK(!client.host_synced_ && !client.scanning_ && !client.disconnecting_);
     CHECK(client.conn_handle_ == BLE_HS_CONN_HANDLE_NONE && client.write_handle_ == 0);
+    CHECK(client.notify_val_handle_ == 0 && client.cccd_handle_ == 0);
     CHECK(client.pending_terminate_handle_ == BLE_HS_CONN_HANDLE_NONE);
     CHECK(client.ready_generation_ == tk::ble::kNoReadyGeneration);
     CHECK(client.write_payload_size_ == tk::kBleDefaultWritePayload);
     CHECK(!client.conn_rssi_valid_ && client.connection_generation_ == 12);
+    CHECK(client.connect_started_us_ == 0 && !client.cancel_connect_pending_);
+    CHECK(client.terminate_enotconn_streak_ == 0);
+    CHECK(client.last_scan_err_rc_ == 0 && client.last_scan_err_log_us_ == 0);
     CHECK(fixture::connected_calls == 1);
 }
 
